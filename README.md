@@ -6,11 +6,8 @@
 ```bash
 conda create --name suite2p python=3.12
 conda activate suite2p
-pip install ./suite2p
-pip install ./multiday-suite2p-public
-pip install ./vr2p-fork
-pip install ./2ACDC_parse
-pip install ipykernel paramiko==3.5.1 colorcet dask[dataframe]
+pip install tox-conda
+tox -e setup
 ```
 
 ### Copy bash scripts to `$HOME`
