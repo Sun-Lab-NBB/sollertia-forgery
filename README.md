@@ -6,18 +6,17 @@
 ```bash
 conda create --name suite2p python=3.12
 conda activate suite2p
-pip install tox-conda
 tox -e setup
 ```
 
-### Copy bash scripts to `$HOME`
+<!-- ### Copy bash scripts to `$HOME`
 
 ```bash
 mkdir ~/.multiday-suite2p
 cp scripts/extract_session_job.sh ~/.multiday-suite2p/extract_session_job.sh
 mkdir ~/.linear2ac
 cp scripts/placefield_job.sh ~/.linear2ac/placefield_job.sh
-```
+``` -->
 
 
 ## Usage
