@@ -12,16 +12,17 @@ version = "1.0.0"
 description = "Tools for analyzing VR and suite2p data."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
-    { name = "Johan Winnubst"},
-    { name = "Ivan Kondratyev", email = "ik278@cornell.edu" },
+    {name = "Johan Winnubst"},
+    {name = "Ivan Kondratyev"},
+    {name = "Kushaan Gupta"},
 ]
 maintainers = [
     { name = "Ivan Kondratyev", email = "ik278@cornell.edu" },
 ]
 
-keywords = ["Suit2P", "Mesoscope", "VR2P"]
+keywords = ["sunlab", "dataset", "data", "processing", "analysis", "2-photon", "behavior"]
 
 classifiers = [
     # Development status
@@ -31,11 +32,12 @@ classifiers = [
     # License
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     # Supported Python Versions
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     # Supported OS systems
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
     "Operating System :: POSIX :: Linux",
 ]
 
@@ -57,8 +59,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Sun-Lab-NBB/ataraxis-video-system"
-Documentation = "https://app.netlify.com/sites/ataraxis-video-system-api-docs/overview"
+Homepage = "https://github.com/Sun-Lab-NBB/sl-forgery"
+Documentation = "https://sl-forgery-api-docs.netlify.app/"
 
 # Specifies additional dependencies that can be installed alongside the main library. Also, this is the section that
 # stores conda, condarun and noconda lists that facilitate setting up dependencies via conda where possible.
