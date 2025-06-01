@@ -58,3 +58,6 @@ doc/_build/
 
 # Development
 poetry.lock
+
+# Custom
+Results/
