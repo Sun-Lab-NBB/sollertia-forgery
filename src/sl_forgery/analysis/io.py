@@ -1,10 +1,12 @@
 from typing import Any
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray
-
+from matplotlib import pyplot as plt
+matplotlib.use("QtAgg")
 
 def behavior_to_numpy(
     source_file: Path,
@@ -38,6 +40,55 @@ def behavior_to_numpy(
     return frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state
 
 
+def test_plot(f_cells, f_neuropils, spks, roi_index) -> None:
+    plt.figure(figsize=(20.0, 20.0), dpi=100)
+    plt.suptitle(f"Fluorescence and Deconvolved Traces for ROI {roi_index} Across Sessions", y=0.92)
+
+    # Assigns distinct color to visualized traces
+    colors = ["#1f77b4", "#2ca02c", "#d62728"]  # Blue, Green, Red
+
+    frame_in = 6400
+    frame_out = 7500
+    cell_start = 500
+    cell_stop = 510
+
+    # Extracts data for the specific ROI from this session
+    # f_neu = f_neuropils[roi_index][frame_in:frame_out]
+    # sp = spks[roi_index][frame_in:frame_out]
+
+    # # Adjust range to match fluorescence traces
+    # fmax = np.maximum(f.max(), f_neu.max())
+    # fmin = np.minimum(f.min(), f_neu.min())
+    # frange = fmax - fmin
+
+    # # Normalizes spikes
+    # if sp.max() > 0:
+    #     sp = sp / sp.max() * frange + fmin
+    # else:
+    #     sp = np.zeros_like(sp) + fmin
+
+    for ind in range(500, 510, 1):
+        f = f_cells[ind][frame_in:frame_out]
+        plt.plot(f, label=f"cell_{ind}")
+
+    # plt.plot(f_neu, color=colors[1], label="Neuropil Fluorescence")
+    # plt.plot(sp, color=colors[2], label="Deconvolved")
+
+    plt.xticks(np.arange(0, f.shape[0], f.shape[0] // 10))
+
+    # Add y-axis label for fluorescence/pixel intensity
+    plt.ylabel("fluorescence")
+
+    plt.xlabel("frame")
+    plt.grid(True, linestyle=":", alpha=0.6)
+
+    plt.legend(bbox_to_anchor=(1.01, 1), loc="upper left")
+
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9)
+    plt.show()
+
+
 # Path to the target session
 session_root = Path("/Users/InfamousOne/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
 
@@ -54,5 +105,5 @@ spks_path = session_root.joinpath(target_group, "spks.npy")
 fluorescence = np.load(file=f_path, mmap_mode="r")
 neuropil = np.load(file=f_neu_path, mmap_mode="r")
 spks = np.load(file=spks_path, mmap_mode="r")
-print(fluorescence.shape)
-print(frame_index.shape)
+
+test_plot(f_cells=fluorescence, f_neuropils=neuropil, spks=spks, roi_index=500)
