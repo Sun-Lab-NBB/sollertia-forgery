@@ -41,7 +41,13 @@ dependencies = [
     "ataraxis-time==3.0.0",
     "ataraxis-base-utilities==3.0.1",
     "ataraxis-data-structures==3.1.1",
-    "sl-shared-assets==1.2.0rc2"
+    "polars==1.31.0",
+    "pyarrow==20.0.0",
+    "numpy==2.2.6",
+    "numba==0.61.2",
+    "scipy==1.16.0",
+    "matplotlib==3.10.3",
+    "sl-shared-assets==2.0.1"
 ]
 
 [project.urls]
@@ -55,7 +61,14 @@ Documentation = "https://sl-forgery-api-docs.netlify.app/"
 # Runtime dependencies known to be installable with conda for all development platforms
 # (OSX ARM64, WIN AMD64, LIN AMD64). This specification is used by ataraxis-automation to resolve as many
 # project dependencies with conda over pip as possible.
-condarun = []
+condarun = [
+    "polars==1.31.0",
+    "pyarrow==20.0.0",
+    "numpy==2.2.6",
+    "numba==0.61.2",
+    "scipy==1.16.0",
+    "matplotlib==3.10.3",
+]
 
 # Dependencies known to be installable with conda for all development platforms (OSX ARM64, WIN AMD64, LIN AMD64).
 conda = [
