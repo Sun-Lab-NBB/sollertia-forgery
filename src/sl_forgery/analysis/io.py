@@ -38,10 +38,21 @@ def behavior_to_numpy(
     return frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state
 
 
-data = behavior_to_numpy(
-    source_file=Path(
-        "/Users/InfamousOne/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/behavior/behavior_at_frame.feather"
-    )
+# Path to the target session
+session_root = Path("/Users/InfamousOne/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
+
+# Parses behavior data as one-dimensional NumPy arrays
+frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
+    source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
 )
 
-print(data)
+# Loads either single-day or multi-day data for the target session
+target_group = "multi_day"  # Supported values: single_day multi_day
+f_path = session_root.joinpath(target_group, "F.npy")
+f_neu_path = session_root.joinpath(target_group, "Fneu.npy")
+spks_path = session_root.joinpath(target_group, "spks.npy")
+fluorescence = np.load(file=f_path, mmap_mode="r")
+neuropil = np.load(file=f_neu_path, mmap_mode="r")
+spks = np.load(file=spks_path, mmap_mode="r")
+print(fluorescence.shape)
+print(frame_index.shape)
