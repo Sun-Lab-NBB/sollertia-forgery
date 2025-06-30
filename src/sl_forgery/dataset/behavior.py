@@ -204,16 +204,18 @@ def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, tra
     )
 
     # Assembles the final behavior dataset
-    behavior_dataset = pl.DataFrame({
-        "frame": mesoscope_frames["frame"],
-        "frame_time_us": frame_timestamps,
-        "traveled_distance_cm": distance_at_frame,
-        "trial": trial_at_frame,
-        "lick_state": lick_at_frame,
-        "reward_state": reward_at_frame,
-        "experiment_stage": experiment_stage_at_frame,
-        "system_state": system_state_at_frame
-    })
+    behavior_dataset = pl.DataFrame(
+        {
+            "frame": mesoscope_frames["frame"],
+            "frame_time_us": frame_timestamps,
+            "traveled_distance_cm": distance_at_frame,
+            "trial": trial_at_frame,
+            "lick_state": lick_at_frame,
+            "reward_state": reward_at_frame,
+            "experiment_stage": experiment_stage_at_frame,
+            "system_state": system_state_at_frame,
+        }
+    )
 
     behavior_path = dataset_path.joinpath(session_data.animal_id, session_data.session_name, "behavior")
     ensure_directory_exists(behavior_path)
