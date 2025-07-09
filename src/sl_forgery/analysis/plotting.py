@@ -130,6 +130,8 @@ def plotting(mouse, kind):
     trial_start = active_behavior_df.filter(
         pl.col("trial") != pl.col("trial").shift(1)
     )
+    #TODO ^^^could also just "group_by" the trial value column; easier?
+
 
     #create 5 cm bins
     #TODO:  need to soft code bin size and cue length later
@@ -155,3 +157,6 @@ def plotting(mouse, kind):
                                                 active_fluorescence_df,
                                                 trial_indices)
 
+    # TODO: use result df (trial bins), normalize the distances and separate into 5 cm bins
+    #  take the average of each smaller bin, then concat them and take the average of the averages
+    #   and plot
