@@ -176,3 +176,30 @@ def plotting(mouse, kind):
             normalized = 240 * (arr - min_val) / (max_val - min_val)
 
         normalized_arrays.append(np.floor(normalized))
+
+
+  #TODO bin these new arrays
+
+    # bin the normalized arrays
+
+    bin_edges = np.arange(0, 245, 5)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
+    num_trials = len(normalized_arrays)
+    binned_arrays = np.empty((num_trials, 48), dtype=object)   #arrays of binned distance arrays for each trial (i.e. N
+    # trial arrays, each with 48 bins of
+    # 5cm distances); make the 48 softcoded
+    bin_assignments = np.empty(num_trials, dtype=object)   # indexes of bins to use for cell activity
+
+    for e, arr in enumerate(normalized_arrays):
+        # get the indices of the bins to which each value belongs in an array; use np.digitize
+        bin_indices = np.digitize(arr, bin_edges, right=False) - 1
+        # Handle values exactly equal to 240 (put in last bin)
+        bin_indices = np.where(arr == 240, 47, bin_indices)
+        print(bin_indices)
+        bin_assignments[e] = bin_indices #use these in future df to split up cell activity
+
+
+    # Create the 5 cm arrays for each bin
+        for i in range(48):
+            mask = bin_indices == i
+            bin_values = arr[mask]
+            binned_arrays[e, i] = bin_values
