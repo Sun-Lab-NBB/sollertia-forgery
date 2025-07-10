@@ -160,3 +160,19 @@ def plotting(mouse, kind):
     # TODO: use result df (trial bins), normalize the distances and separate into 5 cm bins
     #  take the average of each smaller bin, then concat them and take the average of the averages
     #   and plot
+
+    # normalize arrays
+    normalized_arrays = []
+    for dist in result["distance_array"]:
+        arr = np.array(dist)
+
+        # Normalize
+        min_val = arr.min()
+        max_val = arr.max()
+
+        if max_val - min_val == 0:
+            normalized = np.zeros_like(arr)
+        else:
+            normalized = 240 * (arr - min_val) / (max_val - min_val)
+
+        normalized_arrays.append(np.floor(normalized))
