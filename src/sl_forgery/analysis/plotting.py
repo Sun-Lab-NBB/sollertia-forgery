@@ -11,6 +11,7 @@ from matplotlib import pyplot as plt
 #  next step is to continue binning the data
 #   and create a column with cue identity
 #   *this potentially doesnt need to be a separate function; ask ivan
+#   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
 def create_grouped_dataframe_vectorized(distance_df, signal_df, start_indices):
     '''
 
@@ -261,7 +262,8 @@ def plotting(mouse, kind):
 
     # now create dict for the average signal for each cell in the session
     avg_data = {}
-    sess_sem = []
+    sess_sem = []       #had to make list bc I couldnt get both arrays into a single cell, there was some issue with
+    # polars.  Should try to use polars arrays instead of numpy arrays, or just use arrays outside df
 
     for col in trial_avg_df.columns:
         # stack all arrays and compute mean for each index
@@ -275,7 +277,7 @@ def plotting(mouse, kind):
     # create new row and add it to the bottom of the df
     session_avg_row = pl.DataFrame(avg_data)
 
-    # i was having an issue getting these to stay as arrays when I put htem in the df
+    # again - i was having an issue getting these to stay as arrays when I put htem in the df
     # session_avg_row = session_avg_row.with_columns([
     #     pl.col(col).cast(pl.Array(pl.Float64, 48)) for col in session_avg_row.columns
     # ])
@@ -294,9 +296,7 @@ def plotting(mouse, kind):
         fig, ax = plt.subplots()
 
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
-        # which has the avg
-        # session data
-        # use {}.format for cell number
+        # which has the avg session data
 
         mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
         # pulling ndarrays from polars df
@@ -314,7 +314,7 @@ def plotting(mouse, kind):
         fig, ax = plt.subplots()
 
         for i in range(result.shape[0]):
-            ax.plot(xaxis, df1[i, cell], label=f"{i}")
+            ax.plot(xaxis, trial_avg_df[i, cell], label=f"{i}")
         # if kind == "place":
         #     for i in range(result.shape[0]):
         #         ax.plot(normalized_arrays[i], result["cell_1_signal"][i])
