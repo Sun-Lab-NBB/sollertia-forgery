@@ -266,4 +266,11 @@ def plotting(mouse, kind):
     df1 = bin_and_average_signal(reduced_df)
     print(df1.item(0, 0).shape)
 
-    # TODO get the SEM 
+    # TODO get the SEM
+
+    xaxis = np.arange(2.5, 240, 5)
+
+    fig, ax = plt.subplots()
+
+    for i in range(result.shape[0]):
+        ax.plot(xaxis, df1[i, 0], label=f"{i}")
