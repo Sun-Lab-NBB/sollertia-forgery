@@ -203,3 +203,67 @@ def plotting(mouse, kind):
             mask = bin_indices == i
             bin_values = arr[mask]
             binned_arrays[e, i] = bin_values
+
+
+    #TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
+    # series
+    #
+    # create a df with the bin idx; not sure if this is actually necessary
+    binned_df = result.with_columns(pl.Series("bin_assignments", bin_assignments))
+    print(binned_df)
+
+    reduced_df = binned_df.drop("group_id", "start_index", "distance_array")
+    print(reduced_df)
+
+    # for x in binned_arrays[:]:
+    #     for i in x:
+    #         print(np.mean(i))
+
+    def bin_and_average_signal(df, index_col="bin_assignments"):
+        """
+
+        Args:
+            df: reduced dataframe with only signal data and the bin assignments column (for binning)
+            index_col: what to use for binning each row
+
+        Returns:
+            a dataframe with average signal data for each cell, each trial
+        """
+        signal_columns = [col for col in df.columns if col != index_col]
+
+        # convert entire dataframe to numpy
+        data_dict = df.to_dict(as_series=False)
+
+        # create dict
+        result_data = {}
+
+        max_bins = n_bins  # this was calculated earlier
+        for col in signal_columns:
+
+            col_results = []
+
+            # process all rows for this column
+            for row_idx in range(len(df)):
+                signal_array = np.array(data_dict[col][row_idx], dtype=np.float64)
+                index_array = np.array(data_dict[index_col][row_idx], dtype=np.int32)
+
+                # use numpy binning
+                bin_sums = np.bincount(index_array, weights=signal_array, minlength=max_bins)
+                bin_counts = np.bincount(index_array, minlength=max_bins)
+
+                # calculate averages, handling division by zero
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    bin_averages = np.divide(bin_sums, bin_counts,
+                                             out=np.full_like(bin_sums, np.nan),
+                                             where=bin_counts != 0)
+
+                col_results.append(bin_averages)
+
+            result_data[f'{col}_binned'] = col_results
+
+        return pl.DataFrame(result_data)
+
+    df1 = bin_and_average_signal(reduced_df)
+    print(df1.item(0, 0).shape)
+
+    # TODO get the SEM 
