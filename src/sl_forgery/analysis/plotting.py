@@ -219,58 +219,116 @@ def plotting(mouse, kind):
     #     for i in x:
     #         print(np.mean(i))
 
-    def bin_and_average_signal(df, index_col="bin_assignments"):
-        """
+    # CREATE NEW DF
+    binned_df = result.with_columns(pl.Series("bin_assignments", bin_assignments))
 
-        Args:
-            df: reduced dataframe with only signal data and the bin assignments column (for binning)
-            index_col: what to use for binning each row
+    reduced_df = binned_df.drop("group_id", "start_index", "distance_array")
+    index_col = "bin assignments"
 
-        Returns:
-            a dataframe with average signal data for each cell, each trial
-        """
-        signal_columns = [col for col in df.columns if col != index_col]
+    signal_columns = [col for col in reduced_df.columns if col != index_col]
 
-        # convert entire dataframe to numpy
-        data_dict = df.to_dict(as_series=False)
+    # convert entire dataframe to numpy
+    data_dict = reduced_df.to_dict(as_series=False)
 
-        # create dict
-        result_data = {}
+    # create dict for trial avgs
+    trial_avgs = {}
 
-        max_bins = n_bins  # this was calculated earlier
-        for col in signal_columns:
+    max_bins = n_bins  # this was calculated earlier
+    for col in signal_columns:  # for each cell
 
-            col_results = []
+        col_results = []
 
-            # process all rows for this column
-            for row_idx in range(len(df)):
-                signal_array = np.array(data_dict[col][row_idx], dtype=np.float64)
-                index_array = np.array(data_dict[index_col][row_idx], dtype=np.int32)
+        # process all rows for this column
+        for row_idx in range(len(df)):
+            signal_array = np.array(data_dict[col][row_idx], dtype=np.float64)  # signal for that col/row
+            index_array = np.array(data_dict[index_col][row_idx], dtype=np.int32)  # index for that trial (bins)
 
-                # use numpy binning
-                bin_sums = np.bincount(index_array, weights=signal_array, minlength=max_bins)
-                bin_counts = np.bincount(index_array, minlength=max_bins)
+            # use numpy binning
+            # np.bin_count counts all the values in the bin and sums them
+            bin_sums = np.bincount(index_array, weights=signal_array, minlength=max_bins)  # sum the signals
+            bin_counts = np.bincount(index_array, minlength=max_bins)  # find the length of the bin
 
-                # calculate averages, handling division by zero
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    bin_averages = np.divide(bin_sums, bin_counts,
-                                             out=np.full_like(bin_sums, np.nan),
-                                             where=bin_counts != 0)
+            # calculate averages by dividing signal sum by bin length
+            bin_averages = np.divide(bin_sums, bin_counts,
+                                     out=np.full_like(bin_sums, np.nan),
+                                     where=bin_counts != 0)
 
-                col_results.append(bin_averages)
+            col_results.append(bin_averages)
 
-            result_data[f'{col}_binned'] = col_results
+        trial_avgs[f'{col}_binned'] = col_results
 
-        return pl.DataFrame(result_data)
+    trial_avg_df = pl.DataFrame(trial_avgs)
 
-    df1 = bin_and_average_signal(reduced_df)
-    print(df1.item(0, 0).shape)
+    # now create dict for the average signal for each cell in the session
+    avg_data = {}
+    sess_sem = []
 
-    # TODO get the SEM
+    for col in trial_avg_df.columns:
+        # stack all arrays and compute mean for each index
+        stacked_arrays = np.array(trial_avg_df[col].to_list())
+        avg_array = np.mean(stacked_arrays, axis=0)
+        session_sem = np.array(stats.sem(stacked_arrays, axis=0))  # find the standard error
+        avg_data[col] = [avg_array]  # , sessoin_sem  # save as a 2 element array which can be
+        # accessed later by indexing
+        sess_sem.append(session_sem)
 
-    xaxis = np.arange(2.5, 240, 5)
+    # create new row and add it to the bottom of the df
+    session_avg_row = pl.DataFrame(avg_data)
 
-    fig, ax = plt.subplots()
+    # i was having an issue getting these to stay as arrays when I put htem in the df
+    # session_avg_row = session_avg_row.with_columns([
+    #     pl.col(col).cast(pl.Array(pl.Float64, 48)) for col in session_avg_row.columns
+    # ])
+    session_avg_df = pl.concat([trial_avg_df, session_avg_row])
 
-    for i in range(result.shape[0]):
-        ax.plot(xaxis, df1[i, 0], label=f"{i}")
+    # %%%%%%%%%%%%%%%%%%
+    # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
+    #  plotting;  integrate with plotly when jacob is done;  plot cue regions under the graph; basically thick little
+    #  vlines of different colors
+
+    cells = range(5)
+
+    for cell in cells:
+        xaxis = np.arange(2.5, 240, 5)  # include 240 in the plot
+        print(xaxis.shape)
+        fig, ax = plt.subplots()
+
+        cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
+        # which has the avg
+        # session data
+        # use {}.format for cell number
+
+        mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
+        # pulling ndarrays from polars df
+        sem = sess_sem[0]
+        print(mean, sem)
+        ax.plot(xaxis, mean)
+        plt.fill_between(xaxis, mean - sem, mean + sem,
+                         color='blue', alpha=0.2, label='Mean +/- SEM')
+
+        plt.title("cell {} session avg day5".format(cell))
+        plt.xlabel("distance in cm")
+        plt.ylabel("Fluorescent signal")
+
+        # plot trial avgs
+        fig, ax = plt.subplots()
+
+        for i in range(result.shape[0]):
+            ax.plot(xaxis, df1[i, cell], label=f"{i}")
+        # if kind == "place":
+        #     for i in range(result.shape[0]):
+        #         ax.plot(normalized_arrays[i], result["cell_1_signal"][i])
+
+        # ax.vlines(trial_start["distance"][:10], ymin=-150, ymax=0, color='r', lw=2)
+
+        # TODO make this cycle through a random subset of cells when calling the function and pull the column names for
+        # cell ID
+
+        # Hide the x-tick labels
+        plt.title("cell {} trial avgs day5".format(cell))
+        plt.xlabel("distance in cm")
+        plt.ylabel("Fluorescent signal")
+        plt.show()
+
+
+plotting(mouse="6", kind="place")
