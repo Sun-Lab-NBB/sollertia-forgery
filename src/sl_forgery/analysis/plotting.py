@@ -12,7 +12,7 @@ import polars as pl
 #  next step is to create a column with cue identity
 #   *this potentially doesnt need to be a separate function; ask ivan
 #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
-def create_grouped_dataframe_vectorized(distance_df, signal_df, start_indices):
+def create_grouped_df(distance_df, signal_df, start_indices):
     '''
 
     Args:
@@ -130,11 +130,9 @@ def plotting(mouse, kind):
     )
     #TODO ^^^could also just "group_by" the trial value column; easier?
 
-
     trial_indices = trial_start["frame"].to_numpy()
 
-
-    result = create_grouped_dataframe_vectorized(active_behavior_df.select(active_behavior_df["frame", "distance"]),
+    result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "distance"]),
                                                 active_fluorescence_df,
                                                 trial_indices)
 
