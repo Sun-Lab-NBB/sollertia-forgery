@@ -12,7 +12,7 @@ from ataraxis_time.time_helpers import get_timestamp
 from ..utils import get_working_directory, get_credentials_file_path
 
 
-def generate_remote_project_manifest(project: str) -> None:
+def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) -> None:
     """Generates the manifest .feather file for the specified project stored on the remote compute server.
 
     This function allows generating the manifest.feather files on the remote compute server outside the standard
@@ -33,6 +33,8 @@ def generate_remote_project_manifest(project: str) -> None:
 
     Args:
         project: The name of the project for which to generate and fetch the manifest file.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
 
     Raises:
         FileNotFoundError: If the remote (server-side) project manifest generation job fails with an error and does not
@@ -49,7 +51,7 @@ def generate_remote_project_manifest(project: str) -> None:
     # Uses the server access credentials file to initialize the SHH connection to the remote server.
     server = Server(credentials_path=credentials_path)
 
-    # Resolves the working directory for the remote job, using static job name and the current timestamp in UTC.
+    # Resolves the working directory for the remote job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
     job_name = f"{project}_manifest_generation"
     server_working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
@@ -81,6 +83,10 @@ def generate_remote_project_manifest(project: str) -> None:
         f"-od {str(project_storage_root)}"
     )
 
+    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
+    if not keep_job_logs:
+        job.add_command(f"rm -rf {str(server_working_directory)}")
+
     # Submits the remote job to the server
     job = server.submit_job(job)
 
@@ -111,6 +117,7 @@ def generate_remote_project_manifest(project: str) -> None:
     # If the job completes as expected, pulls the generated manifest file to the project-specific subdirectory under
     # the local working directory. This ensures that the user has continued access to the most recent manifest file
     # for that project.
+    console.echo(message=f"Fetching the generated manifest file from the remote compute server...")
     server.pull_file(
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,
@@ -163,6 +170,7 @@ def fetch_remote_project_manifest(project: str) -> None:
 
     # If the job completes as expected, pulls the generated manifest file to the project-specific subdirectory under
     # the local working directory.
+    console.echo(message=f"Fetching the manifest file from the remote compute server...")
     server.pull_file(
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,

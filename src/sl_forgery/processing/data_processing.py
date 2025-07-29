@@ -10,11 +10,16 @@ from ataraxis_time.time_helpers import get_timestamp
 from sl_shared_assets.tools.project_management_tools import ProjectManifest
 
 from ..utils import get_working_directory
-from .management import fetch_remote_project_manifest
+from .project_management import fetch_remote_project_manifest
 
 
 def submit_behavior_processing_job(
-    project: str, session: str, server: Server, reprocess: bool, legacy: bool
+    project: str,
+    session: str,
+    server: Server,
+    reprocess: bool = False,
+    legacy: bool = False,
+    keep_job_logs: bool = False,
 ) -> Job | None:
     """Generates and submits the behavior processing job for the specified session to the remote processing server.
 
@@ -23,9 +28,9 @@ def submit_behavior_processing_job(
     to an asynchronous 'future' object.
 
     Notes:
-        Depending on current server load and other jobs in the processing queue, the job may take a significant amount
-        of time to execute. Use the job_complete() method of the Server class to periodically check on the state of
-        the job.
+        Depending on the current server load and other jobs in the processing queue, the job may take a significant
+        amount of time to execute. Use the job_complete() method of the Server class to periodically check on the state
+        of the job.
 
     Args:
         project: The name of the project for which to submit the behavior processing job.
@@ -35,6 +40,9 @@ def submit_behavior_processing_job(
         reprocess: A boolean flag indicating whether to reprocess sessions that have already been processed.
         legacy: A boolean flag indicating whether to use the legacy behavior processing pipeline. This pipeline is
             designed exclusively for processing 'Tyche' project data and should not be used for any other project.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+
 
     Returns:
         The Job instance representing the behavior processing job running on the server if the job is submitted. None,
@@ -53,9 +61,9 @@ def submit_behavior_processing_job(
     # Parses the target session data from the manifest file
     manifest = ProjectManifest(manifest_file=manifest_path)
     session_data = manifest.get_session_info(session=session)
-    session_type = session_data["type"]
-    animal = session_data["animal"]
-    processed = bool(session_data["behavior"])
+    session_type = session_data["type"][0]
+    animal = str(session_data["animal"][0])
+    processed = bool(session_data["behavior"][0])
 
     # If the session type is not one of the supported types, skips processing the session
     if session_type not in {SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING, SessionTypes.MESOSCOPE_EXPERIMENT}:
@@ -79,8 +87,11 @@ def submit_behavior_processing_job(
         return None
 
     # Otherwise, constructs the session processing job and submits it to the remote compute server
+    import sys
 
-    # Resolves the working directory for the job, using static job name and the current timestamp in UTC.
+    sys.exit()
+
+    # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
     job_name = f"{session}_behavior_processing"
     working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
@@ -88,10 +99,10 @@ def submit_behavior_processing_job(
     # Ensures that the working directory exists on the remote server
     server.create_directory(remote_path=working_directory)
 
-    # Parses the paths to the shared Sun lab directories used to store raw and processed project data on the remote
+    # Parses the paths to the shared Sun lab directories used to store raw and processed session data on the remote
     # server.
-    project_storage_root = Path(server.raw_data_root).joinpath(project)
-    project_working_path = Path(server.processed_data_root).joinpath(project)
+    remote_session_path = Path(server.raw_data_root).joinpath(project, animal, session)
+    processed_data_root = Path(server.processed_data_root)
 
     # Generates the remote job header. Currently, all behavior processing jobs use at most 7 CPU cores and do not
     # require more than 10GB of RAM due to using memory mapping.
@@ -111,9 +122,13 @@ def submit_behavior_processing_job(
     # processing mode is intended exclusively for processing Tyche data using modern Sun lab tools and should not be
     # used in most cases.
     if not legacy:
-        job.add_command(f"sl-sl-process-behavior -sp {str(project_storage_root)} -pdr {str(project_working_path)}")
+        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
     else:
-        job.add_command(f"sl-sl-process-behavior -sp {str(project_storage_root)} -pdr {str(project_working_path)} -l")
+        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -l -um")
+
+    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
+    if not keep_job_logs:
+        job.add_command(f"rm -rf {str(working_directory)}")
 
     # Submits the remote job to the server and returns the job object updated with job tracking details to the caller
     # for monitoring and handling the results once the job completes.
