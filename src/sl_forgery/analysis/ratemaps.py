@@ -44,7 +44,10 @@ def behavior_to_numpy(
 
 path = "data/TM_06_pilot/6/2025-06-23-13-32-06-980761/"
 
+<<<<<<< HEAD
 
+=======
+>>>>>>> origin/rate_maps
 project_root = Path(__file__).resolve().parents[3]
 session_root = project_root / path
 
