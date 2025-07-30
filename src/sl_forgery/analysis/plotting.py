@@ -1,7 +1,5 @@
-print('plotting 3')
-
 from numba.cpython.unsafe.numbers import trailing_zeros
-from sl_forgery.analysis.io import behavior_to_numpy, extract_data
+from sl_forgery.analysis.io import behavior_to_numpy
 from pathlib import Path
 from scipy import stats
 from matplotlib import pyplot as plt
@@ -72,24 +70,31 @@ def plotting(mouse, kind):
     project_root = Path(__file__).resolve().parents[3]
     session_root = project_root / path
 
-
-    date = 1  # fix this
-
-    #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
-    fluorescence, neuropil, spikes, iscell = extract_data(mouse, date, "single_day")
-
+    target_group = "single_day"
 
     #beh data is structured by frame --> so shape is (frames, ) 1D array
     frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
         source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
     )
 
-#TODO working on this as an outer function with df, optional filtering w keywords
+    #TODO working on this as an outer function with df, optional filtering w keywords
 
     # create polars dataframe indexed by frame with cells as columns
+    f_path = session_root.joinpath(target_group, "F.npy")
+    f_neu_path = session_root.joinpath(target_group, "Fneu.npy")
+    spks_path = session_root.joinpath(target_group, "spks.npy")
+    fluorescence = np.load(file=f_path, mmap_mode="r")
+    neuropil = np.load(file=f_neu_path, mmap_mode="r")
+    spikes = np.load(file=spks_path, mmap_mode="r")
+
+
     fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
     neuropil_df = pl.DataFrame(neuropil.T, schema=[f"cell_{i}" for i in range(neuropil.shape[0])])
     spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
+
+
+    iscell_path = session_root.joinpath(target_group, "iscell.npy")
+    iscell = np.load(file=iscell_path, mmap_mode="r")
 
     iscell_df = pl.DataFrame(iscell)  # this has cells as indices and 2 columns, where 1st column is boolean value for
     # cell/not cell and 2nd is likelihood of being a cell
