@@ -62,7 +62,6 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
     # Parses the paths to the shared Sun lab directories used to store raw and processed project data on the remote
     # server.
     project_storage_root = server.raw_data_root.joinpath(project)
-    project_working_path = server.processed_data_root.joinpath(project)
 
     # Generates the remote job header
     job = Job(
@@ -79,7 +78,7 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
     # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file
     # inside the project's root raw data directory
     job.add_command(
-        f"sl-project-manifest -pp {str(project_storage_root)} -ppp {str(project_working_path)} "
+        f"sl-project-manifest -pp {str(project_storage_root)} -pdr {str(server.processed_data_root)} "
         f"-od {str(project_storage_root)}"
     )
 
@@ -106,6 +105,9 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
 
     # Verifies that the job ran as expected. For this, ensures that the remote manifest file exists (was created).
     if not server.exists(remote_path=remote_manifest_path):
+        # Closes the SSH connection
+        server.close()
+
         message = (
             f"Unable to locate the manifest file for '{project}' project one the remote server. This indicates that "
             f"the remote manifest creation job ran into an error and did not generate the file. Check the error logs "
@@ -122,6 +124,9 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,
     )
+
+    # Closes the SSH connection
+    server.close()
 
 
 def fetch_remote_project_manifest(project: str) -> None:
@@ -160,6 +165,9 @@ def fetch_remote_project_manifest(project: str) -> None:
     # Verifies that the job ran as expected. For this, ensures that the remote manifest file exists (was created).
     # Otherwise, aborts with an error.
     if not server.exists(remote_path=remote_manifest_path):
+        # Closes the SSH connection
+        server.close()
+
         message = (
             f"Unable to fetch the manifest file for '{project}' project from the remote server, as the target project "
             f"does not have a manifest file. Either wait for one of the service pipelines to generate the manifest "
@@ -175,3 +183,6 @@ def fetch_remote_project_manifest(project: str) -> None:
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,
     )
+
+    # Closes the SSH connection
+    server.close()
