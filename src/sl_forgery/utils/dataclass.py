@@ -94,15 +94,23 @@ class Data:
         
 
     def get_all_data(self, mouse, session, target_group):
+        """
+        Return all session data as polars dataframes.
+        
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+        Returns:
+            A tuple of 5 Polars dataframes: behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df.     
+        """
 
         session_root = self.find_session(mouse, session)
 
         target_group = "single_day"
 
-        #beh data is structured by frame --> so shape is (frames, ) 1D array
-        frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = Data.behavior_to_numpy(
-            source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
-        )
+        behavior_df = pl.read_ipc(session_root.joinpath("behavior", "behavior_at_frame.feather"), use_pyarrow=True)
+
 
         #TODO working on this as an outer function with df, optional filtering w keywords
 
@@ -127,19 +135,20 @@ class Data:
         # cell/not cell and 2nd is likelihood of being a cell
 
         iscell_df = iscell_df.with_row_index("cell_idx")  # add cell id index to cell df, 0-indexed to match F_df
-
-        # polars dataframe indexed by frame with data as columns
-        # 1 indexed
-        behavior_df = pl.DataFrame(
-            {"frame": frame_index,
-            "timestamp": timestamps,
-            "distance": traveled_distance,
-            "trial": trial,
-            "lick": lick,
-            "reward": reward,
-            "stage": experiment_stage,
-            "state": system_state}
-        )
         
         return behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df
         
+    def process_data(self, mouse, session, target_group):
+        """
+        Return 
+        
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+        Returns:
+
+        Notes:
+            This function should ultimately be split into many smaller functions. It contains the brunt of Chelsea's 
+            original code for plotting place fields.
+        """

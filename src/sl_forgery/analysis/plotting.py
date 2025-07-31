@@ -12,6 +12,7 @@ import polars as pl
 #  next step is to create a column with cue identity
 #   *this potentially doesnt need to be a separate function; ask ivan
 #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
+@staticmethod
 def create_grouped_df(distance_df, signal_df, start_indices):
     '''
 
@@ -44,7 +45,7 @@ def create_grouped_df(distance_df, signal_df, start_indices):
     # Create the grouped result for distances
     distance_grouped = distance_with_groups.group_by("group_id").agg([
         pl.col("frame").first().alias("start_index"),
-        pl.col("distance").alias("distance_array")]
+        pl.col("traveled_distance_cm").alias("distance_array")]
     ).sort("group_id")
 
     # Get the actual cell column names from the signal dataframe
@@ -66,8 +67,12 @@ def create_grouped_df(distance_df, signal_df, start_indices):
     #   what are the other "kind" options
 
 def plotting(mouse, session, target_group,  data : Data):
+    print("getting data")
     behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df = data.get_all_data(mouse, session, target_group)
+    print("got data")
 
+
+    print("grouping data")
     # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
     # use column 1 i.e. boolean values
     cell_mask = iscell_df[:, 1].to_numpy()
@@ -77,7 +82,7 @@ def plotting(mouse, session, target_group,  data : Data):
     cell_fluorescence_df = fluorescence_df.select([fluorescence_df.columns[i] for i in np.where(cell_mask)[0]])
 
     # then choose only frames where the system was in the active state i.e. mouse running
-    active_state_mask = behavior_df["state"] == 2  # 2 is the active state (0 is idle, 1 is rest)
+    active_state_mask = behavior_df["system_state"] == 2  # 2 is the active state (0 is idle, 1 is rest)
 
     # filter the dataframes by this active state
     active_behavior_df = behavior_df.filter(active_state_mask)
@@ -96,15 +101,18 @@ def plotting(mouse, session, target_group,  data : Data):
 
     trial_indices = trial_start["frame"].to_numpy()
 
-    result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "distance"]),
+    result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "traveled_distance_cm"]),
                                                 active_fluorescence_df,
                                                 trial_indices)
+
+    print("grouped data")
+    print("normalizing data")
 
     # create 5 cm bins
     # TODO:  need to soft code bin size and cue length late
     #   this only works with set lengths
     # this wont work w my task, with variable track lengths
-    track_length = np.mean(np.diff(trial_start["distance"]))
+    track_length = np.mean(np.diff(trial_start["traveled_distance_cm"]))
     cue_length = 30  # cm
     bin_size = 5  # cm
     n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
@@ -127,6 +135,8 @@ def plotting(mouse, session, target_group,  data : Data):
 
         normalized_arrays.append(np.floor(normalized))
 
+    print("normalized data")
+    print("binning data")
 
     # bin the normalized arrays
 
@@ -166,6 +176,9 @@ def plotting(mouse, session, target_group,  data : Data):
     # convert entire dataframe to numpy
     data_dict = reduced_df.to_dict(as_series=False)
 
+    print("binned data")
+    print("averaging over trials")
+    
     # create dict for trial avgs
     trial_avgs = {}
 
@@ -195,6 +208,7 @@ def plotting(mouse, session, target_group,  data : Data):
 
     trial_avg_df = pl.DataFrame(trial_avgs)
 
+
     # now create dict for the average signal for each cell in the session
     avg_data = {}
     sess_sem = []       #had to make list bc I couldnt get both arrays into a single cell, there was some issue with
@@ -218,10 +232,14 @@ def plotting(mouse, session, target_group,  data : Data):
     # ])
     session_avg_df = pl.concat([trial_avg_df, session_avg_row])
 
+    print("averaged over trias")
+    print("plotting data")
+
     # %%%%%%%%%%%%%%%%%%
     # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
     #  plotting;  integrate with plotly when jacob is done;  plot cue regions under the graph; basically thick little
     #  vlines of different colors
+
 
     cells = range(5)
 
@@ -263,6 +281,7 @@ def plotting(mouse, session, target_group,  data : Data):
         plt.ylabel("Fluorescent signal")
         plt.show()
 
-project_root = Path(__file__).resolve().parents[3]
-data = Data(project_root / "data")
-plotting(6, "2025-06-23-13-32-06-980761", "single_day", data)
+if __name__ == "__main__":
+    project_root = Path(__file__).resolve().parents[3]
+    data = Data(project_root / "data")
+    plotting(6, "2025-06-23-13-32-06-980761", "single_day", data)
