@@ -5,6 +5,8 @@ from scipy import stats
 from typing import Any
 from numpy.typing import NDArray
 
+from functools import lru_cache
+
 from pathlib import Path
 
 
@@ -195,8 +197,8 @@ class Data:
 
         return result
 
-
-    def process_data(self, mouse, session, target_group):
+    @lru_cache(maxsize=None)
+    def process_data(self, mouse, session, target_group, bin_size=5):
         """
         Return 
         
@@ -257,7 +259,6 @@ class Data:
         # this wont work w my task, with variable track lengths
         track_length = np.mean(np.diff(trial_start["traveled_distance_cm"]))
         cue_length = 30  # cm
-        bin_size = 5  # cm
         n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
 
 
