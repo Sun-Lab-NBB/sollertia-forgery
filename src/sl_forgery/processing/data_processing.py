@@ -2,22 +2,40 @@
 designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
 configured to execute all data processing tasks."""
 
+from enum import IntEnum
 import shutil as sh
 from pathlib import Path
 from dataclasses import dataclass
-from tqdm import tqdm
 
+from tqdm import tqdm
+from ataraxis_time import PrecisionTimer
 from sl_shared_assets import Job, Server, SessionTypes, ProjectManifest, ProcessingTracker
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
-from ataraxis_time import PrecisionTimer
 
 from ..utils import get_working_directory, get_credentials_file_path
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
+class _ProcessingStatus(IntEnum):
+    """Maps integer-based remote job processing status codes to human-readable names.
+
+    This enumeration is used internally to standardize job progress tracking across all processing jobs supported
+    by this module.
+    """
+
+    RUNNING = 0
+    """The job is currently running on the remote server. It may be executed (in progress) or waiting for resources 
+    to become available (queued)."""
+    SUCCEEDED = 1
+    """The server has completed the job, and the processing tracker for the job indicates the job ran successfully."""
+    FAILED = 2
+    """The server has completed the job, but the processing tracker for the job indicates that the job has encountered 
+    an error and failed before finishing its runtime."""
+
+
 @dataclass()
-class ProcessingJob:
+class _ProcessingJob:
     """Stores the information about a processing job running on the remote server.
 
     This class instance is used to aggregate information about running data processing pipelines to support the
@@ -45,16 +63,52 @@ class ProcessingJob:
     keep_job_logs: bool = False
     """Determines whether to keep the logs for successfully completed jobs on the server or (default) to remove them 
     after runtime."""
+    job_status: _ProcessingStatus | int = _ProcessingStatus.RUNNING
+    """Stores the current status of the job running on the remote server."""
+
+    def check_job_status(self) -> None:
+        """Checks if the managed job running on the remote compute server has completed successfully.
+
+        This function updates the 'job_status' class instance field to reflect the current status of the managed job.
+        """
+
+        # If the server has not yet completed the job, returns without updating the job status.
+        if not self.server.job_complete(job=self.job):
+            return
+
+        # Otherwise, checks the outcome of the job by evaluating the processing status stored inside the processing
+        # tracker file. To do so, first pulls the tracker file from the remote server to the local machine.
+        ensure_directory_exists(self.local_tracker_path)  # Ensures that the local temporary directory exists
+        self.server.pull_file(remote_file_path=self.remote_tracker_path, local_file_path=self.local_tracker_path)
+        tracker = ProcessingTracker(self.local_tracker_path)
+
+        # The tracker should indicate that the job is 'complete' if runtime finishes successfully.
+        if not tracker.is_complete:
+            # Removes the temporary directory where the local copy of the tracker file is stored.
+            sh.rmtree(self.local_tracker_path.parent)
+            self.job_status = _ProcessingStatus.FAILED  # Updates the job status to 'failed'
+            return
+
+        # If the job was configured to remove logs after completing successfully, removes the job logs from the remote
+        # server.
+        if not self.keep_job_logs:
+            self.server.remove(remote_path=self.job_working_directory, recursive=True, is_dir=True)
+
+        # Removes the temporary directory where the local copy of the tracker file is stored.
+        sh.rmtree(self.local_tracker_path.parent)
+
+        self.job_status = _ProcessingStatus.SUCCEEDED  # Updates the job status to 'succeeded'
+        return
 
 
-def submit_behavior_processing_job(
+def _submit_behavior_processing_job(
     project: str,
     session: str,
     server: Server,
     reprocess: bool = False,
     legacy: bool = False,
     keep_job_logs: bool = False,
-) -> ProcessingJob | None:
+) -> _ProcessingJob | None:
     """Generates and submits the behavior processing job for the specified session to the remote processing server.
 
     This function composes the behavior processing job and instructs the specified remote server to execute the job. It
@@ -89,7 +143,7 @@ def submit_behavior_processing_job(
 
     # If the local manifest file does not exist, fetches it from the remote server
     if not manifest_path.exists():
-        fetch_remote_project_manifest(project)
+        fetch_remote_project_manifest(project=project, server=server)
 
     # Parses the target session data from the manifest file
     manifest = ProjectManifest(manifest_file=manifest_path)
@@ -190,7 +244,7 @@ def submit_behavior_processing_job(
     local_tracker_path = local_working_directory.joinpath(project, "temp", "behavior_tracker.yaml")
 
     # Packages Job data into a ProcessingJob object and returns it to the caller.
-    job_data = ProcessingJob(
+    job_data = _ProcessingJob(
         job=job,
         server=server,
         remote_tracker_path=remote_tracker_path,
@@ -200,55 +254,16 @@ def submit_behavior_processing_job(
         animal=animal,
         project=project,
         keep_job_logs=keep_job_logs,
+        job_status=_ProcessingStatus.RUNNING,
     )
 
     return job_data
 
 
-def verify_processing_job_outcome(job_data: ProcessingJob) -> bool | None:
-    """Checks if the input processing job running on the remote compute server has completed successfully.
-
-    If the job is still running, returns None. If the job has completed successfully, returns True. If the job has
-    failed, returns False. This function also prints success and failure messages to the console to notify the user
-    about the job evaluation status.
-    """
-
-    # Unpacks the Job and Server objects from the ProcessingJob object.
-    job = job_data.job
-    server = job_data.server
-
-    # If the server has not yet completed the job, returns None to indicate that the job is still running.
-    if not server.job_complete(job=job):
-        return None
-
-    # Otherwise, checks the outcome of the job by evaluating the processing status stored inside the processing
-    # tracker file. To do so, first pulls the tracker file from the remote server to the local machine.
-    ensure_directory_exists(job_data.local_tracker_path)  # Ensures that the local temporary directory exists
-    server.pull_file(remote_file_path=job_data.remote_tracker_path, local_file_path=job_data.local_tracker_path)
-    tracker = ProcessingTracker(job_data.local_tracker_path)
-
-    # The tracker should indicate that the job is 'complete' if runtime finishes successfully.
-    if not tracker.is_complete:
-        # Removes the temporary directory where the local copy of the tracker file is stored.
-        sh.rmtree(job_data.local_tracker_path.parent)
-
-        return False  # Job has failed
-
-    # If the job was configured to remove logs after completing successfully, removes the job logs from the remote
-    # server.
-    if not job_data.keep_job_logs:
-        server.remove(remote_path=job_data.job_working_directory, recursive=True, is_dir=True)
-
-    # Removes the temporary directory where the local copy of the tracker file is stored.
-    sh.rmtree(job_data.local_tracker_path.parent)
-
-    return True  # Job completed successfully
-
-
 def process_behavior_data(
     project: str,
     update_manifest: bool = True,
-    sessions: list[str] | tuple[str] | None = None,
+    sessions: list[str] | tuple[str, ...] | None = None,
     reprocess: bool = False,
     legacy: bool = False,
     keep_job_logs: bool = False,
@@ -260,9 +275,9 @@ def process_behavior_data(
     # Depending on configuration, updates the project manifest file stored on the remote server and fetches it to the
     # local machine.
     if update_manifest:
-        generate_remote_project_manifest(project=project)
+        generate_remote_project_manifest(project=project, server=server)
     else:
-        fetch_remote_project_manifest(project=project)
+        fetch_remote_project_manifest(project=project, server=server)
 
     # Loads the fetched manifest file into memory as a ProjectManifest instance.
     manifest_path = get_working_directory().joinpath(project, "manifest.feather")
@@ -276,9 +291,9 @@ def process_behavior_data(
         sessions = tuple(sessions)
 
     # Attempts to generate and submit a remote processing job for each session
-    jobs = []
+    jobs: list[_ProcessingJob] = []
     for session in sessions:
-        job = submit_behavior_processing_job(
+        job = _submit_behavior_processing_job(
             server=server,
             project=project,
             session=session,
@@ -303,45 +318,42 @@ def process_behavior_data(
         return
 
     # Creates a progress bar to track the progress of the behavior processing jobs.
-    with tqdm(total=len(jobs), desc="Processing jobs", unit="job") as pbar:
-
+    with tqdm(total=len(jobs), desc="Processing session behavior data", unit="session") as pbar:
         # Initializes a timer to delay repeated job status checks
         delay_timer = PrecisionTimer("s")
-
-        remaining_jobs = jobs.copy()  # Creates a copy to track remaining jobs
-        completed_count = 0
+        uncompleted_count = len(jobs)
 
         # Runs until all jobs are completed (successfully or not)
-        while remaining_jobs:
+        while uncompleted_count > 0:
+            # At every loop cycle, checks the status of each running job
+            for running_job in jobs:
+                # Only checks still running jobs
+                if running_job.job_status == _ProcessingStatus.RUNNING:
+                    # Check if the job has been completed
+                    running_job.check_job_status()
 
-            # Checks the status of each remaining job
-            jobs_to_remove = []
-            for i, job in enumerate(remaining_jobs):
+                    # If the job status changed to one of the completed status codes, increments the completed job
+                    # count and updates the progress bar
+                    if running_job.job_status != _ProcessingStatus.RUNNING:
+                        uncompleted_count -= 1
+                        pbar.update(1)  # Updates progress bar
 
-                result = verify_processing_job_outcome(job_data=job)
+            # Checks for job completion every 10 seconds to avoid overwhelming the communication line.
+            delay_timer.delay_noblock(delay=10, allow_sleep=True)
 
-                # If the job verification function returned True or False (completed), marks the job for removal
-                if result is not None:
-
-                    jobs_to_remove.append(i)
-                    completed_count += 1
-                    pbar.update(1)  # Updates progress bar
-
-            # Removes completed jobs from tracking (in reverse order to maintain indices)
-            for i in reversed(jobs_to_remove):
-                remaining_jobs.pop(i)
-
-            # If jobs are still running, waits before checking again
-            if remaining_jobs:
-                delay_timer.delay_noblock(delay=5, allow_sleep=True)
-
-        # Sets the final progress bar status.
-        pbar.set_postfix_str(f"All {len(jobs)} jobs completed")
-
-
-    # message = (
-    #     f"The remote processing job with id {job.job_id} and name '{job.job_name}' for the session "
-    #     f"'{job_data.session}' performed by animal '{job_data.animal}' for '{job_data.project}' project did not "
-    #     f"run successfully. Check the job error logs for the specific details about the cause of the failure."
-    # )
-    # console.echo(message=message, level=LogLevel.ERROR)
+        # Once all jobs are completed, reports the processing outcome of each job to the user.
+        for completed_job in jobs:
+            if completed_job.job_status == _ProcessingStatus.FAILED:
+                message = (
+                    f"The behavior processing job for the session '{completed_job.session}' performed by animal "
+                    f"'{completed_job.animal}' for '{completed_job.project}' project did not run successfully. Check "
+                    f"the remote job error logs stored on the server for the specific details about the cause of the "
+                    f"failure."
+                )
+                console.echo(message=message, level=LogLevel.ERROR)
+            else:
+                message = (
+                    f"Behavior processing job for the session '{completed_job.session}' performed by animal "
+                    f"'{completed_job.animal}' for '{completed_job.project}' project: Complete."
+                )
+                console.echo(message=message, level=LogLevel.SUCCESS)
