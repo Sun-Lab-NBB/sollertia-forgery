@@ -89,8 +89,8 @@ def test_plot(f_cells, f_neuropils, spks, roi_index) -> None:
     plt.show()
 
 
-# Path to the target session
-session_root = Path("/Users/InfamousOne/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
+#Path to the target session
+session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
 
 # Parses behavior data as one-dimensional NumPy arrays
 frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
@@ -106,4 +106,33 @@ fluorescence = np.load(file=f_path, mmap_mode="r")
 neuropil = np.load(file=f_neu_path, mmap_mode="r")
 spks = np.load(file=spks_path, mmap_mode="r")
 
-test_plot(f_cells=fluorescence, f_neuropils=neuropil, spks=spks, roi_index=500)
+
+def extract_data(filepath, day=None):
+    '''
+    Loads either single-day or multi-day data for the mouse
+
+    Args:
+        mouse: int, mouse ID
+        date: format year-month-day ex: 2025-06-23
+        day: "multi" or "single"
+
+    Returns:
+    processed data: fluorescence, neuropil, spikes, iscell
+    '''
+
+    #session_root = Path("/Users/cs963/Desktop/TM_06_pilot/{}/{}-13-32-06-980761/".format(mouse, date))
+    session_root = Path(filepath)
+
+
+    #Loads either single-day or multi-day data for the target session
+    target_group = day # Supported values: single_day multi_day
+    f_path = session_root.joinpath(target_group, "F.npy")
+    f_neu_path = session_root.joinpath(target_group, "Fneu.npy")
+    spks_path = session_root.joinpath(target_group, "spks.npy")
+    iscell_path = session_root.joinpath(target_group, "iscell.npy")
+    fluorescence = np.load(file=f_path, mmap_mode="r")
+    neuropil = np.load(file=f_neu_path, mmap_mode="r")
+    spks = np.load(file=spks_path, mmap_mode="r")
+    iscell = np.load(file=iscell_path, mmap_mode="r")
+
+    return fluorescence, neuropil, spks, iscell
