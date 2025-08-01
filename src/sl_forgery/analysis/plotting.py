@@ -66,12 +66,12 @@ def create_grouped_df(distance_df, signal_df, start_indices):
     #   what are the other "kind" options
 
 def plotting(mouse, kind):
-    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644")
+    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644/single_day")
 
     date = 1  # fix this
 
     #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
-    fluorescence, neuropil, spikes, iscell = extract_data(mouse, date, "single_day")
+    fluorescence, neuropil, spikes, iscell = extract_data(session_root, None)
 
 
     #beh data is structured by frame --> so shape is (frames, ) 1D array
@@ -265,6 +265,7 @@ def plotting(mouse, kind):
         xaxis = np.arange(2.5, 240, 5)  # # 5 cm bins, plot the avg signal in center of bin
         fig, ax = plt.subplots()
 
+        # plot the session avg with error
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
 
@@ -279,7 +280,10 @@ def plotting(mouse, kind):
         plt.xlabel("distance in cm")
         plt.ylabel("Fluorescent signal")
 
-        # plot trial avgs
+
+
+
+        # plot all of the trial avg signals in a single plot
         fig, ax = plt.subplots()
 
         for i in range(result.shape[0]):
