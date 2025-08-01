@@ -209,8 +209,11 @@ cython_debug/
 /stubs/
 /.pypirc
 
+
 # Project: Add any project-specific exclusions here
 /temp
 
 data
 trash
+
+.vscode
