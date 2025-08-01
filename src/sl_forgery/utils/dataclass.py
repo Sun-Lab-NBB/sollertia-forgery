@@ -4,6 +4,8 @@ from scipy import stats
 
 from typing import Any
 from numpy.typing import NDArray
+import re
+from datetime import datetime
 
 from functools import lru_cache
 
@@ -12,8 +14,26 @@ from pathlib import Path
 
 class Data:
     def __init__(self, root):
-        self.root = Path(root)
+        self.root = Path(root)   
+
+    @staticmethod
+    def parse_session(session):
+        """
+        If session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
+        return only 'MM-DD'. Otherwise return the session unchanged.
+        """
+        pattern = r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d+$"
         
+        if isinstance(session, str) and re.match(pattern, session):
+            try:
+                # Only use the date part before the first dash after YYYY-MM-DD
+                date_part = "-".join(session.split("-")[:3])
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                return dt.strftime("%m-%d")
+            except ValueError:
+                pass  # If parsing fails, return original
+        
+        return session
 
     @staticmethod
     def behavior_to_numpy(
