@@ -42,13 +42,13 @@ dependencies = [
     "ataraxis-base-utilities==3.1.0",
     "ataraxis-data-structures==3.1.1",
     "polars==1.31.0",
-    "pyarrow==20.0.0",
+    "pyarrow==21.0.0",
     "numpy==2.2.6",
     "numba==0.61.2",
     "scipy==1.16.0",
     "matplotlib==3.10.3",
     "PyQt6==6.9.1",
-    "sl-shared-assets==3.1.2"
+    "sl-shared-assets==3.1.3"
 ]
 
 [project.urls]
