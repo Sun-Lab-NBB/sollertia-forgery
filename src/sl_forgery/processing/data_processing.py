@@ -34,6 +34,22 @@ class _ProcessingStatus(IntEnum):
     an error and failed before finishing its runtime."""
 
 
+class _Suite2PStages(IntEnum):
+    """Maps integer-based codes for single-day suite2p processing pipeline stages to human-readable names.
+
+    This enumeration is used internally to run remote suite2p single-day processing pipelines by issuing multiple
+    sequential stage-based jobs to the server.
+    """
+    BINARIZE = 0
+    """Stage 1: Converts source data files into multiple suite2p plane-specific binary files."""
+    PROCESS = 1
+    """Stage 2: Processes each plane by registering all planes to eliminate motion, discovering cells, and extracting 
+    cell fluorescence."""
+    COMBINE = 2
+    """Stage 3: Combines all plane-specific data into a unified 'combined' dataset. This is a prerequisite for running 
+    multi-day suite2p pipeline."""
+
+
 @dataclass()
 class _ProcessingJob:
     """Stores the information about a processing job running on the remote server.
@@ -151,6 +167,166 @@ def _submit_behavior_processing_job(
     session_type = session_data["type"][0]
     animal = str(session_data["animal"][0])
     processed = bool(session_data["behavior"][0])
+    complete = bool(session_data["complete"][0])
+    dataset = bool(session_data["dataset"][0])
+
+    # If the session type is not one of the supported types, skips processing the session
+    if session_type not in {SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING, SessionTypes.MESOSCOPE_EXPERIMENT}:
+        message = (
+            f"Unable to process behavior data for session '{session}' performed by animal '{animal}' for '{project}' "
+            f"project. The session is of type '{session_type},' which does not support this form of processing. "
+            f"Skipping processing the session."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    # If the session has already been processed and the function is not running in reprocessing mode, skips
+    # processing the session.
+    if processed and not reprocess:
+        message = (
+            f"Unable to process behavior data for session '{session}' performed by animal '{animal}' for '{project}' "
+            f"project. The session has already been processed with at least one behavior processing pipeline. To "
+            f"enable reprocessing already processed sessions, call this command with the 'reprocess' flag set to True."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    # Prevents processing incomplete sessions
+    if not complete:
+        message = (
+            f"Unable to process behavior data for session '{session}' performed by animal '{animal}' for '{project}' "
+            f"project. The session is marked as 'incomplete', which excludes it from automated data processing. "
+            f"To enable processing, manually mark it as 'complete' by creating the 'telomere.bin' marker file in "
+            f"the session's raw_data directory on the remote server."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    if dataset:
+        message = (
+            f"Unable to process behavior data for session '{session}' performed by animal '{animal}' for '{project}' "
+            f"project. The session is currently in the 'dataset integration' mode and cannot be processed. To convert "
+            f"the session back to the 'data processing' mode, call the 'sl-resolve-session-mode' CLI command from this "
+            f"library with the appropriate runtime flag."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    # Otherwise, constructs the session processing job and submits it to the remote compute server
+
+    # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
+    timestamp = get_timestamp()
+    job_name = f"{session}_behavior_processing"
+    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
+
+    # Ensures that the working directory exists on the remote server
+    server.create_directory(remote_path=working_directory)
+
+    # Parses the paths to the shared Sun lab directories used to store raw and processed session data on the remote
+    # server.
+    remote_session_path = Path(server.raw_data_root).joinpath(project, animal, session)
+    processed_data_root = Path(server.processed_data_root)
+
+    # Generates the remote job header. Currently, all behavior processing jobs use at most 7 CPU cores and do not
+    # require more than 10GB of RAM due to using memory mapping.
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="behavior",
+        cpus_to_use=7,
+        ram_gb=10,
+        time_limit=60,
+    )
+
+    # Configures the job to use the sl-behavior package installed on the server to process session's behavior data.
+    # Note, depending on the legacy flag, either submits the job in the legacy or contemporary processing mode. Legacy
+    # processing mode is intended exclusively for processing Tyche data using modern Sun lab tools and should not be
+    # used in most cases.
+    if not legacy:
+        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
+    else:
+        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -l -um")
+
+    # Submits the remote job to the server and returns the job object updated with job tracking details to the caller
+    # for monitoring and handling the results once the job completes.
+    job = server.submit_job(job)
+
+    # Resolves the paths to the local and remote job tracker files.
+    remote_tracker_path = Path(server.processed_data_root).joinpath(
+        project, animal, session, "processed_data", "behavior_processing_tracker.yaml"
+    )
+    local_tracker_path = local_working_directory.joinpath(project, "temp", "behavior_tracker.yaml")
+
+    # Packages Job data into a ProcessingJob object and returns it to the caller.
+    job_data = _ProcessingJob(
+        job=job,
+        server=server,
+        remote_tracker_path=remote_tracker_path,
+        job_working_directory=working_directory,
+        local_tracker_path=local_tracker_path,
+        session=session,
+        animal=animal,
+        project=project,
+        keep_job_logs=keep_job_logs,
+        job_status=_ProcessingStatus.RUNNING,
+    )
+
+    return job_data
+
+
+def _submit_suite2p_processing_job(
+    project: str,
+    session: str,
+    server: Server,
+    stage: _Suite2PStages,
+    reprocess: bool = False,
+    keep_job_logs: bool = False,
+) -> _ProcessingJob | None:
+    """ Generates and submits the behavior processing job for the specified session to the remote processing server.
+
+    This function composes the behavior processing job and instructs the specified remote server to execute the job. It
+    does not wait for the server to complete the job and instead returns the submitted Job object, which behaves similar
+    to an asynchronous 'future' object.
+
+    Notes:
+        Depending on the current server load and other jobs in the processing queue, the job may take a significant
+        amount of time to execute. Use the job_complete() method of the Server class to periodically check on the state
+        of the job.
+
+    Args:
+        project: The name of the project for which to submit the behavior processing job.
+        session: The name of the session for which to submit the behavior processing job.
+        server: An instance of the Server class that manages access to the remote server that stores the session data
+            to process.
+        reprocess: A boolean flag indicating whether to reprocess sessions that have already been processed.
+        legacy: A boolean flag indicating whether to use the legacy behavior processing pipeline. This pipeline is
+            designed exclusively for processing 'Tyche' project data and should not be used for any other project.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+
+    Returns:
+        The ProcessingJob instance representing the processing job running on the server if the job is submitted. None,
+        if the job is not submitted to the server for any reason.
+    """
+
+    # Resolves the path to the local Sun lab working directory
+    local_working_directory = get_working_directory()
+
+    # Resolves the path to the locally stored project manifest file
+    manifest_path = local_working_directory.joinpath(project, "manifest.feather")
+
+    # If the local manifest file does not exist, fetches it from the remote server
+    if not manifest_path.exists():
+        fetch_remote_project_manifest(project=project, server=server)
+
+    # Parses the target session data from the manifest file
+    manifest = ProjectManifest(manifest_file=manifest_path)
+    session_data = manifest.get_session_info(session=session)
+    session_type = session_data["type"][0]
+    animal = str(session_data["animal"][0])
+    processed = bool(session_data["suite2p"][0])
     complete = bool(session_data["complete"][0])
     dataset = bool(session_data["dataset"][0])
 
