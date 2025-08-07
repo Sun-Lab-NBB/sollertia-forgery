@@ -41,14 +41,16 @@ dependencies = [
     "ataraxis-time==3.0.0",
     "ataraxis-base-utilities==3.1.0",
     "ataraxis-data-structures==3.1.1",
-    "polars==1.31.0",
+    "polars==1.32.0",
     "pyarrow==21.0.0",
     "numpy==2.2.6",
     "numba==0.61.2",
-    "scipy==1.16.0",
-    "matplotlib==3.10.3",
+    "scipy==1.16.1",
+    "matplotlib==3.10.5",
     "PyQt6==6.9.1",
-    "sl-shared-assets==3.1.3"
+    "tqdm==4.67.1",
+    "appdirs==1.4.4",
+    "sl-shared-assets==4.0.1"
 ]
 
 [project.urls]
@@ -63,51 +65,55 @@ Documentation = "https://sl-forgery-api-docs.netlify.app/"
 # (OSX ARM64, WIN AMD64, LIN AMD64). This specification is used by ataraxis-automation to resolve as many
 # project dependencies with conda over pip as possible.
 condarun = [
-    "polars==1.31.0",
-    "pyarrow==20.0.0",
+    "polars==1.32.0",
+    "pyarrow==21.0.0",
     "numpy==2.2.6",
     "numba==0.61.2",
-    "scipy==1.16.0",
-    "matplotlib==3.10.3",
+    "matplotlib==3.10.5",
+    "tqdm==4.67.1",
+    "appdirs==1.4.4",
 ]
 
 # Dependencies known to be installable with conda for all development platforms (OSX ARM64, WIN AMD64, LIN AMD64).
 conda = [
+    # Tox
+    "tox==4.28.4",
+    "tox-uv==1.26.2",
+    "uv==0.8.4",
+
     # Documentation
-    "sphinx>=8,<9",
-    "importlib_metadata>=8,<9",
-    "sphinx-rtd-theme>=3,<4",
-    "sphinx-click>=6,<7",
-    "sphinx-autodoc-typehints>=3,<4",
+    "sphinx==8.2.3",
+    "importlib_metadata==8.7.0",
+    "sphinx-click==6.0.0",
+    "sphinx-autodoc-typehints==3.2.0",
 
     # Linting and Stub-generation
-    "mypy>=1,<2",
-    "ruff>=0,<1",
+    "mypy==1.17.1",
+    "ruff==0.12.7",
 
     # Building
-    "hatchling>=1,<2",
+    "hatchling==1.27.0",
 
     # Distribution
-    "twine>=6,<7",
-    "grayskull>=2,<3",
+    "twine==6.1.0",
+
+    # Types:
+    "types-appdirs==1.4.3.5",
+    "types-tqdm==4.67.0.20250516",
 ]
 
 # Dependencies known to not be installable with conda for at least one supported development platform
 # (OSX ARM64, WIN AMD64, LIN AMD64).
 noconda = [
-     # Tox
-    "tox>=4,<5",
-    "tox-uv>=1,<2",
-    "uv>=0,<1",
-
     # Documentation
-    "sphinx-rtd-dark-mode>=1,<2",
+    "sphinx-rtd-dark-mode==1.3.0",
+    "sphinx-rtd-theme==3.0.2",
 
     # Building
-    "build>=1,<2",
+    "build==1.3.0",
 
     # Automation
-    "ataraxis-automation>=5,<6",
+    "ataraxis-automation==5.0.0",
 ]
 
 # A shorthand specification that installs tox and all packages required for development tasks. This specification can
