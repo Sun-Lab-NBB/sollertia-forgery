@@ -1,3 +1,5 @@
+# This file is a standalone implementation of binning made by Jacob. It may be useful so it has yet to be deleted.
+
 from pathlib import Path
 
 import numpy as np

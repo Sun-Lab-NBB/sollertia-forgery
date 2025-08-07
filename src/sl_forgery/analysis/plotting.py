@@ -10,6 +10,18 @@ from plotly import graph_objects as go
 class Plotting:
     @staticmethod
     def plot_session(mouse, session, target_group, cell, data : Data):
+        """
+        Plots Binned Fluorescence. Relies on Chelsea's initial binning implementation, currently encapsulated in Data.bin_data
+        
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+
+        Returns:
+            The figure that is displayed
+
+        """
 
         # %%%%%%%%%%%%%%%%%%
         # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
@@ -122,13 +134,21 @@ class Plotting:
             ],
         )
         fig.show(renderer="browser")
+        return fig
 
     @staticmethod
     def plot_umap(mouse, session, target_group, data : Data):
         """
         Makes an interactive umap plot of data
-            embedding: numpy array of shape (frames, 3)
-            behavior: polars dataframe with (frames, columns), where a each row in the dataframe corresponds with the same row in the embedding.
+
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+
+        Returns:
+            The figure that is displayed
+
         """
         embedding, behavior_filtered = data.compute_umap(mouse, session, target_group)
 
@@ -250,6 +270,7 @@ class Plotting:
         )
 
         fig.show(renderer="browser")
+        return fig
 
 
 

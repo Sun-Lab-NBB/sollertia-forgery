@@ -255,6 +255,7 @@ class Data:
     @staticmethod
     def create_grouped_df(distance_df, signal_df, start_indices):
         '''
+        Helper function to Data.bin_data
 
         Args:
             distance_df: behavior dataframe distance column
@@ -262,11 +263,11 @@ class Data:
             start_indices: trial start indices/frames
 
         Returns:
-        A new dataframe that is grouped by trial identity, where the 1st col is trial,
-        the 2nd column are arrays of the distance covered during that trial,
-        and the following columns are arrays of the recorded signals for each cell during that trial.
-        The distance and signal arrays in each row are of the same length. These can be used for plotting signal over
-        entire trials.
+            A new dataframe that is grouped by trial identity, where the 1st col is trial,
+            the 2nd column are arrays of the distance covered during that trial,
+            and the following columns are arrays of the recorded signals for each cell during that trial.
+            The distance and signal arrays in each row are of the same length. These can be used for plotting signal over
+            entire trials.
 
         '''
         row_indices = distance_df["frame"]
@@ -304,14 +305,14 @@ class Data:
     @lru_cache(maxsize=None)
     def bin_data(self, mouse, session, target_group):
         """
-        Return 
+        bins data 
         
         Args:
             mouse (str): Mouse identifier.
             session (int | str): Session number (0-indexed) or session name.
             target_group (str): "single_day" or "multi_day"
         Returns:
-
+            session_avg_df, sess_sem, result, trial_avg_df
         Notes:
             This function should ultimately be split into many smaller functions. It contains the brunt of Chelsea's 
             original code for plotting place fields.
@@ -484,6 +485,19 @@ class Data:
     
     @lru_cache(maxsize=None)
     def filter_for_umap(self, mouse, session, target_group):
+        """
+        Filters data before inputting into umap. Essentially grabs the frames where the system is active and the mouse is in experiment stage 2 or 4
+
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+
+        Returns:
+            spikes_filtered, behavior_filtered
+        """
+
+
         behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df = self.get_all_data(mouse, session, target_group)
 
         # Filter data 
@@ -496,6 +510,20 @@ class Data:
 
     @lru_cache(maxsize=None)
     def compute_umap(self, mouse, session, target_group):
+        """
+        Runs the umap job for a specific session
+
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+
+        Returns:
+            embedding, behavior_filtered
+                embedding: numpy array of shape (frames, 3)
+                behavior: polars dataframe with (frames, columns), where a each row in the dataframe corresponds with the same row in the embedding.
+        
+        """
         spikes_filtered, behavior_filtered = self.filter_for_umap(mouse, session, target_group)
 
         spikes = spikes_filtered.to_numpy() # umap needs cells x frames
@@ -516,6 +544,15 @@ class Data:
     def add_plotting_columns(behavior_df):
         """
         Adds columns for track_position, region, cue, to a behavior dataframe if not already present
+
+        Args:
+            behavior_df
+
+        Returns:
+            behavior_df with additional columns
+
+        Notes:
+            Helper function to plot_umap
         """
 
         track_length = 240
