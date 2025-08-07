@@ -77,7 +77,7 @@ def plot_session_plotly(mouse, session, target_group, cell, data : Data):
         mode='lines',
         line=dict(width=3),
     ))
-    fig.show()
+    fig.show(renderer="browser")
 
     fig, ax = plt.subplots()
     ax.plot(xaxis, mean)
@@ -162,7 +162,7 @@ def plot_session_trials(mouse, session, target_group, cell, data : Data):
         ],
     )
 
-    fig.show()
+    fig.show(renderer="browser")
 
     # # plot trial avgs
     # fig, ax = plt.subplots()
@@ -181,8 +181,8 @@ if __name__ == "__main__":
 
     cells = [4]
     for cell in cells:
-        plot_session_plotly(6, "2025-06-23-13-32-06-980761", "single_day", cell, data)
-        plot_session(6, "2025-06-23-13-32-06-980761", "single_day", cell, data)
+        # plot_session_plotly(6, "2025-06-23-13-32-06-980761", "single_day", cell, data)
+        plot_session_trials(6, "2025-06-23-13-32-06-980761", "single_day", cell, data)
         plt.show()
         # plot_session(6, "2025-06-23-13-32-06-980761", "single_day", cell, data)
 

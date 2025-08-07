@@ -8,13 +8,33 @@ import re
 from datetime import datetime
 
 from functools import lru_cache
-
+from IPython.display import display, HTML
 from pathlib import Path
 
 
 class Data:
     def __init__(self, root):
         self.root = Path(root)   
+
+    @staticmethod
+    def show_scrollable(df: pl.DataFrame, height: int = 400, width: int = 1200):
+        """
+        Display a Polars DataFrame as a scrollable HTML table in Jupyter/VSCode notebooks.
+        
+        Parameters:
+        - df (pl.DataFrame): The Polars DataFrame to display.
+        - height (int): Height of the scroll box in pixels.
+        - width (int): Width of the scroll box in pixels.
+        """
+        pd_df = df.to_pandas()  # Convert to pandas for HTML rendering
+        html_table = pd_df.to_html(index=False)  # HTML table without the index
+        
+        scrollable_html = f"""
+        <div style="height:{height}px; width:{width}px; overflow:auto; border:1px solid #ccc; font-family:monospace;">
+            {html_table}
+        </div>
+        """
+        display(HTML(scrollable_html))
 
     @staticmethod
     def parse_session(session):
@@ -66,7 +86,7 @@ class Data:
         system_state = df["system_state"].to_numpy()
 
         return frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state
-    
+
     def find_mouse(self, mouse):
         """
         Return the path to a mouse directory.
@@ -168,6 +188,65 @@ class Data:
     #  next step is to create a column with cue identity
     #   *this potentially doesnt need to be a separate function; ask ivan
     #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
+
+    @staticmethod
+    def _interpolate_data(
+        timestamps: NDArray[np.uint64],
+        data: NDArray[np.integer[Any] | np.floating[Any]],
+        seed_timestamps: NDArray[np.uint64],
+        is_discrete: bool,
+    ) -> NDArray[np.signedinteger[Any] | np.unsignedinteger[Any] | np.floating[Any]]:
+        """Interpolates data values for the provided seed timestamps.
+
+        Primarily, this service function is used to time-align different datastreams from the same source. For example, the
+        Valve module generates both the solenoid valve data and the auditory tone data, which is generated at non-matching
+        rates. This function is used to equalize the data sampling rate between the two data streams, allowing to output
+        the data as .feather file.
+
+        Notes:
+            This function expects seed_timestamps and timestamps arrays to be monotonically increasing.
+
+            Discrete interpolated data will be returned as an array with the same datatype as the input data. Continuous
+            interpolated data will always use float_64 datatype.
+
+        Args:
+            timestamps: The one-dimensional numpy array that stores the timestamps for the source data.
+            data: The one-dimensional numpy array that stores the source datapoints.
+            seed_timestamps: The one-dimensional numpy array that stores the timestamps for which to interpolate the data
+                values.
+            is_discrete: A boolean flag that determines whether the data is discrete or continuous.
+
+        Returns:
+            A numpy NDArray with the same dimension as the seed_timestamps array that stores the interpolated data values.
+        """
+        # Discrete data
+        if is_discrete:
+            # Preallocates the output array
+            interpolated_data = np.empty(seed_timestamps.shape, dtype=data.dtype)
+
+            # Handles boundary conditions in bulk using boolean masks. All seed timestamps below the minimum source
+            # timestamp are statically set to data[0], and all seed timestamps above the maximum source timestamp are set
+            # to data[-1].
+            below_min = seed_timestamps < timestamps[0]
+            above_max = seed_timestamps > timestamps[-1]
+            within_bounds = ~(below_min | above_max)  # The portion of the seed that is within the source timestamp boundary
+
+            # Assigns out-of-bounds values in-bulk
+            interpolated_data[below_min] = data[0]
+            interpolated_data[above_max] = data[-1]
+
+            # Processes within-boundary timestamps by finding the last known certain value to the left of each seed
+            # timestamp and setting each seed timestamp to that value.
+            if np.any(within_bounds):
+                indices = np.searchsorted(timestamps, seed_timestamps[within_bounds], side="right") - 1
+                interpolated_data[within_bounds] = data[indices]
+
+            return interpolated_data
+
+        # Continuous data. Note, due to interpolation, continuous data is always returned using float_64 datatype.
+        else:
+            return np.interp(seed_timestamps, timestamps, data)  # type: ignore
+        
     @staticmethod
     def create_grouped_df(distance_df, signal_df, start_indices):
         '''
