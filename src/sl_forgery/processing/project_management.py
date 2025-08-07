@@ -9,10 +9,10 @@ from sl_shared_assets import Job, Server
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
 
-from ..utils import get_working_directory, get_credentials_file_path
+from ..utils import get_working_directory
 
 
-def generate_remote_project_manifest(project: str, keep_job_logs: bool = False, server: Server | None = None) -> None:
+def generate_remote_project_manifest(project: str, server: Server, keep_job_logs: bool = False) -> None:
     """Generates the manifest .feather file for the specified project stored on the remote compute server.
 
     This function allows generating the manifest.feather files on the remote compute server outside the standard
@@ -35,10 +35,8 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False, 
         project: The name of the project for which to generate and fetch the manifest file.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If the job fails, the logs are always kept regardless of this parameter.
-        server: An initialized Server instance used to communicate with the remote server. This optional argument is
-            used when this function is called as part of a standard data processing or dataset formation pipeline, which
-            automatically resolves the server access as part of its runtime. Note, the Server must be configured to use
-            the service account server access credentials.
+        server: An initialized Server instance used to communicate with the remote server. Note, the Server must be
+            configured to use the service account server access credentials.
 
     Raises:
         FileNotFoundError: If the remote (server-side) project manifest generation job fails with an error and does not
@@ -47,17 +45,6 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False, 
 
     # Resolves the path to the local directory used to work with Sun lab data.
     local_working_directory = get_working_directory()
-
-    # If the server instance is not provided, initializes a SHH connection to the remote server using the service
-    # access credentials
-    server_was_none: bool = server is None
-    if server_was_none:
-        # Resolves the path to the server access credentials file. Since manifest generation requires access to .YAML
-        # processing trackers, this function requires service access privileges.
-        credentials_path = get_credentials_file_path(require_service=True)
-
-        # Uses the server access credentials file to initialize the SHH connection to the remote server.
-        server = Server(credentials_path=credentials_path)
 
     # Resolves the working directory for the remote job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
@@ -133,12 +120,8 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False, 
         remote_file_path=remote_manifest_path,
     )
 
-    # Closes the SSH connection if the server connection was established from within this function.
-    if server_was_none:
-        server.close()
 
-
-def fetch_remote_project_manifest(project: str, server: Server | None = None) -> None:
+def fetch_remote_project_manifest(project: str, server: Server) -> None:
     """Fetches (pulls) the existing project manifest .feather file for the specified project stored on the remote
     compute server to the local Sun lab working directory.
 
@@ -149,9 +132,7 @@ def fetch_remote_project_manifest(project: str, server: Server | None = None) ->
 
     Args:
         project: The name of the project for which to fetch the manifest file.
-        server: An initialized Server instance used to communicate with the remote server. This optional argument is
-            used when this function is called as part of a standard data processing or dataset formation pipeline, which
-            automatically resolves the server access as part of its runtime.
+        server: An initialized Server instance used to communicate with the remote server.
 
     Raises:
         FileNotFoundError: If the manifest file does not exist on the server, indicating that the file has not been
@@ -160,16 +141,6 @@ def fetch_remote_project_manifest(project: str, server: Server | None = None) ->
 
     # Resolves the path to the local directory used to work with Sun lab data.
     local_working_directory = get_working_directory()
-
-    # If the server instance is not provided, initializes a SHH connection to the remote server
-    server_was_none: bool = server is None
-    if server_was_none:
-        # Unlike generating the manifest file, pulling an existing manifest file does not require service access
-        # privileges.
-        credentials_path = get_credentials_file_path(require_service=False)
-
-        # Uses the server access credentials file to initialize the SHH connection to the remote server.
-        server = Server(credentials_path=credentials_path)
 
     # Resolves the path to the remote and local manifest files
     remote_manifest_path = server.raw_data_root.joinpath(project, f"{project}_manifest.feather")
@@ -199,7 +170,3 @@ def fetch_remote_project_manifest(project: str, server: Server | None = None) ->
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,
     )
-
-    # Closes the SSH connection if the server connection was established from within this function.
-    if server_was_none:
-        server.close()

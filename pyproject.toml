@@ -194,6 +194,7 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages that have type stubs available.
 exclude = [
     "sl-forgery-\\d+", # Ignores temporary folder created by setuptools when building the sdist
+    "src/sl_forgery/legacy/*",    # Ignores temporary legacy files
     "venv.*/",         # Ignores virtual environments
     "build/",          # Ignores the sdist directory
     "dist/",           # Ignores the wheel directory

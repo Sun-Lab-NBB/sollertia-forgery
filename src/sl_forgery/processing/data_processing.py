@@ -2,36 +2,48 @@
 designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
 configured to execute all data processing tasks."""
 
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 import shutil as sh
 from pathlib import Path
 from dataclasses import dataclass
 
 from tqdm import tqdm
 from ataraxis_time import PrecisionTimer
-from sl_shared_assets import Job, Server, SessionTypes, ProjectManifest, ProcessingTracker
+from sl_shared_assets import (
+    Job,
+    Server,
+    SessionTypes,
+    ProjectManifest,
+    TrackerFileNames,
+    generate_manager_id,
+    get_processing_tracker,
+)
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
 
-from ..utils import get_working_directory, get_credentials_file_path
+from ..utils import get_working_directory, get_credentials_file_path, get_remote_filesystem_paths
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
 class _ProcessingStatus(IntEnum):
-    """Maps integer-based remote job processing status codes to human-readable names.
+    """Maps integer-based remote processing pipeline status codes to human-readable names.
 
-    This enumeration is used internally to standardize job progress tracking across all processing jobs supported
-    by this module.
+    This enumeration is used internally to standardize processing progress tracking across all processing pipelines
+    supported by this module.
+
+    Notes:
+        Each processing pipeline may be associated with multiple sequential or concurrent jobs running on the server.
+        Therefore, these status codes track the state of the pipeline as a whole, instead of tracking the state of each
+        job.
     """
 
     RUNNING = 0
-    """The job is currently running on the remote server. It may be executed (in progress) or waiting for resources 
+    """The pipeline is currently running on the remote server. It may be executed (in progress) or waiting for resources 
     to become available (queued)."""
     SUCCEEDED = 1
-    """The server has completed the job, and the processing tracker for the job indicates the job ran successfully."""
+    """The server has successfully executed the processing pipeline."""
     FAILED = 2
-    """The server has completed the job, but the processing tracker for the job indicates that the job has encountered 
-    an error and failed before finishing its runtime."""
+    """The server has failed to complete the pipeline as one of its constituent jobs has encountered a runtime error."""
 
 
 class _Suite2PStages(IntEnum):
@@ -40,116 +52,190 @@ class _Suite2PStages(IntEnum):
     This enumeration is used internally to run remote suite2p single-day processing pipelines by issuing multiple
     sequential stage-based jobs to the server.
     """
-    BINARIZE = 0
+
+    BINARIZE = 1
     """Stage 1: Converts source data files into multiple suite2p plane-specific binary files."""
-    PROCESS = 1
+    PROCESS = 2
     """Stage 2: Processes each plane by registering all planes to eliminate motion, discovering cells, and extracting 
     cell fluorescence."""
-    COMBINE = 2
+    COMBINE = 3
     """Stage 3: Combines all plane-specific data into a unified 'combined' dataset. This is a prerequisite for running 
     multi-day suite2p pipeline."""
 
 
-@dataclass()
-class _ProcessingJob:
-    """Stores the information about a processing job running on the remote server.
+class _ProcessingPipelines(StrEnum):
+    """Defines the set of supported remote processing pipeline names.
 
-    This class instance is used to aggregate information about running data processing pipelines to support the
-    asynchronous job result collection. It is processing-pipeline agnostic and works for all currently
-    supported Sun lab processing pipelines.
+    This enumeration is primarily used to standardize the names of the remote processing pipelines used in this library.
+
+    Notes:
+        The fields in this enumeration match the fields in the ProcessingTracker enumeration, since each valid
+        processing pipeline is associated with a ProcessingTracker file. However, not all ProcessingTracker files are
+        associated with a data processing pipeline: some are used for preprocessing or dataset formation pipelines.
     """
 
-    job: Job
-    """The Job object that stores the metadata for the job tracked by this class instance."""
+    BEHAVIOR = "behavior"
+    SUITE2P = "single-day suite2p"
+
+
+@dataclass()
+class _ProcessingPipeline:
+    """Manages a single remote processing pipeline running on the remote server.
+
+    This class instance functions as a general-purpose interface for executing processing pipelines on the Sun lab
+    compute servers. It is processing-pipeline agnostic and works for all currently supported Sun lab processing
+    pipelines.
+
+    Notes:
+        The processing graph for each pipeline is fully resolved at the instantiation of this class instance. This
+        means that the instance is preconfigured to store the Job objects for each processing stage of the pipeline at
+        instantiation.
+    """
+
     server: Server
-    """The Server object that maintains bidirectional communication with the remote server running the job."""
+    """The reference to the Server object that maintains bidirectional communication with the remote server running 
+    the pipeline."""
+    manager_id: int
+    """The unique identifier for the manager process that constructs and manages the runtime of the tracked pipeline. 
+    This is used to ensure that only a single pipeline instance can work with each session's data at the same time."""
+    jobs: dict[int, list[Job]]
+    """Stores a dictionary that maps the processing stage integer-codes to lists of Job objects, one for each 
+    independent job instance to be submitted as part of that managed processing pipeline stage."""
+    job_working_directories: list[Path]
+    """Stores a list of paths to each managed job's working directory on the remote server. This path is 
+    used to remove the log folder for each successful job if the pipeline is not configured to preserve job logs."""
     remote_tracker_path: Path
-    """The path to the job tracker .yaml file stored on the remote server running the job."""
-    job_working_directory: Path
-    """The path to the job's working directory on the remote server."""
+    """The path to the processing tracker .yaml file for the pipeline stored on the remote server running the 
+    pipeline."""
     local_tracker_path: Path
-    """The path to the local job tracker .yaml file. The remote file is pulled to this location as part of the job 
-    outcome verification process."""
+    """The path to the local pipeline processing tracker .yaml file. The remote file is pulled to this location as 
+    part of each processing stage outcome verification process."""
     session: str
-    """The ID of the session whose data is being processed by the tracked job."""
+    """The ID of the session whose data is being processed by the tracked pipeline."""
     animal: str
-    """The ID of the animal whose data is being processed by the tracked job."""
+    """The ID of the animal whose data is being processed by the tracked pipeline."""
     project: str
-    """The name of the project whose data is being processed by the tracked job."""
+    """The name of the project whose data is being processed by the tracked pipeline."""
+    pipeline_type: _ProcessingPipelines
+    """Stores the name of the processing pipeline managed by this class instance. Primarily, this is used to identify 
+    the pipeline to the user in terminal messages and logs."""
     keep_job_logs: bool = False
     """Determines whether to keep the logs for successfully completed jobs on the server or (default) to remove them 
-    after runtime."""
-    job_status: _ProcessingStatus | int = _ProcessingStatus.RUNNING
-    """Stores the current status of the job running on the remote server."""
+    after pipeline successfully ends its runtime. If the pipeline fails to complete its runtime, the logs are kept 
+    regardless of this setting."""
+    pipeline_status: _ProcessingStatus | int = _ProcessingStatus.RUNNING
+    """Stores the current status of the tracked remote pipeline. This field is the primary means with which the class 
+    instance communicates with external pipeline management functions from this library."""
+    _pipeline_stage: int = 0
+    """Stores the current stage of the tracked pipeline. Note, each stage can be associated with one or more 
+    individual jobs running on the server in-parallel. This field is initialized to a non-valid value '0' and is then 
+    modified as the instance tracks the completion of each stage of the managed pipeline."""
 
-    def check_job_status(self) -> None:
-        """Checks if the managed job running on the remote compute server has completed successfully.
+    def job_cycle(self) -> None:
+        """This is the main entry point for all interactions with the processing pipeline running on the remote server.
 
-        This function updates the 'job_status' class instance field to reflect the current status of the managed job.
+        During processing, this method should be called repeatedly to track the progress of the pipeline managed by this
+        instance and continuously advance the pipeline across all of its inter-dependent stages. This method updates
+        the 'pipeline_status' instance field to communicate whether the managed pipeline is still running, succeeded,
+        or failed.
         """
 
-        # If the server has not yet completed the job, returns without updating the job status.
-        if not self.server.job_complete(job=self.job):
-            return
+        # This clause is executed the first time the method is called for the newly initialized pipeline tracker
+        # instance. For one-stage pipelines, this is the only time when pipeline jobs are submitted to the server.
+        if self._pipeline_stage == 0:
+            self._pipeline_stage += 1
+            self._submit_jobs()
 
-        # Otherwise, checks the outcome of the job by evaluating the processing status stored inside the processing
-        # tracker file. To do so, first pulls the tracker file from the remote server to the local machine.
+        # If the server has not completed all jobs in the current processing stage, returns to caller without doing
+        # any additional processing.
+        for job in self.jobs[self._pipeline_stage]:
+            if not self.server.job_complete(job=job):
+                return
+
+        # If all jobs for the current processing stage have completed successfully, checks the shared processing
+        # tracker file to determine if all jobs completed successfully.
         ensure_directory_exists(self.local_tracker_path)  # Ensures that the local temporary directory exists
         self.server.pull_file(remote_file_path=self.remote_tracker_path, local_file_path=self.local_tracker_path)
-        tracker = ProcessingTracker(self.local_tracker_path)
+        tracker = get_processing_tracker(root=self.local_tracker_path.parent, file_name=TrackerFileNames.BEHAVIOR)
 
-        # The tracker should indicate that the job is 'complete' if runtime finishes successfully.
-        if not tracker.is_complete:
+        # Checks whether the stage has completed without errors. If the stage failed due to encountering an error,
+        # removes the local tracker copy and marks the pipeline as 'failed. It is expected that the pipeline state is
+        # then handed by the caller to notify the user at the appropriate time.
+        if tracker.encountered_error:
             # Removes the temporary directory where the local copy of the tracker file is stored.
             sh.rmtree(self.local_tracker_path.parent)
-            self.job_status = _ProcessingStatus.FAILED  # Updates the job status to 'failed'
+            self.pipeline_status = _ProcessingStatus.FAILED  # Updates the processing status to 'failed'
             return
 
-        # If the job was configured to remove logs after completing successfully, removes the job logs from the remote
-        # server.
-        if not self.keep_job_logs:
-            self.server.remove(remote_path=self.job_working_directory, recursive=True, is_dir=True)
+        # If this was the last processing stage, the tracker would indicate that the processing has been completed.
+        # In this case, initialized the shutdown sequence:
+        if tracker.is_complete:
+            # If the pipeline was configured to remove logs after completing successfully, removes the job logs from
+            # the remote server. Note, removes the logs from the jobs submitted across all stages.
+            if not self.keep_job_logs:
+                for directory in self.job_working_directories:
+                    self.server.remove(remote_path=directory, recursive=True, is_dir=True)
 
-        # Removes the temporary directory where the local copy of the tracker file is stored.
-        sh.rmtree(self.local_tracker_path.parent)
+            # Removes the temporary directory where the local copy of the tracker file is stored.
+            sh.rmtree(self.local_tracker_path.parent)
 
-        self.job_status = _ProcessingStatus.SUCCEEDED  # Updates the job status to 'succeeded'
-        return
+            self.pipeline_status = _ProcessingStatus.SUCCEEDED  # Updates the job status to 'succeeded'
+            return
+
+        # If the processing is not complete (according to the tracker), this indicates that the pipeline has more
+        # stages to execute. In this case, increments the processing stage tracker and submits the next batch of jobs
+        # to the server.
+        self._pipeline_stage += 1
+        self._submit_jobs()
+
+    def _submit_jobs(self) -> None:
+        """This worker method submits the processing jobs for the currently active pipeline stage to the remote
+        server.
+
+        It is used internally by the job_cycle() method to iteratively execute all stages of the processing pipeline on
+        the remote server.
+        """
+        for job in self.jobs[self._pipeline_stage]:
+            self.server.submit_job(job=job)
 
 
-def _submit_behavior_processing_job(
+def _construct_behavior_processing_pipeline(
     project: str,
     session: str,
     server: Server,
+    manager_id: int,
     reprocess: bool = False,
-    legacy: bool = False,
     keep_job_logs: bool = False,
-) -> _ProcessingJob | None:
-    """Generates and submits the behavior processing job for the specified session to the remote processing server.
+) -> _ProcessingPipeline | None:
+    """Generates and returns the ProcessingPipeline instance that can be used to run the behavior processing pipeline
+    on the target session's data.
 
-    This function composes the behavior processing job and instructs the specified remote server to execute the job. It
-    does not wait for the server to complete the job and instead returns the submitted Job object, which behaves similar
-    to an asynchronous 'future' object.
+    This function composes the behavior processing pipeline (graph), packages it into the ProcessingPipeline, and
+    returns it to the caller. This function does not itself submit the pipeline to the server, this is done the first
+    time the job_cycle() method of the returned instance is called.
 
     Notes:
-        Depending on the current server load and other jobs in the processing queue, the job may take a significant
-        amount of time to execute. Use the job_complete() method of the Server class to periodically check on the state
-        of the job.
+        Depending on the current server load and other jobs / pipeline in the processing queue, the pipeline may take a
+        significant amount of time to execute.
+
+        The returned ProcessingPipeline instance represents a complete solution for executing and tracking the state of
+        the processing pipeline running on the remote server. All interactions with the pipeline should be done
+        exclusively through that instance.
 
     Args:
-        project: The name of the project for which to submit the behavior processing job.
-        session: The name of the session for which to submit the behavior processing job.
-        server: An instance of the Server class that manages access to the remote server that stores the session data
-            to process.
+        project: The name of the project for which to execute the behavior processing pipeline.
+        session: The name of the session for which to execute the behavior processing pipeline.
+        server: The Server class instance that manages access to the remote server that stores the session data to
+            process.
+        manager_id: The ID of the process that is managing the constructed behavior processing pipeline.
         reprocess: A boolean flag indicating whether to reprocess sessions that have already been processed.
-        legacy: A boolean flag indicating whether to use the legacy behavior processing pipeline. This pipeline is
-            designed exclusively for processing 'Tyche' project data and should not be used for any other project.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If the job fails, the logs are always kept regardless of this parameter.
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this parameter.
 
     Returns:
-        The ProcessingJob instance representing the processing job running on the server if the job is submitted. None,
-        if the job is not submitted to the server for any reason.
+        The _ProcessingPipeline instance configured to execute and manage the requested processing pipeline on the
+        server if the session can be processed with the requested pipeline. None, if the session is excluded from
+        processing for any reason.
     """
     # Resolves the path to the local Sun lab working directory
     local_working_directory = get_working_directory()
@@ -202,6 +288,7 @@ def _submit_behavior_processing_job(
         console.echo(message=message, level=LogLevel.WARNING)
         return None
 
+    # Prevents processing sessions that are marked as dataset integration candidates
     if dataset:
         message = (
             f"Unable to process behavior data for session '{session}' performed by animal '{animal}' for '{project}' "
@@ -212,7 +299,8 @@ def _submit_behavior_processing_job(
         console.echo(message=message, level=LogLevel.WARNING)
         return None
 
-    # Otherwise, constructs the session processing job and submits it to the remote compute server
+    # Otherwise, constructs the session processing pipeline and returns it to caller. Behavior processing pipeline is
+    # executed as a single job, so it does not require an extensive setup process similar to the suite2p setup process.
 
     # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
@@ -241,50 +329,47 @@ def _submit_behavior_processing_job(
     )
 
     # Configures the job to use the sl-behavior package installed on the server to process session's behavior data.
-    # Note, depending on the legacy flag, either submits the job in the legacy or contemporary processing mode. Legacy
-    # processing mode is intended exclusively for processing Tyche data using modern Sun lab tools and should not be
-    # used in most cases.
-    if not legacy:
-        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
-    else:
-        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -l -um")
-
-    # Submits the remote job to the server and returns the job object updated with job tracking details to the caller
-    # for monitoring and handling the results once the job completes.
-    job = server.submit_job(job)
+    job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = Path(server.processed_data_root).joinpath(
-        project, animal, session, "processed_data", "behavior_processing_tracker.yaml"
+        project, animal, session, "processed_data", TrackerFileNames.BEHAVIOR
     )
-    local_tracker_path = local_working_directory.joinpath(project, "temp", "behavior_tracker.yaml")
+    local_tracker_path = local_working_directory.joinpath(
+        project, f"{session}_behavior_processing", TrackerFileNames.BEHAVIOR
+    )
 
-    # Packages Job data into a ProcessingJob object and returns it to the caller.
-    job_data = _ProcessingJob(
-        job=job,
+    # Packages job data into a _ProcessingPipeline object and returns it to the caller. The end-result is a 'one-stage'
+    # and 'one-job' pipeline.
+    pipeline = _ProcessingPipeline(
+        jobs={1: [job]},
         server=server,
+        manager_id=manager_id,
+        pipeline_type=_ProcessingPipelines.BEHAVIOR,
         remote_tracker_path=remote_tracker_path,
-        job_working_directory=working_directory,
+        job_working_directories=[working_directory],
         local_tracker_path=local_tracker_path,
         session=session,
         animal=animal,
         project=project,
         keep_job_logs=keep_job_logs,
-        job_status=_ProcessingStatus.RUNNING,
+        pipeline_status=_ProcessingStatus.RUNNING,
     )
 
-    return job_data
+    return pipeline
 
 
-def _submit_suite2p_processing_job(
+def _construct_suite2p_processing_pipeline(
     project: str,
     session: str,
     server: Server,
-    stage: _Suite2PStages,
+    manager_id: int,
+    configuration_file: str = "GCaMP6f_CA1_SD.yaml",
+    plane_count: int = 3,
     reprocess: bool = False,
     keep_job_logs: bool = False,
-) -> _ProcessingJob | None:
-    """ Generates and submits the behavior processing job for the specified session to the remote processing server.
+) -> _ProcessingPipeline | None:
+    """Generates and submits the behavior processing job for the specified session to the remote processing server.
 
     This function composes the behavior processing job and instructs the specified remote server to execute the job. It
     does not wait for the server to complete the job and instead returns the submitted Job object, which behaves similar
@@ -301,8 +386,6 @@ def _submit_suite2p_processing_job(
         server: An instance of the Server class that manages access to the remote server that stores the session data
             to process.
         reprocess: A boolean flag indicating whether to reprocess sessions that have already been processed.
-        legacy: A boolean flag indicating whether to use the legacy behavior processing pipeline. This pipeline is
-            designed exclusively for processing 'Tyche' project data and should not be used for any other project.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If the job fails, the logs are always kept regardless of this parameter.
 
@@ -372,76 +455,96 @@ def _submit_suite2p_processing_job(
         console.echo(message=message, level=LogLevel.WARNING)
         return None
 
-    # Otherwise, constructs the session processing job and submits it to the remote compute server
+    # Otherwise, resolves the single-day suite2p processing graph. Note; the suite2p processing relies on multiple jobs
+    # submitted in 3 distinct processing stages. All Job objects are resolved before running the pipeline on the
+    # remote server (below), so that the pipeline functions as a monolithic processing graph.
+
+    # Precreates the lists to store stage jobs
+    stage_1 = []
+    stage_2 = []
+    stage_3 = []
+    working_directories = []
+
+    # Resolves the path to the target suite2p configuration file stored on the remote server.
+    configuration_path = get_remote_filesystem_paths(server=server).suite2p_configurations_path.joinpath(configuration_file)
 
     # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
-    job_name = f"{session}_behavior_processing"
-    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
-
-    # Ensures that the working directory exists on the remote server
-    server.create_directory(remote_path=working_directory)
+    working_root = Path(server.user_working_root).joinpath("job_logs")
 
     # Parses the paths to the shared Sun lab directories used to store raw and processed session data on the remote
     # server.
     remote_session_path = Path(server.raw_data_root).joinpath(project, animal, session)
     processed_data_root = Path(server.processed_data_root)
 
-    # Generates the remote job header. Currently, all behavior processing jobs use at most 7 CPU cores and do not
-    # require more than 10GB of RAM due to using memory mapping.
+    # Stage 1, Job 1: Binarization
+    job_name = f"{session}_s2p_sd_binarization"
+    working_directory =working_root.joinpath(f"{job_name}_{timestamp}")
+    server.create_directory(remote_path=working_directory)
     job = Job(
         job_name=job_name,
         output_log=working_directory.joinpath(f"output.txt"),
         error_log=working_directory.joinpath(f"errors.txt"),
         working_directory=working_directory,
-        conda_environment="behavior",
-        cpus_to_use=7,
+        conda_environment="suite2p",
+        cpus_to_use=2,
         ram_gb=10,
         time_limit=60,
     )
+    stage_1.append(job)
+    working_directories.append(working_directory)
 
-    # Configures the job to use the sl-behavior package installed on the server to process session's behavior data.
-    # Note, depending on the legacy flag, either submits the job in the legacy or contemporary processing mode. Legacy
-    # processing mode is intended exclusively for processing Tyche data using modern Sun lab tools and should not be
-    # used in most cases.
-    if not legacy:
-        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
-    else:
-        job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -l -um")
-
-    # Submits the remote job to the server and returns the job object updated with job tracking details to the caller
-    # for monitoring and handling the results once the job completes.
-    job = server.submit_job(job)
+    # Stage 2, Jobs 2+: Plane processing
+    for plane in range(plane_count):
+        job_name = f"{session}_s2p_sd_plane_{plane+1}"
+        working_directory = working_root.joinpath(f"{job_name}_{timestamp}")
+        server.create_directory(remote_path=working_directory)
+        job = Job(
+            job_name=job_name,
+            output_log=working_directory.joinpath(f"output.txt"),
+            error_log=working_directory.joinpath(f"errors.txt"),
+            working_directory=working_directory,
+            conda_environment="suite2p",
+            cpus_to_use=20,
+            ram_gb=50,
+            time_limit=60,
+        )
+        stage_1.append(job)
+        working_directories.append(working_directory)
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = Path(server.processed_data_root).joinpath(
-        project, animal, session, "processed_data", "behavior_processing_tracker.yaml"
+        project, animal, session, "processed_data", TrackerFileNames.SUITE2P
     )
-    local_tracker_path = local_working_directory.joinpath(project, "temp", "behavior_tracker.yaml")
+    local_tracker_path = local_working_directory.joinpath(
+        project, f"{session}_suite2p_processing", TrackerFileNames.SUITE2P
+    )
 
-    # Packages Job data into a ProcessingJob object and returns it to the caller.
-    job_data = _ProcessingJob(
-        job=job,
+    # Packages job data into a _ProcessingPipeline object and returns it to the caller. The end-result is a 'one-stage'
+    # and 'one-job' pipeline.
+    pipeline = _ProcessingPipeline(
+        jobs={1: [job]},
         server=server,
+        manager_id=manager_id,
+        pipeline_type=_ProcessingPipelines.BEHAVIOR,
         remote_tracker_path=remote_tracker_path,
-        job_working_directory=working_directory,
+        job_working_directories=[working_directory],
         local_tracker_path=local_tracker_path,
         session=session,
         animal=animal,
         project=project,
         keep_job_logs=keep_job_logs,
-        job_status=_ProcessingStatus.RUNNING,
+        pipeline_status=_ProcessingStatus.RUNNING,
     )
 
-    return job_data
+    return pipeline
 
 
-def process_behavior_data(
+def process_project_data(
     project: str,
     update_manifest: bool = True,
     sessions: list[str] | tuple[str, ...] | None = None,
-    reprocess: bool = False,
-    legacy: bool = False,
+    reprocess_behavior: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
     # Establishes SSH connection to the processing server.
@@ -462,74 +565,78 @@ def process_behavior_data(
     # If the user did not specify a list of sessions to process, processes all available sessions for that project.
     # Ensures sessions are stored as a tuple of strings for efficiency.
     if sessions is None:
-        sessions = manifest.sessions
+        sessions = manifest.get_sessions(exclude_incomplete=True, not_dataset_ready_only=True)
     else:
         sessions = tuple(sessions)
 
-    # Attempts to generate and submit a remote processing job for each session
-    jobs: list[_ProcessingJob] = []
+    # Generates the unique identifier for this runtime
+    manager_id = generate_manager_id()
+
+    # Generates the list of processing pipelines to run on the target project's data.
+    pipelines: list[_ProcessingPipeline] = []
     for session in sessions:
-        job = _submit_behavior_processing_job(
+        # Behavior processing pipeline.
+        behavior_pipeline = _construct_behavior_processing_pipeline(
             server=server,
+            manager_id=manager_id,
             project=project,
             session=session,
-            reprocess=reprocess,
-            legacy=legacy,
+            reprocess=reprocess_behavior,
             keep_job_logs=keep_job_logs,
         )
+        if behavior_pipeline is not None:
+            # If the session is not excluded from processing, adds the pipeline for processing the session to the
+            # storage list.
+            pipelines.append(behavior_pipeline)
 
-        # Since the job submission function also verifies whether the job should be submitted, not all jobs are
-        # expected to actually be sent to the server. If the returned object is None, the job was not submitted and,
-        # hence, does not require tracking.
-        if job is not None:
-            jobs.append(job)
-
-    # If no jobs were submitted, aborts the runtime early
-    if len(jobs) == 0:
+    # If the project requires no additional processing, aborts the runtime early
+    if len(pipelines) == 0:
         message = (
-            f"All available sessions for project '{project}' have been excluded from behavior processing. See the "
-            f"messages above for details on exclusion criteria applied to each session."
+            f"All available sessions for project '{project}' have been excluded from all supported processing "
+            f"pipelines. See the messages above for details on exclusion criteria applied to each session and pipeline "
+            f"combination."
         )
         console.echo(message=message, level=LogLevel.WARNING)
         return
 
-    # Creates a progress bar to track the progress of the behavior processing jobs.
-    with tqdm(total=len(jobs), desc="Processing session behavior data", unit="session") as pbar:
-        # Initializes a timer to delay repeated job status checks
+    # Creates a progress bar to track the runtime progress of each processing pipeline.
+    with tqdm(total=len(pipelines), desc="Executing processing pipelines", unit="pipeline") as pbar:
+        # Initializes a timer to delay repeated pipeline status checks
         delay_timer = PrecisionTimer("s")
-        uncompleted_count = len(jobs)
+        uncompleted_count = len(pipelines)
 
-        # Runs until all jobs are completed (successfully or not)
+        # Runs until all pipelines are completed (successfully or not)
         while uncompleted_count > 0:
             # At every loop cycle, checks the status of each running job
-            for running_job in jobs:
-                # Only checks still running jobs
-                if running_job.job_status == _ProcessingStatus.RUNNING:
-                    # Check if the job has been completed
-                    running_job.check_job_status()
+            for pipeline in pipelines:
+                # Only checks still running pipelines
+                if pipeline.pipeline_status == _ProcessingStatus.RUNNING:
+                    # Resolves the state of the pipeline. If necessary, this can advance the processing stage of the
+                    # pipeline and submit additional jobs to the server.
+                    pipeline.job_cycle()
 
-                    # If the job status changed to one of the completed status codes, increments the completed job
-                    # count and updates the progress bar
-                    if running_job.job_status != _ProcessingStatus.RUNNING:
+                    # If the pipeline status changed to one of the completed status codes, increments the completed
+                    # pipeline count and updates the progress bar
+                    if pipeline.pipeline_status != _ProcessingStatus.RUNNING:
                         uncompleted_count -= 1
                         pbar.update(1)  # Updates progress bar
 
-            # Checks for job completion every 10 seconds to avoid overwhelming the communication line.
-            delay_timer.delay_noblock(delay=10, allow_sleep=True)
+            # Reruns the pipeline resolution cycle every 30 seconds to avoid overwhelming the communication line.
+            delay_timer.delay_noblock(delay=30, allow_sleep=True)
 
-        # Once all jobs are completed, reports the processing outcome of each job to the user.
-        for completed_job in jobs:
-            if completed_job.job_status == _ProcessingStatus.FAILED:
+        # Once all pipelines are completed, reports the processing outcome of each pipeline to the user.
+        for pipeline in pipelines:
+            if pipeline.pipeline_status == _ProcessingStatus.FAILED:
                 message = (
-                    f"The behavior processing job for the session '{completed_job.session}' performed by animal "
-                    f"'{completed_job.animal}' for '{completed_job.project}' project did not run successfully. Check "
+                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' performed "
+                    f"by animal '{pipeline.animal}' for '{pipeline.project}' project did not run successfully. Check "
                     f"the remote job error logs stored on the server for the specific details about the cause of the "
                     f"failure."
                 )
                 console.echo(message=message, level=LogLevel.ERROR)
             else:
                 message = (
-                    f"Behavior processing job for the session '{completed_job.session}' performed by animal "
-                    f"'{completed_job.animal}' for '{completed_job.project}' project: Complete."
+                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' performed "
+                    f"by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
                 )
                 console.echo(message=message, level=LogLevel.SUCCESS)
