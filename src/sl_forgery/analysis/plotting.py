@@ -1,11 +1,11 @@
-from numba.cpython.unsafe.numbers import trailing_zeros
 from sl_forgery.utils.dataclass import Data
-from pathlib import Path
-
-from plotly import graph_objects as go
+from sl_forgery.utils.dataclass import track_length, cue_length, bin_size
 
 import numpy as np
-import polars as pl
+from pathlib import Path
+import plotly
+from plotly import graph_objects as go
+
 
 class Plotting:
     @staticmethod
@@ -16,14 +16,8 @@ class Plotting:
         #  plotting; plot cue regions under the graph; basically thick little
         #  vlines of different colors
 
-        # TODO Figure out where to put these parameters (parameters to function? Attributes to class? Attributes to Analysis or dataclass)
-        bin_size = 5 #cm
-        track_length = 240
-        cue_length = 30
         cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
-
-
-        session_avg_df, sess_sem, result, trial_avg_df = data.process_data(mouse, session, target_group)
+        session_avg_df, sess_sem, result, trial_avg_df = data.bin_data(mouse, session, target_group)
 
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
@@ -128,3 +122,134 @@ class Plotting:
             ],
         )
         fig.show(renderer="browser")
+
+    @staticmethod
+    def plot_umap(mouse, session, target_group, data : Data):
+        """
+        Makes an interactive umap plot of data
+            embedding: numpy array of shape (frames, 3)
+            behavior: polars dataframe with (frames, columns), where a each row in the dataframe corresponds with the same row in the embedding.
+        """
+        embedding, behavior_filtered = data.compute_umap(mouse, session, target_group)
+
+        behavior_filtered = Data.add_plotting_columns(behavior_filtered)
+            
+        cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
+        region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
+        region_names = ['Cue 1', 'Gray 1', 'Cue 2', 'Gray 2', 'Cue 3', 'Gray 3', 'Cue 4', 'Gray 4']
+
+        cue_point_colors = np.array([cue_color_map[label] for label in  behavior_filtered["cue"]])
+        region_point_colors = np.array([region_color_map[label] for label in  behavior_filtered["region"]])
+        
+        fig = go.Figure(
+            go.Scatter3d(
+                x=embedding[:, 0],
+                y=embedding[:, 1],
+                z=embedding[:, 2],
+                mode='markers',
+                marker={
+                    "size": 2,
+                    "opacity": 1,
+                    "color": cue_point_colors
+                },
+                showlegend=False,
+            )
+        )
+
+        # Make the cue legend
+        for cue_val, color in enumerate(cue_color_map):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[None], y=[None], z=[None],        # no actual points
+                    mode="markers",
+                    marker=dict(size=6, color=color),    # same color map
+                    showlegend=True if cue_val != 0 else False, # don't view legend for the gray region
+                    name=f" Cue {cue_val}",               # legend label
+                )
+            )
+        
+        # Make the region legend
+        for cue_val, color in enumerate(region_color_map):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[None], y=[None], z=[None],        # no actual points
+                    mode="markers",
+                    marker=dict(size=6, color=color),    # same color map
+                    showlegend=False,
+                    name=f"{region_names[cue_val]}"               # legend label
+                )
+            )
+
+        # Same setting for each axis
+        axis_settings = dict(
+            visible=False,        # hides axis, labels, ticks
+            showbackground=False, # hides background plane
+            showgrid=False,       # hides grid lines
+            zeroline=False        # hides zero line
+        )
+
+        fig.update_layout(
+            scene=dict(
+                xaxis=axis_settings,
+                yaxis=axis_settings,
+                zaxis=axis_settings
+            ),
+            updatemenus=[dict(
+                type="dropdown",
+                xanchor="left", yanchor="bottom",
+                x=1, y=1,
+                direction="down",
+                buttons=[
+                    dict(label="Cues",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": [cue_point_colors] + cue_color_map + region_color_map,
+                                "marker.showscale": False,
+                                "showlegend":  [False] + ([False] + [True] * len(cue_color_map[1:])) + [False] * len(region_color_map),
+                            },
+                        ]),
+                    dict(label="Region",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": [region_point_colors] + cue_color_map + region_color_map,
+                                "marker.showscale": False,
+                                "showlegend":  [False] + [False] * len(cue_color_map) + [True] * len(region_color_map),
+                            },
+                        ]),
+                    dict(
+                        label="Track Position",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": np.array(behavior_filtered["track_position_cm"]),
+                                "marker.colorscale": str(plotly.colors.make_colorscale(plotly.colors.cyclical.Twilight)).replace("'", '"'),
+                                "marker.cmin": 0,
+                                "marker.cmax": behavior_filtered["track_position_cm"].max(),
+                                "marker.showscale": True,
+                                "showlegend": False,
+                            },
+                        ]
+                    ),
+                    dict(label="Trial",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": np.array(behavior_filtered["trial"]),
+                                "marker.colorscale": str(plotly.colors.make_colorscale(plotly.colors.sequential.thermal)).replace("'", '"'),
+                                "marker.cmin": 0,
+                                "marker.cmax": behavior_filtered["trial"].max(),
+                                "marker.showscale": True,
+                                "showlegend": False,
+                            },
+                        ]
+                    ),
+                ],
+            )]
+        )
+
+        fig.show(renderer="browser")
+
+
+

@@ -1,6 +1,7 @@
 import polars as pl
 import numpy as np
 from scipy import stats
+import umap
 
 from typing import Any
 from numpy.typing import NDArray
@@ -11,6 +12,10 @@ from functools import lru_cache
 from IPython.display import display, HTML
 from pathlib import Path
 
+# TODO Figure out where to put these parameters (parameters to function? Attributes to class? Attributes to Analysis or dataclass)
+track_length = 240
+cue_length = 30
+bin_size = 5
 
 class Data:
     def __init__(self, root):
@@ -297,7 +302,7 @@ class Data:
         return result
 
     @lru_cache(maxsize=None)
-    def process_data(self, mouse, session, target_group, bin_size=5):
+    def bin_data(self, mouse, session, target_group):
         """
         Return 
         
@@ -356,8 +361,6 @@ class Data:
         # TODO:  need to soft code bin size and cue length late
         #   this only works with set lengths
         # this wont work w my task, with variable track lengths
-        track_length = np.mean(np.diff(trial_start["traveled_distance_cm"]))
-        cue_length = 30  # cm
         n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
 
 
@@ -374,7 +377,7 @@ class Data:
             if max_val - min_val == 0:
                 normalized = np.zeros_like(arr)
             else:
-                normalized = 240 * (arr - min_val) / (max_val - min_val)
+                normalized = track_length * (arr - min_val) / (max_val - min_val)
 
             normalized_arrays.append(np.floor(normalized))
 
@@ -383,7 +386,7 @@ class Data:
 
         # bin the normalized arrays
 
-        bin_edges = np.arange(0, 245, 5)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
+        bin_edges = np.arange(0, track_length + bin_size, bin_size)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
         num_trials = len(normalized_arrays)
         binned_arrays = np.empty((num_trials, 48), dtype=object)   #arrays of binned distance arrays for each trial (i.e. N
         # trial arrays, each with 48 bins of
@@ -394,7 +397,7 @@ class Data:
             # get the indices of the bins to which each value belongs in an array; use np.digitize
             bin_indices = np.digitize(arr, bin_edges, right=False) - 1
             # Handle values exactly equal to 240 (put in last bin)
-            bin_indices = np.where(arr == 240, 47, bin_indices)
+            bin_indices = np.where(arr == track_length, 47, bin_indices)
             bin_assignments[e] = bin_indices #use these in future df to split up cell activity
 
 
@@ -478,3 +481,72 @@ class Data:
         print("averaged over trials")
 
         return session_avg_df, sess_sem, result, trial_avg_df
+    
+    @lru_cache(maxsize=None)
+    def filter_for_umap(self, mouse, session, target_group):
+        behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df = self.get_all_data(mouse, session, target_group)
+
+        # Filter data 
+
+        active_state_mask = (behavior_df["experiment_stage"].is_in([2, 4])) & (behavior_df["system_state"] == 2)
+        behavior_filtered = behavior_df.filter(active_state_mask)
+        spikes_filtered = spikes_df.filter(active_state_mask)
+
+        return spikes_filtered, behavior_filtered
+
+    @lru_cache(maxsize=None)
+    def compute_umap(self, mouse, session, target_group):
+        spikes_filtered, behavior_filtered = self.filter_for_umap(mouse, session, target_group)
+
+        spikes = spikes_filtered.to_numpy() # umap needs cells x frames
+
+        umap_data = umap.UMAP(
+            n_neighbors=100,
+            n_components=3,
+            min_dist=0.1,
+            n_jobs=-1,
+            metric='correlation'
+        ).fit(spikes)
+
+        embedding = umap_data.embedding_
+
+        return embedding, behavior_filtered
+    
+    @staticmethod
+    def add_plotting_columns(behavior_df):
+        """
+        Adds columns for track_position, region, cue, to a behavior dataframe if not already present
+        """
+
+        track_length = 240
+        # Add cue labels and traveled distance labels (more modern data might already have this)
+        cue_length = 30
+
+        def compute_track_position(distance_traveled_cm, initial_pos_cm=10):
+            return (distance_traveled_cm + initial_pos_cm) % track_length
+
+        def compute_region(track_pos):
+            return int(track_pos // cue_length)
+
+        cue_sequence = [1, 0, 2, 0, 3, 0, 4, 0]
+        def compute_cue(region):
+            return cue_sequence[region]
+
+        if "track_position_cm" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                compute_track_position(pl.col("traveled_distance_cm")).alias("track_position_cm")
+            )
+
+        if "region" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                pl.col("track_position_cm").map_elements(compute_region, return_dtype=pl.Int64).alias("region")
+            )
+        
+        if "cue" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                pl.col("region").map_elements(compute_cue, return_dtype=pl.Int64).alias("cue")
+            )
+
+        return behavior_df
+    
+
