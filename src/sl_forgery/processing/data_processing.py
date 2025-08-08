@@ -466,7 +466,9 @@ def _construct_suite2p_processing_pipeline(
     working_directories = []
 
     # Resolves the path to the target suite2p configuration file stored on the remote server.
-    configuration_path = get_remote_filesystem_paths(server=server).suite2p_configurations_path.joinpath(configuration_file)
+    configuration_path = get_remote_filesystem_paths(server=server).suite2p_configurations_path.joinpath(
+        configuration_file
+    )
 
     # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
@@ -479,7 +481,7 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 1, Job 1: Binarization
     job_name = f"{session}_s2p_sd_binarization"
-    working_directory =working_root.joinpath(f"{job_name}_{timestamp}")
+    working_directory = working_root.joinpath(f"{job_name}_{timestamp}")
     server.create_directory(remote_path=working_directory)
     job = Job(
         job_name=job_name,
@@ -496,7 +498,7 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 2, Jobs 2+: Plane processing
     for plane in range(plane_count):
-        job_name = f"{session}_s2p_sd_plane_{plane+1}"
+        job_name = f"{session}_s2p_sd_plane_{plane + 1}"
         working_directory = working_root.joinpath(f"{job_name}_{timestamp}")
         server.create_directory(remote_path=working_directory)
         job = Job(
@@ -547,12 +549,16 @@ def process_project_data(
     reprocess_behavior: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
+
+    # Entry message
+    console.echo(message=f"Initializing project '{project}' data processing...", level=LogLevel.INFO)
+
     # Establishes SSH connection to the processing server.
     credentials = get_credentials_file_path(require_service=True)
     server = Server(credentials_path=credentials)
 
-    # Depending on configuration, updates the project manifest file stored on the remote server and fetches it to the
-    # local machine.
+    # Depending on the configuration, updates the project manifest file stored on the remote server and fetches it to
+    # the local machine.
     if update_manifest:
         generate_remote_project_manifest(project=project, server=server)
     else:
@@ -600,43 +606,69 @@ def process_project_data(
         return
 
     # Creates a progress bar to track the runtime progress of each processing pipeline.
-    with tqdm(total=len(pipelines), desc="Executing processing pipelines", unit="pipeline") as pbar:
-        # Initializes a timer to delay repeated pipeline status checks
-        delay_timer = PrecisionTimer("s")
-        uncompleted_count = len(pipelines)
+    console.echo(message=f"Executing {len(pipelines)} resolved processing pipelines...", level=LogLevel.INFO)
 
-        # Runs until all pipelines are completed (successfully or not)
-        while uncompleted_count > 0:
-            # At every loop cycle, checks the status of each running job
-            for pipeline in pipelines:
-                # Only checks still running pipelines
-                if pipeline.pipeline_status == _ProcessingStatus.RUNNING:
-                    # Resolves the state of the pipeline. If necessary, this can advance the processing stage of the
-                    # pipeline and submit additional jobs to the server.
-                    pipeline.job_cycle()
+    # Initializes a timer to delay repeated pipeline status checks
+    delay_timer = PrecisionTimer("s")
 
-                    # If the pipeline status changed to one of the completed status codes, increments the completed
-                    # pipeline count and updates the progress bar
-                    if pipeline.pipeline_status != _ProcessingStatus.RUNNING:
-                        uncompleted_count -= 1
-                        pbar.update(1)  # Updates progress bar
+    # Initializes tracker variables to track the processing progress
+    uncompleted_count = len(pipelines)
+    successful_count = 0
+    failed_count = 0
+    aborted_count = 0
 
-            # Reruns the pipeline resolution cycle every 30 seconds to avoid overwhelming the communication line.
-            delay_timer.delay_noblock(delay=30, allow_sleep=True)
-
-        # Once all pipelines are completed, reports the processing outcome of each pipeline to the user.
+    # Runs until all pipelines are completed (successfully or not)
+    while uncompleted_count > 0:
+        # At every loop cycle, checks the status of each running job
         for pipeline in pipelines:
+
+            # If the pipeline has been completed, skips to the next pipeline
+            if pipeline.pipeline_status != _ProcessingStatus.RUNNING:
+                continue
+
+            # Resolves the state of the pipeline. If necessary, this can advance the processing stage of the
+            # pipeline and submit additional jobs to the server.
+            pipeline.job_cycle()
+
+            # If the pipeline status changed to one of the completed status codes, decrements the uncompleted
+            # pipeline count and notifies the user about the outcome of the processing runtime.
             if pipeline.pipeline_status == _ProcessingStatus.FAILED:
+                # The pipeline has encountered a runtime error and ended early
                 message = (
-                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' performed "
-                    f"by animal '{pipeline.animal}' for '{pipeline.project}' project did not run successfully. Check "
-                    f"the remote job error logs stored on the server for the specific details about the cause of the "
+                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                    f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Failed. Check the "
+                    f"remote job error logs stored on the server for the specific details about the cause of the "
                     f"failure."
                 )
                 console.echo(message=message, level=LogLevel.ERROR)
-            else:
+                failed_count += 1
+                uncompleted_count -= 1
+            elif pipeline.pipeline_status == _ProcessingStatus.SUCCEEDED:
+                # The pipeline has successfully completed the runtime
                 message = (
-                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' performed "
-                    f"by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
+                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                    f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
                 )
                 console.echo(message=message, level=LogLevel.SUCCESS)
+                successful_count += 1
+                uncompleted_count -= 1
+            else:
+                # A very rare case: the pipeline was aborted by another user. It is highly unrealistic to encounter
+                # this case.
+                message = (
+                    f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                    f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Aborted."
+                )
+                console.echo(message=message, level=LogLevel.WARNING)
+                aborted_count += 1
+                uncompleted_count -= 1
+
+        # Reruns the pipeline resolution cycle every 30 seconds to avoid overwhelming the communication line.
+        delay_timer.delay_noblock(delay=30, allow_sleep=True)
+
+        # Exit message
+        message = (
+            f"Project '{project}' data: Processed. Successfully completed {successful_count} pipelines, failed or "
+            f"aborted {failed_count+aborted_count} pipelines."
+        )
+        console.echo(message=message, level=LogLevel.SUCCESS)

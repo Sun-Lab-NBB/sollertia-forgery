@@ -36,7 +36,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-# Runtime project dependencies. This overlaps with 'condarun' optional list.
+# Runtime project dependencies. This overlaps with the 'condarun' optional list.
 dependencies = [
     "ataraxis-time==3.0.0",
     "ataraxis-base-utilities==3.1.0",
@@ -78,8 +78,8 @@ condarun = [
 conda = [
     # Tox
     "tox==4.28.4",
-    "tox-uv==1.26.2",
-    "uv==0.8.4",
+    "tox-uv==1.27.0",
+    "uv==0.8.6",
 
     # Documentation
     "sphinx==8.2.3",
@@ -89,7 +89,7 @@ conda = [
 
     # Linting and Stub-generation
     "mypy==1.17.1",
-    "ruff==0.12.7",
+    "ruff==0.12.8",
 
     # Building
     "hatchling==1.27.0",
@@ -126,6 +126,8 @@ dev = [
 
 # Exports CLIs upon library installation into an environment
 [project.scripts]
+sl-set-working-directory = "sl_forgery.cli:designate_working_directory"
+sl-print-project-data = "sl_forgery.cli:print_project_manifest_data"
 
 # Specifies files that should not be included in the source-code distribution, but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
@@ -164,7 +166,7 @@ lint.ignore = [
 quote-style = "double"             # Uses double quotes for strings
 indent-style = "space"             # Uses space for indents
 skip-magic-trailing-comma = false  # Like black, ignores trailing commas
-line-ending = "auto"               # Automatically detects and standardizes line ending character
+line-ending = "auto"               # Automatically detects and standardizes line-ending character
 
 # Docstrings and comments' line length
 [tool.ruff.lint.pycodestyle]
