@@ -143,7 +143,6 @@ class Data:
         mouse_root = self.find_mouse(mouse)
         return len([f for f in mouse_root.iterdir() if f.is_dir()])
         
-
     def get_all_data(self, mouse, session, target_group):
         """
         Return all session data as polars dataframes.
@@ -188,11 +187,6 @@ class Data:
         iscell_df = iscell_df.with_row_index("cell_idx")  # add cell id index to cell df, 0-indexed to match F_df
         
         return behavior_df, fluorescence_df, neuropil_df, spikes_df, iscell_df
-
-        # TODO: Type args and write doc string
-    #  next step is to create a column with cue identity
-    #   *this potentially doesnt need to be a separate function; ask ivan
-    #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
 
     @staticmethod
     def _interpolate_data(
