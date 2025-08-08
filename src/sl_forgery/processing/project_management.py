@@ -17,16 +17,14 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
 
     This function allows generating the manifest.feather files on the remote compute server outside the standard
     workflow (manually). Since this process requires 'service' access privileges, this function is not intended to be
-    called directly by most lab users.
+    called directly by most lab users. As part of its runtime, this function also fetches (pulls) the generated manifest
+    file to the local Sun lab working directory. Therefore, this function also includes the functionality of the
+    fetch_remote_project_manifest() function.
 
     Notes:
         All Sun lab 'service' pipelines automatically update the manifest file as part of their runtime, so it is
         typically unnecessary to use this function. The function is mostly used internally to test various lab pipelines
         and data management strategies.
-
-        As part of its runtime, this function also fetches (pulls) the generated manifest file to the local Sun lab
-        working directory. Therefore, this function also includes the functionality of the
-        fetch_remote_project_manifest() function.
 
         The manifest file is created and stored inside the root raw data directory for the target project on the remote
         server.
@@ -67,7 +65,7 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
         conda_environment="manage",
         cpus_to_use=1,
         ram_gb=10,
-        time_limit=10,
+        time_limit=20,
     )
 
     # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file

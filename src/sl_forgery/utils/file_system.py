@@ -1,5 +1,6 @@
-"""This module provides various tools and assets for working with the filesystem of the local machine (PC) to support
-running all other pipelines and runtimes exposed by this library."""
+"""This module provides various tools and assets for working with the filesystem of the local machine (PC) and the
+remote compute server. The assets from this module support running all other pipelines and runtimes exposed by this
+library."""
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -197,11 +198,11 @@ def get_credentials_file_path(require_service: bool = False) -> Path:
 
 @dataclass()
 class RemotePaths:
-    """This class provides the paths to shared configuration directories for some data processing pipelines used in
-    the Sun lab.
+    """Stores the paths to configuration directories for some data processing pipelines stored on the remote server.
 
     These configuration directories are stored in the shared Sun lab data directory on the remote compute server and
-    are used by various processing pipelines to maintain consistent configuration across all sessions and projects.
+    are used by various processing pipelines to maintain consistent configuration across all sessions, projects, and
+    users.
 
     Notes:
         This class should be instantiated via the get_remote_filesystem_paths() function exposed by the 'utils' package
@@ -218,14 +219,18 @@ class RemotePaths:
 
 
 def get_remote_filesystem_paths(server: Server) -> RemotePaths:
-    """Resolves and returns the paths to shared configuration directories for some data processing pipelines.
+    """Resolves and returns a RemotePaths instance that provides the paths to certain server-side directories used by
+    processing pipelines.
+
+    Primarily, this function is used to resolve the paths to shared server-side configuration directories used by
+    pipelines such as DeepLabCut and sl-suite2p single-day and multi-day.
 
     Args:
         server: The Server class instance that manages the bidirectional communication with the remote compute server
             that executes processing pipelines.
 
     Returns:
-        The RemotePaths instance containing the paths to shared configuration directories for some processing pipelines.
+        The initialized RemotePaths instance that stores the resolved paths data.
     """
 
     return RemotePaths(

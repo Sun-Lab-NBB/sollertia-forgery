@@ -1,5 +1,5 @@
-"""This module provides miscellaneous tools and assets used by all other packages of this library to fulfill various
-service tasks."""
+"""This module provides miscellaneous tools and assets used by all other packages of this library to support their
+runtime."""
 
 from .file_system import (
     RemotePaths,
