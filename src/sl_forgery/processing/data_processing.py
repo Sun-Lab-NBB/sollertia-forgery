@@ -549,7 +549,6 @@ def process_project_data(
     reprocess_behavior: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
-
     # Entry message
     console.echo(message=f"Initializing project '{project}' data processing...", level=LogLevel.INFO)
 
@@ -621,7 +620,6 @@ def process_project_data(
     while uncompleted_count > 0:
         # At every loop cycle, checks the status of each running job
         for pipeline in pipelines:
-
             # If the pipeline has been completed, skips to the next pipeline
             if pipeline.pipeline_status != _ProcessingStatus.RUNNING:
                 continue
@@ -669,6 +667,6 @@ def process_project_data(
         # Exit message
         message = (
             f"Project '{project}' data: Processed. Successfully completed {successful_count} pipelines, failed or "
-            f"aborted {failed_count+aborted_count} pipelines."
+            f"aborted {failed_count + aborted_count} pipelines."
         )
         console.echo(message=message, level=LogLevel.SUCCESS)
