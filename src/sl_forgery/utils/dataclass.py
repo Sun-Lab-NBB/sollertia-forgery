@@ -549,10 +549,6 @@ class Data:
             Helper function to plot_umap
         """
 
-        track_length = 240
-        # Add cue labels and traveled distance labels (more modern data might already have this)
-        cue_length = 30
-
         def compute_track_position(distance_traveled_cm, initial_pos_cm=10):
             return (distance_traveled_cm + initial_pos_cm) % track_length
 
