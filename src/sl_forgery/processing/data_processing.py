@@ -14,8 +14,8 @@ from sl_shared_assets import (
     SessionTypes,
     ProjectManifest,
     TrackerFileNames,
+    ProcessingTracker,
     generate_manager_id,
-    get_processing_tracker,
 )
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
@@ -180,7 +180,7 @@ class _ProcessingPipeline:
         # If all jobs for the current processing stage have completed, checks the pipeline's processing tracker file to
         # determine if all jobs completed successfully.
         self.server.pull_file(remote_file_path=self.remote_tracker_path, local_file_path=self.local_tracker_path)
-        tracker = get_processing_tracker(root=self.local_tracker_path.parent, file_name=TrackerFileNames.BEHAVIOR)
+        tracker = ProcessingTracker(self.local_tracker_path)
 
         # If the stage failed due to encountering an error, removes the local tracker copy and marks the pipeline
         # as 'failed'. It is expected that the pipeline state is then handed by the manager process to notify the
@@ -192,15 +192,15 @@ class _ProcessingPipeline:
         # If this was the last processing stage, the tracker indicates that the processing has been completed. In this
         # case, initialized the shutdown sequence:
         elif tracker.is_complete:
+            sh.rmtree(self.local_tracker_path.parent)  # Removes local temporary data
+            self.pipeline_status = _ProcessingStatus.SUCCEEDED  # Updates the job status to 'succeeded'
+
             # If the pipeline was configured to remove logs after completing successfully, removes the runtime log for
             # each job submitted as part of this pipeline from the remote server.
             if not self.keep_job_logs:
                 for stage_jobs in self.jobs.values():
                     for _, directory in stage_jobs:  # Ignores job objects as part of this iteration.
                         self.server.remove(remote_path=directory, recursive=True, is_dir=True)
-
-            sh.rmtree(self.local_tracker_path.parent)  # Removes local temporary data
-            self.pipeline_status = _ProcessingStatus.SUCCEEDED  # Updates the job status to 'succeeded'
 
         # If the processing is not complete (according to the tracker), this indicates that the pipeline has more
         # stages to execute. In this case, increments the processing stage tracker and submits the next batch of jobs
@@ -227,7 +227,7 @@ class _ProcessingPipeline:
     @property
     def is_running(self) -> bool:
         """Returns True if the pipeline is currently running, False otherwise."""
-        if self._pipeline_stage == _ProcessingStatus.RUNNING:
+        if self.pipeline_status == _ProcessingStatus.RUNNING:
             return True
         return False
 
@@ -352,8 +352,7 @@ def _construct_behavior_processing_pipeline(
     remote_session_path = Path(server.raw_data_root).joinpath(project, animal, session)
     processed_data_root = Path(server.processed_data_root)
 
-    # Generates the remote job header. Currently, all behavior processing jobs use at most 7 CPU cores and do not
-    # require more than 8GB of RAM due to using memory mapping.
+    # Generates the remote job header and configures it to run behavior processing
     job = Job(
         job_name=job_name,
         output_log=working_directory.joinpath(f"output.txt"),
@@ -361,11 +360,9 @@ def _construct_behavior_processing_pipeline(
         working_directory=working_directory,
         conda_environment="behavior",
         cpus_to_use=7,
-        ram_gb=8,
-        time_limit=90,
+        ram_gb=5,
+        time_limit=180,
     )
-
-    # Configures the job to use the sl-behavior package installed on the server to process session's behavior data.
     job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
 
     # Resolves the paths to the local and remote job tracker files.
@@ -548,9 +545,9 @@ def _construct_suite2p_processing_pipeline(
         error_log=working_directory.joinpath(f"errors.txt"),
         working_directory=working_directory,
         conda_environment="suite2p",
-        cpus_to_use=2,
-        ram_gb=10,
-        time_limit=90,
+        cpus_to_use=1,
+        ram_gb=5,
+        time_limit=240,
     )
     job.add_command(
         f"sl-process-suite2p -i {str(configuration_path)} -sp {str(remote_session_path)} "
@@ -569,9 +566,9 @@ def _construct_suite2p_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="suite2p",
-            cpus_to_use=20,
-            ram_gb=50,
-            time_limit=90,
+            cpus_to_use=42,
+            ram_gb=80,
+            time_limit=300,
         )
         job.add_command(
             f"sl-process-suite2p -i {str(configuration_path)} -sp {str(remote_session_path)} "
@@ -589,8 +586,8 @@ def _construct_suite2p_processing_pipeline(
         error_log=working_directory.joinpath(f"errors.txt"),
         working_directory=working_directory,
         conda_environment="suite2p",
-        cpus_to_use=2,
-        ram_gb=10,
+        cpus_to_use=1,
+        ram_gb=4,
         time_limit=90,
     )
     job.add_command(
@@ -626,17 +623,210 @@ def _construct_suite2p_processing_pipeline(
     return pipeline
 
 
+def _construct_dataset_marker_job(
+    project: str,
+    session: str,
+    server: Server,
+    create: bool = False,
+) -> Job | None:
+    """Generates and returns the ProcessingPipeline instance used to execute the single-day suite2p processing pipeline
+    for the target session.
+
+    This function composes the processing pipeline and packages it into the ProcessingPipeline. This pipeline extracts
+    the brain activity data from the mesoscope-acquired .tiff stacks. The extracted data is stored as a collection of
+    NumPy .npy files and is later used during the multi-day suite2p pipeline.
+
+    Notes:
+        This function does not start executing the pipeline. Instead, the pipeline starts executing the first time
+        the manager process calls its runtime_cycle() method.
+
+        If the function determines that the target session cannot be processed, it instead returns None and notifies
+        the user why the session was excluded from processing via the terminal.
+
+    Args:
+        project: The name of the project for which to execute the single-day suite2p processing pipeline.
+        session: The name of the session to process with the single-day suite2p processing pipeline.
+        server: The Server class instance that manages access to the remote server that executes the pipeline and
+            stores the target session data.
+        manager_id: The unique identifier of the process that calls this function to construct the pipeline.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
+            value.
+
+    Returns:
+        The _ProcessingPipeline instance configured to execute and manage the single-day suite2p processing pipeline
+        on the server if the session can be processed with this pipeline. None, if the session is excluded from
+        processing for any reason.
+    """
+
+    # Resolves the path to the local Sun lab working directory
+    local_working_directory = get_working_directory()
+
+    # Resolves the path to the locally stored project manifest file
+    manifest_path = local_working_directory.joinpath(project, "manifest.feather")
+
+    # If the local manifest file does not exist, fetches it from the remote server
+    if not manifest_path.exists():
+        fetch_remote_project_manifest(project=project, server=server)
+
+    # Parses the target session data from the manifest file
+    manifest = ProjectManifest(manifest_file=manifest_path)
+    session_data = manifest.get_session_info(session=session)
+    session_type = session_data["type"][0]
+    animal = str(session_data["animal"][0])
+    complete = bool(session_data["complete"][0]) and bool(session_data["integrity"][0])
+    behavior = bool(session_data["behavior"][0])
+    suite2p = bool(session_data["suite2p"][0])
+    dataset = bool(session_data["dataset"][0])
+
+    # Prevents resolving dataset marker for incomplete sessions.
+    if not complete:
+        message = (
+            f"Unable to resolve the dataset marker for the session '{session}' performed by animal '{animal}' for "
+            f"'{project}' project. The session is either marked as 'incomplete,' or did not pass integrity "
+            f"verification when it was moved to the remote server. If necessary, resolve the marker manually by "
+            f"creating or removing the 'p53.bin' marker file from the session's processed_data directory on the remote "
+            f"server."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    # Prevents recreating the dataset marker if it already exists.
+    if create and dataset:
+        message = (
+            f"Session '{session}' performed by animal '{animal}' for '{project}' project is already marked as ready "
+            f"for dataset integration. Skipping (re)creating the dataset marker for the session."
+        )
+        console.echo(message=message, level=LogLevel.SUCCESS)
+        return None
+
+    # Prevents removing the dataset marker if it does not exist.
+    elif not create and not dataset:
+        message = (
+            f"Session '{session}' performed by animal '{animal}' for '{project}' project does not contain the dataset "
+            f"integration marker. Skipping removing the nonexistent dataset marker for the session."
+        )
+        console.echo(message=message, level=LogLevel.SUCCESS)
+        return None
+
+    # Ensures that the session (type) supports dataset integration.
+    if session_type not in {SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING, SessionTypes.MESOSCOPE_EXPERIMENT}:
+        message = (
+            f"Unable to resolve the dataset marker for the session '{session}' performed by animal '{animal}' for "
+            f"'{project}' project. The session is of type '{session_type},' which does not support dataset "
+            f"integration. Skipping resolving the dataset marker for the session."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    elif (
+        session_type in {SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING, SessionTypes.MESOSCOPE_EXPERIMENT}
+        and not behavior
+    ):
+        message = (
+            f"Unable to resolve the dataset marker for the session '{session}' performed by animal '{animal}' for "
+            f"'{project}' project. The session requires to be processed with the behavior processing pipeline before "
+            f"it can be integrated into a dataset, but the manifest file for the project indicates that the session "
+            f"has not been processed with this pipeline. Call the 'sl-process' command to conduct the required "
+            f"processing and retry resolving the dataset marker."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    elif session_type in {SessionTypes.MESOSCOPE_EXPERIMENT} and not suite2p:
+        message = (
+            f"Unable to resolve the dataset marker for the session '{session}' performed by animal '{animal}' for "
+            f"'{project}' project. The session requires to be processed with the single-day suite2p processing "
+            f"pipeline before it can be integrated into a dataset, but the manifest file for the project indicates "
+            f"that the session has not been processed with this pipeline. Call the 'sl-process' command to conduct the "
+            f"required processing and retry resolving the dataset marker."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return None
+
+    # This section works similar to other pipeline sections in this module. However, instead of constructing a
+    # pipeline object, it constructs and submits a processing job to the server. Primarily, this is because the dataset
+    # marker pipeline does not rely on processing tracker files like other pipeline
+
+    # Resolves the working directory for the job, using a static job name and the current timestamp in UTC.
+    timestamp = get_timestamp()
+    job_name = f"{session}_dataset_marker"
+    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
+
+    # Ensures that the working directory exists on the remote server
+    server.create_directory(remote_path=working_directory)
+
+    # Parses the paths to the shared Sun lab directories used to store raw and processed session data on the remote
+    # server.
+    remote_session_path = Path(server.raw_data_root).joinpath(project, animal, session)
+    processed_data_root = Path(server.processed_data_root)
+
+    # Generates the remote job header and configures the job to resolve the dataset marker for the target session.
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="manage",
+        cpus_to_use=4,
+        ram_gb=20,
+        time_limit=90,
+    )
+    if create:
+        job.add_command(f"sl-dataset-marker -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
+    else:
+        job.add_command(f"sl-dataset-marker -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um -r")
+
+    return job
+
+
 def process_project_data(
     project: str,
-    update_manifest: bool = True,
     sessions: list[str] | tuple[str, ...] | None = None,
     process_behavior: bool = True,
     process_suite2p: bool = True,
+    create_dataset_markers: bool = True,
+    remove_dataset_markers: bool = True,
+    update_manifest: bool = True,
     reprocess: bool = False,
     keep_job_logs: bool = False,
-    configuration_file: str = "GCaMP6f_CA1_SD.yaml",
+    suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
     plane_count: int = 3,
 ) -> None:
+    """Resolves and executes the necessary data processing pipelines for the specified project.
+
+    This function acts as the main entry point for all data processing in the Sun lab. As part of its runtime, it first
+    determines which processing pipelines need to be executed for each session of the project. Then it efficiently
+    executes these pipelines on the remote compute server by iteratively submitting batches of remote compute jobs
+    to the server.
+
+    Args:
+        project: The name of the project to process.
+        sessions: An iterable of session names to process as part of this runtime. If this optional argument is not
+            provided, the function automatically processes all sessions that have not been processed with one or more
+            supported pipelines.
+        process_behavior: Determines whether to execute behavior data processing as part of this runtime.
+        process_suite2p: Determines whether to execute single-day suite2p processing as part of this runtime.
+        create_dataset_markers: Determines whether to create dataset markers for sessions that have been processed with
+            all supported pipelines as part of this runtime. Note, once a session is marked with a dataset marker, it
+            cannot be (re)processed until the marker is removed.
+        remove_dataset_markers: Determines whether to remove dataset markers from sessions that have them before
+            executing data processing. This allows (re)processing sessions that have been marked for dataset
+            integration, but prevents them from being included in datasets until the marker are recreated again.
+        update_manifest: Determines whether to update the project manifest file stored on the remote server after each
+            processing step.
+        reprocess: Determines whether to reprocess the sessions that have already been processed.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            each processing pipeline completes successfully. If the pipeline fails, the job logs are kept regardless
+            of the value of this argument.
+        suite2p_configuration_file: Specifies the name of the configuration file for the single-day suite2p processing
+            pipeline. This argument is only used if the 'process_suite2p' argument is set to True. The configuration
+            file with the specified name must be present in the shared suite2p configuration directory on the remote
+            compute server.
+        plane_count: Specifies the number of planes in the session's data to be processed with the single-day suite2p
+            pipeline. Note; for mesoscope recordings this number is equal to the number of ROI(s) (stripes) * the number
+            of z-planes. This argument is only used if the 'process_suite2p' argument is set to True.
+    """
     # Entry message
     console.echo(message=f"Initializing project '{project}' data processing...", level=LogLevel.INFO)
 
@@ -666,6 +856,7 @@ def process_project_data(
     manager_id = generate_manager_id()
 
     # Generates the list of processing pipelines to run on the target project's data.
+    console.echo(message=f"Resolving the data processing pipelines to run on the project data...", level=LogLevel.INFO)
     pipelines: list[_ProcessingPipeline] = []
     for session in sessions:
         # Behavior processing pipeline.
@@ -688,7 +879,7 @@ def process_project_data(
                 manager_id=manager_id,
                 project=project,
                 session=session,
-                configuration_file=configuration_file,
+                configuration_file=suite2p_configuration_file,
                 plane_count=plane_count,
                 reprocess=reprocess,
                 keep_job_logs=keep_job_logs,

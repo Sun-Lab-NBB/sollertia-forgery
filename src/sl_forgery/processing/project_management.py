@@ -84,9 +84,9 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
 
     # Waits for the server to complete the job
     delay_timer = PrecisionTimer("s")
+    message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
+    console.echo(message=message, level=LogLevel.INFO)
     while not server.job_complete(job=job):
-        message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
-        console.echo(message=message, level=LogLevel.INFO)
         delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
     # Resolves the path to the remote and local manifest files
