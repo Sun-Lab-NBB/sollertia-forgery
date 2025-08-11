@@ -1,21 +1,17 @@
 from pathlib import Path
+from scipy import stats
+from matplotlib import pyplot as plt
 
 import numpy as np
 import polars as pl
-from matplotlib import pyplot as plt
-from numba.cpython.unsafe.numbers import trailing_zeros
-
-from sl_forgery.analysis.io import extract_data, behavior_to_numpy
 
 
 # TODO: Type args and write doc string
-#  next step is to continue binning the data
-#   and create a column with cue identity
+#  next step is to create a column with cue identity
 #   *this potentially doesnt need to be a separate function; ask ivan
 #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
-def create_grouped_dataframe_vectorized(distance_df, signal_df, start_indices):
-    """
-
+def create_grouped_df(distance_df, signal_df, start_indices):
+  """
     Args:
         distance_df: behavior dataframe distance column
         signal_df: signal (F, neuropil, etc) dataframe
@@ -30,8 +26,7 @@ def create_grouped_dataframe_vectorized(distance_df, signal_df, start_indices):
 
     """
     row_indices = distance_df["frame"]
-    group_ids = np.searchsorted(start_indices, row_indices, side="right")
-    print(row_indices, group_ids)
+    group_ids = np.searchsorted(start_indices, row_indices, side='right')
 
     # Add group_id column to distance dataframe
     distance_with_groups = distance_df.with_columns(pl.Series("group_id", group_ids))
@@ -67,12 +62,11 @@ def create_grouped_dataframe_vectorized(distance_df, signal_df, start_indices):
 
 
 def plotting(mouse, kind):
-    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
+    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644/single_day")
 
     date = 1  # fix this
-
-    # meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
-    fluorescence, neuropil, spikes, iscell = extract_data(mouse, date, "single_day")
+    #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
+    fluorescence, neuropil, spikes, iscell = extract_data(session_root, None)
 
     # beh data is structured by frame --> so shape is (frames, ) 1D array
     frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
@@ -106,8 +100,6 @@ def plotting(mouse, kind):
         }
     )
 
-    behavior_df = behavior_df.with_row_index("row_idx")  # add row index
-
     # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
     # use column 1 i.e. boolean values
     cell_mask = iscell_df[:, 1].to_numpy()
@@ -122,40 +114,31 @@ def plotting(mouse, kind):
     # filter the dataframes by this active state
     active_behavior_df = behavior_df.filter(active_state_mask)
     active_fluorescence_df = cell_fluorescence_df.filter(active_state_mask)
+    # print("active F df", active_fluorescence_df)
 
     # TODO: 1. Check that the distance keeps increasing, otherwise there will be cell activity that is being compressed
-    #  on the plot
+    #  on the plot.  change this to group by trial
 
-    trial_start = active_behavior_df["trial"][0]
     # Find indices where the column value changes i.e. a new trial starts
-    trial_start = active_behavior_df.filter(pl.col("trial") != pl.col("trial").shift(1))
-    # TODO ^^^could also just "group_by" the trial value column; easier?
-
-    # create 5 cm bins
-    # TODO:  need to soft code bin size and cue length later
-
-    track_length = np.mean(np.diff(trial_start["distance"]))
-    cue_length = 30  # cm
-    bin_size = 5  # cm
-    n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
-
-    # TODO this only works with set lengths
-    # this wont work w my task, with variable track lengths
-    track_length = np.mean(np.diff(trial_start["distance"]))
-    print("trial start", trial_start)
-    cue_length = 30  # cm
-    bin_size = 5  # cm
-    n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
+    trial_start = active_behavior_df.filter(
+        pl.col("trial") != pl.col("trial").shift(1)
+    )
+    #TODO ^^^could also just "group_by" the trial value column; easier?
 
     trial_indices = trial_start["frame"].to_numpy()
 
-    result = create_grouped_dataframe_vectorized(
-        active_behavior_df.select(active_behavior_df["frame", "distance"]), active_fluorescence_df, trial_indices
-    )
+    result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "distance"]),
+                                                active_fluorescence_df,
+                                                trial_indices)
 
-    # TODO: use result df (trial bins), normalize the distances and separate into 5 cm bins
-    #  take the average of each smaller bin, then concat them and take the average of the averages
-    #   and plot
+    # create 5 cm bins
+    # TODO:  need to soft code bin size and cue length late
+    #   this only works with set lengths
+    # this wont work w my task, with variable track lengths
+    track_length = np.mean(np.diff(trial_start["distance"]))
+    cue_length = 30  # cm
+    bin_size = 5  # cm
+    n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
 
     # normalize arrays
     normalized_arrays = []
@@ -173,8 +156,6 @@ def plotting(mouse, kind):
 
         normalized_arrays.append(np.floor(normalized))
 
-    # TODO bin these new arrays
-
     # bin the normalized arrays
 
     bin_edges = np.arange(0, 245, 5)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
@@ -189,8 +170,7 @@ def plotting(mouse, kind):
         bin_indices = np.digitize(arr, bin_edges, right=False) - 1
         # Handle values exactly equal to 240 (put in last bin)
         bin_indices = np.where(arr == 240, 47, bin_indices)
-        print(bin_indices)
-        bin_assignments[e] = bin_indices  # use these in future df to split up cell activity
+        bin_assignments[e] = bin_indices #use these in future df to split up cell activity
 
         # Create the 5 cm arrays for each bin
         for i in range(48):
@@ -200,23 +180,12 @@ def plotting(mouse, kind):
 
     # TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
     # series
-    #
-    # create a df with the bin idx; not sure if this is actually necessary
-    binned_df = result.with_columns(pl.Series("bin_assignments", bin_assignments))
-    print(binned_df)
 
-    reduced_df = binned_df.drop("group_id", "start_index", "distance_array")
-    print(reduced_df)
-
-    # for x in binned_arrays[:]:
-    #     for i in x:
-    #         print(np.mean(i))
-
-    # CREATE NEW DF
+    # CREATE NEW DF - bin the trials into 5 cm bins, and average each bin for signal along position
     binned_df = result.with_columns(pl.Series("bin_assignments", bin_assignments))
 
     reduced_df = binned_df.drop("group_id", "start_index", "distance_array")
-    index_col = "bin assignments"
+    index_col = "bin_assignments"
 
     signal_columns = [col for col in reduced_df.columns if col != index_col]
 
@@ -231,7 +200,7 @@ def plotting(mouse, kind):
         col_results = []
 
         # process all rows for this column
-        for row_idx in range(len(df)):
+        for row_idx in range(len(reduced_df)):
             signal_array = np.array(data_dict[col][row_idx], dtype=np.float64)  # signal for that col/row
             index_array = np.array(data_dict[index_col][row_idx], dtype=np.int32)  # index for that trial (bins)
 
@@ -280,17 +249,16 @@ def plotting(mouse, kind):
     cells = range(5)
 
     for cell in cells:
-        xaxis = np.arange(2.5, 240, 5)  # include 240 in the plot
-        print(xaxis.shape)
+        xaxis = np.arange(2.5, 240, 5)  # # 5 cm bins, plot the avg signal in center of bin
         fig, ax = plt.subplots()
 
-        cell_val = session_avg_df["cell_{}_signal_binned".format(cell)][-1]  # selects the last row of the col,
+        # plot the session avg with error
+        cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
 
         mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
         # pulling ndarrays from polars df
         sem = sess_sem[0]
-        print(mean, sem)
         ax.plot(xaxis, mean)
         plt.fill_between(xaxis, mean - sem, mean + sem, color="blue", alpha=0.2, label="Mean +/- SEM")
 
@@ -298,7 +266,10 @@ def plotting(mouse, kind):
         plt.xlabel("distance in cm")
         plt.ylabel("Fluorescent signal")
 
-        # plot trial avgs
+
+
+
+        # plot all of the trial avg signals in a single plot
         fig, ax = plt.subplots()
 
         for i in range(result.shape[0]):
