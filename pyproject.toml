@@ -1,8 +1,6 @@
-# Defines the build system used for the project. For pure-python projects, uses the hatchling build system, which is
-# used internally by scikit-build for our C-extension projects. Therefore, there is clear continuity between our
-# c-extension and pure-python projects.
+# Defines the build system used for the project.
 [build-system]
-requires = ["hatchling>=1,<2"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 # Project metdata section. Provides the genral ID information about the project.
@@ -28,98 +26,61 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     # Intended audience and project topic
     "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
     # License
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     # Supported Python Versions
     "Programming Language :: Python :: 3.13",
     # Supported OS systems
     "Operating System :: OS Independent",
+    # Typing
+    "Typing :: Typed"
 ]
 
-# Runtime project dependencies. This overlaps with 'condarun' optional list.
+# Runtime project dependencies.
 dependencies = [
     "ataraxis-time==3.0.0",
-    "ataraxis-base-utilities==3.0.1",
+    "ataraxis-base-utilities==3.1.0",
     "ataraxis-data-structures==3.1.1",
-    "polars==1.31.0",
-    "pyarrow==20.0.0",
+    "polars==1.32.0",
+    "pyarrow==21.0.0",
     "numpy==2.2.6",
     "numba==0.61.2",
-    "scipy==1.16.0",
-    "matplotlib==3.10.3",
+    "scipy==1.16.1",
+    "matplotlib==3.10.5",
     "PyQt6==6.9.1",
-    "sl-shared-assets==2.0.1"
+    "tqdm==4.67.1",
+    "appdirs==1.4.4",
+    "sl-shared-assets==4.0.1",
+    "plotly==6.2.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Sun-Lab-NBB/sl-forgery"
 Documentation = "https://sl-forgery-api-docs.netlify.app/"
 
-# Specifies additional dependencies that can be installed alongside the main library. Also, this is the section that
-# stores conda, condarun, and noconda lists that facilitate setting up dependencies via conda where possible.
+# Specifies additional dependencies that can be installed alongside the main library.
 [project.optional-dependencies]
 
-# Runtime dependencies known to be installable with conda for all development platforms
-# (OSX ARM64, WIN AMD64, LIN AMD64). This specification is used by ataraxis-automation to resolve as many
-# project dependencies with conda over pip as possible.
-condarun = [
-    "polars==1.31.0",
-    "pyarrow==20.0.0",
-    "numpy==2.2.6",
-    "numba==0.61.2",
-    "scipy==1.16.0",
-    "matplotlib==3.10.3",
-]
-
-# Dependencies known to be installable with conda for all development platforms (OSX ARM64, WIN AMD64, LIN AMD64).
-conda = [
-    # Documentation
-    "sphinx>=8,<9",
-    "importlib_metadata>=8,<9",
-    "sphinx-rtd-theme>=3,<4",
-    "sphinx-click>=6,<7",
-    "sphinx-autodoc-typehints>=3,<4",
-
-    # Linting and Stub-generation
-    "mypy>=1,<2",
-    "ruff>=0,<1",
-
-    # Building
-    "hatchling>=1,<2",
-
-    # Distribution
-    "twine>=6,<7",
-    "grayskull>=2,<3",
-]
-
-# Dependencies known to not be installable with conda for at least one supported development platform
-# (OSX ARM64, WIN AMD64, LIN AMD64).
-noconda = [
-     # Tox
-    "tox>=4,<5",
-    "tox-uv>=1,<2",
-    "uv>=0,<1",
-
-    # Documentation
-    "sphinx-rtd-dark-mode>=1,<2",
-
-    # Building
-    "build>=1,<2",
-
-    # Automation
-    "ataraxis-automation>=5,<6",
-]
-
-# A shorthand specification that installs tox and all packages required for development tasks. This specification can
-# be used by developers to quickly install all necessary components for working on this project. Has to be installed
-# from pip.
+# Dependencies that support developing this project.
 dev = [
-    "sl_forgery[conda]",
-    "sl_forgery[noconda]"
+    # Tox
+    "tox==4.28.4",
+    "uv==0.8.8",
+    "tox-uv==1.27.0",
+
+    # Development Automation
+    "ataraxis-automation==6.0.0",
+
+    # Types
+    "types-appdirs==1.4.3.5",
+    "types-tqdm==4.67.0.20250809",
 ]
 
 # Exports CLIs upon library installation into an environment
 [project.scripts]
+sl-set-working-directory = "sl_forgery.cli:designate_working_directory"
+sl-print-project-data = "sl_forgery.cli:print_project_manifest_data"
 
 # Specifies files that should not be included in the source-code distribution, but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
@@ -158,7 +119,7 @@ lint.ignore = [
 quote-style = "double"             # Uses double quotes for strings
 indent-style = "space"             # Uses space for indents
 skip-magic-trailing-comma = false  # Like black, ignores trailing commas
-line-ending = "auto"               # Automatically detects and standardizes line ending character
+line-ending = "auto"               # Automatically detects and standardizes line-ending character
 
 # Docstrings and comments' line length
 [tool.ruff.lint.pycodestyle]
@@ -188,6 +149,7 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages that have type stubs available.
 exclude = [
     "sl-forgery-\\d+", # Ignores temporary folder created by setuptools when building the sdist
+    "src/sl_forgery/legacy/*",    # Ignores temporary legacy files
     "venv.*/",         # Ignores virtual environments
     "build/",          # Ignores the sdist directory
     "dist/",           # Ignores the wheel directory

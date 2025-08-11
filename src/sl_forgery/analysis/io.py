@@ -1,12 +1,14 @@
 from typing import Any
 from pathlib import Path
 
-import matplotlib
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
+import matplotlib
 from matplotlib import pyplot as plt
+from numpy.typing import NDArray
+
 matplotlib.use("QtAgg")
+
 
 def behavior_to_numpy(
     source_file: Path,

@@ -1,5 +1,3 @@
-from numba.cpython.unsafe.numbers import trailing_zeros
-from sl_forgery.analysis.io import behavior_to_numpy, extract_data
 from pathlib import Path
 from scipy import stats
 from matplotlib import pyplot as plt
@@ -13,8 +11,7 @@ import polars as pl
 #   *this potentially doesnt need to be a separate function; ask ivan
 #   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
 def create_grouped_df(distance_df, signal_df, start_indices):
-    '''
-
+  """
     Args:
         distance_df: behavior dataframe distance column
         signal_df: signal (F, neuropil, etc) dataframe
@@ -27,59 +24,56 @@ def create_grouped_df(distance_df, signal_df, start_indices):
     The distance and signal arrays in each row are of the same length. These can be used for plotting signal over
     entire trials.
 
-    '''
+    """
     row_indices = distance_df["frame"]
     group_ids = np.searchsorted(start_indices, row_indices, side='right')
 
     # Add group_id column to distance dataframe
-    distance_with_groups = distance_df.with_columns(
-        pl.Series("group_id", group_ids)
-    )
+    distance_with_groups = distance_df.with_columns(pl.Series("group_id", group_ids))
 
     # Add group_id column to signal dataframe
-    signal_with_groups = signal_df.with_columns(
-        pl.Series("group_id", group_ids)
-    )
+    signal_with_groups = signal_df.with_columns(pl.Series("group_id", group_ids))
 
     # Create the grouped result for distances
-    distance_grouped = distance_with_groups.group_by("group_id").agg([
-        pl.col("frame").first().alias("start_index"),
-        pl.col("distance").alias("distance_array")]
-    ).sort("group_id")
+    distance_grouped = (
+        distance_with_groups.group_by("group_id")
+        .agg([pl.col("frame").first().alias("start_index"), pl.col("distance").alias("distance_array")])
+        .sort("group_id")
+    )
 
     # Get the actual cell column names from the signal dataframe
     cell_columns = [col for col in signal_df.columns if col.startswith("cell_")]
 
     # Create the grouped result for signals
-    signal_grouped = signal_with_groups.group_by("group_id").agg([
-        *[pl.col(f"{col}").alias(f"{col}_signal") for col in cell_columns]
-    ]).sort("group_id")
+    signal_grouped = (
+        signal_with_groups.group_by("group_id")
+        .agg([*[pl.col(f"{col}").alias(f"{col}_signal") for col in cell_columns]])
+        .sort("group_id")
+    )
 
     # Combine the results
     result = pl.concat([distance_grouped, signal_grouped.drop("group_id")], how="horizontal")
 
     return result
 
-
     # TODO - fix date variable and folder search
     #   add arguments for cue length, bin size, day type for meso (single, multi)
     #   what are the other "kind" options
+
 
 def plotting(mouse, kind):
     session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644/single_day")
 
     date = 1  # fix this
-
     #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
     fluorescence, neuropil, spikes, iscell = extract_data(session_root, None)
 
-
-    #beh data is structured by frame --> so shape is (frames, ) 1D array
+    # beh data is structured by frame --> so shape is (frames, ) 1D array
     frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
         source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
     )
 
-#TODO working on this as an outer function with df, optional filtering w keywords
+    # TODO working on this as an outer function with df, optional filtering w keywords
 
     # create polars dataframe indexed by frame with cells as columns
     fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
@@ -94,14 +88,16 @@ def plotting(mouse, kind):
     # polars dataframe indexed by frame with data as columns
     # 1 indexed
     behavior_df = pl.DataFrame(
-        {"frame": frame_index,
-         "timestamp": timestamps,
-         "distance": traveled_distance,
-         "trial": trial,
-         "lick": lick,
-         "reward": reward,
-         "stage": experiment_stage,
-         "state": system_state}
+        {
+            "frame": frame_index,
+            "timestamp": timestamps,
+            "distance": traveled_distance,
+            "trial": trial,
+            "lick": lick,
+            "reward": reward,
+            "stage": experiment_stage,
+            "state": system_state,
+        }
     )
 
     # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
@@ -119,7 +115,6 @@ def plotting(mouse, kind):
     active_behavior_df = behavior_df.filter(active_state_mask)
     active_fluorescence_df = cell_fluorescence_df.filter(active_state_mask)
     # print("active F df", active_fluorescence_df)
-
 
     # TODO: 1. Check that the distance keeps increasing, otherwise there will be cell activity that is being compressed
     #  on the plot.  change this to group by trial
@@ -145,8 +140,6 @@ def plotting(mouse, kind):
     bin_size = 5  # cm
     n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
 
-
-
     # normalize arrays
     normalized_arrays = []
     for dist in result["distance_array"]:
@@ -163,15 +156,14 @@ def plotting(mouse, kind):
 
         normalized_arrays.append(np.floor(normalized))
 
-
     # bin the normalized arrays
 
     bin_edges = np.arange(0, 245, 5)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
     num_trials = len(normalized_arrays)
-    binned_arrays = np.empty((num_trials, 48), dtype=object)   #arrays of binned distance arrays for each trial (i.e. N
+    binned_arrays = np.empty((num_trials, 48), dtype=object)  # arrays of binned distance arrays for each trial (i.e. N
     # trial arrays, each with 48 bins of
     # 5cm distances); make the 48 softcoded
-    bin_assignments = np.empty(num_trials, dtype=object)   # indexes of bins to use for cell activity
+    bin_assignments = np.empty(num_trials, dtype=object)  # indexes of bins to use for cell activity
 
     for e, arr in enumerate(normalized_arrays):
         # get the indices of the bins to which each value belongs in an array; use np.digitize
@@ -180,15 +172,13 @@ def plotting(mouse, kind):
         bin_indices = np.where(arr == 240, 47, bin_indices)
         bin_assignments[e] = bin_indices #use these in future df to split up cell activity
 
-
-    # Create the 5 cm arrays for each bin
+        # Create the 5 cm arrays for each bin
         for i in range(48):
             mask = bin_indices == i
             bin_values = arr[mask]
             binned_arrays[e, i] = bin_values
 
-
-    #TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
+    # TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
     # series
 
     # CREATE NEW DF - bin the trials into 5 cm bins, and average each bin for signal along position
@@ -207,7 +197,6 @@ def plotting(mouse, kind):
 
     max_bins = n_bins  # this was calculated earlier
     for col in signal_columns:  # for each cell
-
         col_results = []
 
         # process all rows for this column
@@ -221,19 +210,17 @@ def plotting(mouse, kind):
             bin_counts = np.bincount(index_array, minlength=max_bins)  # find the length of the bin
 
             # calculate averages by dividing signal sum by bin length
-            bin_averages = np.divide(bin_sums, bin_counts,
-                                     out=np.full_like(bin_sums, np.nan),
-                                     where=bin_counts != 0)
+            bin_averages = np.divide(bin_sums, bin_counts, out=np.full_like(bin_sums, np.nan), where=bin_counts != 0)
 
             col_results.append(bin_averages)
 
-        trial_avgs[f'{col}_binned'] = col_results
+        trial_avgs[f"{col}_binned"] = col_results
 
     trial_avg_df = pl.DataFrame(trial_avgs)
 
     # now create dict for the average signal for each cell in the session
     avg_data = {}
-    sess_sem = []       #had to make list bc I couldnt get both arrays into a single cell, there was some issue with
+    sess_sem = []  # had to make list bc I couldnt get both arrays into a single cell, there was some issue with
     # polars.  Should try to use polars arrays instead of numpy arrays, or just use arrays outside df
 
     for col in trial_avg_df.columns:
@@ -273,8 +260,7 @@ def plotting(mouse, kind):
         # pulling ndarrays from polars df
         sem = sess_sem[0]
         ax.plot(xaxis, mean)
-        plt.fill_between(xaxis, mean - sem, mean + sem,
-                         color='blue', alpha=0.2, label='Mean +/- SEM')
+        plt.fill_between(xaxis, mean - sem, mean + sem, color="blue", alpha=0.2, label="Mean +/- SEM")
 
         plt.title("cell {} session avg day5".format(cell))
         plt.xlabel("distance in cm")
