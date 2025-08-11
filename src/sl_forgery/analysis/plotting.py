@@ -1,293 +1,276 @@
-from pathlib import Path
-from scipy import stats
-from matplotlib import pyplot as plt
+from sl_forgery.utils.dataclass import Data
+from sl_forgery.utils.dataclass import track_length, cue_length, bin_size
 
 import numpy as np
-import polars as pl
+from pathlib import Path
+import plotly
+from plotly import graph_objects as go
 
 
-# TODO: Type args and write doc string
-#  next step is to create a column with cue identity
-#   *this potentially doesnt need to be a separate function; ask ivan
-#   actually it might be better if the binning function was outside the plotting function, maybe as separate modules
-def create_grouped_df(distance_df, signal_df, start_indices):
-  """
-    Args:
-        distance_df: behavior dataframe distance column
-        signal_df: signal (F, neuropil, etc) dataframe
-        start_indices: trial start indices/frames
+class Plotting:
+    @staticmethod
+    def plot_session(mouse, session, target_group, cell, data : Data):
+        """
+        Plots Binned Fluorescence. Relies on Chelsea's initial binning implementation, currently encapsulated in Data.bin_data
+        
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
 
-    Returns:
-    A new dataframe that is grouped by trial identity, where the 1st col is trial,
-    the 2nd column are arrays of the distance covered during that trial,
-    and the following columns are arrays of the recorded signals for each cell during that trial.
-    The distance and signal arrays in each row are of the same length. These can be used for plotting signal over
-    entire trials.
+        Returns:
+            The figure that is displayed
 
-    """
-    row_indices = distance_df["frame"]
-    group_ids = np.searchsorted(start_indices, row_indices, side='right')
+        """
 
-    # Add group_id column to distance dataframe
-    distance_with_groups = distance_df.with_columns(pl.Series("group_id", group_ids))
+        # %%%%%%%%%%%%%%%%%%
+        # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
+        #  plotting; plot cue regions under the graph; basically thick little
+        #  vlines of different colors
 
-    # Add group_id column to signal dataframe
-    signal_with_groups = signal_df.with_columns(pl.Series("group_id", group_ids))
-
-    # Create the grouped result for distances
-    distance_grouped = (
-        distance_with_groups.group_by("group_id")
-        .agg([pl.col("frame").first().alias("start_index"), pl.col("distance").alias("distance_array")])
-        .sort("group_id")
-    )
-
-    # Get the actual cell column names from the signal dataframe
-    cell_columns = [col for col in signal_df.columns if col.startswith("cell_")]
-
-    # Create the grouped result for signals
-    signal_grouped = (
-        signal_with_groups.group_by("group_id")
-        .agg([*[pl.col(f"{col}").alias(f"{col}_signal") for col in cell_columns]])
-        .sort("group_id")
-    )
-
-    # Combine the results
-    result = pl.concat([distance_grouped, signal_grouped.drop("group_id")], how="horizontal")
-
-    return result
-
-    # TODO - fix date variable and folder search
-    #   add arguments for cue length, bin size, day type for meso (single, multi)
-    #   what are the other "kind" options
-
-
-def plotting(mouse, kind):
-    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644/single_day")
-
-    date = 1  # fix this
-    #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
-    fluorescence, neuropil, spikes, iscell = extract_data(session_root, None)
-
-    # beh data is structured by frame --> so shape is (frames, ) 1D array
-    frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
-        source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
-    )
-
-    # TODO working on this as an outer function with df, optional filtering w keywords
-
-    # create polars dataframe indexed by frame with cells as columns
-    fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
-    neuropil_df = pl.DataFrame(neuropil.T, schema=[f"cell_{i}" for i in range(neuropil.shape[0])])
-    spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
-
-    iscell_df = pl.DataFrame(iscell)  # this has cells as indices and 2 columns, where 1st column is boolean value for
-    # cell/not cell and 2nd is likelihood of being a cell
-
-    iscell_df = iscell_df.with_row_index("cell_idx")  # add cell id index to cell df, 0-indexed to match F_df
-
-    # polars dataframe indexed by frame with data as columns
-    # 1 indexed
-    behavior_df = pl.DataFrame(
-        {
-            "frame": frame_index,
-            "timestamp": timestamps,
-            "distance": traveled_distance,
-            "trial": trial,
-            "lick": lick,
-            "reward": reward,
-            "stage": experiment_stage,
-            "state": system_state,
-        }
-    )
-
-    # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
-    # use column 1 i.e. boolean values
-    cell_mask = iscell_df[:, 1].to_numpy()
-
-    # only keep columns (cell data) for positive id cells  ->  cell_mask=True
-    # np.where returns a tuple containing a numpy array with the indices ([idx], )
-    cell_fluorescence_df = fluorescence_df.select([fluorescence_df.columns[i] for i in np.where(cell_mask)[0]])
-
-    # then choose only frames where the system was in the active state i.e. mouse running
-    active_state_mask = behavior_df["state"] == 2  # 2 is the active state (0 is idle, 1 is rest)
-
-    # filter the dataframes by this active state
-    active_behavior_df = behavior_df.filter(active_state_mask)
-    active_fluorescence_df = cell_fluorescence_df.filter(active_state_mask)
-    # print("active F df", active_fluorescence_df)
-
-    # TODO: 1. Check that the distance keeps increasing, otherwise there will be cell activity that is being compressed
-    #  on the plot.  change this to group by trial
-
-    # Find indices where the column value changes i.e. a new trial starts
-    trial_start = active_behavior_df.filter(
-        pl.col("trial") != pl.col("trial").shift(1)
-    )
-    #TODO ^^^could also just "group_by" the trial value column; easier?
-
-    trial_indices = trial_start["frame"].to_numpy()
-
-    result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "distance"]),
-                                                active_fluorescence_df,
-                                                trial_indices)
-
-    # create 5 cm bins
-    # TODO:  need to soft code bin size and cue length late
-    #   this only works with set lengths
-    # this wont work w my task, with variable track lengths
-    track_length = np.mean(np.diff(trial_start["distance"]))
-    cue_length = 30  # cm
-    bin_size = 5  # cm
-    n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
-
-    # normalize arrays
-    normalized_arrays = []
-    for dist in result["distance_array"]:
-        arr = np.array(dist)
-
-        # Normalize
-        min_val = arr.min()
-        max_val = arr.max()
-
-        if max_val - min_val == 0:
-            normalized = np.zeros_like(arr)
-        else:
-            normalized = 240 * (arr - min_val) / (max_val - min_val)
-
-        normalized_arrays.append(np.floor(normalized))
-
-    # bin the normalized arrays
-
-    bin_edges = np.arange(0, 245, 5)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
-    num_trials = len(normalized_arrays)
-    binned_arrays = np.empty((num_trials, 48), dtype=object)  # arrays of binned distance arrays for each trial (i.e. N
-    # trial arrays, each with 48 bins of
-    # 5cm distances); make the 48 softcoded
-    bin_assignments = np.empty(num_trials, dtype=object)  # indexes of bins to use for cell activity
-
-    for e, arr in enumerate(normalized_arrays):
-        # get the indices of the bins to which each value belongs in an array; use np.digitize
-        bin_indices = np.digitize(arr, bin_edges, right=False) - 1
-        # Handle values exactly equal to 240 (put in last bin)
-        bin_indices = np.where(arr == 240, 47, bin_indices)
-        bin_assignments[e] = bin_indices #use these in future df to split up cell activity
-
-        # Create the 5 cm arrays for each bin
-        for i in range(48):
-            mask = bin_indices == i
-            bin_values = arr[mask]
-            binned_arrays[e, i] = bin_values
-
-    # TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
-    # series
-
-    # CREATE NEW DF - bin the trials into 5 cm bins, and average each bin for signal along position
-    binned_df = result.with_columns(pl.Series("bin_assignments", bin_assignments))
-
-    reduced_df = binned_df.drop("group_id", "start_index", "distance_array")
-    index_col = "bin_assignments"
-
-    signal_columns = [col for col in reduced_df.columns if col != index_col]
-
-    # convert entire dataframe to numpy
-    data_dict = reduced_df.to_dict(as_series=False)
-
-    # create dict for trial avgs
-    trial_avgs = {}
-
-    max_bins = n_bins  # this was calculated earlier
-    for col in signal_columns:  # for each cell
-        col_results = []
-
-        # process all rows for this column
-        for row_idx in range(len(reduced_df)):
-            signal_array = np.array(data_dict[col][row_idx], dtype=np.float64)  # signal for that col/row
-            index_array = np.array(data_dict[index_col][row_idx], dtype=np.int32)  # index for that trial (bins)
-
-            # use numpy binning
-            # np.bin_count counts all the values in the bin and sums them
-            bin_sums = np.bincount(index_array, weights=signal_array, minlength=max_bins)  # sum the signals
-            bin_counts = np.bincount(index_array, minlength=max_bins)  # find the length of the bin
-
-            # calculate averages by dividing signal sum by bin length
-            bin_averages = np.divide(bin_sums, bin_counts, out=np.full_like(bin_sums, np.nan), where=bin_counts != 0)
-
-            col_results.append(bin_averages)
-
-        trial_avgs[f"{col}_binned"] = col_results
-
-    trial_avg_df = pl.DataFrame(trial_avgs)
-
-    # now create dict for the average signal for each cell in the session
-    avg_data = {}
-    sess_sem = []  # had to make list bc I couldnt get both arrays into a single cell, there was some issue with
-    # polars.  Should try to use polars arrays instead of numpy arrays, or just use arrays outside df
-
-    for col in trial_avg_df.columns:
-        # stack all arrays and compute mean for each index
-        stacked_arrays = np.array(trial_avg_df[col].to_list())
-        avg_array = np.mean(stacked_arrays, axis=0)
-        session_sem = np.array(stats.sem(stacked_arrays, axis=0))  # find the standard error
-        avg_data[col] = [avg_array]  # , sessoin_sem  # save as a 2 element array which can be
-        # accessed later by indexing
-        sess_sem.append(session_sem)
-
-    # create new row and add it to the bottom of the df
-    session_avg_row = pl.DataFrame(avg_data)
-
-    # again - i was having an issue getting these to stay as arrays when I put htem in the df
-    # session_avg_row = session_avg_row.with_columns([
-    #     pl.col(col).cast(pl.Array(pl.Float64, 48)) for col in session_avg_row.columns
-    # ])
-    session_avg_df = pl.concat([trial_avg_df, session_avg_row])
-
-    # %%%%%%%%%%%%%%%%%%
-    # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
-    #  plotting;  integrate with plotly when jacob is done;  plot cue regions under the graph; basically thick little
-    #  vlines of different colors
-
-    cells = range(5)
-
-    for cell in cells:
-        xaxis = np.arange(2.5, 240, 5)  # # 5 cm bins, plot the avg signal in center of bin
-        fig, ax = plt.subplots()
-
-        # plot the session avg with error
+        cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
+        session_avg_df, sess_sem, result, trial_avg_df = data.bin_data(mouse, session, target_group)
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
 
         mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
         # pulling ndarrays from polars df
-        sem = sess_sem[0]
-        ax.plot(xaxis, mean)
-        plt.fill_between(xaxis, mean - sem, mean + sem, color="blue", alpha=0.2, label="Mean +/- SEM")
+        
+        sem = sess_sem[cell] # Before Chelsea indexed sess_sem[0] every time, I think she meant to get the sem for the cell being plotted
+        
+        xaxis = np.arange(bin_size / 2, track_length, bin_size)  # plot the avg signal in center of bin
 
-        plt.title("cell {} session avg day5".format(cell))
-        plt.xlabel("distance in cm")
-        plt.ylabel("Fluorescent signal")
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x = xaxis,
+            y = mean,
+            mode='lines',
+            line=dict(width=3),
+            name="Mean"
+        ))
+
+        upper = mean + sem
+        lower = mean - sem
+
+        fig.add_trace(go.Scatter(
+            x=list(xaxis) + list(xaxis[::-1]),  # x followed by reversed x
+            y=list(upper) + list(lower[::-1]),  # upper followed by reversed lower
+            fill='toself',
+            fillcolor='rgba(0, 0, 255, 0.2)',  # RGBA for transparency
+            line=dict(color='rgba(255,255,255,0)'),  # No border
+            hoverinfo='skip',
+            name='SEM'
+        ))
+
+        trial_traces = [go.Scatter(
+            x = xaxis,
+            y = trial_avg_df[i, cell],
+            mode='lines',
+            line=dict(width=2),
+            name=f"Trial {i+1}",
+            visible=False,
+        ) for i in range(result.shape[0])]
+
+        fig.add_traces(trial_traces)
+
+        fig.update_layout(
+            title=dict(
+                text=f"Cell Fluorescence Trial Averages",
+                x=.5,
+            ),
+            plot_bgcolor='white',
+            xaxis=dict(
+                title="Track position (cm)",
+                range=[0, track_length]
+            ),
+            yaxis=dict(
+                title="Flourescant Signal",
+                range=[0, 6000]
+            ),
+            updatemenus=[dict(
+                type="dropdown",
+                xanchor="left", yanchor="bottom",
+                x=1, y=1,
+                direction="down",
+                buttons=[
+                    dict(
+                        label="Session Average",
+                        method="update",
+                        args=[{"visible": [True] * 2 + [False] * len(trial_traces)}]
+                    ),
+                    dict(
+                        label="Trial Binned Averages",
+                        method="update",
+                        args=[{"visible": [False] * 2 + [True] * len(trial_traces)}]
+                    ),
+                ]
+            )],
+            annotations=
+            [
+                *[
+                    dict(
+                        text=f"Cue {i+1}",
+                        xref="x", yref="paper",
+                        x=pos + cue_length / 2, y=1, 
+                        xanchor="center", yanchor="top",
+                        align="center", 
+                        showarrow=False,
+                    ) for i, pos in enumerate(cue_positions)          
+                ],
+                dict(
+                    text=f"Mouse: {mouse}<br>Session: {Data.parse_session(session)}<br>Cell: {cell}",
+                    xref="paper", yref="paper",
+                    x=1, y=1, 
+                    xanchor="right", yanchor="bottom",
+                    align="left", 
+                    showarrow=False,
+                )
+            ],
+            shapes=[
+                dict(type="rect", x0=pos, x1=pos+cue_length, y0=0, y1=1, xref="x", yref="paper",
+                    fillcolor="lightsteelblue", opacity=0.4, layer="below", line_width=0) 
+                for pos in cue_positions
+            ],
+        )
+        fig.show(renderer="browser")
+        return fig
+
+    @staticmethod
+    def plot_umap(mouse, session, target_group, data : Data):
+        """
+        Makes an interactive umap plot of data
+
+        Args:
+            mouse (str): Mouse identifier.
+            session (int | str): Session number (0-indexed) or session name.
+            target_group (str): "single_day" or "multi_day"
+
+        Returns:
+            The figure that is displayed
+
+        """
+        embedding, behavior_filtered = data.compute_umap(mouse, session, target_group)
+
+        behavior_filtered = Data.add_plotting_columns(behavior_filtered)
+            
+        cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
+        region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
+        region_names = ['Cue 1', 'Gray 1', 'Cue 2', 'Gray 2', 'Cue 3', 'Gray 3', 'Cue 4', 'Gray 4']
+
+        cue_point_colors = np.array([cue_color_map[label] for label in  behavior_filtered["cue"]])
+        region_point_colors = np.array([region_color_map[label] for label in  behavior_filtered["region"]])
+        
+        fig = go.Figure(
+            go.Scatter3d(
+                x=embedding[:, 0],
+                y=embedding[:, 1],
+                z=embedding[:, 2],
+                mode='markers',
+                marker={
+                    "size": 2,
+                    "opacity": 1,
+                    "color": cue_point_colors
+                },
+                showlegend=False,
+            )
+        )
+
+        # Make the cue legend
+        for cue_val, color in enumerate(cue_color_map):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[None], y=[None], z=[None],        # no actual points
+                    mode="markers",
+                    marker=dict(size=6, color=color),    # same color map
+                    showlegend=True if cue_val != 0 else False, # don't view legend for the gray region
+                    name=f" Cue {cue_val}",               # legend label
+                )
+            )
+        
+        # Make the region legend
+        for cue_val, color in enumerate(region_color_map):
+            fig.add_trace(
+                go.Scatter3d(
+                    x=[None], y=[None], z=[None],        # no actual points
+                    mode="markers",
+                    marker=dict(size=6, color=color),    # same color map
+                    showlegend=False,
+                    name=f"{region_names[cue_val]}"               # legend label
+                )
+            )
+
+        # Same setting for each axis
+        axis_settings = dict(
+            visible=False,        # hides axis, labels, ticks
+            showbackground=False, # hides background plane
+            showgrid=False,       # hides grid lines
+            zeroline=False        # hides zero line
+        )
+
+        fig.update_layout(
+            scene=dict(
+                xaxis=axis_settings,
+                yaxis=axis_settings,
+                zaxis=axis_settings
+            ),
+            updatemenus=[dict(
+                type="dropdown",
+                xanchor="left", yanchor="bottom",
+                x=1, y=1,
+                direction="down",
+                buttons=[
+                    dict(label="Cues",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": [cue_point_colors] + cue_color_map + region_color_map,
+                                "marker.showscale": False,
+                                "showlegend":  [False] + ([False] + [True] * len(cue_color_map[1:])) + [False] * len(region_color_map),
+                            },
+                        ]),
+                    dict(label="Region",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": [region_point_colors] + cue_color_map + region_color_map,
+                                "marker.showscale": False,
+                                "showlegend":  [False] + [False] * len(cue_color_map) + [True] * len(region_color_map),
+                            },
+                        ]),
+                    dict(
+                        label="Track Position",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": np.array(behavior_filtered["track_position_cm"]),
+                                "marker.colorscale": str(plotly.colors.make_colorscale(plotly.colors.cyclical.Twilight)).replace("'", '"'),
+                                "marker.cmin": 0,
+                                "marker.cmax": behavior_filtered["track_position_cm"].max(),
+                                "marker.showscale": True,
+                                "showlegend": False,
+                            },
+                        ]
+                    ),
+                    dict(label="Trial",
+                        method="update",
+                        args=[
+                            {
+                                "marker.color": np.array(behavior_filtered["trial"]),
+                                "marker.colorscale": str(plotly.colors.make_colorscale(plotly.colors.sequential.thermal)).replace("'", '"'),
+                                "marker.cmin": 0,
+                                "marker.cmax": behavior_filtered["trial"].max(),
+                                "marker.showscale": True,
+                                "showlegend": False,
+                            },
+                        ]
+                    ),
+                ],
+            )]
+        )
+
+        fig.show(renderer="browser")
+        return fig
 
 
 
-
-        # plot all of the trial avg signals in a single plot
-        fig, ax = plt.subplots()
-
-        for i in range(result.shape[0]):
-            ax.plot(xaxis, trial_avg_df[i, cell], label=f"{i}")
-        # if kind == "place":
-        #     for i in range(result.shape[0]):
-        #         ax.plot(normalized_arrays[i], result["cell_1_signal"][i])
-
-        # ax.vlines(trial_start["distance"][:10], ymin=-150, ymax=0, color='r', lw=2)
-
-        # TODO make this cycle through a random subset of cells when calling the function and pull the column names for
-        # cell ID
-
-        # Hide the x-tick labels
-        plt.title("cell {} trial avgs day5".format(cell))
-        plt.xlabel("distance in cm")
-        plt.ylabel("Fluorescent signal")
-        plt.show()
-
-
-plotting(mouse="6", kind="place")
