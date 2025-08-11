@@ -30,12 +30,12 @@ class Plotting:
 
         cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
         session_avg_df, sess_sem, result, trial_avg_df = data.bin_data(mouse, session, target_group)
-
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
 
         mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
         # pulling ndarrays from polars df
+        
         sem = sess_sem[cell] # Before Chelsea indexed sess_sem[0] every time, I think she meant to get the sem for the cell being plotted
         
         xaxis = np.arange(bin_size / 2, track_length, bin_size)  # plot the avg signal in center of bin

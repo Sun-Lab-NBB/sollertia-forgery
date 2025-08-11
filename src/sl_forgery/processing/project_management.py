@@ -9,24 +9,22 @@ from sl_shared_assets import Job, Server
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
 
-from ..utils import get_working_directory, get_credentials_file_path
+from ..utils import get_working_directory
 
 
-def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) -> None:
+def generate_remote_project_manifest(project: str, server: Server, keep_job_logs: bool = False) -> None:
     """Generates the manifest .feather file for the specified project stored on the remote compute server.
 
     This function allows generating the manifest.feather files on the remote compute server outside the standard
     workflow (manually). Since this process requires 'service' access privileges, this function is not intended to be
-    called directly by most lab users.
+    called directly by most lab users. As part of its runtime, this function also fetches (pulls) the generated manifest
+    file to the local Sun lab working directory. Therefore, this function also includes the functionality of the
+    fetch_remote_project_manifest() function.
 
     Notes:
         All Sun lab 'service' pipelines automatically update the manifest file as part of their runtime, so it is
         typically unnecessary to use this function. The function is mostly used internally to test various lab pipelines
         and data management strategies.
-
-        As part of its runtime, this function also fetches (pulls) the generated manifest file to the local Sun lab
-        working directory. Therefore, this function also includes the functionality of the
-        fetch_remote_project_manifest() function.
 
         The manifest file is created and stored inside the root raw data directory for the target project on the remote
         server.
@@ -35,6 +33,8 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
         project: The name of the project for which to generate and fetch the manifest file.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If the job fails, the logs are always kept regardless of this parameter.
+        server: An initialized Server instance used to communicate with the remote server. Note, the Server must be
+            configured to use the service account server access credentials.
 
     Raises:
         FileNotFoundError: If the remote (server-side) project manifest generation job fails with an error and does not
@@ -43,13 +43,6 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
 
     # Resolves the path to the local directory used to work with Sun lab data.
     local_working_directory = get_working_directory()
-
-    # Resolves the path to the server access credentials file. Since manifest generation requires access to .YAML
-    # processing trackers, this function requires service access privileges.
-    credentials_path = get_credentials_file_path(require_service=True)
-
-    # Uses the server access credentials file to initialize the SHH connection to the remote server.
-    server = Server(credentials_path=credentials_path)
 
     # Resolves the working directory for the remote job, using a static job name and the current timestamp in UTC.
     timestamp = get_timestamp()
@@ -62,7 +55,6 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
     # Parses the paths to the shared Sun lab directories used to store raw and processed project data on the remote
     # server.
     project_storage_root = server.raw_data_root.joinpath(project)
-    project_working_path = server.processed_data_root.joinpath(project)
 
     # Generates the remote job header
     job = Job(
@@ -73,13 +65,13 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
         conda_environment="manage",
         cpus_to_use=1,
         ram_gb=10,
-        time_limit=10,
+        time_limit=20,
     )
 
     # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file
     # inside the project's root raw data directory
     job.add_command(
-        f"sl-project-manifest -pp {str(project_storage_root)} -ppp {str(project_working_path)} "
+        f"sl-project-manifest -pp {str(project_storage_root)} -pdr {str(server.processed_data_root)} "
         f"-od {str(project_storage_root)}"
     )
 
@@ -92,9 +84,9 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
 
     # Waits for the server to complete the job
     delay_timer = PrecisionTimer("s")
+    message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
+    console.echo(message=message, level=LogLevel.INFO)
     while not server.job_complete(job=job):
-        message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
-        console.echo(message=message, level=LogLevel.INFO)
         delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
     # Resolves the path to the remote and local manifest files
@@ -106,6 +98,9 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
 
     # Verifies that the job ran as expected. For this, ensures that the remote manifest file exists (was created).
     if not server.exists(remote_path=remote_manifest_path):
+        # Closes the SSH connection
+        server.close()
+
         message = (
             f"Unable to locate the manifest file for '{project}' project one the remote server. This indicates that "
             f"the remote manifest creation job ran into an error and did not generate the file. Check the error logs "
@@ -124,7 +119,7 @@ def generate_remote_project_manifest(project: str, keep_job_logs: bool = False) 
     )
 
 
-def fetch_remote_project_manifest(project: str) -> None:
+def fetch_remote_project_manifest(project: str, server: Server) -> None:
     """Fetches (pulls) the existing project manifest .feather file for the specified project stored on the remote
     compute server to the local Sun lab working directory.
 
@@ -135,6 +130,7 @@ def fetch_remote_project_manifest(project: str) -> None:
 
     Args:
         project: The name of the project for which to fetch the manifest file.
+        server: An initialized Server instance used to communicate with the remote server.
 
     Raises:
         FileNotFoundError: If the manifest file does not exist on the server, indicating that the file has not been
@@ -143,12 +139,6 @@ def fetch_remote_project_manifest(project: str) -> None:
 
     # Resolves the path to the local directory used to work with Sun lab data.
     local_working_directory = get_working_directory()
-
-    # Unlike generating the manifest file, pulling an existing manifest file does not require service access privileges.
-    credentials_path = get_credentials_file_path(require_service=False)
-
-    # Uses the server access credentials file to initialize the SHH connection to the remote server.
-    server = Server(credentials_path=credentials_path)
 
     # Resolves the path to the remote and local manifest files
     remote_manifest_path = server.raw_data_root.joinpath(project, f"{project}_manifest.feather")
@@ -160,6 +150,9 @@ def fetch_remote_project_manifest(project: str) -> None:
     # Verifies that the job ran as expected. For this, ensures that the remote manifest file exists (was created).
     # Otherwise, aborts with an error.
     if not server.exists(remote_path=remote_manifest_path):
+        # Closes the SSH connection
+        server.close()
+
         message = (
             f"Unable to fetch the manifest file for '{project}' project from the remote server, as the target project "
             f"does not have a manifest file. Either wait for one of the service pipelines to generate the manifest "

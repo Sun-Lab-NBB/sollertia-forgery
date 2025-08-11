@@ -1,10 +1,12 @@
-"""This module provides various tools and assets for working with the filesystem of the local machine (PC) to support
-running all other pipelines and runtimes exposed by this library."""
+"""This module provides various tools and assets for working with the filesystem of the local machine (PC) and the
+remote compute server. The assets from this module support running all other pipelines and runtimes exposed by this
+library."""
 
 from pathlib import Path
+from dataclasses import dataclass
 
 import appdirs
-from sl_shared_assets import ServerCredentials
+from sl_shared_assets import Server, ServerCredentials
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
 
@@ -157,7 +159,7 @@ def get_credentials_file_path(require_service: bool = False) -> Path:
 
     # If the caller requires the service account, evaluates the service credentials file.
     if require_service:
-        credentials = ServerCredentials.from_yaml(file_path=service_path)  # type: ignore
+        credentials: ServerCredentials = ServerCredentials.from_yaml(file_path=service_path)  # type: ignore
 
         # If the service account is not configured, aborts with an error.
         if credentials.username == "YourNetID" or credentials.password == "YourPassword":
@@ -176,7 +178,7 @@ def get_credentials_file_path(require_service: bool = False) -> Path:
             return service_path
 
     # Otherwise, evaluates the user credentials file.
-    credentials = ServerCredentials.from_yaml(file_path=user_path)  # type: ignore
+    credentials: ServerCredentials = ServerCredentials.from_yaml(file_path=user_path)  # type: ignore
 
     # If the user account is not configured, aborts with an error.
     if credentials.username == "YourNetID" or credentials.password == "YourPassword":
@@ -192,3 +194,46 @@ def get_credentials_file_path(require_service: bool = False) -> Path:
     message = f"Server access credentials: Resolved. Using the {credentials.username} account."
     console.echo(message=message, level=LogLevel.SUCCESS)
     return user_path
+
+
+@dataclass()
+class RemotePaths:
+    """Stores the paths to configuration directories for some data processing pipelines stored on the remote server.
+
+    These configuration directories are stored in the shared Sun lab data directory on the remote compute server and
+    are used by various processing pipelines to maintain consistent configuration across all sessions, projects, and
+    users.
+
+    Notes:
+        This class should be instantiated via the get_remote_filesystem_paths() function exposed by the 'utils' package
+        of this library.
+
+        All paths in this class are resolved relative to the remote compute server's shared working and storage
+        directories.
+    """
+
+    suite2p_configurations_path: Path = Path()
+    """The path to the shared Sun lab directory that contains single-day and multi-day suite2p configuration files."""
+    dlc_projects_path: Path = Path()
+    """The path to the shared Sun lab directory that contains DeepLabCut project directories."""
+
+
+def get_remote_filesystem_paths(server: Server) -> RemotePaths:
+    """Resolves and returns a RemotePaths instance that provides the paths to certain server-side directories used by
+    processing pipelines.
+
+    Primarily, this function is used to resolve the paths to shared server-side configuration directories used by
+    pipelines such as DeepLabCut and sl-suite2p single-day and multi-day.
+
+    Args:
+        server: The Server class instance that manages the bidirectional communication with the remote compute server
+            that executes processing pipelines.
+
+    Returns:
+        The initialized RemotePaths instance that stores the resolved paths data.
+    """
+
+    return RemotePaths(
+        suite2p_configurations_path=server.raw_data_root.joinpath("suite2p_configurations"),
+        dlc_projects_path=server.raw_data_root.joinpath("deeplabcut_projects"),
+    )
