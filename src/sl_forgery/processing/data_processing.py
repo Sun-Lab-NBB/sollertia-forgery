@@ -69,24 +69,6 @@ class _ProcessingPipelines(StrEnum):
     """DeepLabCut (Video) processing pipeline."""
 
 
-class _Suite2PStages(IntEnum):
-    """Maps integer-codes for single-day suite2p processing pipeline stages to human-readable names.
-
-    This enumeration is used internally to construct single-day suite2p processing pipelines, which consist of multiple
-    processing stages. The names and codes used in this enumeration agree with the latest state of the Sun lab
-    maintained sl-suite2p library.
-    """
-
-    BINARIZE = 1
-    """Stage 1: Converts source data files into multiple suite2p plane-specific binary files."""
-    PROCESS = 2
-    """Stage 2: Processes each plane by registering all planes to eliminate motion, discovering cells, and extracting 
-    cell fluorescence."""
-    COMBINE = 3
-    """Stage 3: Combines all plane-specific data into a unified 'combined' dataset. This is a prerequisite for running 
-    multi-day suite2p pipeline."""
-
-
 @dataclass()
 class _ProcessingPipeline:
     """Encapsulates access to a processing pipeline running on the remote compute server.
