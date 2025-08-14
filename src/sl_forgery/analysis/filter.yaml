@@ -1,0 +1,16 @@
+animals:
+  - 11
+  - 15
+  - 16
+
+sessions:
+  start_date: 2025-7-1
+  end_date: 2025-8-1
+  include:
+    - 2025-07-14-13-49-04-018601
+  exclude:
+    - 2025-07-21-11-50-11-637172
+    - 2025-07-22-12-54-42-553484
+
+exclude_lick_training: true
+exclude_run_training: true

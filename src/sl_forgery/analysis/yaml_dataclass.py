@@ -1,51 +1,60 @@
-from dataclasses import dataclass, field
 from pathlib import Path
+import yaml
+import copy
+from dateutil import parser, tz
+from zoneinfo import ZoneInfo
+import polars as pl
 
-from ataraxis_base_utilities import ensure_directory_exists
+from ataraxis_base_utilities import ensure_directory_exists, console, LogLevel
 from ataraxis_data_structures import YamlConfig
+from sl_shared_assets import ProjectManifest
+from sl_shared_assets import get_system_configuration_data
+
+from dataclasses import dataclass, field
+from typing import List, Tuple
 
 @dataclass
 class BehaviorData:
     root_path: Path = Path()
     behavior_path: Path = Path()
-    desktop_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path: Path = root_directory
         self.behavior_path = root_directory / "behavior_at_frame.feather"
-        self.desktop_path = root_directory / "desktop.ini" # TODO: Decide if this should be kept
-
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
 
 @dataclass
-class SingleDayData():
+class SingleDayData:
     root_path: Path = Path()
-    desktop_path: Path = Path()
     F_path: Path = Path()
     Fneu_path: Path = Path()
     iscell_path: Path = Path()
     ops_path: Path = Path()
+    single_data_s2p_configuration_path: Path = Path()
+    spks_path: Path = Path()
+    stat_path: Path = Path()
     umap_embedding_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
-        self.desktop_path = root_directory / "desktop.ini" # TODO: Decide if this should be kept
         self.F_path = root_directory / "F.npy"
         self.Fneu_path = root_directory / "Fneu.npy"
         self.iscell_path = root_directory / "iscell.npy"
         self.ops_path = root_directory / "ops.npy"
+        self.single_day_s2p_configuration_path = root_directory / "single_day_s2p_configuration.yaml"
+        self.spks_path = root_directory / "spks.npy"
+        self.stat = root_directory / "stat.npy"
         self.umap_embedding_path = root_directory / "umap_embedding.npy"
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
 
 @dataclass
-class MultiDayData():
+class MultiDayData:
     root_path: Path = Path()
     backwards_deformed_cell_masks_path: Path = Path()
-    desktop_path: Path = Path()
     F_path: Path = Path()
     Fneu_path: Path = Path()
     ops_path: Path = Path()
@@ -63,7 +72,6 @@ class MultiDayData():
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
         self.backwards_deformed_cell_masks_path = root_directory / "backwards_deformed_cell_masks.npy"
-        self.desktop_path = root_directory / "desktop.ini" # TODO: Decide if this should be kept
         self.F_path = root_directory / "F.npy"
         self.Fneu_path = root_directory / "Fneu.npy"
         self.ops_path = root_directory / "ops.npy"
@@ -82,27 +90,191 @@ class MultiDayData():
         ensure_directory_exists(self.root_path)
 
 @dataclass
-class ProcessedSessionData():
-    behavior_data: BehaviorData = field(default_factory=lambda: BehaviorData)
-    single_day_data: SingleDayData = field(default_factory=lambda: SingleDayData)
-    multi_day_data: MultiDayData = field(default_factory=lambda: MultiDayData)
+class ProcessedSessionData:
+    name: str
+    root_path: Path = Path()
+    behavior_data: BehaviorData = field(default_factory=BehaviorData)
+    single_day_data: SingleDayData = field(default_factory=SingleDayData)
+    multi_day_data: MultiDayData = field(default_factory=MultiDayData)
 
-    @classmethod
-    def create(cls) -> "ProcessedSessionData":
-        pass
+    def resolve_paths(self, root_directory: Path) -> None:
+        self.root_path = root_directory
+        if self.behavior_data is None:
+            self.behavior_data = BehaviorData()
+        self.behavior_data.resolve_paths(root_directory / "behavior")
+        if self.single_day_data is None:
+            self.single_day_data = SingleDayData()
+        self.single_day_data.resolve_paths(root_directory / "single_day")
+        if self.multi_day_data is None:
+            self.multi_day_data = MultiDayData()
+        self.multi_day_data.resolve_paths(root_directory / "multi_day")
 
-    @classmethod
-    def load(cls, session_path: Path):
-        pass
+    def make_directories(self):
+        ensure_directory_exists(self.root_path)
+        self.behavior_data.make_directories()
+        self.single_day_data.make_directories()
+        self.multi_day_data.make_directories()
     
-
-
-
-
 @dataclass 
-class MouseData():
-    pass
+class MouseData:
+    name: int
+    sessions: List[ProcessedSessionData]
+    root_path: Path = Path()
+
+    def resolve_paths(self, root_directory: Path) -> None:
+        self.root_path = root_directory
+        for session in self.sessions:
+            session.resolve_paths(root_directory / session.name)
+    
+    def make_directories(self):
+        ensure_directory_exists(self.root_path)
+        for session in self.sessions:
+            session.make_directories()
 
 @dataclass
 class ProjectData(YamlConfig):
-    pass
+    name: str
+    mice: List[MouseData]
+    root_path: Path = Path()
+
+
+    # TODO Ivan I think this should really be part of the ProjectManifest class as opposed to a helper function here
+    # It is easier to leave it here for now because then I don't have to update sl_shared_assets but this function could 
+    # very easily be moved, you would just need to replace manifest with self
+    @staticmethod
+    def filter_manifest(manifest: ProjectManifest, filter_path: Path) -> None:
+        """Filters the project manifest's session data according to rules defined in a YAML filter file.
+
+        This function reads the filtering criteria from the specified filter file and applies them to the
+        manifest's internal dataframe in place. Filtering rules can limit sessions by animal ID, date range,
+        explicit inclusion or exclusion lists, training type flags, and dataset readiness. Any sessions
+        excluded because they are not yet ready for integration (`dataset == 0`) will trigger a warning message.
+
+        Args:
+            manifest: The project manifest object whose `_data` attribute (a Polars DataFrame) will be updated.
+            filter_path: Path to a YAML file specifying filtering rules. The file must include:
+                - `animals`: list of allowed animal IDs.
+                - `sessions.start_date` / `sessions.end_date`: date range for allowed sessions.
+                - `sessions.include`: list of explicitly included session IDs.
+                - `sessions.exclude`: list of explicitly excluded session IDs.
+                - `include_lick_training` (bool): whether to keep "lick training" sessions.
+                - `include_run_training` (bool): whether to keep "run training" sessions.
+
+        Notes:
+            This method modifies the `manifest._data` attribute directly and is intended for use when curating
+            a subset of sessions for analysis or processing. Although currently implemented as a static helper
+            method, it could be refactored into the `ProjectManifest` class itself to avoid passing the manifest
+            object explicitly.
+
+            Filtering hierarchy:
+                1. Sessions must match the allowed `animals` list.
+                2. Sessions in `sessions.include` are always kept, regardless of date range.
+                3. Sessions must be within the `sessions.start_date` / `sessions.end_date` range unless
+                   explicitly included in `sessions.include`.
+                4. Sessions in `sessions.exclude` are always removed, even if explicitly included.
+                5. If `include_lick_training` is false, remove all "lick training" sessions.
+                6. If `include_run_training` is false, remove all "run training" sessions.
+                7. Remove sessions where `dataset == 0` (not ready for integration).
+
+            The filter file must be in YAML format and contain the following keys. Below is an example:
+
+            ```yaml
+            animals:
+              - 11
+              - 15
+              - 16
+
+            sessions:
+              start_date: 2025-7-1
+              end_date: 2025-8-1
+              include:
+                - 2025-07-14-13-49-04-018601
+              exclude:
+                - 2025-07-21-11-50-11-637172
+                - 2025-07-22-12-54-42-553484
+
+            exclude_lick_training: true
+            exclude_run_training: true
+            ```
+        """
+        with open(filter_path, "r") as f:
+            filter = yaml.safe_load(f)
+        
+
+        df = manifest._data
+
+        if "animals" in filter:
+            df = df.filter(pl.col("animal").is_in(filter["animals"]))
+        
+        if "sessions" in filter:
+            include_lst = [] if "include" not in filter else filter["sessions"]["include"]
+            if "start" in filter["sessions"]:
+                start = parser.parse(filter["sessions"]["start_date"]).astimezone(ZoneInfo("America/New_York"))
+                df = df._filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
+            if "end" in filter["sessions"]:
+                end = parser.parse(filter["sessions"]["end_date"]).astimezone(ZoneInfo("America/New_York"))
+                df = df._filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
+            if "exclude" in filter["sessions"]:
+                df = df.filter(~pl.col("session").is_in(filter["sessions"]["exclude"]))
+
+        if "exclude_lick_training" in filter and filter["exclude_lick_training"]:
+            df = df.filter(pl.col("type") != "lick training")
+
+        if "exclude_run_training" in filter and filter["exclude_run_training"]:
+            df = df.filter(pl.col("type") != "run training")
+
+        for session_name in df.filter(pl.col("dataset") == 0)["session"]:
+            console.echo(f"Excluded session {session_name}, which has data that is not ready to be integrated into the dataset.", level=LogLevel.WARNING)
+        df = df.filter(pl.col("dataset") != 0)
+
+        manifest._data = df
+
+
+    @classmethod
+    def create(cls, project_name: str, working_directory: Path, manifest_path: Path, filter_path: Path) -> "ProjectData":
+        
+        project = ProjectManifest(manifest_path)
+        print(len(project._data.rows()))
+        ProjectData.filter_manifest(project, filter_path)
+        print(len(project._data.rows()))
+
+        project_path = working_directory / project_name
+        mice = list(MouseData(name=animal_id, sessions=list(ProcessedSessionData(name=session_name) for session_name in project.get_sessions(animal_id))) for animal_id in project.animals)
+        for mouse in mice: 
+            mouse.resolve_paths(root_directory=project_path / str(mouse.name))
+            mouse.make_directories()
+        
+        instance = ProjectData(
+            name=project_name,
+            mice=mice,
+        )
+
+        instance.root_path = project_path
+
+        instance._save()
+        return instance
+        
+    @classmethod
+    def load(cls, working_directory: Path, yml_path: Path):
+        instance: ProjectData = cls.from_yaml(yml_path)
+        
+        instance.root_path = working_directory / instance.name
+        for mouse in instance.mice:
+            mouse.resolve_paths(root_directory=instance.root_path / str(mouse.name))
+            mouse.make_directories()
+
+        return instance
+
+    def _save(self) -> None:
+        origin = copy.deepcopy(self)
+
+        origin.root_path = None
+        for mouse in origin.mice:
+            mouse.root_path = None
+            for session in mouse.sessions:
+                session.root_path = None
+                session.behavior_data = None
+                session.single_day_data = None
+                session.multi_day_data = None
+        
+        origin.to_yaml(file_path = self.root_path / "project_data.yaml")
