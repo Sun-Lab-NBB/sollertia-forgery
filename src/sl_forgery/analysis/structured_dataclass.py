@@ -234,9 +234,7 @@ class ProjectData(YamlConfig):
     def create(cls, project_name: str, working_directory: Path, manifest_path: Path, filter_path: Path) -> "ProjectData":
         
         project = ProjectManifest(manifest_path)
-        print(len(project._data.rows()))
         ProjectData.filter_manifest(project, filter_path)
-        print(len(project._data.rows()))
 
         project_path = working_directory / project_name
         mice = list(MouseData(name=animal_id, sessions=list(ProcessedSessionData(name=session_name) for session_name in project.get_sessions(animal_id))) for animal_id in project.animals)

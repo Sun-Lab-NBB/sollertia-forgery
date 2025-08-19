@@ -211,9 +211,8 @@ cython_debug/
 
 
 # Project: Add any project-specific exclusions here
-/temp
+Temp/
 
 data
-trash
 
 .vscode
