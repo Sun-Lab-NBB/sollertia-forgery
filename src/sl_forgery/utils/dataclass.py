@@ -37,7 +37,8 @@ class DataLoader:
                     raise TypeError("Expected a Polars DataFrame for saving to .feather")
                 data.write_ipc(path)
             case ".npy":
-                np.save(path, data)
+                with open(path, "wb") as f:   # exact filename you want
+                    np.save(f, data)
             case ".yaml" | ".yml":
                 with open(path, "w") as yml_file:
                     yaml.safe_dump(data, yml_file)

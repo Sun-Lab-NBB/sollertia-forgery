@@ -185,7 +185,6 @@ class Plotting:
 
         return behavior_df
 
-
     @staticmethod
     def plot_umap(target_group, session_data: ProcessedSessionData):
         """
@@ -212,7 +211,7 @@ class Plotting:
             - Uses Plotly's `Scatter3d` for visualization.
             - The figure is displayed in the browser and also returned for further manipulation.
         """
-        embedding, behavior_filtered = Processing.compute_umap(target_group, session_data)
+        embedding, behavior_filtered = Processing.compute_single_session_umap(target_group, session_data)
 
         behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)
             

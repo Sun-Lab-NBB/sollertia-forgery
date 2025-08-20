@@ -10,6 +10,8 @@ work_dir = Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\slf_data")
 
 data = ProjectData.create(project_name="TM_06_pilot", manifest_path=manifest_path, filter_path=filter_path, working_directory=work_dir)
 
-Plotting.plot_session("single_day", 4, data.get_session("2025-06-23-13-32-06-980761"))
+# Plotting.plot_session("single_day", 4, data.get_session("2025-06-23-13-32-06-980761"))
 
-Plotting.plot_umap("single_day", data.get_session("2025-06-23-13-32-06-980761")).write_html(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\sl-forgery\src\sl_forgery\analysis\umap.html")
+fig = Plotting.plot_umap("single_day", data.get_session("2025-06-23-13-32-06-980761"))
+
+# fig.write_html(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\sl-forgery\src\sl_forgery\analysis\umap.html")

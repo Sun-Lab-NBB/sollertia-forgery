@@ -3,7 +3,7 @@ from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
 
 from ataraxis_base_utilities import console
 
-from functools import lru_cache
+from pathlib import Path
 import numpy as np
 import polars as pl
 from scipy import stats
@@ -328,33 +328,84 @@ class Processing:
         return spikes_filtered, behavior_filtered
 
     @staticmethod
-    def compute_umap(target_group, session_data: ProcessedSessionData):
+    def compute_single_session_umap(
+        target_group, 
+        session_data: ProcessedSessionData,
+        use_saved: bool=True,
+        save: bool=True,
+        alternate_path: Path = None
+        ):
         """
-        Runs the umap job for a specific session
+        Compute or load a UMAP embedding for a single session.
+
+        This function filters neural and behavioral data for active states,
+        computes a UMAP embedding if needed, and returns both the embedding
+        and the filtered behavior data. By default, it will reuse a saved 
+        embedding if one exists, and only save to disk when a new embedding 
+        is generated.
 
         Args:
-            mouse (str): Mouse identifier.
-            session (int | str): Session number (0-indexed) or session name.
-            target_group (str): "single_day" or "multi_day"
+            target_group (str): Which group to process. Must be one of:
+                - "single_day": use session_data.single_day_data
+                - "multi_day": use session_data.multi_day_data
+            session_data (ProcessedSessionData): Container for the session’s
+                spike and behavioral data, and associated DataLoader objects.
+            use_saved (bool, default=True): 
+                If True and an embedding file already exists, load the saved 
+                embedding instead of recomputing.
+            save (bool, default=True): 
+                If True, save the newly computed embedding to disk. Ignored 
+                when loading an existing embedding (no re-save).
+            alternate_path (Path, optional): 
+                If provided, use this path instead of the default embedding 
+                path defined in the DataLoader.
 
         Returns:
-            embedding, behavior_filtered
-                embedding: numpy array of shape (frames, 3)
-                behavior: polars dataframe with (frames, columns), where a each row in the dataframe corresponds with the same row in the embedding.
-        
+            tuple:
+                - embedding (numpy.ndarray): Array of shape (frames, 3) containing
+                the UMAP embedding. Computed or loaded from disk.
+                - behavior_filtered (pl.DataFrame): Filtered behavioral dataframe
+                aligned with the embedding rows. Each row corresponds to the
+                same frame as the embedding.
         """
-        spikes_filtered, behavior_filtered = Processing._filter_for_umap(target_group, session_data)
+        behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
+        match target_group:
+            case "single_day":
+                data_loader = session_data.single_day_data
+            case "multi_day":
+                data_loader = session_data.multi_day_data
+            case _:
+                console.error('target_group must be either "single_day" or "multi_day"', error=ValueError)
 
-        spikes = spikes_filtered.to_numpy() # umap needs cells x frames
+        spikes = data_loader.load(data_loader.spks_path)
+        spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
 
-        umap_data = umap.UMAP(
-            n_neighbors=100,
-            n_components=3,
-            min_dist=0.1,
-            n_jobs=-1,
-            metric='correlation'
-        ).fit(spikes)
+        # Filter data 
+        active_state_mask = (behavior_df["experiment_stage"].is_in([2, 4])) & (behavior_df["system_state"] == 2)
+        behavior_filtered = behavior_df.filter(active_state_mask)
 
-        embedding = umap_data.embedding_
+        if alternate_path is not None:
+            embedding_path = alternate_path
+        else:
+            embedding_path = data_loader.umap_embedding_path
+        
+        if use_saved and embedding_path.exists():
+            embedding = data_loader.load(embedding_path)
+        else:
+            spikes_filtered = spikes_df.filter(active_state_mask)
+            spikes = spikes_filtered.to_numpy() # umap needs cells x frames
+
+            umap_data = umap.UMAP(
+                n_neighbors=100,
+                n_components=3,
+                min_dist=0.1,
+                n_jobs=-1,
+                metric='correlation'
+            ).fit(spikes)
+
+            embedding = umap_data.embedding_
+        
+            if save:
+                data_loader.save(embedding_path, embedding)
 
         return embedding, behavior_filtered
