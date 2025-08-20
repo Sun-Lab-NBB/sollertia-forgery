@@ -53,6 +53,7 @@ dependencies = [
     "appdirs==1.4.4",
     "sl-shared-assets==4.0.1",
     "plotly==6.2.0",
+    "umap-learn==0.5.9.post2",
 ]
 
 [project.urls]

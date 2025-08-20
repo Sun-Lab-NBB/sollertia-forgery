@@ -1,15 +1,19 @@
-from sl_forgery.utils.dataclass import Data
+from sl_forgery.utils.dataclass import Data #TODO delete
+from sl_forgery.analysis.structured_dataclass import ProjectData, ProcessedSessionData #TODO file names, class names, location
+from sl_forgery.analysis.structured_processing import Processing #TODO file names, class names, location
+
 from sl_forgery.utils.dataclass import track_length, cue_length, bin_size
 
 import numpy as np
 from pathlib import Path
 import plotly
 from plotly import graph_objects as go
+import polars as pl
 
 
 class Plotting:
     @staticmethod
-    def plot_session(mouse, session, target_group, cell, data : Data):
+    def plot_session(target_group, cell, session_data : ProcessedSessionData):
         """
         Plots Binned Fluorescence. Relies on Chelsea's initial binning implementation, currently encapsulated in Data.bin_data
         
@@ -17,6 +21,7 @@ class Plotting:
             mouse (str): Mouse identifier.
             session (int | str): Session number (0-indexed) or session name.
             target_group (str): "single_day" or "multi_day"
+            TODO fix this docstring
 
         Returns:
             The figure that is displayed
@@ -29,7 +34,7 @@ class Plotting:
         #  vlines of different colors
 
         cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
-        session_avg_df, sess_sem, result, trial_avg_df = data.bin_data(mouse, session, target_group)
+        session_avg_df, sess_sem, result, trial_avg_df = Processing.bin_data(target_group, session_data)
         cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
         # which has the avg session data
 
@@ -119,7 +124,7 @@ class Plotting:
                     ) for i, pos in enumerate(cue_positions)          
                 ],
                 dict(
-                    text=f"Mouse: {mouse}<br>Session: {Data.parse_session(session)}<br>Cell: {cell}",
+                    text=f"Mouse: TODO<br>Session: {ProjectData.parse_session(session_data.name)}<br>Cell: {cell}",
                     xref="paper", yref="paper",
                     x=1, y=1, 
                     xanchor="right", yanchor="bottom",
@@ -135,9 +140,51 @@ class Plotting:
         )
         fig.show(renderer="browser")
         return fig
+    
+    @staticmethod
+    def _add_plotting_columns(behavior_df):
+        """
+        Adds columns for track_position, region, cue, to a behavior dataframe if not already present
+
+        Args:
+            behavior_df
+
+        Returns:
+            behavior_df with additional columns
+
+        Notes:
+            Helper function to plot_umap
+        """
+
+        def compute_track_position(distance_traveled_cm, initial_pos_cm=10):
+            return (distance_traveled_cm + initial_pos_cm) % track_length
+
+        def compute_region(track_pos):
+            return int(track_pos // cue_length)
+
+        cue_sequence = [1, 0, 2, 0, 3, 0, 4, 0]
+        def compute_cue(region):
+            return cue_sequence[region]
+
+        if "track_position_cm" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                compute_track_position(pl.col("traveled_distance_cm")).alias("track_position_cm")
+            )
+
+        if "region" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                pl.col("track_position_cm").map_elements(compute_region, return_dtype=pl.Int64).alias("region")
+            )
+        
+        if "cue" not in behavior_df.columns:
+            behavior_df = behavior_df.with_columns(
+                pl.col("region").map_elements(compute_cue, return_dtype=pl.Int64).alias("cue")
+            )
+
+        return behavior_df
 
     @staticmethod
-    def plot_umap(mouse, session, target_group, data : Data):
+    def plot_umap(target_group, session_data : ProcessedSessionData):
         """
         Makes an interactive umap plot of data
 
@@ -145,14 +192,15 @@ class Plotting:
             mouse (str): Mouse identifier.
             session (int | str): Session number (0-indexed) or session name.
             target_group (str): "single_day" or "multi_day"
+            TODO fix docstring
 
         Returns:
             The figure that is displayed
 
         """
-        embedding, behavior_filtered = data.compute_umap(mouse, session, target_group)
+        embedding, behavior_filtered = Processing.compute_umap(target_group, session_data)
 
-        behavior_filtered = Data.add_plotting_columns(behavior_filtered)
+        behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)
             
         cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
         region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']

@@ -9,7 +9,6 @@ import re
 from datetime import datetime
 
 from functools import lru_cache
-from IPython.display import display, HTML
 from pathlib import Path
 
 # TODO Figure out where to put these parameters (parameters to function? Attributes to class? Attributes to Analysis or dataclass)
@@ -20,26 +19,6 @@ bin_size = 5
 class Data:
     def __init__(self, root):
         self.root = Path(root)   
-
-    @staticmethod
-    def show_scrollable(df: pl.DataFrame, height: int = 400, width: int = 1200):
-        """
-        Display a Polars DataFrame as a scrollable HTML table in Jupyter/VSCode notebooks.
-        
-        Parameters:
-        - df (pl.DataFrame): The Polars DataFrame to display.
-        - height (int): Height of the scroll box in pixels.
-        - width (int): Width of the scroll box in pixels.
-        """
-        pd_df = df.to_pandas()  # Convert to pandas for HTML rendering
-        html_table = pd_df.to_html(index=False)  # HTML table without the index
-        
-        scrollable_html = f"""
-        <div style="height:{height}px; width:{width}px; overflow:auto; border:1px solid #ccc; font-family:monospace;">
-            {html_table}
-        </div>
-        """
-        display(HTML(scrollable_html))
 
     @staticmethod
     def parse_session(session):

@@ -1,8 +1,11 @@
 from pathlib import Path
 import yaml
 import copy
-from dateutil import parser, tz
+from dateutil import parser
 from zoneinfo import ZoneInfo
+from datetime import datetime
+import re
+import numpy as np
 import polars as pl
 
 from ataraxis_base_utilities import ensure_directory_exists, console, LogLevel
@@ -13,8 +16,36 @@ from sl_shared_assets import get_system_configuration_data
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
+class DataLoader:
+    @staticmethod
+    def load(path: Path):
+        match path.suffix:
+            case ".feather":
+                return pl.read_ipc(path, use_pyarrow=True)
+            case ".npy":
+                return np.load(file=path, mmap_mode="r")
+            case ".yaml" | ".yml":
+                with open(path) as yml_file:
+                    return yaml.safe_load(yml_file)
+        raise Exception(f"No built in method for loading {path.suffix} files")
+    
+    @staticmethod
+    def save(path: Path, data):
+        match path.suffix:
+            case ".feather":
+                if not isinstance(data, pl.DataFrame):
+                    raise TypeError("Expected a Polars DataFrame for saving to .feather")
+                data.write_ipc(path)
+            case ".npy":
+                np.save(path, data)
+            case ".yaml" | ".yml":
+                with open(path, "w") as yml_file:
+                    yaml.safe_dump(data, yml_file)
+            case _:
+                raise Exception(f"No built in method for saving {path.suffix} files")
+
 @dataclass
-class BehaviorData:
+class BehaviorData(DataLoader):
     root_path: Path = Path()
     behavior_path: Path = Path()
 
@@ -26,7 +57,7 @@ class BehaviorData:
         ensure_directory_exists(self.root_path)
 
 @dataclass
-class SingleDayData:
+class SingleDayData(DataLoader):
     root_path: Path = Path()
     F_path: Path = Path()
     Fneu_path: Path = Path()
@@ -52,7 +83,7 @@ class SingleDayData:
         ensure_directory_exists(self.root_path)
 
 @dataclass
-class MultiDayData:
+class MultiDayData(DataLoader):
     root_path: Path = Path()
     backwards_deformed_cell_masks_path: Path = Path()
     F_path: Path = Path()
@@ -116,7 +147,7 @@ class ProcessedSessionData:
         self.multi_day_data.make_directories()
     
 @dataclass 
-class MouseData:
+class AnimalData:
     name: int
     sessions: List[ProcessedSessionData]
     root_path: Path = Path()
@@ -131,10 +162,17 @@ class MouseData:
         for session in self.sessions:
             session.make_directories()
 
+    def get_session(self, name: str):
+        for session in self.sessions:
+            if session.name == name:
+                return session
+        console.error(f"Session {name} is not present.", error=ValueError)
+
 @dataclass
 class ProjectData(YamlConfig):
     name: str
-    mice: List[MouseData]
+    animals: List[AnimalData]
+    manifest: ProjectManifest
     root_path: Path = Path()
 
 
@@ -229,22 +267,22 @@ class ProjectData(YamlConfig):
 
         manifest._data = df
 
-
     @classmethod
     def create(cls, project_name: str, working_directory: Path, manifest_path: Path, filter_path: Path) -> "ProjectData":
         
-        project = ProjectManifest(manifest_path)
-        ProjectData.filter_manifest(project, filter_path)
+        manifest = ProjectManifest(manifest_path)
+        ProjectData.filter_manifest(manifest, filter_path)
 
         project_path = working_directory / project_name
-        mice = list(MouseData(name=animal_id, sessions=list(ProcessedSessionData(name=session_name) for session_name in project.get_sessions(animal_id))) for animal_id in project.animals)
-        for mouse in mice: 
-            mouse.resolve_paths(root_directory=project_path / str(mouse.name))
-            mouse.make_directories()
+        animals = list(AnimalData(name=animal_id, sessions=list(ProcessedSessionData(name=session_name) for session_name in manifest.get_sessions(animal_id))) for animal_id in manifest.animals)
+        for animal in animals: 
+            animal.resolve_paths(root_directory=project_path / str(animal.name))
+            animal.make_directories()
         
         instance = ProjectData(
             name=project_name,
-            mice=mice,
+            animals=animals,
+            manifest=manifest
         )
 
         instance.root_path = project_path
@@ -257,9 +295,9 @@ class ProjectData(YamlConfig):
         instance: ProjectData = cls.from_yaml(yml_path)
         
         instance.root_path = working_directory / instance.name
-        for mouse in instance.mice:
-            mouse.resolve_paths(root_directory=instance.root_path / str(mouse.name))
-            mouse.make_directories()
+        for animal in instance.animals:
+            animal.resolve_paths(root_directory=instance.root_path / str(animal.name))
+            animal.make_directories()
 
         return instance
 
@@ -267,12 +305,40 @@ class ProjectData(YamlConfig):
         origin = copy.deepcopy(self)
 
         origin.root_path = None
-        for mouse in origin.mice:
-            mouse.root_path = None
-            for session in mouse.sessions:
+        for animal in origin.animals:
+            animal.root_path = None
+            for session in animal.sessions:
                 session.root_path = None
                 session.behavior_data = None
                 session.single_day_data = None
                 session.multi_day_data = None
         
         origin.to_yaml(file_path = self.root_path / "project_data.yaml")
+
+    @staticmethod
+    def parse_session(session_name):
+        """
+        If session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
+        return only 'MM-DD'. Otherwise return the session unchanged.
+        """
+        pattern = r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d+$"
+        
+        if isinstance(session_name, str) and re.match(pattern, session_name):
+            try:
+                # Only use the date part before the first dash after YYYY-MM-DD
+                date_part = "-".join(session_name.split("-")[:3])
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                return dt.strftime("%m-%d")
+            except ValueError:
+                pass  # If parsing fails, return original
+        
+        return session_name
+    
+    def get_mouse(self, name: int| str):
+        for mouse in self.animals:
+            if str(mouse.name) == str(name):
+                return mouse
+        console.error(f"Mouse {name} is not present.", error=ValueError)
+    
+    def get_session(self, name: str):
+        return self.get_mouse(self.manifest.get_session_info(name)['animal'].item()).get_session(name)
