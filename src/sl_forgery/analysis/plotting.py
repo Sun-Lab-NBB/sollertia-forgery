@@ -1,4 +1,4 @@
-from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
+from sl_forgery.utils.dataclass import ProjectData, AnimalData, ProcessedSessionData
 from sl_forgery.analysis.processing import Processing
 
 from sl_forgery.utils.dataclass import TargetGroup
@@ -9,8 +9,6 @@ from pathlib import Path
 import plotly
 from plotly import graph_objects as go
 import polars as pl
-
-
 
 
 class Plotting:
@@ -195,6 +193,7 @@ class Plotting:
             )
 
         return behavior_df
+        
 
     @staticmethod
     def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
@@ -350,6 +349,6 @@ class Plotting:
 
         fig.show(renderer="browser")
         return fig
-
+    
 
 

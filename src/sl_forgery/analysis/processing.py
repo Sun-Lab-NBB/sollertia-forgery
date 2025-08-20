@@ -289,6 +289,7 @@ class Processing:
 
         return session_avg_df, sess_sem, result, trial_avg_df    
     
+    # TODO: delete or reencaspulate compute_single_session_umap, currently nothing calls this function.
     @staticmethod
     def _filter_for_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
