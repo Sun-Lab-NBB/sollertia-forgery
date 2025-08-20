@@ -1,5 +1,5 @@
-from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData #TODO file names, class names, location
-from sl_forgery.analysis.processing import Processing #TODO file names, class names, location
+from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
+from sl_forgery.analysis.processing import Processing
 
 from sl_forgery.analysis.processing import track_length, cue_length, bin_size
 
@@ -14,19 +14,22 @@ class Plotting:
     @staticmethod
     def plot_session(target_group, cell, session_data : ProcessedSessionData):
         """
-        Plots Binned Fluorescence. Relies on Chelsea's initial binning implementation, currently encapsulated in Data.bin_data
-        
+        Plots binned fluorescence activity for a single cell across a session.
+        Uses pre-binned data from `Processing.bin_data` to generate either 
+        the session average (with SEM shading) or trial-by-trial averages. 
+        Cues are overlaid as shaded regions and annotated along the track.
+
         Args:
-            mouse (str): Mouse identifier.
-            session (int | str): Session number (0-indexed) or session name.
-            target_group (str): "single_day" or "multi_day"
-            TODO fix this docstring
+            target_group (str): Data grouping option, must be either:
+                - "single_day": Use single-day data loader and filter for identified cells.
+                - "multi_day": Use multi-day data loader.
+            cell (int): Index of the cell to plot.
+            session_data (ProcessedSessionData): Object containing behavior 
+                and fluorescence data for the session.
 
         Returns:
-            The figure that is displayed
-
+            plotly.graph_objects.Figure:
         """
-
         # %%%%%%%%%%%%%%%%%%
         # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
         #  plotting; plot cue regions under the graph; basically thick little
@@ -123,7 +126,7 @@ class Plotting:
                     ) for i, pos in enumerate(cue_positions)          
                 ],
                 dict(
-                    text=f"Mouse: TODO<br>Session: {ProjectData.parse_session(session_data.name)}<br>Cell: {cell}",
+                    text=f"Session: {ProjectData.parse_session(session_data.name)}<br>Cell: {cell}",
                     xref="paper", yref="paper",
                     x=1, y=1, 
                     xanchor="right", yanchor="bottom",
@@ -182,20 +185,32 @@ class Plotting:
 
         return behavior_df
 
+
     @staticmethod
-    def plot_umap(target_group, session_data : ProcessedSessionData):
+    def plot_umap(target_group, session_data: ProcessedSessionData):
         """
-        Makes an interactive umap plot of data
+        Creates an interactive 3D UMAP visualization of neural activity with behavioral annotations.
+        The embedding is computed from filtered spike and behavioral data, and points can be colored
+        dynamically by cue, region, track position, or trial using a dropdown menu.
 
         Args:
-            mouse (str): Mouse identifier.
-            session (int | str): Session number (0-indexed) or session name.
-            target_group (str): "single_day" or "multi_day"
-            TODO fix docstring
+            target_group (str): Data grouping option, must be either:
+                - "single_day": Use single-day data loader.
+                - "multi_day": Use multi-day data loader.
+            session_data (ProcessedSessionData): Object containing references to 
+                behavior and spike data loaders, including file paths.
 
         Returns:
-            The figure that is displayed
+            plotly.graph_objects.Figure:
+                An interactive 3D scatter plot where:
+                - Default coloring shows cue identity.
+                - Dropdown menu allows switching between cue, region, track position, and trial views.
+                - Legends are dynamically updated based on the selected coloring scheme.
 
+        Notes:
+            - Axes, grid, and background are hidden for clarity.
+            - Uses Plotly's `Scatter3d` for visualization.
+            - The figure is displayed in the browser and also returned for further manipulation.
         """
         embedding, behavior_filtered = Processing.compute_umap(target_group, session_data)
 

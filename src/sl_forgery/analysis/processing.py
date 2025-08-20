@@ -69,18 +69,34 @@ class Processing:
     @staticmethod
     def bin_data(target_group, session_data: ProcessedSessionData):
         """
-        bins data 
-        
+        Bins calcium imaging and behavioral data into fixed spatial bins along the track.
+        This method identifies active periods, segments trials, normalizes distance traveled,
+        and averages cell activity within position bins to produce both trial-level and 
+        session-level statistics.
+
         Args:
-            mouse (str): Mouse identifier.
-            session (int | str): Session number (0-indexed) or session name.
-            target_group (str): "single_day" or "multi_day"
-            TODO fix docstring
+            target_group (str): Data grouping option, must be either:
+                - "single_day": Use single-day data loader and filter for identified cells
+                  (from Suite2p `iscell` mask).
+                - "multi_day": Use multi-day data loader without filtering cells.
+            session_data (ProcessedSessionData): Object containing references to
+                behavior and fluorescence data loaders, including file paths.
+
         Returns:
-            session_avg_df, sess_sem, result, trial_avg_df
+            tuple[pl.DataFrame, list[np.ndarray], pl.DataFrame, pl.DataFrame]:
+                - session_avg_df (pl.DataFrame): Session-level averaged activity across bins 
+                  for each cell, appended to trial averages.
+                - sess_sem (list[np.ndarray]): Standard error of the mean (SEM) per cell across trials.
+                - result (pl.DataFrame): Intermediate grouped DataFrame containing trial-level
+                  distance arrays and corresponding fluorescence activity.
+                - trial_avg_df (pl.DataFrame): Trial-level averages of binned cell activity.
+
         Notes:
-            This function should ultimately be split into many smaller functions. It contains the brunt of Chelsea's 
-            original code for plotting place fields.
+            - Currently assumes fixed track length and bin size (hardcoded to 48 bins of 5 cm).
+            - Only includes frames where the system is in the active running state 
+              (system_state == 2).
+            - This function consolidates much of the original place field plotting code and 
+              should ideally be refactored into smaller, modular components.
         """
         print("getting data")
 
@@ -271,16 +287,24 @@ class Processing:
     @staticmethod
     def _filter_for_umap(target_group, session_data):
         """
-        Filters data before inputting into umap. Essentially grabs the frames where the system is active and the mouse is in experiment stage 2 or 4
+        Filters neural and behavioral data before inputting into UMAP. Specifically,
+        selects frames where the system is active (system_state == 2) and the mouse 
+        is in experiment stage 2 or 4. The method also ensures the correct data source 
+        is chosen depending on whether the analysis is single-day or multi-day.
 
         Args:
-            mouse (str): Mouse identifier.
-            session (int | str): Session number (0-indexed) or session name.
-            target_group (str): "single_day" or "multi_day"
-            TODO
+            target_group (str): Data grouping option, must be either:
+                - "single_day": Use single-day data loader.
+                - "multi_day": Use multi-day data loader.
+            session_data (SessionData): Object containing references to 
+                behavior and spike data loaders and their associated file paths.
 
         Returns:
-            spikes_filtered, behavior_filtered
+            tuple[pl.DataFrame, pl.DataFrame]:
+                - spikes_filtered (pl.DataFrame): Filtered spike activity, 
+                  with each column representing a cell.
+                - behavior_filtered (pl.DataFrame): Filtered behavioral data 
+                  corresponding to the same frames.
         """
 
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
