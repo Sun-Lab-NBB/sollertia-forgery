@@ -1,6 +1,6 @@
-from sl_forgery.analysis.structured_dataclass import ProjectData, ProcessedSessionData
+from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
 
-from sl_forgery.utils.dataclass import track_length, cue_length, bin_size #TODO
+
 from ataraxis_base_utilities import console
 
 from functools import lru_cache
@@ -9,6 +9,10 @@ import polars as pl
 from scipy import stats
 import umap
 
+
+track_length = 240
+cue_length = 30
+bin_size = 5
 
 class Processing:
 

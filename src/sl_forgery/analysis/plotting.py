@@ -1,8 +1,7 @@
-from sl_forgery.utils.dataclass import Data #TODO delete
-from sl_forgery.analysis.structured_dataclass import ProjectData, ProcessedSessionData #TODO file names, class names, location
-from sl_forgery.analysis.structured_processing import Processing #TODO file names, class names, location
+from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData #TODO file names, class names, location
+from sl_forgery.analysis.processing import Processing #TODO file names, class names, location
 
-from sl_forgery.utils.dataclass import track_length, cue_length, bin_size
+from sl_forgery.analysis.processing import track_length, cue_length, bin_size
 
 import numpy as np
 from pathlib import Path
