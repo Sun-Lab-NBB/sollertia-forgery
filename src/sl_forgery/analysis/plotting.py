@@ -1,6 +1,7 @@
 from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
 from sl_forgery.analysis.processing import Processing
 
+from sl_forgery.utils.dataclass import TargetGroup
 from sl_forgery.analysis.processing import track_length, cue_length, bin_size
 
 import numpy as np
@@ -10,9 +11,11 @@ from plotly import graph_objects as go
 import polars as pl
 
 
+
+
 class Plotting:
     @staticmethod
-    def plot_session(target_group, cell, session_data : ProcessedSessionData):
+    def plot_session(target_group: str | TargetGroup, cell, session_data : ProcessedSessionData):
         """
         Plots binned fluorescence activity for a single cell across a session.
         Uses pre-binned data from `Processing.bin_data` to generate either 
@@ -20,9 +23,13 @@ class Plotting:
         Cues are overlaid as shaded regions and annotated along the track.
 
         Args:
-            target_group (str): Data grouping option, must be either:
-                - "single_day": Use single-day data loader and filter for identified cells.
-                - "multi_day": Use multi-day data loader.
+            target_group (str | TargetGroup): Which data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day"):
+                    Uses the single-day data loader and filters for identified cells
+                    based on the Suite2p `iscell` mask.
+                - TargetGroup.MULTI_DAY (or "multi_day"):
+                    Uses the multi-day data loader without additional cell filtering.
+                Passing any other string will raise a ValueError.
             cell (int): Index of the cell to plot.
             session_data (ProcessedSessionData): Object containing behavior 
                 and fluorescence data for the session.
@@ -30,6 +37,10 @@ class Plotting:
         Returns:
             plotly.graph_objects.Figure:
         """
+
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)        
+
         # %%%%%%%%%%%%%%%%%%
         # TODO normalize F --> F - .7Fneu for y axis OR z-score;  extract cue;  add option for single day or multi day
         #  plotting; plot cue regions under the graph; basically thick little
@@ -186,16 +197,20 @@ class Plotting:
         return behavior_df
 
     @staticmethod
-    def plot_umap(target_group, session_data: ProcessedSessionData):
+    def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
         Creates an interactive 3D UMAP visualization of neural activity with behavioral annotations.
         The embedding is computed from filtered spike and behavioral data, and points can be colored
         dynamically by cue, region, track position, or trial using a dropdown menu.
 
         Args:
-            target_group (str): Data grouping option, must be either:
-                - "single_day": Use single-day data loader.
-                - "multi_day": Use multi-day data loader.
+            target_group (str | TargetGroup): Which data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day"):
+                    Uses the single-day data loader and filters for identified cells
+                    based on the Suite2p `iscell` mask.
+                - TargetGroup.MULTI_DAY (or "multi_day"):
+                    Uses the multi-day data loader without additional cell filtering.
+                Passing any other string will raise a ValueError.
             session_data (ProcessedSessionData): Object containing references to 
                 behavior and spike data loaders, including file paths.
 
@@ -211,6 +226,9 @@ class Plotting:
             - Uses Plotly's `Scatter3d` for visualization.
             - The figure is displayed in the browser and also returned for further manipulation.
         """
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)
+        
         embedding, behavior_filtered = Processing.compute_single_session_umap(target_group, session_data)
 
         behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)

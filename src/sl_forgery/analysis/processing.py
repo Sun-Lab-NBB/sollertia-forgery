@@ -1,4 +1,4 @@
-from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData
+from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData, TargetGroup
 
 
 from ataraxis_base_utilities import console
@@ -67,7 +67,7 @@ class Processing:
         return result
 
     @staticmethod
-    def bin_data(target_group, session_data: ProcessedSessionData):
+    def bin_data(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
         Bins calcium imaging and behavioral data into fixed spatial bins along the track.
         This method identifies active periods, segments trials, normalizes distance traveled,
@@ -75,10 +75,13 @@ class Processing:
         session-level statistics.
 
         Args:
-            target_group (str): Data grouping option, must be either:
-                - "single_day": Use single-day data loader and filter for identified cells
-                  (from Suite2p `iscell` mask).
-                - "multi_day": Use multi-day data loader without filtering cells.
+            target_group (str | TargetGroup): Which data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day"):
+                    Uses the single-day data loader and filters for identified cells
+                    based on the Suite2p `iscell` mask.
+                - TargetGroup.MULTI_DAY (or "multi_day"):
+                    Uses the multi-day data loader without additional cell filtering.
+                Passing any other string will raise a ValueError.
             session_data (ProcessedSessionData): Object containing references to
                 behavior and fluorescence data loaders, including file paths.
 
@@ -102,15 +105,17 @@ class Processing:
 
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
         
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)
+
         match target_group:
-            case "single_day":
+            case TargetGroup.SINGLE_DAY:
                 data_loader = session_data.single_day_data
                 iscell = data_loader.load(data_loader.iscell_path)
                 iscell_df = pl.DataFrame(iscell).with_row_index("cell_idx")
-            case "multi_day":
+            case TargetGroup.MULTI_DAY:
                 data_loader = session_data.multi_day_data
-            case _:
-                console.error('target_group must be either "single_day" or "multi_day"', error=ValueError)
+
 
         fluorescence = data_loader.load(data_loader.F_path)
         fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
@@ -123,7 +128,7 @@ class Processing:
         # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
         # use column 1 i.e. boolean values
 
-        if target_group == "single_day":
+        if target_group == TargetGroup.SINGLE_DAY:
             cell_mask = iscell_df[:, 1].to_numpy()
 
             # only keep columns (cell data) for positive id cells  ->  cell_mask=True
@@ -285,7 +290,7 @@ class Processing:
         return session_avg_df, sess_sem, result, trial_avg_df    
     
     @staticmethod
-    def _filter_for_umap(target_group, session_data):
+    def _filter_for_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
         Filters neural and behavioral data before inputting into UMAP. Specifically,
         selects frames where the system is active (system_state == 2) and the mouse 
@@ -293,9 +298,13 @@ class Processing:
         is chosen depending on whether the analysis is single-day or multi-day.
 
         Args:
-            target_group (str): Data grouping option, must be either:
-                - "single_day": Use single-day data loader.
-                - "multi_day": Use multi-day data loader.
+            target_group (str | TargetGroup): Which data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day"):
+                    Uses the single-day data loader and filters for identified cells
+                    based on the Suite2p `iscell` mask.
+                - TargetGroup.MULTI_DAY (or "multi_day"):
+                    Uses the multi-day data loader without additional cell filtering.
+                Passing any other string will raise a ValueError.
             session_data (SessionData): Object containing references to 
                 behavior and spike data loaders and their associated file paths.
 
@@ -306,15 +315,18 @@ class Processing:
                 - behavior_filtered (pl.DataFrame): Filtered behavioral data 
                   corresponding to the same frames.
         """
-
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
+
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)
+
         match target_group:
-            case "single_day":
+            case TargetGroup.SINGLE_DAY:
                 data_loader = session_data.single_day_data
-            case "multi_day":
+                iscell = data_loader.load(data_loader.iscell_path)
+                iscell_df = pl.DataFrame(iscell).with_row_index("cell_idx")
+            case TargetGroup.MULTI_DAY:
                 data_loader = session_data.multi_day_data
-            case _:
-                console.error('target_group must be either "single_day" or "multi_day"', error=ValueError)
 
         spikes = data_loader.load(data_loader.spks_path)
         spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
@@ -329,7 +341,7 @@ class Processing:
 
     @staticmethod
     def compute_single_session_umap(
-        target_group, 
+        target_group: str | TargetGroup, 
         session_data: ProcessedSessionData,
         use_saved: bool=True,
         save: bool=True,
@@ -345,9 +357,13 @@ class Processing:
         is generated.
 
         Args:
-            target_group (str): Which group to process. Must be one of:
-                - "single_day": use session_data.single_day_data
-                - "multi_day": use session_data.multi_day_data
+            target_group (str | TargetGroup): Which data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day"):
+                    Uses the single-day data loader and filters for identified cells
+                    based on the Suite2p `iscell` mask.
+                - TargetGroup.MULTI_DAY (or "multi_day"):
+                    Uses the multi-day data loader without additional cell filtering.
+                Passing any other string will raise a ValueError.
             session_data (ProcessedSessionData): Container for the session’s
                 spike and behavioral data, and associated DataLoader objects.
             use_saved (bool, default=True): 
@@ -369,13 +385,17 @@ class Processing:
                 same frame as the embedding.
         """
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
+
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)
+
         match target_group:
-            case "single_day":
+            case TargetGroup.SINGLE_DAY:
                 data_loader = session_data.single_day_data
-            case "multi_day":
+                iscell = data_loader.load(data_loader.iscell_path)
+                iscell_df = pl.DataFrame(iscell).with_row_index("cell_idx")
+            case TargetGroup.MULTI_DAY:
                 data_loader = session_data.multi_day_data
-            case _:
-                console.error('target_group must be either "single_day" or "multi_day"', error=ValueError)
 
         spikes = data_loader.load(data_loader.spks_path)
         spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])

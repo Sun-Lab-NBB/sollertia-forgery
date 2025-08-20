@@ -15,6 +15,13 @@ from sl_shared_assets import get_system_configuration_data
 
 from dataclasses import dataclass, field
 from typing import List, Tuple
+from enum import Enum
+
+
+
+class TargetGroup(str, Enum):
+    SINGLE_DAY = "single_day"
+    MULTI_DAY = "multi_day"
 
 class DataLoader:
     @staticmethod
