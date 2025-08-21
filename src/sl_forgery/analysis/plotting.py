@@ -9,9 +9,19 @@ from pathlib import Path
 import plotly
 from plotly import graph_objects as go
 import polars as pl
+from enum import Enum
+
+class ColoringStrategy(str, Enum):
+    CUE = "cue"
+    REGION = "region"
+    TRACK_POSITION = "track_position"
+    TRIAL = "trial"
 
 
 class Plotting:
+    cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
+    region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
+    
     @staticmethod
     def plot_session(target_group: str | TargetGroup, cell, session_data : ProcessedSessionData):
         """
@@ -58,6 +68,7 @@ class Plotting:
 
         fig = go.Figure()
 
+        # Add the trace corresponding to the session average
         fig.add_trace(go.Scatter(
             x = xaxis,
             y = mean,
@@ -68,7 +79,8 @@ class Plotting:
 
         upper = mean + sem
         lower = mean - sem
-
+        
+        # Add trace for the standard error of the mean
         fig.add_trace(go.Scatter(
             x=list(xaxis) + list(xaxis[::-1]),  # x followed by reversed x
             y=list(upper) + list(lower[::-1]),  # upper followed by reversed lower
@@ -79,6 +91,7 @@ class Plotting:
             name='SEM'
         ))
 
+        # Add the traces for each individual session
         trial_traces = [go.Scatter(
             x = xaxis,
             y = trial_avg_df[i, cell],
@@ -193,7 +206,38 @@ class Plotting:
             )
 
         return behavior_df
-        
+    
+    @staticmethod
+    def get_point_colors(behavior_filtered, coloring_strategy: ColoringStrategy):
+
+        match coloring_strategy:
+            case ColoringStrategy.CUE:
+                return np.array([Plotting.cue_color_map[label] for label in  behavior_filtered["cue"]])
+            case ColoringStrategy.REGION:
+                return np.array([Plotting.region_color_map[label] for label in  behavior_filtered["region"]])
+            case ColoringStrategy.TRACK_POSITION:
+                return np.array(behavior_filtered["track_position_cm"])
+            case ColoringStrategy.TRIAL:
+                return np.array(behavior_filtered["trial"])
+                
+    @staticmethod
+    def make_umap_scatter(embedding, behavior_filtered, coloring_strategy: ColoringStrategy):
+        behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)
+
+
+        return go.Scatter3d(
+            x=embedding[:, 0],
+            y=embedding[:, 1],
+            z=embedding[:, 2],
+            mode='markers',
+            marker={
+                "size": 2,
+                "opacity": 1,
+                "color": Plotting.get_point_colors(behavior_filtered, coloring_strategy)
+            },
+            showlegend=False,
+        )
+    
 
     @staticmethod
     def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
@@ -232,30 +276,17 @@ class Plotting:
 
         behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)
             
-        cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
-        region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
+        #TODO this is specific to Ivan's first task
         region_names = ['Cue 1', 'Gray 1', 'Cue 2', 'Gray 2', 'Cue 3', 'Gray 3', 'Cue 4', 'Gray 4']
 
-        cue_point_colors = np.array([cue_color_map[label] for label in  behavior_filtered["cue"]])
-        region_point_colors = np.array([region_color_map[label] for label in  behavior_filtered["region"]])
+        cue_point_colors = np.array([Plotting.cue_color_map[label] for label in  behavior_filtered["cue"]])
+        region_point_colors = np.array([Plotting.region_color_map[label] for label in  behavior_filtered["region"]])
         
-        fig = go.Figure(
-            go.Scatter3d(
-                x=embedding[:, 0],
-                y=embedding[:, 1],
-                z=embedding[:, 2],
-                mode='markers',
-                marker={
-                    "size": 2,
-                    "opacity": 1,
-                    "color": cue_point_colors
-                },
-                showlegend=False,
-            )
-        )
+
+        fig = go.Figure(Plotting.make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE))
 
         # Make the cue legend
-        for cue_val, color in enumerate(cue_color_map):
+        for cue_val, color in enumerate(Plotting.cue_color_map):
             fig.add_trace(
                 go.Scatter3d(
                     x=[None], y=[None], z=[None],        # no actual points
@@ -267,7 +298,7 @@ class Plotting:
             )
         
         # Make the region legend
-        for cue_val, color in enumerate(region_color_map):
+        for cue_val, color in enumerate(Plotting.region_color_map):
             fig.add_trace(
                 go.Scatter3d(
                     x=[None], y=[None], z=[None],        # no actual points
@@ -302,18 +333,18 @@ class Plotting:
                         method="update",
                         args=[
                             {
-                                "marker.color": [cue_point_colors] + cue_color_map + region_color_map,
+                                "marker.color": [cue_point_colors] + Plotting.cue_color_map + Plotting.region_color_map,
                                 "marker.showscale": False,
-                                "showlegend":  [False] + ([False] + [True] * len(cue_color_map[1:])) + [False] * len(region_color_map),
+                                "showlegend":  [False] + ([False] + [True] * len(Plotting.cue_color_map[1:])) + [False] * len(Plotting.region_color_map),
                             },
                         ]),
                     dict(label="Region",
                         method="update",
                         args=[
                             {
-                                "marker.color": [region_point_colors] + cue_color_map + region_color_map,
+                                "marker.color": [region_point_colors] + Plotting.cue_color_map + Plotting.region_color_map,
                                 "marker.showscale": False,
-                                "showlegend":  [False] + [False] * len(cue_color_map) + [True] * len(region_color_map),
+                                "showlegend":  [False] + [False] * len(Plotting.cue_color_map) + [True] * len(Plotting.region_color_map),
                             },
                         ]),
                     dict(
@@ -350,5 +381,58 @@ class Plotting:
         fig.show(renderer="browser")
         return fig
     
+    @staticmethod
+    def clear_axes(fig):
+        """
+        Makes it so  axes are invisible for a plotly figure
+        """
+        axis_settings = dict(
+            visible=False,        # hides axis, labels, ticks
+            showbackground=False, # hides background plane
+            showgrid=False,       # hides grid lines
+            zeroline=False        # hides zero line
+        )
+
+        fig.update_layout(
+            scene=dict(
+                xaxis=axis_settings,
+                yaxis=axis_settings,
+                zaxis=axis_settings
+            )
+        )
+
+    def plot_all_single_session_umaps(target_group:TargetGroup, animal: AnimalData):
+        
+        frames = []
+        for session in animal.sessions:
+            embedding, behavior_filtered = Processing.compute_single_session_umap(target_group=target_group, session_data=session)
+            frames.append(go.Frame(
+                data=[Plotting.make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE)],
+                name=session.name,
+            ))
+
+        fig = go.Figure(data=frames[0].data, frames=frames)
+
+        slider_steps = [
+            {
+                'method': 'animate',
+                'args': [[session.name], dict(mode='immediate', transition=dict(duration=0))],
+                'label': ProjectData.parse_session(session.name),
+            }
+            for session in animal.sessions
+        ]
+
+        fig.update_layout(
+            sliders=[
+                {
+                    'active': 0,
+                    'steps': slider_steps,
+                }
+            ],
+        )
+
+        Plotting.clear_axes(fig)
+
+        fig.show(renderer="browser")
 
 

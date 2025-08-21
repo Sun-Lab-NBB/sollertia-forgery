@@ -1,5 +1,5 @@
 from sl_shared_assets import ProjectManifest, generate_project_manifest, SessionData
-from sl_forgery.utils.dataclass import ProjectData
+from sl_forgery.utils.dataclass import ProjectData, TargetGroup
 from sl_forgery.analysis.plotting import Plotting
 from sl_forgery.analysis.processing import Processing
 
@@ -12,22 +12,13 @@ work_dir = Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\slf_data")
 
 data = ProjectData.create(project_name="TM_06_pilot", manifest_path=manifest_path, filter_path=filter_path, working_directory=work_dir)
 
-
 # Plotting.plot_session("single_day", 4, data.get_session("2025-06-23-13-32-06-980761"))
-
 # fig = Plotting.plot_umap("single_day", data.get_session("2025-06-23-13-32-06-980761"))
 
-for session_name in data.manifest.get_sessions(animal=6):
-    Processing.compute_single_session_umap("single_day", data.get_session(session_name))
+Plotting.plot_all_single_session_umaps(target_group=TargetGroup.SINGLE_DAY, animal=data.get_mouse(6))
 
-from sl_forgery.analysis.temp_chat import plot_all_single_session_umaps
+# for session_name in data.manifest.get_sessions(animal=6):
+#     Processing.compute_single_session_umap("single_day", data.get_session(session_name))
 
-print('plotting')
-
-plot_all_single_session_umaps("single_day", data.get_mouse(6))
 
 # fig.write_html(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\sl-forgery\src\sl_forgery\analysis\umap.html")
-
-mouse = data.animals[0]
-
-mouse.sessions
