@@ -17,13 +17,17 @@ class ColoringStrategy(str, Enum):
     TRACK_POSITION = "track_position"
     TRIAL = "trial"
 
+class TraceType(str, Enum):
+    PER_TRIAL = "per_trial"
+    AVERAGE = "average"
+ 
 
 class Plotting:
     cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
     region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
     
     @staticmethod
-    def plot_session(target_group: str | TargetGroup, cell, session_data : ProcessedSessionData):
+    def plot_session(target_group: str | TargetGroup, cell : int, session_data : ProcessedSessionData):
         """
         Plots binned fluorescence activity for a single cell across a session.
         Uses pre-binned data from `Processing.bin_data` to generate either 
@@ -166,6 +170,152 @@ class Plotting:
         return fig
     
     @staticmethod
+    def plot_multi_session(
+            target_group: str | TargetGroup,
+            trace_type: str | TraceType,
+            cell: int, 
+            animal: AnimalData, 
+            save_path: Path | None = None,
+            ):
+        
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)   
+
+        if isinstance(trace_type, str):
+            trace_type = TraceType(trace_type)
+
+        frames = []
+
+        # TODO: Task specific
+        xaxis = np.arange(bin_size / 2, track_length, bin_size)
+        cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
+
+        for session in animal.sessions:
+            session_avg_df, sess_sem, result, trial_avg_df = Processing.bin_data(target_group, session)
+            
+            match trace_type:
+                case TraceType.PER_TRIAL:
+                    traces = [go.Scatter(
+                        x = xaxis,
+                        y = trial_avg_df[i, cell],
+                        mode='lines',
+                        line=dict(width=2),
+                        name=f"Trial {i+1}",
+                        visible=True,
+                    ) for i in range(result.shape[0])]
+
+                case TraceType.AVERAGE:
+                    cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]
+                    sem = sess_sem[cell]
+                    mean = cell_val.to_numpy()
+                    traces = []
+                    traces.append(go.Scatter(
+                        x = xaxis,
+                        y = mean,
+                        mode='lines',
+                        line=dict(width=3),
+                        name="Mean"
+                    ))
+
+                    upper = mean + sem
+                    lower = mean - sem   
+
+                    # Add trace for the standard error of the mean
+                    traces.append(go.Scatter(
+                        x=list(xaxis) + list(xaxis[::-1]),  # x followed by reversed x
+                        y=list(upper) + list(lower[::-1]),  # upper followed by reversed lower
+                        fill='toself',
+                        fillcolor='rgba(0, 0, 255, 0.2)',  # RGBA for transparency
+                        line=dict(color='rgba(255,255,255,0)'),  # No border
+                        hoverinfo='skip',
+                        name='SEM'
+                    )) 
+
+            frames.append(go.Frame(
+                data=traces,
+                name=session.name
+            ))
+
+        fig = go.Figure(data=frames[0].data, frames=frames)
+
+        slider_steps = [
+            {
+                'method': 'animate',
+                'args': [[session.name], dict(mode='immediate', transition=dict(duration=0))],
+                'label': ProjectData.parse_session(session.name),
+            }
+            for session in animal.sessions
+        ]
+
+
+        # Slider
+        fig.update_layout(
+            sliders=[
+                {
+                    'active': 0,
+                    'steps': slider_steps,
+                }
+            ],
+            updatemenus=[{
+            'type': 'buttons',
+            'y': -.15,
+            'buttons': [
+                {
+                    'label': 'Play',
+                    'method': 'animate',
+                    'args': [None, {'frame': {'duration': 1000, 'redraw': True}, 'transition': {'duration':1000}, 'fromcurrent': True}]
+                },
+
+            ]
+        }]
+        )
+
+        # Axes
+        fig.update_layout(
+            title=dict(
+                text=f"Cell Fluorescence Trial Averages",
+                x=.5,
+            ),
+            plot_bgcolor='white',
+            xaxis=dict(
+                title="Track position (cm)",
+                range=[0, track_length]
+            ),
+            yaxis=dict(
+                title="Flourescant Signal",
+                range=[0, 6000]
+            ),
+        )
+
+
+
+        fig.update_layout(
+            annotations=
+            [
+                *[
+                    dict(
+                        text=f"Cue {i+1}",
+                        xref="x", yref="paper",
+                        x=pos + cue_length / 2, y=1, 
+                        xanchor="center", yanchor="top",
+                        align="center", 
+                        showarrow=False,
+                    ) for i, pos in enumerate(cue_positions)          
+                ],
+            ],
+            shapes=[
+                    dict(type="rect", x0=pos, x1=pos+cue_length, y0=0, y1=1, xref="x", yref="paper",
+                        fillcolor="lightsteelblue", opacity=0.4, layer="below", line_width=0) 
+                    for pos in cue_positions
+                ],
+        )
+
+        Plotting._clear_axes(fig)
+
+        fig.show(renderer="browser")
+        return fig
+
+    @staticmethod
     def _add_plotting_columns(behavior_df):
         """
         Adds columns for track_position, region, cue, to a behavior dataframe if not already present
@@ -208,7 +358,7 @@ class Plotting:
         return behavior_df
     
     @staticmethod
-    def get_point_colors(behavior_filtered, coloring_strategy: ColoringStrategy):
+    def _get_point_colors(behavior_filtered, coloring_strategy: ColoringStrategy):
 
         match coloring_strategy:
             case ColoringStrategy.CUE:
@@ -221,7 +371,7 @@ class Plotting:
                 return np.array(behavior_filtered["trial"])
                 
     @staticmethod
-    def make_umap_scatter(embedding, behavior_filtered, coloring_strategy: ColoringStrategy):
+    def _make_umap_scatter(embedding, behavior_filtered, coloring_strategy: ColoringStrategy):
         behavior_filtered = Plotting._add_plotting_columns(behavior_filtered)
 
 
@@ -233,12 +383,11 @@ class Plotting:
             marker={
                 "size": 2,
                 "opacity": 1,
-                "color": Plotting.get_point_colors(behavior_filtered, coloring_strategy)
+                "color": Plotting._get_point_colors(behavior_filtered, coloring_strategy)
             },
             showlegend=False,
         )
     
-
     @staticmethod
     def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
@@ -283,7 +432,7 @@ class Plotting:
         region_point_colors = np.array([Plotting.region_color_map[label] for label in  behavior_filtered["region"]])
         
 
-        fig = go.Figure(Plotting.make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE))
+        fig = go.Figure(Plotting._make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE))
 
         # Make the cue legend
         for cue_val, color in enumerate(Plotting.cue_color_map):
@@ -382,32 +531,15 @@ class Plotting:
         return fig
     
     @staticmethod
-    def clear_axes(fig):
-        """
-        Makes it so  axes are invisible for a plotly figure
-        """
-        axis_settings = dict(
-            visible=False,        # hides axis, labels, ticks
-            showbackground=False, # hides background plane
-            showgrid=False,       # hides grid lines
-            zeroline=False        # hides zero line
-        )
+    def plot_all_single_session_umaps(target_group:str | TargetGroup, animal: AnimalData):
+        if isinstance(target_group, str):
+            target_group = TargetGroup(target_group)  
 
-        fig.update_layout(
-            scene=dict(
-                xaxis=axis_settings,
-                yaxis=axis_settings,
-                zaxis=axis_settings
-            )
-        )
-
-    def plot_all_single_session_umaps(target_group:TargetGroup, animal: AnimalData):
-        
         frames = []
         for session in animal.sessions:
             embedding, behavior_filtered = Processing.compute_single_session_umap(target_group=target_group, session_data=session)
             frames.append(go.Frame(
-                data=[Plotting.make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE)],
+                data=[Plotting._make_umap_scatter(embedding, behavior_filtered, ColoringStrategy.CUE)],
                 name=session.name,
             ))
 
@@ -431,8 +563,31 @@ class Plotting:
             ],
         )
 
-        Plotting.clear_axes(fig)
+        Plotting._clear_axes(fig)
 
         fig.show(renderer="browser")
+        return fig
+
+    @staticmethod
+    def _clear_axes(fig):
+        """
+        Makes it so  axes are invisible for a plotly figure
+        """
+        axis_settings = dict(
+            visible=False,        # hides axis, labels, ticks
+            showbackground=False, # hides background plane
+            showgrid=False,       # hides grid lines
+            zeroline=False        # hides zero line
+        )
+
+        fig.update_layout(
+            scene=dict(
+                xaxis=axis_settings,
+                yaxis=axis_settings,
+                zaxis=axis_settings
+            )
+        )
+
+
 
 

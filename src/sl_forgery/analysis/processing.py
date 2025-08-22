@@ -66,6 +66,8 @@ class Processing:
 
         return result
 
+
+    #TODO: delete cache, it is only for developement and memory intensive
     @staticmethod
     def bin_data(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
@@ -101,6 +103,7 @@ class Processing:
             - This function consolidates much of the original place field plotting code and 
               should ideally be refactored into smaller, modular components.
         """
+
         print("getting data")
 
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
