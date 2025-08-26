@@ -1,15 +1,16 @@
+from typing import Any, Dict, List, Tuple
+
 import numpy as np
 import plotly
 import plotly.graph_objects as go
-from sl_forgery.utils.dataclass import TargetGroup, AnimalData
-from sl_forgery.analysis.processing import Processing
-from sl_forgery.analysis.plotting import Plotting
 
-from typing import Dict, Any, List, Tuple
+from sl_forgery.utils.dataclass import AnimalData, TargetGroup
+from sl_forgery.analysis.plotting import Plotting
+from sl_forgery.analysis.processing import Processing
 
 # ---------- Helpers (shared by single- and multi-session plots) ----------
 
-def _axis_settings() -> Dict[str, Any]:
+def _axis_settings() -> dict[str, Any]:
     return dict(visible=False, showbackground=False, showgrid=False, zeroline=False)
 
 def _color_maps():
@@ -18,7 +19,7 @@ def _color_maps():
     region_names = ['Cue 1', 'Gray 1', 'Cue 2', 'Gray 2', 'Cue 3', 'Gray 3', 'Cue 4', 'Gray 4']
     return cue_color_map, region_color_map, region_names
 
-def _build_plot_columns(behavior_filtered) -> Dict[str, Any]:
+def _build_plot_columns(behavior_filtered) -> dict[str, Any]:
     cue_color_map, region_color_map, region_names = _color_maps()
     cue_point_colors = np.array([cue_color_map[label] for label in behavior_filtered["cue"]])
     region_point_colors = np.array([region_color_map[label] for label in behavior_filtered["region"]])
@@ -44,7 +45,7 @@ def _build_plot_columns(behavior_filtered) -> Dict[str, Any]:
         region_names=region_names,
     )
 
-def _legend_traces(cue_color_map: List[str], region_color_map: List[str], region_names: List[str]) -> List[go.Scatter3d]:
+def _legend_traces(cue_color_map: list[str], region_color_map: list[str], region_names: list[str]) -> list[go.Scatter3d]:
     traces = []
     for cue_val, color in enumerate(cue_color_map):
         traces.append(
@@ -68,7 +69,7 @@ def _legend_traces(cue_color_map: List[str], region_color_map: List[str], region
         )
     return traces
 
-def _dropdown_buttons_for_session(colors: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _dropdown_buttons_for_session(colors: dict[str, Any]) -> list[dict[str, Any]]:
     cue_len = len(colors["cue_color_map"])
     reg_len = len(colors["region_color_map"])
 
@@ -129,7 +130,7 @@ def _dropdown_buttons_for_session(colors: Dict[str, Any]) -> List[Dict[str, Any]
         ),
     ]
 
-def _build_main_trace(embedding: np.ndarray, colors: Dict[str, Any]) -> go.Scatter3d:
+def _build_main_trace(embedding: np.ndarray, colors: dict[str, Any]) -> go.Scatter3d:
     return go.Scatter3d(
         x=embedding[:, 0],
         y=embedding[:, 1],
@@ -142,7 +143,7 @@ def _build_main_trace(embedding: np.ndarray, colors: Dict[str, Any]) -> go.Scatt
 
 # ---------- Frame builder ----------
 
-def _build_frame(session_name: str, embedding: np.ndarray, behavior_filtered) -> Tuple[go.Frame, Dict[str, Any]]:
+def _build_frame(session_name: str, embedding: np.ndarray, behavior_filtered) -> tuple[go.Frame, dict[str, Any]]:
     colors = _build_plot_columns(behavior_filtered)
     frame_buttons = _dropdown_buttons_for_session(colors)
     frame = go.Frame(
@@ -176,10 +177,10 @@ def plot_all_single_session_umaps(target_group: str | TargetGroup, animal_data: 
 
     cue_color_map, region_color_map, region_names = _color_maps()
 
-    frames: List[go.Frame] = []
-    labels: List[str] = []
+    frames: list[go.Frame] = []
+    labels: list[str] = []
 
-    first_colors: Dict[str, Any] = {}
+    first_colors: dict[str, Any] = {}
     first_embedding: np.ndarray | None = None
 
     # Build frames for each session

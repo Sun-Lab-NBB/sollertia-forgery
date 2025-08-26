@@ -1,15 +1,14 @@
-from sl_forgery.utils.dataclass import ProjectData, AnimalData, ProcessedSessionData
-from sl_forgery.analysis.processing import Processing
-
-from sl_forgery.utils.dataclass import TargetGroup
-from sl_forgery.analysis.processing import track_length, cue_length, bin_size
+from enum import Enum
+from pathlib import Path
 
 import numpy as np
-from pathlib import Path
 import plotly
 from plotly import graph_objects as go
 import polars as pl
-from enum import Enum
+
+from sl_forgery.utils.dataclass import AnimalData, ProjectData, TargetGroup, ProcessedSessionData
+from sl_forgery.analysis.processing import Processing, bin_size, cue_length, track_length
+
 
 class ColoringStrategy(str, Enum):
     CUE = "cue"
@@ -60,7 +59,7 @@ class Plotting:
 
         cue_positions = range(0, track_length, cue_length * 2) # *2 bc of the gray region
         session_avg_df, sess_sem, result, trial_avg_df = Processing.bin_data(target_group, session_data)
-        cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]  # selects the last row of the col,
+        cell_val = session_avg_df[f'cell_{cell}_signal_binned'][-1]  # selects the last row of the col,
         # which has the avg session data
 
         mean = cell_val.to_numpy()  # , cell_val[1].to_numpy()    #extract mean array and sem array; again issue with
@@ -205,7 +204,7 @@ class Plotting:
                     ) for i in range(result.shape[0])]
 
                 case TraceType.AVERAGE:
-                    cell_val = session_avg_df['cell_{}_signal_binned'.format(cell)][-1]
+                    cell_val = session_avg_df[f'cell_{cell}_signal_binned'][-1]
                     sem = sess_sem[cell]
                     mean = cell_val.to_numpy()
                     traces = []

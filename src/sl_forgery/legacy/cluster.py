@@ -136,7 +136,7 @@ def get_cluster(**kwargs: Any) -> Client:
     return client
 
 
-def blockwise(arr: da.Array) -> Generator[tuple[slice, da.Array], None, None]:
+def blockwise(arr: da.Array) -> Generator[tuple[slice, da.Array]]:
     """Yield slice and block pairs from a Dask array, chunk by chunk.
 
     Args:

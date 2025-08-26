@@ -7,7 +7,7 @@ from suite2p.io import BinaryFileCombined, compute_dydx
 from numpy.typing import NDArray
 
 
-def memory_usage(dataframe: Union[pd.DataFrame, pd.Series], verbose: bool = True) -> float:
+def memory_usage(dataframe: pd.DataFrame | pd.Series, verbose: bool = True) -> float:
     """Calculate memory usage for a pandas DataFrame or Series.
 
     Args:
@@ -31,7 +31,7 @@ def memory_usage(dataframe: Union[pd.DataFrame, pd.Series], verbose: bool = True
     return memory_mb
 
 
-def read_raw_frames(bin_folder: Union[Path, str], frames: NDArray[Any]) -> NDArray[Any]:
+def read_raw_frames(bin_folder: Path | str, frames: NDArray[Any]) -> NDArray[Any]:
     """Read and combine raw imaging frames from multiple binary files.
 
     This function reads the requested number of frames from Suite2p binary files across multiple

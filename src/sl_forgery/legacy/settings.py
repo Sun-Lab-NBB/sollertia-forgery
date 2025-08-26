@@ -10,7 +10,7 @@ from ipyfilechooser import FileChooser
 from IPython.display import display
 
 
-def select_settings_file(start_path: Optional[Path] = None) -> FileChooser:
+def select_settings_file(start_path: Path | None = None) -> FileChooser:
     """Open a GUI dialog for selecting a .yml settings file.
 
     This function is designed for use in interactive environments (e.g., IPython notebooks).
@@ -34,7 +34,7 @@ def select_settings_file(start_path: Optional[Path] = None) -> FileChooser:
     return file_chooser
 
 
-def parse_settings(file: Union[Path, str]) -> dict[str, Any]:
+def parse_settings(file: Path | str) -> dict[str, Any]:
     """Parse settings from a YAML configuration file.
 
     Args:
@@ -53,7 +53,7 @@ def parse_settings(file: Union[Path, str]) -> dict[str, Any]:
 
     required_keys = {"server", "cell_detection", "registration", "clustering", "demix"}
 
-    with open(file_path, "r") as data_file:
+    with open(file_path) as data_file:
         settings = yaml.load(data_file, Loader=yaml.FullLoader)
 
     missing_keys = required_keys - settings.keys()
@@ -64,7 +64,7 @@ def parse_settings(file: Union[Path, str]) -> dict[str, Any]:
     return settings
 
 
-def parse_data_info(file: Union[Path, str]) -> dict[str, Any]:
+def parse_data_info(file: Path | str) -> dict[str, Any]:
     """Parse data identification information from a YAML file.
 
     Args:

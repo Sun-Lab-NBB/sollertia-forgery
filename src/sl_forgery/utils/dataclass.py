@@ -1,22 +1,19 @@
-from pathlib import Path
-import yaml
-import copy
-from dateutil import parser
-from zoneinfo import ZoneInfo
-from datetime import datetime
 import re
+import copy
+from enum import Enum
+from typing import List, Tuple
+from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
+from dataclasses import field, dataclass
+
+import yaml
 import numpy as np
 import polars as pl
-
-from ataraxis_base_utilities import ensure_directory_exists, console, LogLevel
+from dateutil import parser
+from sl_shared_assets import ProjectManifest, get_system_configuration_data
+from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
-from sl_shared_assets import ProjectManifest
-from sl_shared_assets import get_system_configuration_data
-
-from dataclasses import dataclass, field
-from typing import List, Tuple
-from enum import Enum
-
 
 
 class TargetGroup(str, Enum):
@@ -157,7 +154,7 @@ class ProcessedSessionData:
 @dataclass 
 class AnimalData:
     name: int
-    sessions: List[ProcessedSessionData]
+    sessions: list[ProcessedSessionData]
     root_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
@@ -179,7 +176,7 @@ class AnimalData:
 @dataclass
 class ProjectData(YamlConfig):
     name: str
-    animals: List[AnimalData]
+    animals: list[AnimalData]
     manifest: ProjectManifest
     root_path: Path = Path()
 
@@ -243,7 +240,7 @@ class ProjectData(YamlConfig):
             exclude_run_training: true
             ```
         """
-        with open(filter_path, "r") as f:
+        with open(filter_path) as f:
             filter = yaml.safe_load(f)
         
 
@@ -263,10 +260,10 @@ class ProjectData(YamlConfig):
             if "exclude" in filter["sessions"]:
                 df = df.filter(~pl.col("session").is_in(filter["sessions"]["exclude"]))
 
-        if "exclude_lick_training" in filter and filter["exclude_lick_training"]:
+        if filter.get("exclude_lick_training"):
             df = df.filter(pl.col("type") != "lick training")
 
-        if "exclude_run_training" in filter and filter["exclude_run_training"]:
+        if filter.get("exclude_run_training"):
             df = df.filter(pl.col("type") != "run training")
 
         for session_name in df.filter(pl.col("dataset") == 0)["session"]:

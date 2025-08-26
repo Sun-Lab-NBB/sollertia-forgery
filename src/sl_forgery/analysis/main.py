@@ -1,10 +1,10 @@
-from sl_shared_assets import ProjectManifest, generate_project_manifest, SessionData
+from pathlib import Path
+
+from sl_shared_assets import SessionData, ProjectManifest, generate_project_manifest
+
 from sl_forgery.utils.dataclass import ProjectData, TargetGroup
 from sl_forgery.analysis.plotting import Plotting
 from sl_forgery.analysis.processing import Processing
-
-
-from pathlib import Path
 
 filter_path = Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\sl-forgery\src\sl_forgery\analysis\tm6_filter.yaml")
 manifest_path = Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\slf_data\TM_06_pilot_manifest.feather")

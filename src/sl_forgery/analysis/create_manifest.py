@@ -4,9 +4,11 @@
 
 from pathlib import Path
 from datetime import datetime
+
 import pytz
 import polars as pl
 from sl_shared_assets import ProjectManifest
+
 
 def make_manifest_from_structure(project_name: str, sessions: list[dict], out_dir: Path) -> Path:
     """

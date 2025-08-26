@@ -104,7 +104,7 @@ def get_working_directory() -> Path:
         console.error(message=message, error=FileNotFoundError)
 
     # Once the location of the path storage file is resolved, reads the file path from the file
-    with open(path_file, "r") as f:
+    with open(path_file) as f:
         working_directory = Path(f.read().strip())
 
     # If the configuration file does not exist, also aborts with an error

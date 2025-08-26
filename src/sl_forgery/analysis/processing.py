@@ -1,14 +1,12 @@
-from sl_forgery.utils.dataclass import ProjectData, ProcessedSessionData, TargetGroup
+from pathlib import Path
 
-
+import umap
+import numpy as np
+from scipy import stats
+import polars as pl
 from ataraxis_base_utilities import console
 
-from pathlib import Path
-import numpy as np
-import polars as pl
-from scipy import stats
-import umap
-
+from sl_forgery.utils.dataclass import ProjectData, TargetGroup, ProcessedSessionData
 
 track_length = 240
 cue_length = 30

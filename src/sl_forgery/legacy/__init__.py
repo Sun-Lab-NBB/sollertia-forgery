@@ -46,7 +46,7 @@ class ExperimentData:
         - self.cells.multi_session.registered[session][cell][key]: Transformed coordinates.
     """
 
-    def __init__(self, file: Union[str, Path]) -> None:
+    def __init__(self, file: str | Path) -> None:
         # Check if cloud path
         is_gcp: bool = isinstance(file, str) and file.lower().startswith("gs://")
         is_aws: bool = isinstance(file, str) and file.lower().startswith("s3://")
@@ -84,7 +84,7 @@ class SignalData:
         self._file = file
         self._field = field
 
-    def __getitem__(self, indices: Union[int, tuple[int, int]]) -> Any:
+    def __getitem__(self, indices: int | tuple[int, int]) -> Any:
         return self._file[f"{self._field}"].oindex[indices]
 
     def __getattr__(self, name: str) -> Any:
@@ -197,7 +197,7 @@ class ObjectSessionData:
         self._field = field
         self.index = -1
 
-    def __getitem__(self, index: Union[int, np.int32]) -> Any:
+    def __getitem__(self, index: int | np.int32) -> Any:
         if not (isinstance(index, int) or isinstance(index, np.int32)):
             raise ValueError("can only access one session at a time")
         return self._file[f"{self._field}/{index}"][()]
