@@ -5,26 +5,23 @@ is also intended to be used by lab users (and requires 'user' server access)."""
 from pathlib import Path
 
 from ataraxis_time import PrecisionTimer
-from sl_shared_assets import Job, Server
+from sl_shared_assets import Job, Server, get_working_directory
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
-
-from ..utils import get_working_directory
 
 
 def generate_remote_project_manifest(project: str, server: Server, keep_job_logs: bool = False) -> None:
     """Generates the manifest .feather file for the specified project stored on the remote compute server.
 
-    This function allows generating the manifest.feather files on the remote compute server outside the standard
+    This function allows generating manifest.feather files on the remote compute server outside the standard
     workflow (manually). Since this process requires 'service' access privileges, this function is not intended to be
-    called directly by most lab users. As part of its runtime, this function also fetches (pulls) the generated manifest
-    file to the local Sun lab working directory. Therefore, this function also includes the functionality of the
-    fetch_remote_project_manifest() function.
+    called directly by most lab users. As part of its runtime, this function also fetches (pulls) the generated
+    manifest file to the local Sun lab working directory.
 
     Notes:
         All Sun lab 'service' pipelines automatically update the manifest file as part of their runtime, so it is
-        typically unnecessary to use this function. The function is mostly used internally to test various lab pipelines
-        and data management strategies.
+        typically unnecessary to use this function. The function is mostly used internally to test processing
+        pipelines and data management strategies.
 
         The manifest file is created and stored inside the root raw data directory for the target project on the remote
         server.
@@ -64,20 +61,20 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
         working_directory=server_working_directory,
         conda_environment="manage",
         cpus_to_use=1,
-        ram_gb=10,
+        ram_gb=5,
         time_limit=20,
     )
 
     # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file
     # inside the project's root raw data directory
     job.add_command(
-        f"sl-project-manifest -pp {str(project_storage_root)} -pdr {str(server.processed_data_root)} "
-        f"-od {str(project_storage_root)}"
+        f"sl-project-manifest -pp {project_storage_root!s} -pdr {server.processed_data_root!s} "
+        f"-od {project_storage_root!s}"
     )
 
     # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
     if not keep_job_logs:
-        job.add_command(f"rm -rf {str(server_working_directory)}")
+        job.add_command(f"rm -rf {server_working_directory!s}")
 
     # Submits the remote job to the server
     job = server.submit_job(job)

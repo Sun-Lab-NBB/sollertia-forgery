@@ -6,7 +6,7 @@ from .data_processing import process_project_data
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
 
 __all__ = [
-    "generate_remote_project_manifest",
     "fetch_remote_project_manifest",
+    "generate_remote_project_manifest",
     "process_project_data",
 ]
