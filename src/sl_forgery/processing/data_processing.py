@@ -157,7 +157,7 @@ def _acquire_session_lock(
         time_limit=20,
     )
 
-    # Parses the paths to the shared Sun lab directories used to store raw session data
+    # Parses the path to the shared Sun lab directories used to store raw session data
     session_folder = server.raw_data_root.joinpath(project, animal, session)
 
     tracker_command = ""

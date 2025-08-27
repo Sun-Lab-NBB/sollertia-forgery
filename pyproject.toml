@@ -81,7 +81,7 @@ dev = [
 [project.scripts]
 sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
 
-# Specifies files that should not be included in the source-code distribution, but are also not part of gitignore.
+# Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
 exclude = [".github", "recipe"]
 
@@ -96,7 +96,7 @@ indent-width = 4          # Same as black, indents are 4 spaces
 target-version = "py313"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the source directory
 
-# Excludes 'service' .py files, such as the sphinx configuration file from linting.
+# Excludes 'service' .py files, such as the sphinx configuration file, from linting.
 extend-exclude = ["conf.py"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.
