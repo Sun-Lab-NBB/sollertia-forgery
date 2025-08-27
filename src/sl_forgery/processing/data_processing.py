@@ -1,4 +1,4 @@
-"""This module contains tools and bindings for all Sun lab data processing pipelines. The tools from this module are
+"""This module contains the bindings for all Sun lab data processing pipelines. The assets from this module are
 designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
 configured to execute all data processing tasks."""
 
@@ -19,7 +19,7 @@ from sl_shared_assets import (
     get_working_directory,
     get_credentials_file_path,
 )
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_time.time_helpers import get_timestamp
 
 from ..utils import ProjectManifest, get_remote_job_work_directory
@@ -35,7 +35,7 @@ def _check_session_eligibility(
     supported_sessions: set[str | SessionTypes],
     allow_reprocessing: bool = False,
 ) -> bool:
-    """Checks whether the input session meets the eligibility criteria for being processed with the specified pipeline.
+    """Checks whether the target session meets the eligibility criteria for being processed with the specified pipeline.
 
     This worker function aggregates common eligibility checks to streamline the process for all supported processing
     pipelines.
@@ -136,9 +136,31 @@ def _acquire_session_lock(
     session: str,
     server: Server,
     manager_id: int,
-    reset_tracker: bool = False,
+    force: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
+    """Acquires exclusive access to the target session's data for the specified manager process.
+
+    This function is used to verify that the data of each session stored on the remove compute server is accessible to
+    a single manager process at a time to ensure safe access while using multiple parallel processes. Acquiring
+    exclusive data access lock is a prerequisite for all other session data processing functions.
+
+    Notes:
+        Each runtime that calls this function must also call the _release_session_lock() function.
+
+    Args:
+        project: The name of the project under which the target session was acquired.
+        animal: The ID of the animal that participated in the target session.
+        session: The name of the session for which to acquire the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target session's
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+        force: Determines whether to forcibly reset the access lock, if it is held by a different manager process. This
+            option should only be enabled when recovering from improper runtime terminations.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+
+    """
     console.echo(message=f"Constructing session lock acquisition job...")
 
     # Resolves the job name and its remote working directory.
@@ -157,15 +179,16 @@ def _acquire_session_lock(
         time_limit=20,
     )
 
-    # Parses the path to the shared Sun lab directories used to store raw session data
+    # Parses the path to the shared Sun lab directory used to store raw session data
     session_folder = server.raw_data_root.joinpath(project, animal, session)
 
+    # Parses additional processing flags for the lock acquisition command
     tracker_command = ""
-    if reset_tracker:
+    if force:
         tracker_command = "-r"
 
     # Configures the job to use the sl-shared-assets library installed on the server to acquire exclusive access to the
-    # session's data for the specified manager process.
+    # session's data for the specified manager process
     job.add_command(
         f"sl-manage session -sp {session_folder} -pdr {server.processed_data_root} -id {manager_id} {tracker_command} "
         f"lock"
@@ -185,20 +208,28 @@ def _acquire_session_lock(
     while not server.job_complete(job=job):
         delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
-    # Verifies the job completion status by checking the session_lock file
+    # Verifies the job completion status by checking the session_lock file for the owner's ID
+    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+
+    # Resolves the paths to the local and remote session lock files.
     local_working_directory = get_working_directory()
     remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
     local_lock_path = local_working_directory.joinpath(project, job_name, "manifest.feather", "session_lock.yaml")
+    ensure_directory_exists(local_lock_path)
 
-    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+    # Pulls the remote session lock file to the local machine
     server.pull_file(
         local_file_path=local_lock_path,
         remote_file_path=remote_lock_path,
     )
 
-    # Ensures that the caller process has exclusive access to session's data.
+    # Ensures that the caller process has exclusive access to session's data. This raises an error if the expectation
+    # is violated.
     lock = SessionLock(file_path=local_lock_path)
     lock.check_owner(manager_id=manager_id)
+
+    # If the lock has been acquired successfully, removes the local working directory
+    delete_directory(local_lock_path.parent)
 
 
 def _release_session_lock(session: str, server: Server) -> None:
@@ -242,8 +273,8 @@ def _construct_checksum_resolution_pipeline(
             expected changes to the session's raw data.
 
     Returns:
-        The ProcessingPipeline instance configured to execute and manage the processing pipeline on the server if the
-        session can be processed with this pipeline. None, if the session is excluded from processing for any reason.
+        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
+        if the session is excluded from processing for any reason.
     """
 
     # Resolves the path to the local Sun lab working directory
@@ -354,8 +385,8 @@ def _construct_preparation_pipeline(
             value.
 
     Returns:
-        The ProcessingPipeline instance configured to execute and manage the processing pipeline on the server if the
-        session can be processed with this pipeline. None, if the session is excluded from processing for any reason.
+        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
+        if the session is excluded from processing for any reason.
     """
 
     # Resolves the path to the local Sun lab working directory
@@ -473,9 +504,8 @@ def _construct_behavior_processing_pipeline(
             value.
 
     Returns:
-        The ProcessingPipeline instance configured to execute and manage the behavior processing pipeline on the
-        server if the session can be processed with this pipeline. None, if the session is excluded from processing
-        for any reason.
+        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
+        if the session is excluded from processing for any reason.
     """
 
     # Resolves the path to the local Sun lab working directory
@@ -639,9 +669,8 @@ def _construct_suite2p_processing_pipeline(
             value.
 
     Returns:
-        The ProcessingPipeline instance configured to execute and manage the single-day suite2p processing pipeline
-        on the server if the session can be processed with this pipeline. None, if the session is excluded from
-        processing for any reason.
+        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
+        if the session is excluded from processing for any reason.
     """
 
     # Resolves the path to the local Sun lab working directory

@@ -3,7 +3,7 @@ tools are intended to be used by data processing pipelines and require 'service'
 is also intended to be used by lab users (and requires 'user' server access)."""
 
 from ataraxis_time import PrecisionTimer
-from sl_shared_assets import Job, Server, TrackerFileNames, ProcessingTracker, get_working_directory
+from sl_shared_assets import Job, Server, TrackerFileNames, ProcessingTracker, get_working_directory, delete_directory
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
 from ..utils import get_remote_job_work_directory
@@ -37,7 +37,7 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
             generate the manifest file.
     """
 
-    console.echo(message=f"Constructing remote project manifest regeneration job...")
+    console.echo(message=f"Constructing the project manifest generation job...")
 
     local_working_directory = get_working_directory()
 
@@ -99,6 +99,9 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
             f"details about the error that caused the failure."
         )
         console.error(message=message, error=RuntimeError)
+    else:
+        # If the job ran successfully, removes the local working directory
+        delete_directory(local_manifest_tracker_path.parent)
 
     # Otherwise, fetches the created manifest file to the local machine via the fetch function.
     console.echo(message=f"Project manifest file: Generated.", level=LogLevel.SUCCESS)
