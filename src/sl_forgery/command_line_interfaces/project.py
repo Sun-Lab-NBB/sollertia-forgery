@@ -5,9 +5,10 @@ on the remote compute server.
 from typing import Any
 
 import click
-from sl_shared_assets import Server, ProjectManifest, get_working_directory, get_credentials_file_path
+from sl_shared_assets import Server, get_working_directory, get_credentials_file_path
 from ataraxis_base_utilities import console
 
+from ..utils import ProjectManifest
 from ..processing import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
@@ -46,6 +47,13 @@ def project_cli(ctx: Any, project: str) -> None:
 )
 @click.pass_context
 def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
+    """Updates the copy of the target project's manifest file stored on the local machine with the most recent version
+    available on the remote server.
+
+    The project manifest file stores the current state of the project's data on the remote server. It is used as an
+    entry-point for all interactions with the remotely stored data. This command should be used before issuing any other
+    command that works with the project's data to ensure that the local manifest copy contains up-to-date information.
+    """
     # Retrieves shared context data.
     project = ctx.obj["project"]
 
@@ -72,8 +80,8 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     type=str,
     required=False,
     help=(
-        "The name of the animal for which to print the manifest data. If not provided, this CLI prints the data for "
-        "all animals that participate in the specified project."
+        "The name of the animal for which to print the manifest data. If not provided, this command prints the data "
+        "for all animals participating in the target project."
     ),
 )
 @click.option(
@@ -83,9 +91,8 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     show_default=True,
     default=False,
     help=(
-        "Determines whether to print the experimenter note view of the available manifest data. This data view is "
-        "optimized for checking the outcome of each session conducted as part of the target project and, optionally, "
-        "by the specified animal."
+        "Determines whether to print the 'experimenter notes' view of the available manifest data. This data view is "
+        "optimized for checking the outcome of each data acquisition session conducted as part of the target project."
     ),
 )
 @click.option(
@@ -95,16 +102,27 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     show_default=True,
     default=False,
     help=(
-        "Determines whether to print the data processing view of the available manifest data. This view is optimized "
-        "for tracking the data processing state of each session conducted as part of the project."
+        "Determines whether to print the 'data processing' view of the available manifest data. This view is optimized "
+        "for tracking the data processing state of each data acquisition session conducted as part of the project."
     ),
 )
+@click.pass_context
 def print_project_manifest_data(
-    project: str,
+    ctx: Any,
     animal: str | None,
     notes: bool,
     summary: bool,
 ) -> None:
+    """Parses the requested data from the locally stored project manifest file and prints it to the terminal as a
+    formatted table.
+
+    This command should be used to inform the user about the current state of the project's data stored on the remote
+    server. It is recommended to always call the 'sl-project update' command before calling this command to ensure that
+    the local manifest file contains up-to-date information.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+
     if not summary and not notes:
         message = (
             f"No data display options were selected when calling the command. Pass either the 'notes' (-n), "
@@ -126,10 +144,8 @@ def print_project_manifest_data(
     # Loads the manifest file data into memory
     manifest = ProjectManifest(manifest_file=manifest_path)
 
-    # Ensures that the specified animal exists in the manifest data. Since the manifest is optimized for the Sun lab
-    # data format, it stores animal IDs as integers. To improve the flexibility of this CLI, converts animal IDs to
-    # strings before running the check.
-    if animal is not None and animal not in [str(animal) for animal in manifest.animals]:
+    # Ensures that the specified animal exists in the manifest data.
+    if animal is not None and animal not in manifest.animals:
         message = (
             f"Unable to display the data for the target animal ({animal}), as the animal does not belong to the "
             f"target project ({project})."

@@ -66,7 +66,7 @@ def _interpolate_data(
         return np.interp(seed_timestamps, timestamps, data)  # type: ignore
 
 
-def _assemble_mesoscope_data(df, single_day_path):
+def _assemble_mesoscope_data(df: pl.DataFrame, single_day_path: Path) -> pl.DataFrame:
     """ """
 
     # Queries the number of frames processed by suite2p. This is used to handle rare cases where the log has more
@@ -120,7 +120,7 @@ def _assemble_mesoscope_data(df, single_day_path):
     df = df.with_columns([((pl.col("pulse_end") - pl.col("pulse_start")) / 1000).alias("duration_ms")])
 
     # Filter for valid duration pulses and get unique frames
-    frame_df = (
+    frame_df: pl.DataFrame = (
         df.filter(
             (pl.col("duration_ms") >= min_duration)
             & (pl.col("duration_ms") <= max_duration)
@@ -149,7 +149,7 @@ def _assemble_mesoscope_data(df, single_day_path):
     return frame_df
 
 
-def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, track_size_cm=240) -> None:
+def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, track_size_cm: int = 240) -> None:
     # Mesoscope Frame Data
     single_day_path = dataset_path.joinpath(session_data.animal_id, session_data.session_name, "single_day")
     frame_file_path = session_data.processed_data.behavior_data_path.joinpath(f"mesoscope_frame_data.feather")

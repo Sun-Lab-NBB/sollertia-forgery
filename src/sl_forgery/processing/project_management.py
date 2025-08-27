@@ -2,12 +2,11 @@
 tools are intended to be used by data processing pipelines and require 'service' server access, a small subset of tools
 is also intended to be used by lab users (and requires 'user' server access)."""
 
-from pathlib import Path
-
 from ataraxis_time import PrecisionTimer
 from sl_shared_assets import Job, Server, get_working_directory
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
-from ataraxis_time.time_helpers import get_timestamp
+
+from ..utils import get_remote_job_work_directory
 
 
 def generate_remote_project_manifest(project: str, server: Server, keep_job_logs: bool = False) -> None:
@@ -38,43 +37,34 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
             generate the manifest file.
     """
 
-    # Resolves the path to the local directory used to work with Sun lab data.
-    local_working_directory = get_working_directory()
+    console.echo(message=f"Constructing remote manifest regeneration job...")
 
-    # Resolves the working directory for the remote job, using a static job name and the current timestamp in UTC.
-    timestamp = get_timestamp()
+    # Resolves the job name and its remote working directory.
     job_name = f"{project}_manifest_generation"
-    server_working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
-
-    # Ensures that the working directory exists on the remote server
-    server.create_directory(remote_path=server_working_directory)
-
-    # Parses the paths to the shared Sun lab directories used to store raw and processed project data on the remote
-    # server.
-    project_storage_root = server.raw_data_root.joinpath(project)
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
 
     # Generates the remote job header
     job = Job(
         job_name=job_name,
-        output_log=server_working_directory.joinpath(f"output.txt"),
-        error_log=server_working_directory.joinpath(f"errors.txt"),
-        working_directory=server_working_directory,
-        conda_environment="manage",
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
         cpus_to_use=1,
-        ram_gb=5,
+        ram_gb=1,
         time_limit=20,
     )
 
-    # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file
+    # Parses the paths to the shared Sun lab directory used to store raw project data on the remote server.
+    project_storage_root = server.raw_data_root.joinpath(project)
+
+    # Configures the job to use the sl-shared-assets library installed on the server to generate the manifest file
     # inside the project's root raw data directory
-    job.add_command(
-        f"sl-project-manifest -pp {project_storage_root!s} -pdr {server.processed_data_root!s} "
-        f"-od {project_storage_root!s}"
-    )
+    job.add_command(f"sl-manage project -pp {project_storage_root} -pdr {server.processed_data_root} manifest")
 
     # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
     if not keep_job_logs:
-        job.add_command(f"rm -rf {server_working_directory!s}")
+        job.add_command(f"rm -rf {working_directory}")
 
     # Submits the remote job to the server
     job = server.submit_job(job)
@@ -86,34 +76,10 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
     while not server.job_complete(job=job):
         delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
-    # Resolves the path to the remote and local manifest files
-    remote_manifest_path = project_storage_root.joinpath(f"{project}_manifest.feather")
-    local_manifest_path = local_working_directory.joinpath(project, "manifest.feather")
-
-    # Ensures that the project-specific folder exists under the local working directory
-    ensure_directory_exists(local_manifest_path)
-
-    # Verifies that the job ran as expected. For this, ensures that the remote manifest file exists (was created).
-    if not server.exists(remote_path=remote_manifest_path):
-        # Closes the SSH connection
-        server.close()
-
-        message = (
-            f"Unable to locate the manifest file for '{project}' project one the remote server. This indicates that "
-            f"the remote manifest creation job ran into an error and did not generate the file. Check the error logs "
-            f"for the {job_name} job stored in the {server_working_directory} server directory for more details about "
-            f"the error."
-        )
-        console.error(message=message, error=FileNotFoundError)
-
     # If the job completes as expected, pulls the generated manifest file to the project-specific subdirectory under
     # the local working directory. This ensures that the user has continued access to the most recent manifest file
     # for that project.
-    console.echo(message=f"Fetching the generated manifest file from the remote compute server...")
-    server.pull_file(
-        local_file_path=local_manifest_path,
-        remote_file_path=remote_manifest_path,
-    )
+    fetch_remote_project_manifest(project=project, server=server)
 
 
 def fetch_remote_project_manifest(project: str, server: Server) -> None:
@@ -160,8 +126,9 @@ def fetch_remote_project_manifest(project: str, server: Server) -> None:
 
     # If the job completes as expected, pulls the generated manifest file to the project-specific subdirectory under
     # the local working directory.
-    console.echo(message=f"Fetching the manifest file from the remote compute server...")
+    console.echo(message=f"Fetching the manifest file from the remote compute server to the local machine...")
     server.pull_file(
         local_file_path=local_manifest_path,
         remote_file_path=remote_manifest_path,
     )
+    console.echo(message=f"Most recent manifest file: Fetched.", level=LogLevel.SUCCESS)

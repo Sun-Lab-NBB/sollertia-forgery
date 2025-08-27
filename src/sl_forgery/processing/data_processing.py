@@ -8,10 +8,11 @@ from ataraxis_time import PrecisionTimer
 from sl_shared_assets import (
     Job,
     Server,
+    SessionLock,
     SessionTypes,
-    ProjectManifest,
     ProcessingStatus,
     TrackerFileNames,
+    AcquisitionSystems,
     ProcessingPipeline,
     ProcessingPipelines,
     generate_manager_id,
@@ -21,26 +22,420 @@ from sl_shared_assets import (
 from ataraxis_base_utilities import LogLevel, console
 from ataraxis_time.time_helpers import get_timestamp
 
+from ..utils import ProjectManifest, get_remote_job_work_directory
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
-def _get_remote_job_work_directory(server: Server, job_name: str) -> Path:
-    """Generates the working directory for the input job intended to be executed on the compute server managed by the
-    input Server class.
+def _check_session_eligibility(
+    manifest: ProjectManifest,
+    project: str,
+    session: str,
+    pipeline: ProcessingPipelines | str,
+    supported_systems: set[str | AcquisitionSystems],
+    supported_sessions: set[str | SessionTypes],
+    allow_reprocessing: bool = False,
+) -> bool:
+    """Checks whether the input session meets the eligibility criteria for being processed with the specified pipeline.
 
-    This worker function generates the current UTC timestamp, clips it down to minutes, and concatenates it to the
-    job_name to construct the working directory name. It then resolves the path to that directory relative to the user
-    working root on the remote server, creates the directory on the server, and returns the resolved path.
+    This worker function aggregates common eligibility checks to streamline the process for all supported processing
+    pipelines.
+
+    Args:
+        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
+        project: The name of the session's project.
+        session: The name (ID) of the session to be processed.
+        pipeline: The processing pipeline to be used to process the session's data.
+        supported_systems: A set of data acquisition systems that support this type of processing.
+        supported_sessions: A set of session types that support this type of processing.
+        allow_reprocessing: Determines whether to allow reprocessing already processed sessions.
+
+    Returns:
+        True if the session meets the eligibility criteria, False otherwise.
+    """
+    # Parses the target session data from the manifest file
+    session_data = manifest.get_session_info(session=session)
+    session_type = session_data["type"][0]
+    session_system = session_data["system"][0]
+    animal = str(session_data["animal"][0])
+    complete = session_data["complete"][0]
+
+    # Determines whether the session has already been processed using the specified pipeline
+    if pipeline == ProcessingPipelines.CHECKSUM:
+        processed = bool(session_data["integrity"][0])
+    elif pipeline == ProcessingPipelines.PREPARATION:
+        processed = bool(session_data["prepared"][0])
+    elif pipeline == ProcessingPipelines.ARCHIVING:
+        processed = bool(session_data["archived"][0])
+    elif pipeline == ProcessingPipelines.BEHAVIOR:
+        processed = bool(session_data["behavior"][0])
+    elif pipeline == ProcessingPipelines.SUITE2P:
+        processed = bool(session_data["suite2p"][0])
+    else:
+        message = (
+            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
+            f"'{animal}' for the '{project}' project. The pipeline '{pipeline}' is not supported. "
+            f"Use one of the supported pipelines: {list(ProcessingPipelines)}. Skipping processing the session."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return False
+
+    # Ensures that the pipeline's name is stored as a ProcessingPipelines instance
+    pipeline = ProcessingPipelines(pipeline)
+
+    # If the session was acquired using a data acquisition system that does not support this type of processing,
+    # skips processing the session
+    if session_system not in supported_systems:
+        message = (
+            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
+            f"'{animal}' for the '{project}' project. The session was acquired using the acquisition system "
+            f"'{session_system},' which does not support this form of processing. Skipping processing the session."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return False
+
+    # If the session type is not one of the supported types, skips processing the session
+    if session_type not in supported_sessions:
+        message = (
+            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
+            f"'{animal}' for the '{project}' project. The session is of type '{session_type},' which does not support "
+            f"this form of processing. Skipping processing the session."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return False
+
+    # Prevents processing incomplete sessions
+    if not complete:
+        message = (
+            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed "
+            f"by the animal '{animal}' for the '{project}' project. The session is marked as 'incomplete,' which "
+            f"excludes it from all further data processing. To enable processing, manually mark it as 'complete' by "
+            f"creating the 'telomere.bin' marker file in the session's 'raw_data' directory on the remote server and "
+            f"setting the integrity_verification_tracker.yaml file to indicate that the verification was passed."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return False
+
+    # If the session has already been processed and reprocessing is not allowed, skips processing the session.
+    if processed and not allow_reprocessing:
+        message = (
+            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
+            f"'{animal}' for the '{project}' project. The session has already been processed with this pipeline "
+            f"and reprocessing is disabled. To enable reprocessing, call this command with the '--reprocess (-r)' "
+            f"flag."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return False
+
+    # The session is eligible for processing with this pipeline.
+    return True
+
+
+def _acquire_session_lock(
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+    reset_tracker: bool = False,
+    keep_job_logs: bool = False,
+) -> None:
+    console.echo(message=f"Constructing session lock acquisition job...")
+
+    # Resolves the job name and its remote working directory.
+    job_name = f"{session}_lock_acquisition"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+
+    # Generates the remote job header
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
+        cpus_to_use=1,
+        ram_gb=1,
+        time_limit=20,
+    )
+
+    # Parses the paths to the shared Sun lab directories used to store raw session data
+    session_folder = server.raw_data_root.joinpath(project, animal, session)
+
+    tracker_command = ""
+    if reset_tracker:
+        tracker_command = "-r"
+
+    # Configures the job to use the sl-shared-assets library installed on the server to acquire exclusive access to the
+    # session's data for the specified manager process.
+    job.add_command(
+        f"sl-manage session -sp {session_folder} -pdr {server.processed_data_root} -id {manager_id} {tracker_command} "
+        f"lock"
+    )
+
+    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
+    if not keep_job_logs:
+        job.add_command(f"rm -rf {working_directory}")
+
+    # Submits the remote job to the server
+    job = server.submit_job(job)
+
+    # Waits for the server to complete the job
+    delay_timer = PrecisionTimer("s")
+    message = f"Waiting for the session data lock acquisition job with ID {job.job_id} to complete..."
+    console.echo(message=message, level=LogLevel.INFO)
+    while not server.job_complete(job=job):
+        delay_timer.delay_noblock(delay=5, allow_sleep=True)
+
+    # Verifies the job completion status by checking the session_lock file
+    local_working_directory = get_working_directory()
+    remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
+    local_lock_path = local_working_directory.joinpath(project, job_name, "manifest.feather", "session_lock.yaml")
+
+    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+    server.pull_file(
+        local_file_path=local_lock_path,
+        remote_file_path=remote_lock_path,
+    )
+
+    # Ensures that the caller process has exclusive access to session's data.
+    lock = SessionLock(file_path=local_lock_path)
+    lock.check_owner(manager_id=manager_id)
+
+
+def _release_session_lock(session: str, server: Server) -> None:
+    pass
+
+
+def _construct_checksum_resolution_pipeline(
+    manifest: ProjectManifest,
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+    reprocess: bool = False,
+    reset_tracker: bool = False,
+    keep_job_logs: bool = False,
+    recreate_checksum: bool = False,
+) -> ProcessingPipeline | None:
+    """Generates and returns the ProcessingPipeline instance used to execute the raw data integrity checksum resolution
+    pipeline for the target session.
+
+    Notes:
+        This pipeline always works with data stored on the 'raw data' volume of the remote compute server.
+
+    Args:
+        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
+        project: The name of the project for which to execute the target processing pipeline.
+        animal: The ID of the animal for which to execute the target processing pipeline.
+        session: The name of the session to process with the target processing pipeline.
+        server: The Server class instance that manages access to the remote server that executes the pipeline and
+            stores the target session's data.
+        manager_id: The unique identifier of the process that calls this function to construct the pipeline.
+        reprocess: Determines whether to reprocess the session if it has already been processed.
+        reset_tracker: Determines whether to reset the processing tracker for the pipeline before executing the
+            processing. This option should only be enabled when recovering from improper runtime terminations.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
+            value.
+        recreate_checksum: Determines whether to recalculate and overwrite the data integrity checksums stored in the
+            'raw data' folder instead of verifying its' integrity. This flag is used to update the checksum following
+            expected changes to the session's raw data.
+
+    Returns:
+        The ProcessingPipeline instance configured to execute and manage the processing pipeline on the server if the
+        session can be processed with this pipeline. None, if the session is excluded from processing for any reason.
     """
 
-    # Resolves working directory name using timestamp (accurate to minutes) and the job_name.
-    timestamp = "-".join(get_timestamp().split("-")[:5])  # type: ignore
-    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
+    # Resolves the path to the local Sun lab working directory
+    local_working_directory = get_working_directory()
 
-    # Creates the working directory on the remote server.
-    server.create_directory(remote_path=working_directory, parents=True)
+    # Parses the path to the session directory on the remote server
+    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
 
-    return working_directory
+    # Determines whether the session is eligible for processing.
+    if not _check_session_eligibility(
+        manifest=manifest,
+        project=project,
+        session=session,
+        pipeline=ProcessingPipelines.CHECKSUM,
+        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
+        supported_sessions={
+            SessionTypes.WINDOW_CHECKING,
+            SessionTypes.LICK_TRAINING,
+            SessionTypes.RUN_TRAINING,
+            SessionTypes.MESOSCOPE_EXPERIMENT,
+        },
+        allow_reprocessing=True if recreate_checksum or reprocess else False,
+    ):
+        # If the session is not eligible, skips processing the session.
+        return None
+
+    # Resolves the name and working directory for the job
+    job_name = f"{session}_behavior_processing"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+
+    # Generates the remote job header and configures it to run behavior processing
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
+        cpus_to_use=30,
+        ram_gb=5,
+        time_limit=180,
+    )
+
+    # Resolves additional flags for the processing CLI
+    tracker_command = ""
+    if reset_tracker:
+        tracker_command = "-r"
+    recalculate_command = ""
+    if recreate_checksum:
+        recalculate_command = "-rc"
+
+    # Instructs the server to execute the target processing pipeline
+    job.add_command(
+        f"sl-manage session -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
+        f"{tracker_command} checksum {recalculate_command}"
+    )
+
+    # Resolves the paths to the local and remote job tracker files.
+    remote_tracker_path = Path(server.raw_data_root).joinpath(
+        project, animal, session, "tracking_data", TrackerFileNames.CHECKSUM
+    )
+    local_tracker_path = local_working_directory.joinpath(
+        project, f"{session}_checksum_resolution", TrackerFileNames.CHECKSUM
+    )
+
+    # Packages job data into a ProcessingPipeline object and returns it to the caller.
+    pipeline = ProcessingPipeline(
+        jobs={1: ((job, working_directory),)},
+        server=server,
+        manager_id=manager_id,
+        pipeline_type=ProcessingPipelines.CHECKSUM,
+        remote_tracker_path=remote_tracker_path,
+        local_tracker_path=local_tracker_path,
+        session=session,
+        animal=animal,
+        project=project,
+        keep_job_logs=keep_job_logs,
+        pipeline_status=ProcessingStatus.RUNNING,
+    )
+
+    return pipeline
+
+
+def _construct_preparation_pipeline(
+    manifest: ProjectManifest,
+    project: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+    reprocess: bool = False,
+    reset_tracker: bool = False,
+    keep_job_logs: bool = False,
+) -> ProcessingPipeline | None:
+    """Generates and returns the ProcessingPipeline instance used to execute the processing preparation pipeline for
+    the target session.
+
+    Args:
+        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
+        project: The name of the project for which to execute the target processing pipeline.
+        session: The name of the session to process with the target processing pipeline.
+        server: The Server class instance that manages access to the remote server that executes the pipeline and
+            stores the target session's data.
+        manager_id: The unique identifier of the process that calls this function to construct the pipeline.
+        reprocess: Determines whether to reprocess the session if it has already been processed.
+        reset_tracker: Determines whether to reset the processing tracker for the pipeline before executing the
+            processing. This option should only be enabled when recovering from improper runtime terminations.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
+            value.
+
+    Returns:
+        The ProcessingPipeline instance configured to execute and manage the processing pipeline on the server if the
+        session can be processed with this pipeline. None, if the session is excluded from processing for any reason.
+    """
+
+    # Resolves the path to the local Sun lab working directory
+    local_working_directory = get_working_directory()
+
+    # Parses the target session data from the manifest file
+    session_data = manifest.get_session_info(session=session)
+    animal = str(session_data["animal"][0])
+
+    # Parses the path to the session directory on the remote server
+    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
+
+    # Determines whether the session is eligible for processing.
+    if not _check_session_eligibility(
+        manifest=manifest,
+        project=project,
+        session=session,
+        pipeline=ProcessingPipelines.PREPARATION,
+        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
+        supported_sessions={
+            SessionTypes.LICK_TRAINING,
+            SessionTypes.RUN_TRAINING,
+            SessionTypes.MESOSCOPE_EXPERIMENT,
+        },
+        allow_reprocessing=reprocess,
+    ):
+        # If the session is not eligible, skips processing the session.
+        return None
+
+    # Resolves the name and working directory for the job
+    job_name = f"{session}_preparation"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+
+    # Generates the remote job header and configures it to run behavior processing
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
+        cpus_to_use=30,
+        ram_gb=5,
+        time_limit=180,
+    )
+
+    # Resolves additional flags for the processing CLI
+    tracker_command = ""
+    if reset_tracker:
+        tracker_command = "-r"
+
+    # Instructs the server to execute the target processing pipeline
+    job.add_command(
+        f"sl-process-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
+        f"{tracker_command} prepare"
+    )
+
+    # Resolves the paths to the local and remote job tracker files.
+    remote_tracker_path = Path(server.raw_data_root).joinpath(
+        project, animal, session, "tracking_data", TrackerFileNames.PREPARATION
+    )
+    local_tracker_path = local_working_directory.joinpath(
+        project, f"{session}_checksum_resolution", TrackerFileNames.PREPARATION
+    )
+
+    # Packages job data into a ProcessingPipeline object and returns it to the caller.
+    pipeline = ProcessingPipeline(
+        jobs={1: ((job, working_directory),)},
+        server=server,
+        manager_id=manager_id,
+        pipeline_type=ProcessingPipelines.PREPARATION,
+        remote_tracker_path=remote_tracker_path,
+        local_tracker_path=local_tracker_path,
+        session=session,
+        animal=animal,
+        project=project,
+        keep_job_logs=keep_job_logs,
+        pipeline_status=ProcessingStatus.RUNNING,
+    )
+
+    return pipeline
 
 
 def _construct_behavior_processing_pipeline(
@@ -180,9 +575,7 @@ def _construct_behavior_processing_pipeline(
     remote_tracker_path = Path(server.processed_data_root).joinpath(
         project, animal, session, "processed_data", TrackerFileNames.BEHAVIOR
     )
-    local_tracker_path = local_working_directory.joinpath(
-        project, f"{session}_behavior_processing", TrackerFileNames.BEHAVIOR
-    )
+    local_tracker_path = local_working_directory.joinpath(project, job_name, TrackerFileNames.BEHAVIOR)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller. The end-result is a 'one-stage'
     # and 'one-job' pipeline.
