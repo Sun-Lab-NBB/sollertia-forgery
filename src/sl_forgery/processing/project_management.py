@@ -3,7 +3,7 @@ tools are intended to be used by data processing pipelines and require 'service'
 is also intended to be used by lab users (and requires 'user' server access)."""
 
 from ataraxis_time import PrecisionTimer
-from sl_shared_assets import Job, Server, TrackerFileNames, ProcessingTracker, get_working_directory, delete_directory
+from sl_shared_assets import Job, Server, TrackerFileNames, ProcessingTracker, delete_directory, get_working_directory
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
 from ..utils import get_remote_job_work_directory
@@ -134,7 +134,7 @@ def fetch_remote_project_manifest(project: str, server: Server) -> None:
     local_working_directory = get_working_directory()
 
     # Resolves the paths to the remote and local manifest files
-    remote_manifest_path = server.raw_data_root.joinpath(project, TrackerFileNames.MANIFEST)
+    remote_manifest_path = server.raw_data_root.joinpath(project, f"{project}_manifest.feather")
     local_manifest_path = local_working_directory.joinpath(project, "manifest.feather")
 
     # Ensures that the project-specific folder exists under the local working directory

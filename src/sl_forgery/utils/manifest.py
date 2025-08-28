@@ -237,3 +237,31 @@ class ProjectManifest:
         df = self._data
         df = df.filter(pl.col("session").eq(session))
         return df
+
+    def get_animal_for_session(self, session: str) -> str:
+        """Returns the animal ID associated with the specified session.
+
+        Since session IDs are unique in the manifest, each session belongs to exactly one animal.
+
+        Args:
+            session: The ID of the session for which to retrieve the animal ID.
+
+        Returns:
+            The animal ID associated with the specified session, formatted as a string.
+
+        Raises:
+            ValueError: If the specified session is not found in the manifest file.
+        """
+        # FilterS the data for the specified session
+        df = self._data.filter(pl.col("session") == session)
+
+        # CheckS if the session exists
+        if df.is_empty():
+            message = f"Session ID '{session}' not found in the project manifest. Available sessions: {self.sessions}."
+            console.error(message=message, error=ValueError)
+
+        # ExtractS the animal ID
+        animal_id = df.select("animal").item()
+
+        # Returns the animal ID with the appropriate type
+        return str(animal_id)

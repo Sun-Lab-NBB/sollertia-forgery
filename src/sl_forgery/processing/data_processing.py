@@ -3,7 +3,9 @@ designed to process the data stored on the remote Sun lab compute server and ass
 configured to execute all data processing tasks."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from tqdm import tqdm
 from ataraxis_time import PrecisionTimer
 from sl_shared_assets import (
     Job,
@@ -15,6 +17,7 @@ from sl_shared_assets import (
     AcquisitionSystems,
     ProcessingPipeline,
     ProcessingPipelines,
+    delete_directory,
     generate_manager_id,
     get_working_directory,
     get_credentials_file_path,
@@ -130,7 +133,7 @@ def _check_session_eligibility(
     return True
 
 
-def _acquire_session_lock(
+def _construct_lock_acquisition_job(
     project: str,
     animal: str,
     session: str,
@@ -138,15 +141,12 @@ def _acquire_session_lock(
     manager_id: int,
     force: bool = False,
     keep_job_logs: bool = False,
-) -> None:
-    """Acquires exclusive access to the target session's data for the specified manager process.
+) -> Job:
+    """Constructs the remote job used to acquire exclusive access to the data of the target session for the specified
+    manager ID.
 
-    This function is used to verify that the data of each session stored on the remove compute server is accessible to
-    a single manager process at a time to ensure safe access while using multiple parallel processes. Acquiring
-    exclusive data access lock is a prerequisite for all other session data processing functions.
-
-    Notes:
-        Each runtime that calls this function must also call the _release_session_lock() function.
+    This worker function is used as part of the overall lock acquisition step to efficiently construct and submit
+    session data lock acquisition jobs to the remote compute server.
 
     Args:
         project: The name of the project under which the target session was acquired.
@@ -160,9 +160,9 @@ def _acquire_session_lock(
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If the job fails, the logs are always kept regardless of this parameter.
 
+    Returns:
+        The initialized Job instance for the constructed and submitted session data lock acquisition job.
     """
-    console.echo(message=f"Constructing session lock acquisition job...")
-
     # Resolves the job name and its remote working directory.
     job_name = f"{session}_lock_acquisition"
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
@@ -198,23 +198,37 @@ def _acquire_session_lock(
     if not keep_job_logs:
         job.add_command(f"rm -rf {working_directory}")
 
-    # Submits the remote job to the server
-    job = server.submit_job(job)
+    # Submits the remote job to the server and returns the updated Job object to caller
+    return server.submit_job(job, verbose=False)
 
-    # Waits for the server to complete the job
-    delay_timer = PrecisionTimer("s")
-    message = f"Waiting for the session data lock acquisition job with ID {job.job_id} to complete..."
-    console.echo(message=message, level=LogLevel.INFO)
-    while not server.job_complete(job=job):
-        delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
-    # Verifies the job completion status by checking the session_lock file for the owner's ID
-    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+def _verify_lock_acquisition_job(
+    job: Job,
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+) -> None:
+    """Verifies the outcome of a session data lock acquisition job that ran on a remote compute server.
+
+    This worker function is used as part of the overall session data lock acquisition step to efficiently verify the
+    outcome of completed session data lock acquisition jobs submitted to the remote compute server.
+
+    Args:
+        job: The initialized Job instance for the lock acquisition job to be verified.
+        project: The name of the project under which the target session was acquired.
+        animal: The ID of the animal that participated in the target session.
+        session: The name of the session for which to acquire the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target session's
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+    """
 
     # Resolves the paths to the local and remote session lock files.
     local_working_directory = get_working_directory()
     remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
-    local_lock_path = local_working_directory.joinpath(project, job_name, "manifest.feather", "session_lock.yaml")
+    local_lock_path = local_working_directory.joinpath(project, job.job_name, "manifest.feather", "session_lock.yaml")
     ensure_directory_exists(local_lock_path)
 
     # Pulls the remote session lock file to the local machine
@@ -232,18 +246,91 @@ def _acquire_session_lock(
     delete_directory(local_lock_path.parent)
 
 
-def _release_session_lock(
+def _acquire_session_lock(
+    manifest: ProjectManifest,
+    project: str,
+    sessions: tuple[str],
+    server: Server,
+    manager_id: int,
+    force: bool = False,
+    keep_job_logs: bool = False,
+) -> None:
+    """Acquires exclusive access to the target sessions' data for the specified manager process.
+
+    This function is used to verify that the data of each processed session stored on the remote compute server is
+    accessible to a single manager process at a time to ensure safe access while using multiple parallel processes.
+    Acquiring exclusive data access lock is a prerequisite for all other session data processing functions.
+
+    Notes:
+        Each runtime that calls this function must also call the _release_session_lock() function.
+
+    Args:
+        project: The name of the project under which the target session was acquired.
+        sessions: The sessions for which to acquire the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target session's
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+        force: Determines whether to forcibly reset the access lock, if it is held by a different manager process. This
+            option should only be enabled when recovering from improper runtime terminations.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+
+    """
+    # Pre-creates a list of animal IDs for each session to be processed
+    animals = [manifest.get_animal_for_session(session=session) for session in sessions]
+
+    # Constructs and submits remote processing jobs to the server
+    jobs = []
+    for session, animal in tqdm(zip(sessions, animals), total=len(sessions), desc="Submitting session lock acquisition jobs", unit="job"):
+        jobs.append(
+            _construct_lock_acquisition_job(
+                project=project,
+                animal=animal,
+                session=session,
+                server=server,
+                manager_id=manager_id,
+                force=force,
+                keep_job_logs=keep_job_logs
+            )
+        )
+
+    completed_jobs = []
+    with tqdm(total=len(jobs), desc="Waiting for the session lock acquisition jobs to complete", unit="job") as pbar:
+        for index, job in enumerate(jobs):
+
+            # Waits for each job to complete. Ensures that each job is verified exactly once.
+            if not server.job_complete(job=job) or index in completed_jobs:
+                continue
+
+            _verify_lock_acquisition_job(
+                job=job,
+                project=project,
+                animal=animals[index],
+                session=sessions[index],
+                server=server,
+                manager_id=manager_id,
+            )
+
+            # Ensures that this job is not processed again as part of this function's cycle
+            completed_jobs.append(index)
+
+            # Increments the progress bar
+            pbar.update()
+
+
+def _construct_lock_release_job(
     project: str,
     animal: str,
     session: str,
     server: Server,
     manager_id: int,
     keep_job_logs: bool = False,
-) -> None:
-    """Releases exclusive access to the target session's data, if it is currently held by the specified manager.
+) -> Job:
+    """Constructs the remote job used to release exclusive access to the data of the target session for the specified
+    manager ID.
 
-    This function is used to release the lock after it has been acquired via the _acquire_session_lock() function
-    runtime. Releasing the lock allows other manager processes to acquire the lock and work with the session's data.
+    This worker function is used as part of the overall lock release step to efficiently construct and submit
+    session data lock release jobs to the remote compute server.
 
     Args:
         project: The name of the project under which the target session was acquired.
@@ -254,9 +341,10 @@ def _release_session_lock(
         manager_id: The unique identifier of the process that calls this function.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If the job fails, the logs are always kept regardless of this parameter.
-    """
-    console.echo(message=f"Constructing session lock release job...")
 
+    Returns:
+        The initialized Job instance for the constructed and submitted session data lock release job.
+    """
     # Resolves the job name and its remote working directory.
     job_name = f"{session}_lock_release"
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
@@ -286,23 +374,37 @@ def _release_session_lock(
     if not keep_job_logs:
         job.add_command(f"rm -rf {working_directory}")
 
-    # Submits the remote job to the server
-    job = server.submit_job(job)
+    # Submits the remote job to the server and returns the updated Job object to caller
+    return server.submit_job(job, verbose=False)
 
-    # Waits for the server to complete the job
-    delay_timer = PrecisionTimer("s")
-    message = f"Waiting for the session data lock acquisition job with ID {job.job_id} to complete..."
-    console.echo(message=message, level=LogLevel.INFO)
-    while not server.job_complete(job=job):
-        delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
-    # Verifies the job completion status by checking the session_lock file for the owner's ID
-    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+def _verify_lock_release_job(
+    job: Job,
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+) -> None:
+    """Verifies the outcome of a session data lock release job that ran on a remote compute server.
+
+    This worker function is used as part of the overall session data lock release step to efficiently verify the
+    outcome of completed session data lock release jobs submitted to the remote compute server.
+
+    Args:
+        job: The initialized Job instance for the lock release job to be verified.
+        project: The name of the project under which the target session was acquired.
+        animal: The ID of the animal that participated in the target session.
+        session: The name of the session for which to release the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target session's
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+    """
 
     # Resolves the paths to the local and remote session lock files.
     local_working_directory = get_working_directory()
     remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
-    local_lock_path = local_working_directory.joinpath(project, job_name, "manifest.feather", "session_lock.yaml")
+    local_lock_path = local_working_directory.joinpath(project, job.job_name, "manifest.feather", "session_lock.yaml")
     ensure_directory_exists(local_lock_path)
 
     # Pulls the remote session lock file to the local machine
@@ -314,10 +416,83 @@ def _release_session_lock(
     # Ensures that the caller process has exclusive access to session's data. This raises an error if the expectation
     # is violated.
     lock = SessionLock(file_path=local_lock_path)
-    lock.check_owner(manager_id=manager_id)
+    try:
+        lock.check_owner(manager_id=manager_id)
+    except Exception:
+        # Since the lock is expected to be released, the 'success' outcome of this check is failing with an exception.
+        # If the lock has been released successfully, removes the local working directory.
+        delete_directory(local_lock_path.parent)
+        return
+    else:
+        message = (
+            f"Failed to release the session data lock from the manager process {manager_id}. Check the job logs "
+            f"stored on the remote server for the details on the error that prevented releasing the lock."
+        )
+        console.error(message=message, error=RuntimeError)
 
-    # If the lock has been acquired successfully, removes the local working directory
-    delete_directory(local_lock_path.parent)
+
+def _release_session_lock(
+    manifest: ProjectManifest,
+    project: str,
+    sessions: tuple[str],
+    server: Server,
+    manager_id: int,
+    keep_job_logs: bool = False,
+) -> None:
+    """Releases exclusive access to the target sessions' data if it is currently held by the specified manager.
+
+    This function is used to release the lock after it has been acquired via the _acquire_session_lock() function
+    runtime. Releasing the lock allows other manager processes to acquire the lock and work with the sessions' data.
+
+    Args:
+        manifest: The ProjectManifest instance containing session metadata.
+        project: The name of the project under which the target sessions were acquired.
+        sessions: The sessions for which to release the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target sessions'
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+    """
+    # Pre-creates a list of animal IDs for each session to be processed
+    animals = [manifest.get_animal_for_session(session=session) for session in sessions]
+
+    # Constructs and submits remote processing jobs to the server
+    jobs = []
+    for session, animal in tqdm(zip(sessions, animals), total=len(sessions), desc="Submitting session lock release jobs", unit="job"):
+        jobs.append(
+            _construct_lock_release_job(
+                project=project,
+                animal=animal,
+                session=session,
+                server=server,
+                manager_id=manager_id,
+                keep_job_logs=keep_job_logs
+            )
+        )
+
+    completed_jobs = []
+    with tqdm(total=len(jobs), desc="Waiting for the session lock release jobs to complete", unit="job") as pbar:
+        for index, job in enumerate(jobs):
+
+            # Waits for each job to complete. Ensures that each job is verified exactly once.
+            if not server.job_complete(job=job) or index in completed_jobs:
+                continue
+
+            _verify_lock_release_job(
+                job=job,
+                project=project,
+                animal=animals[index],
+                session=sessions[index],
+                server=server,
+                manager_id=manager_id,
+            )
+
+            # Ensures that this job is not processed again as part of this function's cycle
+            completed_jobs.append(index)
+
+            # Increments the progress bar
+            pbar.update()
 
 
 def _construct_checksum_resolution_pipeline(
@@ -940,11 +1115,16 @@ def _construct_suite2p_processing_pipeline(
 
 def process_project_data(
     project: str,
+    animals: list[str | int] | tuple[str | int,...] | None = None,
     sessions: list[str] | tuple[str, ...] | None = None,
-    process_behavior: bool = True,
-    process_suite2p: bool = True,
+    process_behavior: bool = False,
+    process_suite2p: bool = False,
     update_manifest: bool = True,
     reprocess: bool = False,
+    force_lock:bool = False,
+    reset_trackers: bool = False,
+    verify_checksum: bool = False,
+    recalculate_checksum: bool = False,
     keep_job_logs: bool = False,
     suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
     plane_count: int = 3,
@@ -961,6 +1141,10 @@ def process_project_data(
         sessions: An iterable of session names to process as part of this runtime. If this optional argument is not
             provided, the function automatically processes all sessions that have not been processed with one or more
             supported pipelines.
+        animals: An iterable of animal IDS to process as part of this runtime. If this optional argument is not
+            provided, the function automatically processes the data for all animals participating in the project. Note,
+            the animal ID filtering is applied after initially selecting the sessions according to the 'sessions'
+            argument value.
         process_behavior: Determines whether to execute behavior data processing as part of this runtime.
         process_suite2p: Determines whether to execute single-day suite2p processing as part of this runtime.
         update_manifest: Determines whether to update the project manifest file stored on the remote server after each
@@ -1002,8 +1186,42 @@ def process_project_data(
     else:
         sessions = tuple(sessions)
 
+    # If optional animal filtering is enabled, filters the resolved list of sessions to only include the sessions
+    # performed by the requested animals.
+    if animals is not None:
+        animals = set([str(animal) for animal in animals])  # Converts to a string set for efficient lookup
+        filtered_sessions = []
+        for session in sessions:
+            if manifest.get_animal_for_session(session) in animals:
+                filtered_sessions.append(session)
+        sessions = tuple(filtered_sessions)
+
     # Generates the unique identifier for this runtime
     manager_id = generate_manager_id()
+
+    # Stage 0: Acquires session data locks for all processed sessions
+    _acquire_session_lock(
+        manifest=manifest,
+        project=project,
+        sessions=sessions,
+        server=server,
+        manager_id=manager_id,
+        force=force_lock,
+        keep_job_logs=keep_job_logs,
+    )
+
+    # Stage 255: Releases session data locks for all processed sessions
+    _release_session_lock(
+        manifest=manifest,
+        project=project,
+        sessions=sessions,
+        server=server,
+        manager_id=manager_id,
+        keep_job_logs=keep_job_logs,
+    )
+
+    import sys
+    sys.exit(12345)
 
     # Generates the list of processing pipelines to run on the target project's data.
     console.echo(message=f"Resolving the data processing pipelines to run on the project data...", level=LogLevel.INFO)
