@@ -232,8 +232,92 @@ def _acquire_session_lock(
     delete_directory(local_lock_path.parent)
 
 
-def _release_session_lock(session: str, server: Server) -> None:
-    pass
+def _release_session_lock(
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+    manager_id: int,
+    keep_job_logs: bool = False,
+) -> None:
+    """Releases exclusive access to the target session's data, if it is currently held by the specified manager.
+
+    This function is used to release the lock after it has been acquired via the _acquire_session_lock() function
+    runtime. Releasing the lock allows other manager processes to acquire the lock and work with the session's data.
+
+    Args:
+        project: The name of the project under which the target session was acquired.
+        animal: The ID of the animal that participated in the target session.
+        session: The name of the session for which to release the exclusive data access rights.
+        server: The Server class instance that manages access to the remote server that stores the target session's
+            data.
+        manager_id: The unique identifier of the process that calls this function.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If the job fails, the logs are always kept regardless of this parameter.
+    """
+    console.echo(message=f"Constructing session lock release job...")
+
+    # Resolves the job name and its remote working directory.
+    job_name = f"{session}_lock_release"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+
+    # Generates the remote job header
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
+        cpus_to_use=1,
+        ram_gb=1,
+        time_limit=20,
+    )
+
+    # Parses the path to the shared Sun lab directory used to store raw session data
+    session_folder = server.raw_data_root.joinpath(project, animal, session)
+
+    # Configures the job to use the sl-shared-assets library installed on the server to release the exclusive access to
+    # the session's data from the specified manager process
+    job.add_command(
+        f"sl-manage session -sp {session_folder} -pdr {server.processed_data_root} -id {manager_id} unlock"
+    )
+
+    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
+    if not keep_job_logs:
+        job.add_command(f"rm -rf {working_directory}")
+
+    # Submits the remote job to the server
+    job = server.submit_job(job)
+
+    # Waits for the server to complete the job
+    delay_timer = PrecisionTimer("s")
+    message = f"Waiting for the session data lock acquisition job with ID {job.job_id} to complete..."
+    console.echo(message=message, level=LogLevel.INFO)
+    while not server.job_complete(job=job):
+        delay_timer.delay_noblock(delay=5, allow_sleep=True)
+
+    # Verifies the job completion status by checking the session_lock file for the owner's ID
+    console.echo(message=f"Verifying that the manager process {manager_id} has acquired the session's data lock...")
+
+    # Resolves the paths to the local and remote session lock files.
+    local_working_directory = get_working_directory()
+    remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
+    local_lock_path = local_working_directory.joinpath(project, job_name, "manifest.feather", "session_lock.yaml")
+    ensure_directory_exists(local_lock_path)
+
+    # Pulls the remote session lock file to the local machine
+    server.pull_file(
+        local_file_path=local_lock_path,
+        remote_file_path=remote_lock_path,
+    )
+
+    # Ensures that the caller process has exclusive access to session's data. This raises an error if the expectation
+    # is violated.
+    lock = SessionLock(file_path=local_lock_path)
+    lock.check_owner(manager_id=manager_id)
+
+    # If the lock has been acquired successfully, removes the local working directory
+    delete_directory(local_lock_path.parent)
 
 
 def _construct_checksum_resolution_pipeline(
