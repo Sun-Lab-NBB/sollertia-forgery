@@ -252,16 +252,40 @@ class ProjectManifest:
         Raises:
             ValueError: If the specified session is not found in the manifest file.
         """
-        # FilterS the data for the specified session
+        # Filters the data for the specified session
         df = self._data.filter(pl.col("session") == session)
 
-        # CheckS if the session exists
+        # Checks if the session exists
         if df.is_empty():
             message = f"Session ID '{session}' not found in the project manifest. Available sessions: {self.sessions}."
             console.error(message=message, error=ValueError)
 
-        # ExtractS the animal ID
+        # Extracts the animal ID
         animal_id = df.select("animal").item()
 
         # Returns the animal ID with the appropriate type
         return str(animal_id)
+
+    def get_system_for_session(self, session: str) -> str:
+        """Returns the data acquisition system associated with the specified session.
+
+        Args:
+            session: The ID of the session for which to retrieve the data acquisition system.
+
+        Returns:
+            The data acquisition system associated with the specified session.
+
+        Raises:
+            ValueError: If the specified session is not found in the manifest file.
+        """
+        # Filters the data for the specified session
+        df = self._data.filter(pl.col("session") == session)
+
+        # Checks if the session exists
+        if df.is_empty():
+            message = f"Session ID '{session}' not found in the project manifest. Available sessions: {self.sessions}."
+            console.error(message=message, error=ValueError)
+
+        # Extracts and returns the acquisition system used to acquire the session
+        return df.select("system").item()
+
