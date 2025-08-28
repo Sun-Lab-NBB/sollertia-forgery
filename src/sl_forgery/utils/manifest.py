@@ -287,5 +287,4 @@ class ProjectManifest:
             console.error(message=message, error=ValueError)
 
         # Extracts and returns the acquisition system used to acquire the session
-        return df.select("system").item()
-
+        return str(df.select("system").item())
