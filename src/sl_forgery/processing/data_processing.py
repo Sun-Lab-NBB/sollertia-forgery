@@ -586,9 +586,9 @@ def _construct_checksum_resolution_pipeline(
         error_log=working_directory.joinpath(f"errors.txt"),
         working_directory=working_directory,
         conda_environment="forge",
-        cpus_to_use=10,
-        ram_gb=20,
-        time_limit=30,
+        cpus_to_use=1,
+        ram_gb=17,
+        time_limit=120,
     )
 
     # Resolves additional flags for the processing CLI.
@@ -1318,10 +1318,10 @@ def process_project_data(
     manager_id = generate_manager_id()
 
     # Generates the list of processing pipelines to run on the target project's data.
-    console.echo(message=f"Resolving the processing runtime graph...", level=LogLevel.INFO)
     processing_pipelines: list[ProcessingPipeline] = []
-    processed_sessions = set()  # Tracks which sessions for the overall input pool require processing
-    for session in sessions:
+    # Tracks which sessions for the overall input pool require processing
+    processed_sessions: set[str] | tuple[str, ...] = set()
+    for session in tqdm(sessions, desc=f"Resolving the processing graph", unit="session"):
         # Checksum resolution pipeline.
         if process_checksum:
             checksum_pipeline = _construct_checksum_resolution_pipeline(
@@ -1397,11 +1397,13 @@ def process_project_data(
         console.echo(message=message, level=LogLevel.WARNING)
         return
 
+    processed_sessions = tuple(sorted(processed_sessions))  # Converts to a sorted tuple for reproducibility
+
     # Acquires session data locks for all processed sessions
     _acquire_session_lock(
         manifest=manifest,
         project=project,
-        sessions=tuple(processed_sessions),
+        sessions=processed_sessions,
         server=server,
         manager_id=manager_id,
         force=force_lock,
@@ -1453,6 +1455,9 @@ def process_project_data(
             # Reruns the pipeline resolution cycle every 30 seconds to avoid overwhelming the communication line.
             delay_timer.delay_noblock(delay=30, allow_sleep=True)
 
+    # Ensures that the processing outcome message does not collide with the progress bar display
+    delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
     # Overall exit message
     message = (
         f"Project '{project}' data: Processed. Successfully completed {successful_count} pipelines, failed "
@@ -1487,7 +1492,7 @@ def process_project_data(
     _release_session_lock(
         manifest=manifest,
         project=project,
-        sessions=tuple(processed_sessions),
+        sessions=processed_sessions,
         server=server,
         manager_id=manager_id,
         keep_job_logs=keep_job_logs,
