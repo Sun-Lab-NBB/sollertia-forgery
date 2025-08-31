@@ -50,7 +50,7 @@ class Plotting:
                     console.error(f"Cannot save as {save_path.suffix} file. Save as a .html file instead.")
 
     @staticmethod
-    def plot_session(target_group: str | TargetGroup, cell : int, session_data : ProcessedSessionData, save_path = Path | None):
+    def plot_session(target_group: str | TargetGroup, cell : int, session_data : ProcessedSessionData, save_path : Path | None = None):
         """
         Plots binned fluorescence activity for a single cell across a session.
         Uses pre-binned data from `Processing.bin_data` to generate either 
@@ -561,7 +561,23 @@ class Plotting:
 
 
     @staticmethod
-    def plot_all_single_session_umaps(target_group:str | TargetGroup, animal: AnimalData):
+    def plot_all_single_session_umaps(target_group:str | TargetGroup, animal: AnimalData, save_path: Path | None = None,):
+        """
+        Creates an animated 3D UMAP visualization across all sessions for a given animal.
+        Each frame corresponds to one session, showing neural activity structure over time.
+
+        Args:
+            target_group (str | TargetGroup): Data grouping to use. Accepts either:
+                - TargetGroup.SINGLE_DAY (or "single_day")
+                - TargetGroup.MULTI_DAY (or "multi_day")
+            animal (AnimalData): Object containing metadata and session data.
+            save_path (Path | None, optional): If provided, saves the figure to this path.
+
+        Returns:
+            plotly.graph_objects.Figure:
+                Interactive 3D scatter animation with a session slider.
+        """
+        
         if isinstance(target_group, str):
             target_group = TargetGroup(target_group)  
 
@@ -595,6 +611,7 @@ class Plotting:
 
         Plotting._clear_axes(fig)
 
+        Plotting.save_fig(fig, save_path)
         fig.show(renderer="browser")
         return fig
 

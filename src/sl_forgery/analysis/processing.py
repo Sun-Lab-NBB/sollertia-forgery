@@ -101,8 +101,9 @@ class Processing:
             - This function consolidates much of the original place field plotting code and 
               should ideally be refactored into smaller, modular components.
         """
-
-        print("getting data")
+        # I left the commmented print statements in this function because they give explanation of what each part is 
+        # doing which will be useful when extracting this code into smaller helper functions
+        # print("getting data")
 
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
         
@@ -122,10 +123,10 @@ class Processing:
         fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
         
 
-        print("got data")
+        # print("got data")
 
 
-        print("grouping data")
+        # print("grouping data")
         # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
         # use column 1 i.e. boolean values
 
@@ -161,8 +162,8 @@ class Processing:
                                                     active_fluorescence_df,
                                                     trial_indices)
 
-        print("grouped data")
-        print("normalizing data")
+        # print("grouped data")
+        # print("normalizing data")
 
         # create 5 cm bins
         # TODO:  need to soft code bin size and cue length late
@@ -188,8 +189,8 @@ class Processing:
 
             normalized_arrays.append(np.floor(normalized))
 
-        print("normalized data")
-        print("binning data")
+        # print("normalized data")
+        # print("binning data")
 
         # bin the normalized arrays
 
@@ -229,8 +230,8 @@ class Processing:
         # convert entire dataframe to numpy
         data_dict = reduced_df.to_dict(as_series=False)
 
-        print("binned data")
-        print("averaging over trials")
+        # print("binned data")
+        # print("averaging over trials")
         
         # create dict for trial avgs
         trial_avgs = {}
@@ -285,7 +286,7 @@ class Processing:
         # ])
         session_avg_df = pl.concat([trial_avg_df, session_avg_row])
 
-        print("averaged over trials")
+        # print("averaged over trials")
 
         return session_avg_df, sess_sem, result, trial_avg_df    
     
