@@ -144,7 +144,6 @@ class Processing:
         # filter the dataframes by this active state
         active_behavior_df = behavior_df.filter(active_state_mask)
         active_fluorescence_df = cell_fluorescence_df.filter(active_state_mask)
-        # print("active F df", active_fluorescence_df)
 
 
         # TODO: 1. Check that the distance keeps increasing, otherwise there will be cell activity that is being compressed
@@ -347,7 +346,7 @@ class Processing:
         session_data: ProcessedSessionData,
         use_saved: bool=True,
         save: bool=True,
-        alternate_path: Path = None
+        alternate_path: Path | None = None
         ):
         """
         Compute or load a UMAP embedding for a single session.
@@ -366,7 +365,7 @@ class Processing:
                 - TargetGroup.MULTI_DAY (or "multi_day"):
                     Uses the multi-day data loader without additional cell filtering.
                 Passing any other string will raise a ValueError.
-            session_data (ProcessedSessionData): Container for the session’s
+            session_data (ProcessedSessionData): Container for the session's
                 spike and behavioral data, and associated DataLoader objects.
             use_saved (bool, default=True): 
                 If True and an embedding file already exists, load the saved 

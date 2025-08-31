@@ -1,10 +1,12 @@
 from enum import Enum
+from typing import ClassVar
 from pathlib import Path
 
 import numpy as np
 import plotly
 from plotly import graph_objects as go
 import polars as pl
+from ataraxis_base_utilities import console
 
 from sl_forgery.utils.dataclass import AnimalData, ProjectData, TargetGroup, ProcessedSessionData
 from sl_forgery.analysis.processing import Processing, bin_size, cue_length, track_length
@@ -22,11 +24,33 @@ class TraceType(str, Enum):
  
 
 class Plotting:
-    cue_color_map = ['gray', 'black', 'blue', 'aqua', 'gold']
-    region_color_map = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
+    cue_color_map : ClassVar[list[str]] = ['gray', 'black', 'blue', 'aqua', 'gold']
+    region_color_map : ClassVar[list[str]] = ['#BEBEBE','#492323', '#BEBEBE', "#6D1B76", '#BEBEBE', '#9B3753', '#BEBEBE', '#D097BB']
     
     @staticmethod
-    def plot_session(target_group: str | TargetGroup, cell : int, session_data : ProcessedSessionData):
+    def save_fig(fig, save_path: Path | None):
+        """
+        Saves the file at the specificed path.
+
+        Args:
+            fig (plotly.graph_objects.Figure): 
+                The Plotly figure object to be saved.
+            save_path (Path | None, optional): 
+                If provided, the figure is saved to this path.
+        Raises:
+            ValueError: If `save_path` has an unsupported file extension.
+        """
+        if save_path is not None:
+            match save_path.suffix:
+                case ".html":
+                    fig.write_html(str(save_path))
+                case ".pdf" | ".png" | ".jpg" | ".jpeg":
+                    fig.write_image(str(save_path))
+                case _:
+                    console.error(f"Cannot save as {save_path.suffix} file. Save as a .html file instead.")
+
+    @staticmethod
+    def plot_session(target_group: str | TargetGroup, cell : int, session_data : ProcessedSessionData, save_path = Path | None):
         """
         Plots binned fluorescence activity for a single cell across a session.
         Uses pre-binned data from `Processing.bin_data` to generate either 
@@ -44,6 +68,8 @@ class Plotting:
             cell (int): Index of the cell to plot.
             session_data (ProcessedSessionData): Object containing behavior 
                 and fluorescence data for the session.
+            save_path (Path | None, optional): 
+                If provided, the figure is saved to this path.
 
         Returns:
             plotly.graph_objects.Figure:
@@ -165,6 +191,7 @@ class Plotting:
                 for pos in cue_positions
             ],
         )
+        Plotting.save_fig(fig, save_path)
         fig.show(renderer="browser")
         return fig
     
@@ -311,6 +338,7 @@ class Plotting:
 
         Plotting._clear_axes(fig)
 
+        Plotting.save_fig(fig, save_path)
         fig.show(renderer="browser")
         return fig
 
@@ -388,7 +416,7 @@ class Plotting:
         )
     
     @staticmethod
-    def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
+    def plot_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData, save_path: Path | None = None,):
         """
         Creates an interactive 3D UMAP visualization of neural activity with behavioral annotations.
         The embedding is computed from filtered spike and behavioral data, and points can be colored
@@ -404,7 +432,8 @@ class Plotting:
                 Passing any other string will raise a ValueError.
             session_data (ProcessedSessionData): Object containing references to 
                 behavior and spike data loaders, including file paths.
-
+            save_path (Path | None, optional): 
+                If provided, the figure is saved to this path. 
         Returns:
             plotly.graph_objects.Figure:
                 An interactive 3D scatter plot where:
@@ -481,7 +510,7 @@ class Plotting:
                         method="update",
                         args=[
                             {
-                                "marker.color": [cue_point_colors] + Plotting.cue_color_map + Plotting.region_color_map,
+                                "marker.color": [cue_point_colors, *Plotting.cue_color_map, *Plotting.region_color_map],
                                 "marker.showscale": False,
                                 "showlegend":  [False] + ([False] + [True] * len(Plotting.cue_color_map[1:])) + [False] * len(Plotting.region_color_map),
                             },
@@ -490,7 +519,7 @@ class Plotting:
                         method="update",
                         args=[
                             {
-                                "marker.color": [region_point_colors] + Plotting.cue_color_map + Plotting.region_color_map,
+                                "marker.color": [region_point_colors, *Plotting.cue_color_map, *Plotting.region_color_map],
                                 "marker.showscale": False,
                                 "showlegend":  [False] + [False] * len(Plotting.cue_color_map) + [True] * len(Plotting.region_color_map),
                             },
@@ -526,9 +555,11 @@ class Plotting:
             )]
         )
 
+        Plotting.save_fig(fig, save_path)
         fig.show(renderer="browser")
         return fig
-    
+
+
     @staticmethod
     def plot_all_single_session_umaps(target_group:str | TargetGroup, animal: AnimalData):
         if isinstance(target_group, str):

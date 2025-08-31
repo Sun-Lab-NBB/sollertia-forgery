@@ -1,7 +1,6 @@
 import re
 import copy
 from enum import Enum
-from typing import List, Tuple
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -29,25 +28,25 @@ class DataLoader:
             case ".npy":
                 return np.load(file=path, mmap_mode="r")
             case ".yaml" | ".yml":
-                with open(path) as yml_file:
+                with path.open() as yml_file:
                     return yaml.safe_load(yml_file)
-        raise Exception(f"No built in method for loading {path.suffix} files")
+        console.error(f"No built in method for loading {path.suffix} files", error=TypeError)
     
     @staticmethod
     def save(path: Path, data):
         match path.suffix:
             case ".feather":
                 if not isinstance(data, pl.DataFrame):
-                    raise TypeError("Expected a Polars DataFrame for saving to .feather")
+                    console.error("Expected a Polars DataFrame for saving to .feather", error=TypeError)
                 data.write_ipc(path)
             case ".npy":
-                with open(path, "wb") as f:   # exact filename you want
+                with path.open("wb") as f:   # exact filename you want
                     np.save(f, data)
             case ".yaml" | ".yml":
-                with open(path, "w") as yml_file:
+                with path.open("w") as yml_file:
                     yaml.safe_dump(data, yml_file)
             case _:
-                raise Exception(f"No built in method for saving {path.suffix} files")
+                console.error(f"No built in method for saving {path.suffix} files", error=TypeError)
 
 @dataclass
 class BehaviorData(DataLoader):
@@ -240,7 +239,7 @@ class ProjectData(YamlConfig):
             exclude_run_training: true
             ```
         """
-        with open(filter_path) as f:
+        with filter_path.open() as f:
             filter = yaml.safe_load(f)
         
 
