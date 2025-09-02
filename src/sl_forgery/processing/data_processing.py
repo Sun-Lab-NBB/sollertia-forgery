@@ -588,7 +588,7 @@ def _construct_checksum_resolution_pipeline(
         conda_environment="forge",
         cpus_to_use=1,
         ram_gb=17,
-        time_limit=120,
+        time_limit=300,
     )
 
     # Resolves additional flags for the processing CLI.
