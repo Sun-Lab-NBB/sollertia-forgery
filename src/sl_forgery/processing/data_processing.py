@@ -698,9 +698,9 @@ def _construct_preparation_pipeline(
         error_log=working_directory.joinpath(f"errors.txt"),
         working_directory=working_directory,
         conda_environment="forge",
-        cpus_to_use=30,
-        ram_gb=5,
-        time_limit=180,
+        cpus_to_use=1,
+        ram_gb=1,
+        time_limit=300,
     )
 
     # Resolves additional flags for the processing CLI.
@@ -710,7 +710,7 @@ def _construct_preparation_pipeline(
 
     # Instructs the server to execute the target processing pipeline.
     job.add_command(
-        f"sl-process-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
+        f"sl-manage session -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
         f"{tracker_command} prepare"
     )
 
