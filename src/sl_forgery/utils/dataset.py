@@ -23,11 +23,11 @@ class TargetGroup(str, Enum):
 @dataclass
 class BehaviorData:
     root_path: Path = Path()
-    behavior_path: Path = Path()
+    encoder_data_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path: Path = root_directory
-        self.behavior_path = root_directory / "behavior_at_frame.feather"
+        self.encoder_data_path = root_directory / "encoder_data.feather"
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
@@ -36,24 +36,20 @@ class BehaviorData:
 @dataclass
 class SingleDayData:
     root_path: Path = Path()
-    F_path: Path = Path()
-    Fneu_path: Path = Path()
-    iscell_path: Path = Path()
-    ops_path: Path = Path()
-    single_data_s2p_configuration_path: Path = Path()
-    spks_path: Path = Path()
-    stat_path: Path = Path()
+    fluorescence_path: Path = Path()
+    neuropil_fluorescence_path: Path = Path()
+    subtracted_fluorescence_path: Path = Path()
+    cell_classification_path: Path = Path()
+    spikes_path: Path = Path()
     umap_embedding_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
-        self.F_path = root_directory / "F.npy"
-        self.Fneu_path = root_directory / "Fneu.npy"
-        self.iscell_path = root_directory / "iscell.npy"
-        self.ops_path = root_directory / "ops.npy"
-        self.single_day_s2p_configuration_path = root_directory / "single_day_s2p_configuration.yaml"
-        self.spks_path = root_directory / "spks.npy"
-        self.stat = root_directory / "stat.npy"
+        self.fluorescence_path = root_directory / "F.npy"
+        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
+        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
+        self.cell_classification_path = root_directory / "iscell.npy"
+        self.spikes_path = root_directory / "spks.npy"
         self.umap_embedding_path = root_directory / "umap_embedding.npy"
 
     def make_directories(self) -> None:
@@ -62,37 +58,22 @@ class SingleDayData:
 
 @dataclass
 class MultiDayData:
+    selection_name: str = ""
     root_path: Path = Path()
-    backwards_deformed_cell_masks_path: Path = Path()
-    F_path: Path = Path()
-    Fneu_path: Path = Path()
-    ops_path: Path = Path()
-    original_images_path: Path = Path()
-    registered_masks_path: Path = Path()
-    session_multiday_masks_path: Path = Path()
-    shared_multiday_masks_path: Path = Path()
-    single_day_s2p_configuration_path: Path = Path()
-    spks_path: Path = Path()
-    template_cell_masks_path: Path = Path()
-    transformed_images_path: Path = Path()
-    unregistered_masks_path: Path = Path()
+    fluorescence_path: Path = Path()
+    neuropil_fluorescence_path: Path = Path()
+    subtracted_fluorescence_path: Path = Path()
+    cell_classification_path: Path = Path()
+    spikes_path: Path = Path()
     umap_embedding_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
-        self.backwards_deformed_cell_masks_path = root_directory / "backwards_deformed_cell_masks.npy"
-        self.F_path = root_directory / "F.npy"
-        self.Fneu_path = root_directory / "Fneu.npy"
-        self.ops_path = root_directory / "ops.npy"
-        self.original_images_path = root_directory / "original_images.npy"
-        self.registered_masks_path = root_directory / "registered_masks.npy"
-        self.session_multiday_masks_path = root_directory / "session_multiday_masks.npy"
-        self.shared_multiday_masks_path = root_directory / "shared_multiday_masks.npy"
-        self.single_day_s2p_configuration_path = root_directory / "single_day_s2p_configuration.yaml"
-        self.spks_path = root_directory / "spks.npy"
-        self.template_cell_masks_path = root_directory / "template_cell_masks.npy"
-        self.transformed_images_path = root_directory / "transformed_images.npy"
-        self.unregistered_masks_path = root_directory / "unregistered_masks.npy"
+        self.fluorescence_path = root_directory / "F.npy"
+        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
+        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
+        self.cell_classification_path = root_directory / "iscell.npy"
+        self.spikes_path = root_directory / "spks.npy"
         self.umap_embedding_path = root_directory / "umap_embedding.npy"
 
     def make_directories(self) -> None:
@@ -102,10 +83,10 @@ class MultiDayData:
 @dataclass
 class ProcessedSessionData:
     name: str
-    root_path: Path = Path()
-    behavior_data: BehaviorData = field(default_factory=BehaviorData)
-    single_day_data: SingleDayData = field(default_factory=SingleDayData)
-    multi_day_data: MultiDayData = field(default_factory=MultiDayData)
+    root_path: Path
+    behavior_data: BehaviorData
+    single_day_data: SingleDayData
+    multi_day_data: list[MultiDayData]
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
@@ -116,7 +97,7 @@ class ProcessedSessionData:
             self.single_day_data = SingleDayData()
         self.single_day_data.resolve_paths(root_directory / "single_day")
         if self.multi_day_data is None:
-            self.multi_day_data = MultiDayData()
+            self.multi_day_data = [MultiDayData()]
         self.multi_day_data.resolve_paths(root_directory / "multi_day")
 
     def make_directories(self):
@@ -227,10 +208,10 @@ class ProjectData(YamlConfig):
             include_lst = [] if "include" not in filter else filter["sessions"]["include"]
             if "start" in filter["sessions"]:
                 start = parser.parse(filter["sessions"]["start_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df._filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
+                df = df.filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
             if "end" in filter["sessions"]:
                 end = parser.parse(filter["sessions"]["end_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df._filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
+                df = df.filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
             if "exclude" in filter["sessions"]:
                 df = df.filter(~pl.col("session").is_in(filter["sessions"]["exclude"]))
 
