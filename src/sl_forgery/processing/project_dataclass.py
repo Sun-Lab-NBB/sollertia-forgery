@@ -345,7 +345,7 @@ def _construct_behavior_processing_pipeline(
         ram_gb=5,
         time_limit=180,
     )
-    job.add_command(f"sl-process-behavior -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
+    job.add_command(f"sl-process-behavior -sp {remote_session_path!s} -pdr {processed_data_root!s} -um")
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = Path(server.processed_data_root).joinpath(
@@ -532,8 +532,8 @@ def _construct_suite2p_processing_pipeline(
         time_limit=240,
     )
     job.add_command(
-        f"sl-process-suite2p -i {str(configuration_path)} -sp {str(remote_session_path)} "
-        f"-pdr {str(processed_data_root)} -b -w -1 -um"
+        f"sl-process-suite2p -i {configuration_path!s} -sp {remote_session_path!s} "
+        f"-pdr {processed_data_root!s} -b -w -1 -um"
     )
     stage_1.append((job, working_directory))
 
@@ -553,8 +553,8 @@ def _construct_suite2p_processing_pipeline(
             time_limit=300,
         )
         job.add_command(
-            f"sl-process-suite2p -i {str(configuration_path)} -sp {str(remote_session_path)} "
-            f"-pdr {str(processed_data_root)} -p -t {plane} -w -1 -um"
+            f"sl-process-suite2p -i {configuration_path!s} -sp {remote_session_path!s} "
+            f"-pdr {processed_data_root!s} -p -t {plane} -w -1 -um"
         )
         stage_2.append((job, working_directory))
 
@@ -573,8 +573,8 @@ def _construct_suite2p_processing_pipeline(
         time_limit=90,
     )
     job.add_command(
-        f"sl-process-suite2p -i {str(configuration_path)} -sp {str(remote_session_path)} "
-        f"-pdr {str(processed_data_root)} -c -w -1 -um"
+        f"sl-process-suite2p -i {configuration_path!s} -sp {remote_session_path!s} "
+        f"-pdr {processed_data_root!s} -c -w -1 -um"
     )
     stage_3.append((job, working_directory))
 
@@ -755,9 +755,9 @@ def _construct_dataset_marker_job(
         time_limit=90,
     )
     if create:
-        job.add_command(f"sl-dataset-marker -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um")
+        job.add_command(f"sl-dataset-marker -sp {remote_session_path!s} -pdr {processed_data_root!s} -um")
     else:
-        job.add_command(f"sl-dataset-marker -sp {str(remote_session_path)} -pdr {str(processed_data_root)} -um -r")
+        job.add_command(f"sl-dataset-marker -sp {remote_session_path!s} -pdr {processed_data_root!s} -um -r")
 
     return job
 

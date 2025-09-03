@@ -1,12 +1,12 @@
-from numba.cpython.unsafe.numbers import trailing_zeros
-from sl_forgery.analysis.io import behavior_to_numpy, extract_data
 from pathlib import Path
-from scipy import stats
-from matplotlib import pyplot as plt
 
 import numpy as np
+from scipy import stats
 import polars as pl
+from matplotlib import pyplot as plt
+from numba.cpython.unsafe.numbers import trailing_zeros
 
+from sl_forgery.analysis.io import extract_data, behavior_to_numpy
 
 files = ["2025-06-23-13-32-06-980761",
          "2025-06-24-13-17-47-781337",

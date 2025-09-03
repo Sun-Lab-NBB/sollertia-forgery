@@ -17,7 +17,7 @@ def _add_imaging_data(
     folder_path: Path,
     group: str,
     counter: int,
-    selected_cells: Optional[list[bool]] = None,
+    selected_cells: list[bool] | None = None,
 ) -> None:
     """Load, process, and add imaging data to the zarr file.
 

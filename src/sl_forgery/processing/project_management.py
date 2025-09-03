@@ -71,13 +71,13 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
     # Configures the job to use the sl-shared-assets package installed on the server to generate the manifest file
     # inside the project's root raw data directory
     job.add_command(
-        f"sl-project-manifest -pp {str(project_storage_root)} -pdr {str(server.processed_data_root)} "
-        f"-od {str(project_storage_root)}"
+        f"sl-project-manifest -pp {project_storage_root!s} -pdr {server.processed_data_root!s} "
+        f"-od {project_storage_root!s}"
     )
 
     # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
     if not keep_job_logs:
-        job.add_command(f"rm -rf {str(server_working_directory)}")
+        job.add_command(f"rm -rf {server_working_directory!s}")
 
     # Submits the remote job to the server
     job = server.submit_job(job)
