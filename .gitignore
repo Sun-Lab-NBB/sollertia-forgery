@@ -212,6 +212,7 @@ cython_debug/
 
 # Project: Add any project-specific exclusions here
 Temp/
+/temp
 
 trash/
 data
