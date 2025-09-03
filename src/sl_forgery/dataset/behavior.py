@@ -221,6 +221,7 @@ def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, tra
     ensure_directory_exists(behavior_path)
     behavior_dataset.write_ipc(file=behavior_path.joinpath("behavior_at_frame.feather"), compression="lz4")
 
+def assemble_dataset()
 
 session = SessionData.load(session_path=Path("/media/Data/TestMice/6/2025-06-27-12-44-58-770644"))
 dataset = Path("/media/Data/TestMice/TM_06_pilot")

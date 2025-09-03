@@ -23,7 +23,11 @@ class TargetGroup(str, Enum):
 @dataclass
 class BehaviorData:
     root_path: Path = Path()
+    break_data_path: Path = Path()
     encoder_data_path: Path = Path()
+    experiment_data_path: Path = Path()
+    guidance_data_path: Path = Path()
+    lick_data_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path: Path = root_directory
