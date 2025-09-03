@@ -71,7 +71,7 @@ def _assemble_mesoscope_data(df: pl.DataFrame, single_day_path: Path) -> pl.Data
 
     # Queries the number of frames processed by suite2p. This is used to handle rare cases where the log has more
     # frame stamps than recorded frames, which usually happens if the user manually triggers mesoscope scanning (of any
-    # kind) outside expected time slot. Specifically, if the log has more frames than the suite2p data, the log is
+    # kind) outside the expected time slot. Specifically, if the log has more frames than the suite2p data, the log is
     # clipped at the front (since aberrant frames have to come from a period before the main experiment runtime)
     _, frames = np.load(single_day_path.joinpath("F.npy"), mmap_mode="r").shape
 
@@ -83,7 +83,7 @@ def _assemble_mesoscope_data(df: pl.DataFrame, single_day_path: Path) -> pl.Data
     min_duration = 1000 / scanning_frequency - 20
     max_duration = 1000 / scanning_frequency + 20
 
-    # Sort by time to ensure correct order
+    # Sort by time to ensure the correct order
     df = df.sort("time_us")
 
     # Create pulse groups and find edges in one pass

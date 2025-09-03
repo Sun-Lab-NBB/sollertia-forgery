@@ -21,7 +21,7 @@ from sl_shared_assets import (
     get_working_directory,
     get_credentials_file_path,
 )
-from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
+from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists, chunk_iterable
 from ataraxis_time.time_helpers import get_timestamp
 
 from ..utils import ProjectManifest, get_remote_job_work_directory
@@ -588,7 +588,7 @@ def _construct_checksum_resolution_pipeline(
         conda_environment="forge",
         cpus_to_use=1,
         ram_gb=17,
-        time_limit=300,
+        time_limit=20,
     )
 
     # Resolves additional flags for the processing CLI.
@@ -700,7 +700,7 @@ def _construct_preparation_pipeline(
         conda_environment="forge",
         cpus_to_use=1,
         ram_gb=1,
-        time_limit=300,
+        time_limit=20,
     )
 
     # Resolves additional flags for the processing CLI.
@@ -1195,22 +1195,111 @@ def _construct_suite2p_processing_pipeline(
     return pipeline
 
 
+def _execute_pipelines(
+        pipelines: tuple[ProcessingPipeline],
+        batch_size: int,
+        stage_name: str,
+        poll_delay: int = 30,
+) -> tuple[int, int, int]:
+    """Executes the input pipelines as sequential batches.
+
+    This worker function is used by the main process_project_data() function to efficiently execute batches of
+    processing pipelines.
+
+    Args:
+        pipelines: The ProcessingPipelines to be executed for the current processing stage.
+        batch_size: The maximum number of pipelines to be executed concurrently.
+        stage_name: The name of the current processing stage.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of three integer values. The first value specifies the number of input pipelines that has been
+        completed successfully. The second value specifies the number of failed pipelines. The third value specifies
+        the number of aborted pipelines.
+
+    """
+
+    # If the list of pipelines is empty, returns 0 for all count updates.
+    if not pipelines:
+        return 0, 0, 0
+
+    # Initializes counters
+    uncompleted_count = len(pipelines)
+    successful_count = 0
+    failed_count = 0
+    aborted_count = 0
+
+    # Tracks which pipelines have been counted using their index
+    counted_indices = set()
+
+    # Splits the overall sequence of pipelines into batches
+    batches = tuple(chunk_iterable([out for out in enumerate(pipelines)], batch_size))
+
+    # Initializes a timer to delay repeated pipeline status checks
+    delay_timer = PrecisionTimer("s")
+
+    # Executes the current processing stage with a progress bar
+    with tqdm(total=len(pipelines), desc=f"Executing {stage_name} pipelines", unit="pipeline") as pbar:
+
+        # Processes each batch sequentially (one at a time)
+        for batch in batches:
+            batch_complete = False
+
+            # Processes the current batch until all batch pipelines are completed
+            while not batch_complete:
+                batch_complete = True
+
+                for idx, pipeline in batch:
+                    # Check if the pipeline is still running
+                    if pipeline.is_running:
+                        pipeline.runtime_cycle()
+                        batch_complete = False
+
+                    # If the pipeline status changes to one of the completed status codes and the pipeline is not yet
+                    # counted, updates the counters
+                    if idx not in counted_indices:
+                        if pipeline.pipeline_status == ProcessingStatus.FAILED:
+                            failed_count += 1
+                            uncompleted_count -= 1
+                            counted_indices.add(idx)
+                            pbar.update()
+                        elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
+                            successful_count += 1
+                            uncompleted_count -= 1
+                            counted_indices.add(idx)
+                            pbar.update()
+                        elif pipeline.pipeline_status == ProcessingStatus.ABORTED:
+                            aborted_count += 1
+                            uncompleted_count -= 1
+                            counted_indices.add(idx)
+                            pbar.update()
+
+                # Reruns the pipeline resolution cycle every poll_delay seconds to avoid overwhelming the
+                # communication line.
+                if not batch_complete:
+                    delay_timer.delay_noblock(delay=poll_delay, allow_sleep=True)
+
+    return successful_count, failed_count, aborted_count
+
+
 def process_project_data(
-    project: str,
-    animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
-    sessions: list[str] | tuple[str, ...] | None = None,
-    process_checksum: bool = False,
-    prepare_sessions: bool = False,
-    process_behavior: bool = False,
-    process_suite2p: bool = False,
-    update_manifest: bool = True,
-    reprocess: bool = False,
-    keep_job_logs: bool = False,
-    force_lock: bool = False,
-    recalculate_checksum: bool = False,
-    reset_trackers: bool = False,
-    suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
-    plane_count: int = 3,
+        project: str,
+        sessions: list[str] | tuple[str, ...] | None = None,
+        animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
+        management_batch_size: int = 1,
+        processing_batch_size: int = 4,
+        process_checksum: bool = False,
+        prepare_sessions: bool = False,
+        process_behavior: bool = False,
+        process_suite2p: bool = False,
+        update_manifest: bool = False,
+        reprocess: bool = False,
+        keep_job_logs: bool = False,
+        force_lock: bool = False,
+        recalculate_checksum: bool = False,
+        reset_trackers: bool = False,
+        suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
+        plane_count: int = 3,
 ) -> None:
     """Resolves and executes the necessary data processing pipelines for the specified project.
 
@@ -1224,16 +1313,21 @@ def process_project_data(
         sessions: An iterable of session names to process as part of this runtime. If this optional argument is not
             provided, the function automatically processes all sessions that have not been processed with one or more
             supported pipelines.
-        animals: An iterable of animal IDS to process as part of this runtime. If this optional argument is not
+        animals: An iterable of animal IDs to process as part of this runtime. If this optional argument is not
             provided, the function automatically processes the data for all animals participating in the project. Note,
             the animal ID filtering is applied after initially selecting the sessions according to the 'sessions'
             argument value.
+        management_batch_size: The number of processing pipelines that can be submitted to the remote compute server at
+            a time when running session data management pipelines. These pipelines are primarily limited by the I/O
+            speed of the slow 'storage' server volume.
+        processing_batch_size: Same as 'management_batch_size', but works with data processing pipelines that work with
+            the data stored on the fast 'working' volume of the server. These pipelines are primarily limited by the
+            available RAM / CPU resources rather than the fast drive I/O speed.
         process_checksum: Determines whether to recreate or verify the raw data integrity checksum for the target
-            sessions as part of this runtime. Note, this processing pipeline interferes with all other processing
-            pipelines.
+            sessions as part of this runtime.
         prepare_sessions: Determines whether to prepare the target sessions for data processing as part of this runtime.
-            Note, this processing pipeline interferes with all other processing pipelines. Executing this pipeline is
-            a prerequisite for running all data processing pipelines other than the checksum processing pipeline.
+            Executing this pipeline is a prerequisite for running all data processing pipelines other than the checksum
+            processing pipeline.
         process_behavior: Determines whether to execute the behavior data processing pipeline.
         process_suite2p: Determines whether to execute the single-day suite2p data processing pipeline.
         update_manifest: Determines whether to regenerate the project manifest file before resolving the processing
@@ -1263,28 +1357,15 @@ def process_project_data(
             of z-planes. This argument is only used if the 'process_suite2p' argument is set to True.
     """
 
-    # Statically ensures that the requested combination of processing pipelines is supported.
-    if process_checksum and (prepare_sessions or process_behavior or process_suite2p):
-        message = (
-            f"Unable to resolve the requested processing pipeline combination. The processing is configured to process "
-            f"session checksums, which interferes with all other processing pipelines. Checksum processing must be "
-            f"carried out as a standalone operation."
-        )
-        console.error(message=message, error=ValueError)
-    if prepare_sessions and (process_behavior or process_suite2p):
-        message = (
-            f"Unable to resolve the requested processing pipeline combination. The processing is configured to prepare "
-            f"sessions for processing, which interferes with all other processing pipelines. Processing preparation "
-            f"must be carried out as a standalone operation."
-        )
-        console.error(message=message, error=ValueError)
-
     # Entry message
     console.echo(message=f"Initializing project '{project}' data processing...", level=LogLevel.INFO)
 
     # Establishes SSH connection to the processing server.
     credentials = get_credentials_file_path(service=True)
     server = Server(credentials_path=credentials)
+
+    # Initializes a delay timer to support better visual separation of various terminal printouts and progress bars.
+    delay_timer = PrecisionTimer("s")
 
     # Depending on the configuration, updates the project manifest file stored on the remote server and fetches it to
     # the local machine.
@@ -1317,14 +1398,29 @@ def process_project_data(
     # Generates the unique identifier for this runtime
     manager_id = generate_manager_id()
 
-    # Generates the list of processing pipelines to run on the target project's data.
-    processing_pipelines: list[ProcessingPipeline] = []
-    # Tracks which sessions for the overall input pool require processing
-    processed_sessions: set[str] | tuple[str, ...] = set()
-    for session in tqdm(sessions, desc=f"Resolving the processing graph", unit="session"):
-        # Checksum resolution pipeline.
-        if process_checksum:
-            checksum_pipeline = _construct_checksum_resolution_pipeline(
+    # Tracks all sessions that have been locked across all processing phases
+    locked_sessions: set[str] = set()
+
+    # Tracks all pipelines executed across all processing phases for final outcome reporting
+    all_pipelines: list[ProcessingPipeline] = []
+
+    # Tracks processing overall statistics
+    total_successful = 0
+    total_failed = 0
+    total_aborted = 0
+
+    # PHASE 1: CHECKSUM
+    if process_checksum:
+        console.echo(message="Phase 1: Checksum Resolution", level=LogLevel.INFO)
+
+        # Ensures the visual separation between terminal printouts
+        delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+        # Resolves the checksum processing graph
+        checksum_pipelines = []
+        checksum_sessions = set()
+        for session in tqdm(sessions, desc="Resolving the checksum processing graph", unit="session"):
+            pipeline = _construct_checksum_resolution_pipeline(
                 manifest=manifest,
                 server=server,
                 manager_id=manager_id,
@@ -1335,13 +1431,59 @@ def process_project_data(
                 recreate_checksum=recalculate_checksum,
                 reset_tracker=reset_trackers,
             )
-            if checksum_pipeline is not None:
-                processing_pipelines.append(checksum_pipeline)
-                processed_sessions.add(session)
+            if pipeline is not None:
+                checksum_pipelines.append(pipeline)
+                checksum_sessions.add(session)
+                all_pipelines.append(pipeline)
 
-        # Processing preparation pipeline.
-        if prepare_sessions:
-            preparation_pipeline = _construct_preparation_pipeline(
+        if checksum_pipelines:
+            # Ensures that the manager process holds the session data locks for all sessions to be processed
+            sessions_to_lock = checksum_sessions - locked_sessions
+            if sessions_to_lock:
+                _acquire_session_lock(
+                    manifest=manifest,
+                    project=project,
+                    sessions=tuple(sorted(sessions_to_lock)),
+                    server=server,
+                    manager_id=manager_id,
+                    force=force_lock,
+                    keep_job_logs=keep_job_logs,
+                )
+                locked_sessions.update(sessions_to_lock)
+
+            # Executes checksum pipelines and saves the runtime statistics data
+            success, failed, aborted = _execute_pipelines(
+                pipelines=tuple(checksum_pipelines),
+                batch_size=management_batch_size,
+                stage_name="checksum",
+                poll_delay=5,
+            )
+            total_successful += success
+            total_failed += failed
+            total_aborted += aborted
+
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+            # Refreshes the local manifest file to include the processing outcome data
+            fetch_remote_project_manifest(project=project, server=server)
+            manifest = ProjectManifest(manifest_file=manifest_path)
+
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+    # PHASE 2: PREPARATION
+    if prepare_sessions:
+        console.echo(message="Phase 2: Processing Preparation", level=LogLevel.INFO)
+
+        # Ensures the visual separation between terminal printouts
+        delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+        # Resolves the session data preparation graph
+        prep_pipelines = []
+        prep_sessions = set()
+        for session in tqdm(sessions, desc="Resolving the processing preparation graph", unit="session"):
+            pipeline = _construct_preparation_pipeline(
                 manifest=manifest,
                 server=server,
                 manager_id=manager_id,
@@ -1351,151 +1493,180 @@ def process_project_data(
                 keep_job_logs=keep_job_logs,
                 reset_tracker=reset_trackers,
             )
-            if preparation_pipeline is not None:
-                processing_pipelines.append(preparation_pipeline)
-                processed_sessions.add(session)
+            if pipeline is not None:
+                prep_pipelines.append(pipeline)
+                prep_sessions.add(session)
+                all_pipelines.append(pipeline)
 
-        # Behavior processing pipeline.
-        if process_behavior:
-            behavior_pipeline = _construct_behavior_processing_pipeline(
-                manifest=manifest,
-                server=server,
-                manager_id=manager_id,
-                project=project,
-                session=session,
-                reprocess=reprocess,
-                keep_job_logs=keep_job_logs,
-                reset_tracker=reset_trackers,
+        if prep_pipelines:
+            # Ensures that the manager process holds the session data locks for all sessions to be processed
+            sessions_to_lock = prep_sessions - locked_sessions
+            if sessions_to_lock:
+                _acquire_session_lock(
+                    manifest=manifest,
+                    project=project,
+                    sessions=tuple(sorted(sessions_to_lock)),
+                    server=server,
+                    manager_id=manager_id,
+                    force=force_lock,
+                    keep_job_logs=keep_job_logs,
+                )
+                locked_sessions.update(sessions_to_lock)
+
+            # Executes preparation pipelines and saves the runtime data
+            success, failed, aborted = _execute_pipelines(
+                pipelines=tuple(prep_pipelines),
+                batch_size=management_batch_size,
+                stage_name="preparation",
+                poll_delay=5,
             )
-            if behavior_pipeline is not None:
-                processing_pipelines.append(behavior_pipeline)
-                processed_sessions.add(session)
+            total_successful += success
+            total_failed += failed
+            total_aborted += aborted
 
-        # Suite2p processing pipeline.
-        if process_suite2p:
-            suite2p_pipeline = _construct_suite2p_processing_pipeline(
-                server=server,
-                manager_id=manager_id,
-                project=project,
-                session=session,
-                configuration_file=suite2p_configuration_file,
-                plane_count=plane_count,
-                reprocess=reprocess,
-                keep_job_logs=keep_job_logs,
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+            # Refreshes the local manifest file to include the processing outcome data
+            fetch_remote_project_manifest(project=project, server=server)
+            manifest = ProjectManifest(manifest_file=manifest_path)
+
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+    # PHASE 3: DATA PROCESSING
+    if process_behavior or process_suite2p:
+        console.echo(message="Phase 3: Data Processing", level=LogLevel.INFO)
+
+        # Ensures the visual separation between terminal printouts
+        delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+        # Build processing pipelines
+        processing_pipelines = []
+        processing_sessions = set()
+
+        for session in tqdm(sessions, desc="Resolving the data processing graph", unit="session"):
+            # Behavior pipeline
+            if process_behavior:
+                pipeline = _construct_behavior_processing_pipeline(
+                    manifest=manifest,
+                    server=server,
+                    manager_id=manager_id,
+                    project=project,
+                    session=session,
+                    reprocess=reprocess,
+                    keep_job_logs=keep_job_logs,
+                    reset_tracker=reset_trackers,
+                )
+                if pipeline is not None:
+                    processing_pipelines.append(pipeline)
+                    processing_sessions.add(session)
+                    all_pipelines.append(pipeline)
+
+            # Suite2p pipeline
+            if process_suite2p:
+                pipeline = _construct_suite2p_processing_pipeline(
+                    server=server,
+                    manager_id=manager_id,
+                    project=project,
+                    session=session,
+                    configuration_file=suite2p_configuration_file,
+                    plane_count=plane_count,
+                    reprocess=reprocess,
+                    keep_job_logs=keep_job_logs,
+                )
+                if pipeline is not None:
+                    processing_pipelines.append(pipeline)
+                    processing_sessions.add(session)
+                    all_pipelines.append(pipeline)
+
+        if processing_pipelines:
+            # Ensures that the manager process holds the session data locks for all sessions to be processed
+            sessions_to_lock = processing_sessions - locked_sessions
+            if sessions_to_lock:
+                _acquire_session_lock(
+                    manifest=manifest,
+                    project=project,
+                    sessions=tuple(sorted(sessions_to_lock)),
+                    server=server,
+                    manager_id=manager_id,
+                    force=force_lock,
+                    keep_job_logs=keep_job_logs,
+                )
+                locked_sessions.update(sessions_to_lock)
+
+            # Executes processing pipelines and saves the runtime statistics
+            success, failed, aborted = _execute_pipelines(
+                pipelines=tuple(processing_pipelines),
+                batch_size=processing_batch_size,
+                stage_name="data processing",
+                poll_delay=30,
             )
-            if suite2p_pipeline is not None:
-                processing_pipelines.append(suite2p_pipeline)
-                processed_sessions.add(session)
+            total_successful += success
+            total_failed += failed
+            total_aborted += aborted
 
-    # If the project requires no additional processing, aborts the runtime early
-    if len(processing_pipelines) == 0:
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+            # Refreshes the local manifest file to include the processing outcome data
+            fetch_remote_project_manifest(project=project, server=server)
+            manifest = ProjectManifest(manifest_file=manifest_path)
+
+            # Ensures the visual separation between terminal printouts
+            delay_timer.delay_noblock(delay=1, allow_sleep=True)
+
+    # Checks if any processing was done
+    if not all_pipelines:
         message = (
             f"All target sessions for project '{project}' have been excluded from all supported processing pipelines. "
-            f"See the messages above for details on exclusion criteria applied to each session and pipeline "
-            f"combination. Processing: Aborted."
+            f"Processing: Aborted."
         )
         console.echo(message=message, level=LogLevel.WARNING)
         return
 
-    processed_sessions = tuple(sorted(processed_sessions))  # Converts to a sorted tuple for reproducibility
-
-    # Acquires session data locks for all processed sessions
-    _acquire_session_lock(
-        manifest=manifest,
-        project=project,
-        sessions=processed_sessions,
-        server=server,
-        manager_id=manager_id,
-        force=force_lock,
-        keep_job_logs=keep_job_logs,
-    )
-
-    # Initializes a timer to delay repeated pipeline status checks
-    delay_timer = PrecisionTimer("s")
-
-    # Initializes tracker variables to track the processing progress
-    uncompleted_count = len(processing_pipelines)
-    successful_count = 0
-    failed_count = 0
-    aborted_count = 0
-
-    # Creates a progress bar to track the runtime progress of each processing pipeline.
-    with tqdm(total=len(processing_pipelines), desc=f"Executing processing pipelines", unit="pipeline") as pbar:
-        # Runs until all pipelines are completed (successfully or not)
-        while uncompleted_count > 0:
-            # At every loop cycle, checks the status of each running job
-            for pipeline in processing_pipelines:
-                # If the pipeline has been completed, skips to the next pipeline
-                if not pipeline.is_running:
-                    continue
-
-                # Resolves the state of the pipeline. If necessary, this can advance the processing stage of the
-                # pipeline and submit additional jobs to the server.
-                pipeline.runtime_cycle()
-
-                # If the pipeline status changed to one of the completed status codes, decrements the uncompleted
-                # pipeline count
-                if pipeline.pipeline_status == ProcessingStatus.FAILED:
-                    # The pipeline has encountered a runtime error and ended early
-                    failed_count += 1
-                    uncompleted_count -= 1
-                    pbar.update()
-                elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
-                    # The pipeline has successfully completed the runtime
-                    successful_count += 1
-                    uncompleted_count -= 1
-                    pbar.update()
-                elif pipeline.pipeline_status == ProcessingStatus.ABORTED:
-                    # A very rare case: the pipeline was aborted by another user. It is highly unrealistic to encounter
-                    # this case.
-                    aborted_count += 1
-                    uncompleted_count -= 1
-                    pbar.update()
-
-            # Reruns the pipeline resolution cycle every 30 seconds to avoid overwhelming the communication line.
-            delay_timer.delay_noblock(delay=30, allow_sleep=True)
-
-    # Ensures that the processing outcome message does not collide with the progress bar display
+    # Creates a visual separation between the final processing outcome message and any progress bars used during
+    # processing
     delay_timer.delay_noblock(delay=1, allow_sleep=True)
 
-    # Overall exit message
+    # Displays the overall processing summary message
     message = (
-        f"Project '{project}' data: Processed. Successfully completed {successful_count} pipelines, failed "
-        f"{failed_count} pipelines, and aborted {aborted_count} pipelines. The details about the processing outcome "
-        f"for each processed session are available below:"
+        f"Project '{project}' data: Processed. Successfully completed {total_successful} pipelines, "
+        f"failed {total_failed} pipelines, and aborted {total_aborted} pipelines. "
+        f"The details about the processing outcome for each processed session are available below:"
     )
     console.echo(message=message, level=LogLevel.INFO)
 
-    # Prints the outcome of each processing pipeline to the terminal.
-    for pipeline in processing_pipelines:
+    # Prints detailed results for all pipelines
+    for pipeline in all_pipelines:
         if pipeline.pipeline_status == ProcessingStatus.FAILED:
-            # The pipeline has encountered a runtime error and ended early
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Failed."
             )
             console.echo(message=message, level=LogLevel.ERROR)
         elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
             )
             console.echo(message=message, level=LogLevel.SUCCESS)
         elif pipeline.pipeline_status == ProcessingStatus.ABORTED:
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for the session '{pipeline.session}' "
+                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Aborted."
             )
             console.echo(message=message, level=LogLevel.WARNING)
 
-    # Releases session data locks for all processed sessions
-    _release_session_lock(
-        manifest=manifest,
-        project=project,
-        sessions=processed_sessions,
-        server=server,
-        manager_id=manager_id,
-        keep_job_logs=keep_job_logs,
-    )
+    # Release all session locks acquired during processing
+    if locked_sessions:
+        _release_session_lock(
+            manifest=manifest,
+            project=project,
+            sessions=tuple(sorted(locked_sessions)),
+            server=server,
+            manager_id=manager_id,
+            keep_job_logs=keep_job_logs,
+        )
 
     console.echo(message=f"Processing: Complete.", level=LogLevel.SUCCESS)
