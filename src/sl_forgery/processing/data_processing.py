@@ -820,8 +820,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=90,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 51  "
@@ -839,8 +839,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=60,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 62 "
@@ -858,8 +858,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=60,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 73 "
@@ -877,8 +877,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=10,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 1  "
@@ -896,8 +896,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=10,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 101  "
@@ -915,8 +915,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=60,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 152  "
@@ -934,8 +934,8 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=15,
-            time_limit=180,
+            ram_gb=60,
+            time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 203  "

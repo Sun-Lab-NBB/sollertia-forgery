@@ -1,21 +1,88 @@
 import re
 import copy
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import field, dataclass
 
 import yaml
-import numpy as np
 import polars as pl
 from dateutil import parser
-from . import ProjectManifest
+from ..utils import ProjectManifest
+from ..processing import fetch_remote_project_manifest
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
+from sl_shared_assets import SessionData, get_working_directory, SessionTypes
+
+# Stores the types of sessions that currently support dataset integration.
+_supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
 
 
-class TargetGroup(str, Enum):
+@dataclass()
+class AnimalDataset:
+    """Specifies the filtering parameters used to extract a subset of all data acquisition sessions performed by the
+    target animal for further analysis.
+
+    This class is used when building analysis datasets to determine which data to include in the dataset from that
+    specific animal. Multiple instances of this class are used as part of the DatasetManifest class.
+
+    Notes:
+        All sessions in the Sun lab use their timestamps stored as microseconds elapsed since UTC epoch onset as IDs.
+        The sessions are also identifiable based on the EDT / ETC timestamp for when the session was acquired, which
+        exactly matches the session ID, but is translated from UTC to EDT/ETC time zone.
+
+        Filtering hierarchy:
+            1. Sessions must be of the type specified in the DatasetManifest class instance that uses this class.
+            2. Sessions must belong to the target animal.
+            3. Sessions must not be in the `exclude` list.
+            4. Sessions can either be in the `include` list or fall within the `start_date` / `end_date` range.
+
+    """
+    animal: int = 11
+    """The ID of the animal for which to generate the dataset."""
+    start_date: str = "2025-07-01"
+    """The data slice start date. All sessions recorded on or after this date are included in the dataset."""
+    end_date: str = "2025-08-01"
+    """The data slice end date. All sessions recorded on or before this date are included in the dataset."""
+    include: list[str] = field(default_factory=lambda: ["2025-07-14-13-49-04-018601"])
+    """The sessions to include in the dataset even if they fall outside of the `start_date` / `end_date` range. This 
+    field must use the full session ID (name), rather than a shortened session date."""
+    exclude: list[str] = field(default_factory=lambda: ["2025-07-21-11-50-11-637172", "2025-07-22-12-54-42-553484"])
+    """The sessions to exclude from the dataset even if they fall within the `start_date` / `end_date` range. This 
+    field takes precedence over the `include` field if a session is included in both fields. This field must use the 
+    full session ID (name), rather than a shortened session date.
+    """
+
+
+@dataclass()
+class DatasetManifest(YamlConfig):
+    """Specifies the filtering parameters used to generate an analysis dataset for the target project."""
+    project: str
+    session_type: str | SessionTypes
+    animals: list[AnimalDataset]
+
+    def __post_init__(self):
+
+        # Ensures that the session_type argument is always stored as a SessionTypes instance.
+        self.session_type = SessionTypes(self.session_type)
+
+        # Prevents initializing the class to construct a dataset from an unsupported type of sessions.
+        if self.session_type not in _supported_sessions:
+            message = (
+                f"Unable to construct the dataset using the requested type of sessions {self.session_type} as it "
+                f"is not supported. Use one of the supported session types: {_supported_sessions}."
+            )
+            console.error(message=message, error=ValueError)
+
+
+def generate_dataset_precursor(sessions: tuple[SessionData,], output_directory: Path) -> None:
+
+    # Ensures that the dataset directory exists
+    ensure_directory_exists(output_directory)
+
+
+class TargetGroup(StrEnum):
     SINGLE_DAY = "single_day"
     MULTI_DAY = "multi_day"
 
@@ -28,6 +95,14 @@ class BehaviorData:
     experiment_data_path: Path = Path()
     guidance_data_path: Path = Path()
     lick_data_path: Path = Path()
+    mesoscope_frame_data_path: Path = Path()
+    screen_data_path: Path = Path()
+    system_state_data_path: Path = Path()
+    torque_data_path: Path = Path()
+    trial_data_path: Path = Path()
+    valve_data_path: Path = Path()
+    vr_cue_data_path: Path = Path()
+    vr_reward_zone_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path: Path = root_directory
@@ -168,37 +243,6 @@ class ProjectData(YamlConfig):
             a subset of sessions for analysis or processing. Although currently implemented as a static helper
             method, it could be refactored into the `ProjectManifest` class itself to avoid passing the manifest
             object explicitly.
-
-            Filtering hierarchy:
-                1. Sessions must match the allowed `animals` list.
-                2. Sessions in `sessions.include` are always kept, regardless of date range.
-                3. Sessions must be within the `sessions.start_date` / `sessions.end_date` range unless
-                   explicitly included in `sessions.include`.
-                4. Sessions in `sessions.exclude` are always removed, even if explicitly included.
-                5. If `include_lick_training` is false, remove all "lick training" sessions.
-                6. If `include_run_training` is false, remove all "run training" sessions.
-                7. Remove sessions where `dataset == 0` (not ready for integration).
-
-            The filter file must be in YAML format and contain the following keys. Below is an example:
-
-            ```yaml
-            animals:
-              - 11
-              - 15
-              - 16
-
-            sessions:
-              start_date: 2025-7-1
-              end_date: 2025-8-1
-              include:
-                - 2025-07-14-13-49-04-018601
-              exclude:
-                - 2025-07-21-11-50-11-637172
-                - 2025-07-22-12-54-42-553484
-
-            exclude_lick_training: true
-            exclude_run_training: true
-            ```
         """
         with filter_path.open() as f:
             filter = yaml.safe_load(f)
@@ -303,11 +347,11 @@ class ProjectData(YamlConfig):
 
         return session_name
 
-    def get_mouse(self, name: int | str):
+    def get_animal(self, name: int | str):
         for mouse in self.animals:
             if str(mouse.name) == str(name):
                 return mouse
-        console.error(f"Mouse {name} is not present.", error=ValueError)
+        console.error(f"Animal {name} is not present.", error=ValueError)
 
     def get_session(self, name: str):
-        return self.get_mouse(self.manifest.get_session_info(name)['animal'].item()).get_session(name)
+        return self.get_animal(self.manifest.get_session_info(name)['animal'].item()).get_session(name)
