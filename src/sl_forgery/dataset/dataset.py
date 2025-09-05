@@ -10,10 +10,9 @@ import yaml
 import polars as pl
 from dateutil import parser
 from ..utils import ProjectManifest
-from ..processing import fetch_remote_project_manifest
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
-from sl_shared_assets import SessionData, get_working_directory, SessionTypes
+from sl_shared_assets import SessionTypes
 
 # Stores the types of sessions that currently support dataset integration.
 _supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
@@ -57,10 +56,19 @@ class AnimalDataset:
 
 @dataclass()
 class DatasetManifest(YamlConfig):
-    """Specifies the filtering parameters used to generate an analysis dataset for the target project."""
+    """Specifies the filtering parameters used to generate an analysis dataset for the target project.
+
+    This class is used to build analysis datasets using the raw and processed data of the target project. Instances
+    of this class are used by the ProjectData class during the dataset assembly process.
+    """
     project: str
+    """The name of the project for which the dataset is generated."""
     session_type: str | SessionTypes
+    """The type of data acquisition sessions making up the dataset. At this time, datasets can only be created using 
+    sessions of the same type."""
     animals: list[AnimalDataset]
+    """The list of AnimalDataset instances that specify the session selection criteria for each animal to be included 
+    into the dataset."""
 
     def __post_init__(self):
 
@@ -75,11 +83,16 @@ class DatasetManifest(YamlConfig):
             )
             console.error(message=message, error=ValueError)
 
+    def save(self, file_path: Path) -> None:
+        """Saves instance data to the specified .yaml file."""
+        original = copy.deepcopy(self)
+        original.session_type = str(original.session_type)  # Converts session_type to string before saving.
+        self.to_yaml(file_path=file_path)
 
-def generate_dataset_precursor(sessions: tuple[SessionData,], output_directory: Path) -> None:
-
-    # Ensures that the dataset directory exists
-    ensure_directory_exists(output_directory)
+    @classmethod
+    def load(cls, file_path: Path) -> "DatasetManifest":
+        """Loads the data from the specified .yaml file and uses it to initialize and return the class instance."""
+        return cls.from_yaml(file_path=file_path)  # type: ignore
 
 
 class TargetGroup(StrEnum):

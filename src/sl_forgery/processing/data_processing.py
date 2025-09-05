@@ -810,6 +810,28 @@ def _construct_behavior_processing_pipeline(
     if system == AcquisitionSystems.MESOSCOPE_VR:
         # All processing jobs are intended to run in parallel with no cross-hierarchical dependencies.
 
+        # Runtime data processing job
+        job_name = f"{session}_runtime_processing"
+        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        job = Job(
+            job_name=job_name,
+            output_log=working_directory.joinpath(f"output.txt"),
+            error_log=working_directory.joinpath(f"errors.txt"),
+            working_directory=working_directory,
+            conda_environment="forge",
+            cpus_to_use=2,
+            ram_gb=4,
+            time_limit=90,
+        )
+        # Note, the tracker reset command is only included with the job that is issued first. Otherwise, multiple jobs
+        # resetting the tracker in rapid succession may overwrite legitimate job completion data written to the tracker
+        # file by the jobs that complete quickly.
+        job.add_command(
+            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 1  "
+            f"{tracker_command} runtime"
+        )
+        stage_1.append((job, working_directory))
+
         # Face camera processing job
         job_name = f"{session}_face_camera_processing"
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
@@ -825,7 +847,7 @@ def _construct_behavior_processing_pipeline(
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 51  "
-            f"{tracker_command} camera"
+            f"camera"
         )
         stage_1.append((job, working_directory))
 
@@ -844,7 +866,7 @@ def _construct_behavior_processing_pipeline(
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 62 "
-            f"{tracker_command} camera"
+            f"camera"
         )
         stage_1.append((job, working_directory))
 
@@ -863,26 +885,7 @@ def _construct_behavior_processing_pipeline(
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 73 "
-            f"{tracker_command} camera"
-        )
-        stage_1.append((job, working_directory))
-
-        # Runtime data processing job
-        job_name = f"{session}_runtime_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
-            working_directory=working_directory,
-            conda_environment="forge",
-            cpus_to_use=30,
-            ram_gb=10,
-            time_limit=90,
-        )
-        job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 1  "
-            f"{tracker_command} runtime"
+            f"camera"
         )
         stage_1.append((job, working_directory))
 
@@ -895,13 +898,13 @@ def _construct_behavior_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
-            cpus_to_use=30,
+            cpus_to_use=5,
             ram_gb=10,
             time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 101  "
-            f"{tracker_command} microcontroller"
+            f"microcontroller"
         )
         stage_1.append((job, working_directory))
 
@@ -914,13 +917,13 @@ def _construct_behavior_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
-            cpus_to_use=30,
+            cpus_to_use=15,
             ram_gb=60,
             time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 152  "
-            f"{tracker_command} microcontroller"
+            f"microcontroller"
         )
         stage_1.append((job, working_directory))
 
@@ -933,19 +936,19 @@ def _construct_behavior_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
-            cpus_to_use=30,
+            cpus_to_use=20,
             ram_gb=60,
             time_limit=90,
         )
         job.add_command(
             f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 203  "
-            f"{tracker_command} microcontroller"
+            f"microcontroller"
         )
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.processed_data_root).joinpath(
-        project, animal, session, "processed_data", TrackerFileNames.BEHAVIOR
+    remote_tracker_path = Path(server.raw_data_root).joinpath(
+        project, animal, session, "tracking_data", TrackerFileNames.BEHAVIOR
     )
     local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", TrackerFileNames.BEHAVIOR)
 
@@ -1169,8 +1172,8 @@ def _construct_suite2p_processing_pipeline(
     stage_3.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.processed_data_root).joinpath(
-        project, animal, session, "processed_data", TrackerFileNames.SUITE2P
+    remote_tracker_path = Path(server.raw_data_root).joinpath(
+        project, animal, session, "tracking_data", TrackerFileNames.SUITE2P
     )
     local_tracker_path = local_working_directory.joinpath(
         project, f"{session}_suite2p_processing", TrackerFileNames.SUITE2P
@@ -1600,7 +1603,7 @@ def process_project_data(
                 pipelines=tuple(processing_pipelines),
                 batch_size=processing_batch_size,
                 stage_name="data processing",
-                poll_delay=30,
+                poll_delay=10,
             )
             total_successful += success
             total_failed += failed

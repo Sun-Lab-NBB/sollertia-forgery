@@ -51,7 +51,7 @@ dependencies = [
     "PyQt6>=6,<7",
     "tqdm>=4,<5",
     "appdirs>=1,<2",
-    "sl-shared-assets>=5,<6",
+    "sl-shared-assets==6.0.0rc2",
     "plotly>=6,<7",
 ]
 
