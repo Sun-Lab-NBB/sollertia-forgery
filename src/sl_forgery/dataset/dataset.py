@@ -1,21 +1,23 @@
 import re
 import copy
-from enum import StrEnum
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import field, dataclass
+import polars as pl
 
 import yaml
-import polars as pl
 from dateutil import parser
 from ..utils import ProjectManifest
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
-from sl_shared_assets import SessionTypes
+from sl_shared_assets import SessionTypes, AcquisitionSystems
 
 # Stores the types of sessions that currently support dataset integration.
 _supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
+
+# Stores the acquisition systems that currently support dataset integration
+_supported_acquisition_systems = (AcquisitionSystems.MESOSCOPE_VR,)
 
 
 @dataclass()
@@ -66,14 +68,18 @@ class DatasetManifest(YamlConfig):
     session_type: str | SessionTypes
     """The type of data acquisition sessions making up the dataset. At this time, datasets can only be created using 
     sessions of the same type."""
+    acquisition_system: str | AcquisitionSystems
+    """The acquisition system that acquired the sessions making up the dataset. At this time, datasets can only be 
+    created using sessions acquired by the same acquisition system."""
     animals: list[AnimalDataset]
     """The list of AnimalDataset instances that specify the session selection criteria for each animal to be included 
     into the dataset."""
 
     def __post_init__(self):
 
-        # Ensures that the session_type argument is always stored as a SessionTypes instance.
+        # Ensures that enumeration-mapped arguments are stored as proper enumeration types.
         self.session_type = SessionTypes(self.session_type)
+        self.acquisition_system = AcquisitionSystems(self.acquisition_system)
 
         # Prevents initializing the class to construct a dataset from an unsupported type of sessions.
         if self.session_type not in _supported_sessions:
@@ -83,120 +89,45 @@ class DatasetManifest(YamlConfig):
             )
             console.error(message=message, error=ValueError)
 
+        # Prevents initializing the class to construct a dataset from sessions acquired by an unsupported acquisition
+        # system.
+        if self.acquisition_system not in _supported_acquisition_systems:
+            message = (
+                f"Unable to construct the dataset using the sessions acquired by the requested acquisition system "
+                f"{self.acquisition_system} as the system is not supported. Use sessions acquired by one of the "
+                f"supported acquisition systems: {_supported_acquisition_systems}."
+            )
+            console.error(message=message, error=ValueError)
+
     def save(self, file_path: Path) -> None:
         """Saves instance data to the specified .yaml file."""
         original = copy.deepcopy(self)
         original.session_type = str(original.session_type)  # Converts session_type to string before saving.
+        # Converts acquisition_system to string before saving.
+        original.acquisition_system = str(original.acquisition_system)
         self.to_yaml(file_path=file_path)
 
     @classmethod
     def load(cls, file_path: Path) -> "DatasetManifest":
         """Loads the data from the specified .yaml file and uses it to initialize and return the class instance."""
-        return cls.from_yaml(file_path=file_path)  # type: ignore
-
-
-class TargetGroup(StrEnum):
-    SINGLE_DAY = "single_day"
-    MULTI_DAY = "multi_day"
-
-
-@dataclass
-class BehaviorData:
-    root_path: Path = Path()
-    break_data_path: Path = Path()
-    encoder_data_path: Path = Path()
-    experiment_data_path: Path = Path()
-    guidance_data_path: Path = Path()
-    lick_data_path: Path = Path()
-    mesoscope_frame_data_path: Path = Path()
-    screen_data_path: Path = Path()
-    system_state_data_path: Path = Path()
-    torque_data_path: Path = Path()
-    trial_data_path: Path = Path()
-    valve_data_path: Path = Path()
-    vr_cue_data_path: Path = Path()
-    vr_reward_zone_path: Path = Path()
-
-    def resolve_paths(self, root_directory: Path) -> None:
-        self.root_path: Path = root_directory
-        self.encoder_data_path = root_directory / "encoder_data.feather"
-
-    def make_directories(self) -> None:
-        ensure_directory_exists(self.root_path)
-
-
-@dataclass
-class SingleDayData:
-    root_path: Path = Path()
-    fluorescence_path: Path = Path()
-    neuropil_fluorescence_path: Path = Path()
-    subtracted_fluorescence_path: Path = Path()
-    cell_classification_path: Path = Path()
-    spikes_path: Path = Path()
-    umap_embedding_path: Path = Path()
-
-    def resolve_paths(self, root_directory: Path) -> None:
-        self.root_path = root_directory
-        self.fluorescence_path = root_directory / "F.npy"
-        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
-        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
-        self.cell_classification_path = root_directory / "iscell.npy"
-        self.spikes_path = root_directory / "spks.npy"
-        self.umap_embedding_path = root_directory / "umap_embedding.npy"
-
-    def make_directories(self) -> None:
-        ensure_directory_exists(self.root_path)
-
-
-@dataclass
-class MultiDayData:
-    selection_name: str = ""
-    root_path: Path = Path()
-    fluorescence_path: Path = Path()
-    neuropil_fluorescence_path: Path = Path()
-    subtracted_fluorescence_path: Path = Path()
-    cell_classification_path: Path = Path()
-    spikes_path: Path = Path()
-    umap_embedding_path: Path = Path()
-
-    def resolve_paths(self, root_directory: Path) -> None:
-        self.root_path = root_directory
-        self.fluorescence_path = root_directory / "F.npy"
-        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
-        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
-        self.cell_classification_path = root_directory / "iscell.npy"
-        self.spikes_path = root_directory / "spks.npy"
-        self.umap_embedding_path = root_directory / "umap_embedding.npy"
-
-    def make_directories(self) -> None:
-        ensure_directory_exists(self.root_path)
+        return cls.from_yaml(file_path=file_path)
 
 
 @dataclass
 class ProcessedSessionData:
     name: str
-    root_path: Path
-    behavior_data: BehaviorData
-    single_day_data: SingleDayData
-    multi_day_data: list[MultiDayData]
+    """Stores the name of the session."""
+    directory_path: Path
+    """Stores the path to the session's directory under the broader dataset structure."""
+    metadata: pl.DataFrame = field(init=False)
+    """Stores the memory-mapped contents of the session's data file as a Polars dataframe."""
+    data: pl.DataFrame = field(init=False)
+    """Stores the memory-mapped contents of the session's data file as a Polars dataframe."""
 
-    def resolve_paths(self, root_directory: Path) -> None:
-        self.root_path = root_directory
-        if self.behavior_data is None:
-            self.behavior_data = BehaviorData()
-        self.behavior_data.resolve_paths(root_directory / "behavior")
-        if self.single_day_data is None:
-            self.single_day_data = SingleDayData()
-        self.single_day_data.resolve_paths(root_directory / "single_day")
-        if self.multi_day_data is None:
-            self.multi_day_data = [MultiDayData()]
-        self.multi_day_data.resolve_paths(root_directory / "multi_day")
-
-    def make_directories(self):
-        ensure_directory_exists(self.root_path)
-        self.behavior_data.make_directories()
-        self.single_day_data.make_directories()
-        self.multi_day_data.make_directories()
+    def __post_init__(self):
+        """Loads the session's data and metadata by memory-mapping their respective .feather files."""
+        # memory-maps the session's data
+        self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True, rechunk=True)
 
 
 @dataclass
@@ -344,8 +275,8 @@ class ProjectData(YamlConfig):
     @staticmethod
     def parse_session(session_name):
         """
-        If session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
-        return only 'MM-DD'. Otherwise return the session unchanged.
+        If the session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
+        return only 'MM-DD'. Otherwise, return the session unchanged.
         """
         pattern = r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d+$"
 
@@ -356,7 +287,7 @@ class ProjectData(YamlConfig):
                 dt = datetime.strptime(date_part, "%Y-%m-%d")
                 return dt.strftime("%m-%d")
             except ValueError:
-                pass  # If parsing fails, return original
+                pass  # If parsing fails, return the original
 
         return session_name
 
