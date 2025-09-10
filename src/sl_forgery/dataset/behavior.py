@@ -66,12 +66,12 @@ def _interpolate_data(
         return np.interp(seed_timestamps, timestamps, data)  # type: ignore
 
 
-def _assemble_mesoscope_data(df, single_day_path):
+def _assemble_mesoscope_data(df: pl.DataFrame, single_day_path: Path) -> pl.DataFrame:
     """ """
 
     # Queries the number of frames processed by suite2p. This is used to handle rare cases where the log has more
     # frame stamps than recorded frames, which usually happens if the user manually triggers mesoscope scanning (of any
-    # kind) outside expected time slot. Specifically, if the log has more frames than the suite2p data, the log is
+    # kind) outside the expected time slot. Specifically, if the log has more frames than the suite2p data, the log is
     # clipped at the front (since aberrant frames have to come from a period before the main experiment runtime)
     _, frames = np.load(single_day_path.joinpath("F.npy"), mmap_mode="r").shape
 
@@ -83,7 +83,7 @@ def _assemble_mesoscope_data(df, single_day_path):
     min_duration = 1000 / scanning_frequency - 20
     max_duration = 1000 / scanning_frequency + 20
 
-    # Sort by time to ensure correct order
+    # Sort by time to ensure the correct order
     df = df.sort("time_us")
 
     # Create pulse groups and find edges in one pass
@@ -120,7 +120,7 @@ def _assemble_mesoscope_data(df, single_day_path):
     df = df.with_columns([((pl.col("pulse_end") - pl.col("pulse_start")) / 1000).alias("duration_ms")])
 
     # Filter for valid duration pulses and get unique frames
-    frame_df = (
+    frame_df: pl.DataFrame = (
         df.filter(
             (pl.col("duration_ms") >= min_duration)
             & (pl.col("duration_ms") <= max_duration)
@@ -149,7 +149,7 @@ def _assemble_mesoscope_data(df, single_day_path):
     return frame_df
 
 
-def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, track_size_cm=240) -> None:
+def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, track_size_cm: int = 240) -> None:
     # Mesoscope Frame Data
     single_day_path = dataset_path.joinpath(session_data.animal_id, session_data.session_name, "single_day")
     frame_file_path = session_data.processed_data.behavior_data_path.joinpath(f"mesoscope_frame_data.feather")
@@ -221,6 +221,7 @@ def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, tra
     ensure_directory_exists(behavior_path)
     behavior_dataset.write_ipc(file=behavior_path.joinpath("behavior_at_frame.feather"), compression="lz4")
 
+def assemble_dataset()
 
 session = SessionData.load(session_path=Path("/media/Data/TestMice/6/2025-06-27-12-44-58-770644"))
 dataset = Path("/media/Data/TestMice/TM_06_pilot")

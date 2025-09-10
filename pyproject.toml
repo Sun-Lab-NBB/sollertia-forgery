@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metdata section. Provides the genral ID information about the project.
 [project]
 name = "sl-forgery"
-version = "1.0.0"
+version = "1.0.0rc1"
 description = "Provides tools for processing and managing the data acquired in the Sun (NeuroAI) lab."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -39,20 +39,20 @@ classifiers = [
 
 # Runtime project dependencies.
 dependencies = [
-    "ataraxis-time==3.0.0",
-    "ataraxis-base-utilities==3.1.0",
-    "ataraxis-data-structures==3.1.1",
-    "polars==1.32.0",
-    "pyarrow==21.0.0",
-    "numpy==2.2.6",
-    "numba==0.61.2",
-    "scipy==1.16.1",
-    "matplotlib==3.10.5",
-    "PyQt6==6.9.1",
-    "tqdm==4.67.1",
-    "appdirs==1.4.4",
-    "sl-shared-assets==4.0.1",
-    "plotly==6.2.0",
+    "ataraxis-time>=3,<4",
+    "ataraxis-base-utilities>=3.1.0,<4",
+    "ataraxis-data-structures>=3.1.1,<4",
+    "polars>=1,<2",
+    "pyarrow>=21,<22",
+    "numpy>=2,<3",
+    "numba>=0,<1",
+    "scipy>=1,<2",
+    "matplotlib>=3,<4",
+    "PyQt6>=6,<7",
+    "tqdm>=4,<5",
+    "appdirs>=1,<2",
+    "sl-shared-assets==6.0.0rc2",
+    "plotly>=6,<7",
     "umap-learn==0.5.9.post2",
 ]
 
@@ -66,24 +66,23 @@ Documentation = "https://sl-forgery-api-docs.netlify.app/"
 # Dependencies that support developing this project.
 dev = [
     # Tox
-    "tox==4.28.4",
-    "uv==0.8.8",
-    "tox-uv==1.27.0",
+    "tox>=4,<5",
+    "uv>=0,<1",
+    "tox-uv>=1,<2",
 
     # Development Automation
-    "ataraxis-automation==6.0.0",
+    "ataraxis-automation>=6,<7",
 
     # Types
-    "types-appdirs==1.4.3.5",
-    "types-tqdm==4.67.0.20250809",
+    "types-appdirs>=1,<2",
+    "types-tqdm>=4,<5",
 ]
 
 # Exports CLIs upon library installation into an environment
 [project.scripts]
-sl-set-working-directory = "sl_forgery.cli:designate_working_directory"
-sl-print-project-data = "sl_forgery.cli:print_project_manifest_data"
+sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
 
-# Specifies files that should not be included in the source-code distribution, but are also not part of gitignore.
+# Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
 exclude = [".github", "recipe"]
 
@@ -98,7 +97,7 @@ indent-width = 4          # Same as black, indents are 4 spaces
 target-version = "py313"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the source directory
 
-# Excludes 'service' .py files, such as the sphinx configuration file from linting.
+# Excludes 'service' .py files, such as the sphinx configuration file, from linting.
 extend-exclude = ["conf.py"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.

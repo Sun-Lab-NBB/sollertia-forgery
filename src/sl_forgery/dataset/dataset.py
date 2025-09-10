@@ -1,136 +1,184 @@
 import re
 import copy
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import field, dataclass
 
 import yaml
-import numpy as np
 import polars as pl
 from dateutil import parser
-from sl_shared_assets import ProjectManifest, get_system_configuration_data
+from ..utils import ProjectManifest
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
+from sl_shared_assets import SessionTypes
+
+# Stores the types of sessions that currently support dataset integration.
+_supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
 
 
-class TargetGroup(str, Enum):
+@dataclass()
+class AnimalDataset:
+    """Specifies the filtering parameters used to extract a subset of all data acquisition sessions performed by the
+    target animal for further analysis.
+
+    This class is used when building analysis datasets to determine which data to include in the dataset from that
+    specific animal. Multiple instances of this class are used as part of the DatasetManifest class.
+
+    Notes:
+        All sessions in the Sun lab use their timestamps stored as microseconds elapsed since UTC epoch onset as IDs.
+        The sessions are also identifiable based on the EDT / ETC timestamp for when the session was acquired, which
+        exactly matches the session ID, but is translated from UTC to EDT/ETC time zone.
+
+        Filtering hierarchy:
+            1. Sessions must be of the type specified in the DatasetManifest class instance that uses this class.
+            2. Sessions must belong to the target animal.
+            3. Sessions must not be in the `exclude` list.
+            4. Sessions can either be in the `include` list or fall within the `start_date` / `end_date` range.
+
+    """
+    animal: int = 11
+    """The ID of the animal for which to generate the dataset."""
+    start_date: str = "2025-07-01"
+    """The data slice start date. All sessions recorded on or after this date are included in the dataset."""
+    end_date: str = "2025-08-01"
+    """The data slice end date. All sessions recorded on or before this date are included in the dataset."""
+    include: list[str] = field(default_factory=lambda: ["2025-07-14-13-49-04-018601"])
+    """The sessions to include in the dataset even if they fall outside of the `start_date` / `end_date` range. This 
+    field must use the full session ID (name), rather than a shortened session date."""
+    exclude: list[str] = field(default_factory=lambda: ["2025-07-21-11-50-11-637172", "2025-07-22-12-54-42-553484"])
+    """The sessions to exclude from the dataset even if they fall within the `start_date` / `end_date` range. This 
+    field takes precedence over the `include` field if a session is included in both fields. This field must use the 
+    full session ID (name), rather than a shortened session date.
+    """
+
+
+@dataclass()
+class DatasetManifest(YamlConfig):
+    """Specifies the filtering parameters used to generate an analysis dataset for the target project.
+
+    This class is used to build analysis datasets using the raw and processed data of the target project. Instances
+    of this class are used by the ProjectData class during the dataset assembly process.
+    """
+    project: str
+    """The name of the project for which the dataset is generated."""
+    session_type: str | SessionTypes
+    """The type of data acquisition sessions making up the dataset. At this time, datasets can only be created using 
+    sessions of the same type."""
+    animals: list[AnimalDataset]
+    """The list of AnimalDataset instances that specify the session selection criteria for each animal to be included 
+    into the dataset."""
+
+    def __post_init__(self):
+
+        # Ensures that the session_type argument is always stored as a SessionTypes instance.
+        self.session_type = SessionTypes(self.session_type)
+
+        # Prevents initializing the class to construct a dataset from an unsupported type of sessions.
+        if self.session_type not in _supported_sessions:
+            message = (
+                f"Unable to construct the dataset using the requested type of sessions {self.session_type} as it "
+                f"is not supported. Use one of the supported session types: {_supported_sessions}."
+            )
+            console.error(message=message, error=ValueError)
+
+    def save(self, file_path: Path) -> None:
+        """Saves instance data to the specified .yaml file."""
+        original = copy.deepcopy(self)
+        original.session_type = str(original.session_type)  # Converts session_type to string before saving.
+        self.to_yaml(file_path=file_path)
+
+    @classmethod
+    def load(cls, file_path: Path) -> "DatasetManifest":
+        """Loads the data from the specified .yaml file and uses it to initialize and return the class instance."""
+        return cls.from_yaml(file_path=file_path)  # type: ignore
+
+
+class TargetGroup(StrEnum):
     SINGLE_DAY = "single_day"
     MULTI_DAY = "multi_day"
 
-class DataLoader:
-    @staticmethod
-    def load(path: Path):
-        match path.suffix:
-            case ".feather":
-                return pl.read_ipc(path, use_pyarrow=True)
-            case ".npy":
-                return np.load(file=path, mmap_mode="r")
-            case ".yaml" | ".yml":
-                with path.open() as yml_file:
-                    return yaml.safe_load(yml_file)
-        console.error(f"No built in method for loading {path.suffix} files", error=TypeError)
-    
-    @staticmethod
-    def save(path: Path, data):
-        match path.suffix:
-            case ".feather":
-                if not isinstance(data, pl.DataFrame):
-                    console.error("Expected a Polars DataFrame for saving to .feather", error=TypeError)
-                data.write_ipc(path)
-            case ".npy":
-                with path.open("wb") as f:   # exact filename you want
-                    np.save(f, data)
-            case ".yaml" | ".yml":
-                with path.open("w") as yml_file:
-                    yaml.safe_dump(data, yml_file)
-            case _:
-                console.error(f"No built in method for saving {path.suffix} files", error=TypeError)
 
 @dataclass
-class BehaviorData(DataLoader):
+class BehaviorData:
     root_path: Path = Path()
-    behavior_path: Path = Path()
+    break_data_path: Path = Path()
+    encoder_data_path: Path = Path()
+    experiment_data_path: Path = Path()
+    guidance_data_path: Path = Path()
+    lick_data_path: Path = Path()
+    mesoscope_frame_data_path: Path = Path()
+    screen_data_path: Path = Path()
+    system_state_data_path: Path = Path()
+    torque_data_path: Path = Path()
+    trial_data_path: Path = Path()
+    valve_data_path: Path = Path()
+    vr_cue_data_path: Path = Path()
+    vr_reward_zone_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path: Path = root_directory
-        self.behavior_path = root_directory / "behavior_at_frame.feather"
+        self.encoder_data_path = root_directory / "encoder_data.feather"
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
 
+
 @dataclass
-class SingleDayData(DataLoader):
+class SingleDayData:
     root_path: Path = Path()
-    F_path: Path = Path()
-    Fneu_path: Path = Path()
-    iscell_path: Path = Path()
-    ops_path: Path = Path()
-    single_data_s2p_configuration_path: Path = Path()
-    spks_path: Path = Path()
-    stat_path: Path = Path()
+    fluorescence_path: Path = Path()
+    neuropil_fluorescence_path: Path = Path()
+    subtracted_fluorescence_path: Path = Path()
+    cell_classification_path: Path = Path()
+    spikes_path: Path = Path()
     umap_embedding_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
-        self.F_path = root_directory / "F.npy"
-        self.Fneu_path = root_directory / "Fneu.npy"
-        self.iscell_path = root_directory / "iscell.npy"
-        self.ops_path = root_directory / "ops.npy"
-        self.single_day_s2p_configuration_path = root_directory / "single_day_s2p_configuration.yaml"
-        self.spks_path = root_directory / "spks.npy"
-        self.stat = root_directory / "stat.npy"
+        self.fluorescence_path = root_directory / "F.npy"
+        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
+        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
+        self.cell_classification_path = root_directory / "iscell.npy"
+        self.spikes_path = root_directory / "spks.npy"
         self.umap_embedding_path = root_directory / "umap_embedding.npy"
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
 
+
 @dataclass
-class MultiDayData(DataLoader):
+class MultiDayData:
+    selection_name: str = ""
     root_path: Path = Path()
-    backwards_deformed_cell_masks_path: Path = Path()
-    F_path: Path = Path()
-    Fneu_path: Path = Path()
-    ops_path: Path = Path()
-    original_images_path: Path = Path()
-    registered_masks_path: Path = Path()
-    session_multiday_masks_path: Path = Path()
-    shared_multiday_masks_path: Path = Path()
-    single_day_s2p_configuration_path: Path = Path()
-    spks_path: Path = Path()
-    template_cell_masks_path: Path = Path()
-    transformed_images_path: Path = Path()
-    unregistered_masks_path: Path = Path()
+    fluorescence_path: Path = Path()
+    neuropil_fluorescence_path: Path = Path()
+    subtracted_fluorescence_path: Path = Path()
+    cell_classification_path: Path = Path()
+    spikes_path: Path = Path()
     umap_embedding_path: Path = Path()
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
-        self.backwards_deformed_cell_masks_path = root_directory / "backwards_deformed_cell_masks.npy"
-        self.F_path = root_directory / "F.npy"
-        self.Fneu_path = root_directory / "Fneu.npy"
-        self.ops_path = root_directory / "ops.npy"
-        self.original_images_path = root_directory / "original_images.npy"
-        self.registered_masks_path = root_directory / "registered_masks.npy"
-        self.session_multiday_masks_path = root_directory / "session_multiday_masks.npy"
-        self.shared_multiday_masks_path = root_directory / "shared_multiday_masks.npy"
-        self.single_day_s2p_configuration_path = root_directory / "single_day_s2p_configuration.yaml"
-        self.spks_path = root_directory / "spks.npy"
-        self.template_cell_masks_path = root_directory / "template_cell_masks.npy"
-        self.transformed_images_path = root_directory / "transformed_images.npy"
-        self.unregistered_masks_path = root_directory / "unregistered_masks.npy"
+        self.fluorescence_path = root_directory / "F.npy"
+        self.neuropil_fluorescence_path = root_directory / "Fneu.npy"
+        self.subtracted_fluorescence_path = root_directory / "Fsub.npy"
+        self.cell_classification_path = root_directory / "iscell.npy"
+        self.spikes_path = root_directory / "spks.npy"
         self.umap_embedding_path = root_directory / "umap_embedding.npy"
 
     def make_directories(self) -> None:
         ensure_directory_exists(self.root_path)
+
 
 @dataclass
 class ProcessedSessionData:
     name: str
-    root_path: Path = Path()
-    behavior_data: BehaviorData = field(default_factory=BehaviorData)
-    single_day_data: SingleDayData = field(default_factory=SingleDayData)
-    multi_day_data: MultiDayData = field(default_factory=MultiDayData)
+    root_path: Path
+    behavior_data: BehaviorData
+    single_day_data: SingleDayData
+    multi_day_data: list[MultiDayData]
 
     def resolve_paths(self, root_directory: Path) -> None:
         self.root_path = root_directory
@@ -141,7 +189,7 @@ class ProcessedSessionData:
             self.single_day_data = SingleDayData()
         self.single_day_data.resolve_paths(root_directory / "single_day")
         if self.multi_day_data is None:
-            self.multi_day_data = MultiDayData()
+            self.multi_day_data = [MultiDayData()]
         self.multi_day_data.resolve_paths(root_directory / "multi_day")
 
     def make_directories(self):
@@ -149,8 +197,9 @@ class ProcessedSessionData:
         self.behavior_data.make_directories()
         self.single_day_data.make_directories()
         self.multi_day_data.make_directories()
-    
-@dataclass 
+
+
+@dataclass
 class AnimalData:
     name: int
     sessions: list[ProcessedSessionData]
@@ -160,7 +209,7 @@ class AnimalData:
         self.root_path = root_directory
         for session in self.sessions:
             session.resolve_paths(root_directory / session.name)
-    
+
     def make_directories(self):
         ensure_directory_exists(self.root_path)
         for session in self.sessions:
@@ -172,6 +221,7 @@ class AnimalData:
                 return session
         console.error(f"Session {name} is not present.", error=ValueError)
 
+
 @dataclass
 class ProjectData(YamlConfig):
     name: str
@@ -179,9 +229,8 @@ class ProjectData(YamlConfig):
     manifest: ProjectManifest
     root_path: Path = Path()
 
-
     # TODO Ivan I think this should really be part of the ProjectManifest class as opposed to a helper function here
-    # It is easier to leave it here for now because then I don't have to update sl_shared_assets but this function could 
+    # It is easier to leave it here for now because then I don't have to update sl_shared_assets but this function could
     # very easily be moved, you would just need to replace manifest with self
     @staticmethod
     def filter_manifest(manifest: ProjectManifest, filter_path: Path) -> None:
@@ -207,55 +256,23 @@ class ProjectData(YamlConfig):
             a subset of sessions for analysis or processing. Although currently implemented as a static helper
             method, it could be refactored into the `ProjectManifest` class itself to avoid passing the manifest
             object explicitly.
-
-            Filtering hierarchy:
-                1. Sessions must match the allowed `animals` list.
-                2. Sessions in `sessions.include` are always kept, regardless of date range.
-                3. Sessions must be within the `sessions.start_date` / `sessions.end_date` range unless
-                   explicitly included in `sessions.include`.
-                4. Sessions in `sessions.exclude` are always removed, even if explicitly included.
-                5. If `include_lick_training` is false, remove all "lick training" sessions.
-                6. If `include_run_training` is false, remove all "run training" sessions.
-                7. Remove sessions where `dataset == 0` (not ready for integration).
-
-            The filter file must be in YAML format and contain the following keys. Below is an example:
-
-            ```yaml
-            animals:
-              - 11
-              - 15
-              - 16
-
-            sessions:
-              start_date: 2025-7-1
-              end_date: 2025-8-1
-              include:
-                - 2025-07-14-13-49-04-018601
-              exclude:
-                - 2025-07-21-11-50-11-637172
-                - 2025-07-22-12-54-42-553484
-
-            exclude_lick_training: true
-            exclude_run_training: true
-            ```
         """
         with filter_path.open() as f:
             filter = yaml.safe_load(f)
-        
 
         df = manifest._data
 
         if "animals" in filter:
             df = df.filter(pl.col("animal").is_in(filter["animals"]))
-        
+
         if "sessions" in filter:
             include_lst = [] if "include" not in filter else filter["sessions"]["include"]
             if "start" in filter["sessions"]:
                 start = parser.parse(filter["sessions"]["start_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df._filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
+                df = df.filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
             if "end" in filter["sessions"]:
                 end = parser.parse(filter["sessions"]["end_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df._filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
+                df = df.filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
             if "exclude" in filter["sessions"]:
                 df = df.filter(~pl.col("session").is_in(filter["sessions"]["exclude"]))
 
@@ -266,23 +283,28 @@ class ProjectData(YamlConfig):
             df = df.filter(pl.col("type") != "run training")
 
         for session_name in df.filter(pl.col("dataset") == 0)["session"]:
-            console.echo(f"Excluded session {session_name}, which has data that is not ready to be integrated into the dataset.", level=LogLevel.WARNING)
+            console.echo(
+                f"Excluded session {session_name}, which has data that is not ready to be integrated into the dataset.",
+                level=LogLevel.WARNING)
         df = df.filter(pl.col("dataset") != 0)
 
         manifest._data = df
 
     @classmethod
-    def create(cls, project_name: str, working_directory: Path, manifest_path: Path, filter_path: Path) -> "ProjectData":
-        
+    def create(cls, project_name: str, working_directory: Path, manifest_path: Path,
+               filter_path: Path) -> "ProjectData":
+
         manifest = ProjectManifest(manifest_path)
         ProjectData.filter_manifest(manifest, filter_path)
 
         project_path = working_directory / project_name
-        animals = list(AnimalData(name=animal_id, sessions=list(ProcessedSessionData(name=session_name) for session_name in manifest.get_sessions(animal_id))) for animal_id in manifest.animals)
-        for animal in animals: 
+        animals = list(AnimalData(name=animal_id, sessions=list(
+            ProcessedSessionData(name=session_name) for session_name in manifest.get_sessions(animal_id))) for animal_id
+                       in manifest.animals)
+        for animal in animals:
             animal.resolve_paths(root_directory=project_path / str(animal.name))
             animal.make_directories()
-        
+
         instance = ProjectData(
             name=project_name,
             animals=animals,
@@ -293,11 +315,11 @@ class ProjectData(YamlConfig):
 
         instance._save()
         return instance
-        
+
     @classmethod
     def load(cls, working_directory: Path, yml_path: Path):
         instance: ProjectData = cls.from_yaml(yml_path)
-        
+
         instance.root_path = working_directory / instance.name
         for animal in instance.animals:
             animal.resolve_paths(root_directory=instance.root_path / str(animal.name))
@@ -316,8 +338,8 @@ class ProjectData(YamlConfig):
                 session.behavior_data = None
                 session.single_day_data = None
                 session.multi_day_data = None
-        
-        origin.to_yaml(file_path = self.root_path / "project_data.yaml")
+
+        origin.to_yaml(file_path=self.root_path / "project_data.yaml")
 
     @staticmethod
     def parse_session(session_name):
@@ -326,7 +348,7 @@ class ProjectData(YamlConfig):
         return only 'MM-DD'. Otherwise return the session unchanged.
         """
         pattern = r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d+$"
-        
+
         if isinstance(session_name, str) and re.match(pattern, session_name):
             try:
                 # Only use the date part before the first dash after YYYY-MM-DD
@@ -335,14 +357,14 @@ class ProjectData(YamlConfig):
                 return dt.strftime("%m-%d")
             except ValueError:
                 pass  # If parsing fails, return original
-        
+
         return session_name
-    
-    def get_mouse(self, name: int| str):
+
+    def get_animal(self, name: int | str):
         for mouse in self.animals:
             if str(mouse.name) == str(name):
                 return mouse
-        console.error(f"Mouse {name} is not present.", error=ValueError)
-    
+        console.error(f"Animal {name} is not present.", error=ValueError)
+
     def get_session(self, name: str):
-        return self.get_mouse(self.manifest.get_session_info(name)['animal'].item()).get_session(name)
+        return self.get_animal(self.manifest.get_session_info(name)['animal'].item()).get_session(name)

@@ -1,18 +1,10 @@
 """This module provides miscellaneous tools and assets used by all other packages of this library to support their
 runtime."""
 
-from .file_system import (
-    RemotePaths,
-    get_working_directory,
-    set_working_directory,
-    get_credentials_file_path,
-    get_remote_filesystem_paths,
-)
+from .manifest import ProjectManifest
+from .pipelines import get_remote_job_work_directory
 
 __all__ = [
-    "RemotePaths",
-    "get_credentials_file_path",
-    "get_remote_filesystem_paths",
-    "get_working_directory",
-    "set_working_directory",
+    "ProjectManifest",
+    "get_remote_job_work_directory",
 ]
