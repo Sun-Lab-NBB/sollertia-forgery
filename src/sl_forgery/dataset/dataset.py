@@ -128,6 +128,8 @@ class ProcessedSessionData:
         """Loads the session's data and metadata by memory-mapping their respective .feather files."""
         # memory-maps the session's data
         self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True, rechunk=True)
+        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True,
+                                rechunk=True)
 
 
 @dataclass

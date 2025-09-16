@@ -1077,7 +1077,7 @@ def _construct_suite2p_processing_pipeline(
             working_directory=working_directory,
             conda_environment="suite2p",
             cpus_to_use=1,
-            ram_gb=3,
+            ram_gb=10,
             time_limit=180,
         )
         # Note, reset tracker command is only issued as part of the binarization processing stage.
@@ -1119,7 +1119,7 @@ def _construct_suite2p_processing_pipeline(
             working_directory=working_directory,
             conda_environment="suite2p",
             cpus_to_use=1,
-            ram_gb=10,
+            ram_gb=30,
             time_limit=180,
         )
         job.add_command(
