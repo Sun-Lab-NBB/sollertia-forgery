@@ -120,7 +120,7 @@ class ProcessedSessionData:
     directory_path: Path
     """Stores the path to the session's directory under the broader dataset structure."""
     metadata: pl.DataFrame = field(init=False)
-    """Stores the memory-mapped contents of the session's data file as a Polars dataframe."""
+    """Stores the memory-mapped contents of the session's metadata file as a Polars dataframe."""
     data: pl.DataFrame = field(init=False)
     """Stores the memory-mapped contents of the session's data file as a Polars dataframe."""
 
@@ -128,7 +128,7 @@ class ProcessedSessionData:
         """Loads the session's data and metadata by memory-mapping their respective .feather files."""
         # memory-maps the session's data
         self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True, rechunk=True)
-        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True,
+        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("metadata"), use_pyarrow=True, memory_map=True,
                                 rechunk=True)
 
 
