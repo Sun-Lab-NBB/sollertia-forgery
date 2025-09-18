@@ -288,3 +288,8 @@ class ProjectManifest:
 
         # Extracts and returns the acquisition system used to acquire the session
         return str(df.select("system").item())
+
+    @property
+    def data(self) -> pl.DataFrame:
+        """Returns Polars DataFrame object wrapped by the class instance."""
+        return self._data

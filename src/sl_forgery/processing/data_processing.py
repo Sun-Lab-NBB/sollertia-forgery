@@ -1033,7 +1033,6 @@ def _construct_suite2p_processing_pipeline(
 
     # Extracts additional metadata about the processed session.
     animal = manifest.get_animal_for_session(session=session)
-    system = manifest.get_system_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
     remote_session_path = server.raw_data_root.joinpath(project, animal, session)
@@ -1065,51 +1064,29 @@ def _construct_suite2p_processing_pipeline(
     stage_2 = []
     stage_3 = []
 
-    if system == AcquisitionSystems.MESOSCOPE_VR:
+    # Stage 1: Binarization
+    job_name = f"{session}_ss2p_binarization"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="suite2p",
+        cpus_to_use=1,
+        ram_gb=10,
+        time_limit=180,
+    )
+    # Note, reset tracker command is only issued as part of the binarization processing stage.
+    job.add_command(
+        f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
+        f"-pdr {server.processed_data_root} -id {manager_id} {job_command} {tracker_command} -b"
+    )
+    stage_1.append((job, working_directory))
 
-        # Stage 1: Binarization
-        job_name = f"{session}_ss2p_binarization"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
-            working_directory=working_directory,
-            conda_environment="suite2p",
-            cpus_to_use=1,
-            ram_gb=10,
-            time_limit=180,
-        )
-        # Note, reset tracker command is only issued as part of the binarization processing stage.
-        job.add_command(
-            f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-            f"-pdr {server.processed_data_root} -id {manager_id} {job_command} {tracker_command} -b"
-        )
-        stage_1.append((job, working_directory))
-
-        # Stage 2: Plane processing
-        for plane in range(plane_count):
-            job_name = f"{session}_ss2p_plane_{plane}"
-            working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-            server.create_directory(remote_path=working_directory)
-            job = Job(
-                job_name=job_name,
-                output_log=working_directory.joinpath(f"output.txt"),
-                error_log=working_directory.joinpath(f"errors.txt"),
-                working_directory=working_directory,
-                conda_environment="suite2p",
-                cpus_to_use=30,
-                ram_gb=80,
-                time_limit=180,
-            )
-            job.add_command(
-                f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-                f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -p -t {plane}"
-            )
-            stage_2.append((job, working_directory))
-
-        # Stage 3: Combination
-        job_name = f"{session}_ss2p_combination"
+    # Stage 2: Plane processing
+    for plane in range(plane_count):
+        job_name = f"{session}_ss2p_plane_{plane}"
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         server.create_directory(remote_path=working_directory)
         job = Job(
@@ -1118,15 +1095,35 @@ def _construct_suite2p_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="suite2p",
-            cpus_to_use=1,
-            ram_gb=30,
+            cpus_to_use=30,
+            ram_gb=80,
             time_limit=180,
         )
         job.add_command(
             f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-            f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -c"
+            f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -p -t {plane}"
         )
-        stage_3.append((job, working_directory))
+        stage_2.append((job, working_directory))
+
+    # Stage 3: Combination
+    job_name = f"{session}_ss2p_combination"
+    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    server.create_directory(remote_path=working_directory)
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath(f"output.txt"),
+        error_log=working_directory.joinpath(f"errors.txt"),
+        working_directory=working_directory,
+        conda_environment="suite2p",
+        cpus_to_use=1,
+        ram_gb=30,
+        time_limit=180,
+    )
+    job.add_command(
+        f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
+        f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -c"
+    )
+    stage_3.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = Path(server.raw_data_root).joinpath(

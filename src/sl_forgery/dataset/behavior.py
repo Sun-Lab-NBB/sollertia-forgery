@@ -1,69 +1,9 @@
-from typing import Any
 from pathlib import Path
 
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
 from sl_shared_assets import SessionData
 from ataraxis_base_utilities import ensure_directory_exists
-
-
-def _interpolate_data(
-    timestamps: NDArray[np.uint64],
-    data: NDArray[np.integer[Any] | np.floating[Any]],
-    seed_timestamps: NDArray[np.uint64],
-    is_discrete: bool,
-) -> NDArray[np.signedinteger[Any] | np.unsignedinteger[Any] | np.floating[Any]]:
-    """Interpolates data values for the provided seed timestamps.
-
-    Primarily, this service function is used to time-align different datastreams from the same source. For example, the
-    Valve module generates both the solenoid valve data and the auditory tone data, which is generated at non-matching
-    rates. This function is used to equalize the data sampling rate between the two data streams, allowing to output
-    the data as .feather file.
-
-    Notes:
-        This function expects seed_timestamps and timestamps arrays to be monotonically increasing.
-
-        Discrete interpolated data will be returned as an array with the same datatype as the input data. Continuous
-        interpolated data will always use float_64 datatype.
-
-    Args:
-        timestamps: The one-dimensional numpy array that stores the timestamps for the source data.
-        data: The one-dimensional numpy array that stores the source datapoints.
-        seed_timestamps: The one-dimensional numpy array that stores the timestamps for which to interpolate the data
-            values.
-        is_discrete: A boolean flag that determines whether the data is discrete or continuous.
-
-    Returns:
-        A numpy NDArray with the same dimension as the seed_timestamps array that stores the interpolated data values.
-    """
-    # Discrete data
-    if is_discrete:
-        # Preallocates the output array
-        interpolated_data = np.empty(seed_timestamps.shape, dtype=data.dtype)
-
-        # Handles boundary conditions in bulk using boolean masks. All seed timestamps below the minimum source
-        # timestamp are statically set to data[0], and all seed timestamps above the maximum source timestamp are set
-        # to data[-1].
-        below_min = seed_timestamps < timestamps[0]
-        above_max = seed_timestamps > timestamps[-1]
-        within_bounds = ~(below_min | above_max)  # The portion of the seed that is within the source timestamp boundary
-
-        # Assigns out-of-bounds values in-bulk
-        interpolated_data[below_min] = data[0]
-        interpolated_data[above_max] = data[-1]
-
-        # Processes within-boundary timestamps by finding the last known certain value to the left of each seed
-        # timestamp and setting each seed timestamp to that value.
-        if np.any(within_bounds):
-            indices = np.searchsorted(timestamps, seed_timestamps[within_bounds], side="right") - 1
-            interpolated_data[within_bounds] = data[indices]
-
-        return interpolated_data
-
-    # Continuous data. Note, due to interpolation, continuous data is always returned using float_64 datatype.
-    else:
-        return np.interp(seed_timestamps, timestamps, data)  # type: ignore
 
 
 def _assemble_mesoscope_data(df: pl.DataFrame, single_day_path: Path) -> pl.DataFrame:
@@ -221,7 +161,24 @@ def generate_behavior_dataset(session_data: SessionData, dataset_path: Path, tra
     ensure_directory_exists(behavior_path)
     behavior_dataset.write_ipc(file=behavior_path.joinpath("behavior_at_frame.feather"), compression="lz4")
 
-def assemble_dataset()
+
+def collect_behavior_data(source_root: Path, destination_root: Path) -> None:
+    combined_path = source_root / "combined"
+
+    files = {
+        combined_path / "F.npy",
+        combined_path / "Fneu.npy",
+        combined_path / "Fsub.npy",
+        combined_path / "iscell.npy",
+        combined_path / "ops.npy",
+        combined_path / "spks.npy",
+        combined_path / "stat.npy",
+        source_root / "single_day_ss2p_configuration.yaml"
+    }
+
+    for file in files:
+        sh.copy2(src=file, dst=destination_root.joinpath(file.name))
+
 
 session = SessionData.load(session_path=Path("/media/Data/TestMice/6/2025-06-27-12-44-58-770644"))
 dataset = Path("/media/Data/TestMice/TM_06_pilot")

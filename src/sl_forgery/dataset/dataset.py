@@ -6,18 +6,28 @@ from zoneinfo import ZoneInfo
 from dataclasses import field, dataclass
 import polars as pl
 
-import yaml
 from dateutil import parser
 from ..utils import ProjectManifest
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
 from sl_shared_assets import SessionTypes, AcquisitionSystems
+from enum import IntEnum
 
 # Stores the types of sessions that currently support dataset integration.
 _supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
 
 # Stores the acquisition systems that currently support dataset integration
 _supported_acquisition_systems = (AcquisitionSystems.MESOSCOPE_VR,)
+
+
+class DatasetTypes(IntEnum):
+    """Stores the types of datasets currently supported by the Sun lab's data processing workflow."""
+    MESOSCOPE_VR_LICK_TRAINING = 1
+    """Mesoscope-VR acquisition system + Lick training session type."""
+    MESOSCOPE_VR_RUN_TRAINING = 2
+    """Mesoscope-VR acquisition system + Run training session type."""
+    MESOSCOPE_VR_EXPERIMENT = 3
+    """Mesoscope-VR acquisition system + Mesoscope Experiment session type."""
 
 
 @dataclass()
@@ -46,10 +56,10 @@ class AnimalDataset:
     """The data slice start date. All sessions recorded on or after this date are included in the dataset."""
     end_date: str = "2025-08-01"
     """The data slice end date. All sessions recorded on or before this date are included in the dataset."""
-    include: list[str] = field(default_factory=lambda: ["2025-07-14-13-49-04-018601"])
+    include: list[str] = field(default_factory=lambda: [])
     """The sessions to include in the dataset even if they fall outside of the `start_date` / `end_date` range. This 
     field must use the full session ID (name), rather than a shortened session date."""
-    exclude: list[str] = field(default_factory=lambda: ["2025-07-21-11-50-11-637172", "2025-07-22-12-54-42-553484"])
+    exclude: list[str] = field(default_factory=lambda: [])
     """The sessions to exclude from the dataset even if they fall within the `start_date` / `end_date` range. This 
     field takes precedence over the `include` field if a session is included in both fields. This field must use the 
     full session ID (name), rather than a shortened session date.
@@ -63,6 +73,8 @@ class DatasetManifest(YamlConfig):
     This class is used to build analysis datasets using the raw and processed data of the target project. Instances
     of this class are used by the ProjectData class during the dataset assembly process.
     """
+    name: str
+    """The name of the dataset."""
     project: str
     """The name of the project for which the dataset is generated."""
     session_type: str | SessionTypes
@@ -105,7 +117,7 @@ class DatasetManifest(YamlConfig):
         original.session_type = str(original.session_type)  # Converts session_type to string before saving.
         # Converts acquisition_system to string before saving.
         original.acquisition_system = str(original.acquisition_system)
-        self.to_yaml(file_path=file_path)
+        original.to_yaml(file_path=file_path)
 
     @classmethod
     def load(cls, file_path: Path) -> "DatasetManifest":
@@ -127,9 +139,10 @@ class ProcessedSessionData:
     def __post_init__(self):
         """Loads the session's data and metadata by memory-mapping their respective .feather files."""
         # memory-maps the session's data
-        self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True, rechunk=True)
-        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("metadata"), use_pyarrow=True, memory_map=True,
+        self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True,
                                 rechunk=True)
+        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("metadata"), use_pyarrow=True, memory_map=True,
+                                    rechunk=True)
 
 
 @dataclass
@@ -156,17 +169,121 @@ class AnimalData:
 
 
 @dataclass
-class ProjectData(YamlConfig):
-    name: str
-    animals: list[AnimalData]
-    manifest: ProjectManifest
-    root_path: Path = Path()
+class ProjectData:
 
-    # TODO Ivan I think this should really be part of the ProjectManifest class as opposed to a helper function here
-    # It is easier to leave it here for now because then I don't have to update sl_shared_assets but this function could
-    # very easily be moved, you would just need to replace manifest with self
+    def __init__(self, dataset_path: Path):
+        self._dataset_path: Path = dataset_path
+
+        # Resolves the path to the dataset's root directory
+        # The root dataset directory is resolved through the presence of the dataset.manifest file. It is expected
+        # that a single copy of the file is stored under the root directory of the dataset hierarchy.
+        manifest_candidates = [candidate for candidate in self._dataset_path.rglob("manifest.yaml")]
+        if len(manifest_candidates) != 1:
+            message = (
+                f"Unable to construct a ProjectData instance for the dataset stored under the path "
+                f"'{self._dataset_path}'. Expected a single manifest.yaml file found under the input path, but found "
+                f"a total of {len(manifest_candidates)} candidates."
+            )
+            console.error(message, error=ValueError)
+            raise ValueError(message)  # Fallback to appease mypy, should not be reachable
+
+        # Loads the dataset's manifest data as a DatasetManifest instance
+        self._manifest: DatasetManifest = DatasetManifest.load(file_path=manifest_candidates.pop())
+
     @staticmethod
-    def filter_manifest(manifest: ProjectManifest, filter_path: Path) -> None:
+    def create(output_directory: Path, dataset_name: str, project: str, dataset_type: int | DatasetTypes) -> None:
+        """Creates the requested project dataset hierarchy and a precursor manifest.feather file used to select the
+        data for the dataset integration.
+
+        This function sets up the root dataset directory at the specified path and partially configures the manifest
+        file for the dataset. It functions as the initial access point for creating all analysis datasets in the Sun
+        lab.
+
+        Notes:
+            It is expected that the user finishes the dataset creation process by editing the manifest file and calling
+            the 'forge' method of the initialized dataset's ProjectData instance.
+
+        Args:
+            output_directory: The directory where to create the dataset hierarchy.
+            dataset_name: The name of the dataset.
+            project: The name of the project for which the dataset is created.
+            dataset_type: A DatasetTypes enumeration members that specifies the type of the dataset.
+        """
+
+        # Ensures that the dataset type is one of the supported types.
+        dataset_type = DatasetTypes(dataset_type)
+
+        # Resolves and creates the dataset directory
+        dataset_path = output_directory / dataset_name
+        ensure_directory_exists(dataset_path)
+
+        # Depending on the requested dataset type, creates a precursor dataset manifest file.
+        if dataset_type == DatasetTypes.MESOSCOPE_VR_LICK_TRAINING:
+            precursor_manifest = DatasetManifest(
+                name=dataset_name,
+                project=project,
+                session_type=SessionTypes.LICK_TRAINING,
+                acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+                animals=[AnimalDataset()]
+            )
+        elif dataset_type == DatasetTypes.MESOSCOPE_VR_RUN_TRAINING:
+            precursor_manifest = DatasetManifest(
+                name=dataset_name,
+                project=project,
+                session_type=SessionTypes.RUN_TRAINING,
+                acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+                animals=[AnimalDataset()]
+            )
+        elif dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
+            precursor_manifest = DatasetManifest(
+                name=dataset_name,
+                project=project,
+                session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+                acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+                animals=[AnimalDataset()]
+            )
+        else:
+            message = (
+                f"Unable to create the dataset '{dataset_name}' for the project {project}. Unsupported dataset "
+                f"type code {dataset_type} encountered when resolving the precursor dataset manifest file. Use one "
+                f"of the supported members of the DatasetTypes enumeration."
+            )
+            console.error(message, error=ValueError)
+            raise ValueError(message)  # Fallback to appease mypy, should not be reachable
+
+        manifest_path = dataset_path / "manifest.yaml"
+        precursor_manifest.save(file_path=manifest_path)
+
+    @staticmethod
+    def _parse_date_boundary(date_string: str, is_end_date: bool = False) -> datetime:
+        """Parses the input date and time string preserving any time information provided.
+
+        Args:
+            date_string: A Date and Time string in various formats (YYYY-MM-DD or with time).
+            is_end_date: If True and only the date data is provided in the string, sets the time component to end of
+                day.
+
+        Returns:
+            The Timezone-aware datetime object in America/New_York timezone constructed from the input string's data.
+        """
+        parsed = parser.parse(date_string)
+
+        # Checks if only the date was provided (parser defaults to midnight)
+        date_only = "T" not in date_string and " " not in date_string and ":" not in date_string
+
+        if date_only and is_end_date:
+            # Makes end dates inclusive of the entire day
+            parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+        # Ensures timezone awareness
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo("America/New_York"))
+        else:
+            parsed = parsed.astimezone(ZoneInfo("America/New_York"))
+
+        return parsed
+
+    def forge(self, project_manifest: ProjectManifest) -> None:
         """Filters the project manifest's session data according to rules defined in a YAML filter file.
 
         This function reads the filtering criteria from the specified filter file and applies them to the
@@ -175,14 +292,7 @@ class ProjectData(YamlConfig):
         excluded because they are not yet ready for integration (`dataset == 0`) will trigger a warning message.
 
         Args:
-            manifest: The project manifest object whose `_data` attribute (a Polars DataFrame) will be updated.
-            filter_path: Path to a YAML file specifying filtering rules. The file must include:
-                - `animals`: list of allowed animal IDs.
-                - `sessions.start_date` / `sessions.end_date`: date range for allowed sessions.
-                - `sessions.include`: list of explicitly included session IDs.
-                - `sessions.exclude`: list of explicitly excluded session IDs.
-                - `include_lick_training` (bool): whether to keep "lick training" sessions.
-                - `include_run_training` (bool): whether to keep "run training" sessions.
+            project_manifest: The initialized ProjectManifest instance for the dataset's project.
 
         Notes:
             This method modifies the `manifest._data` attribute directly and is intended for use when curating
@@ -190,89 +300,121 @@ class ProjectData(YamlConfig):
             method, it could be refactored into the `ProjectManifest` class itself to avoid passing the manifest
             object explicitly.
         """
-        with filter_path.open() as f:
-            filter = yaml.safe_load(f)
 
-        df = manifest._data
+        # Initializes the result dictionary
+        result = {}
 
-        if "animals" in filter:
-            df = df.filter(pl.col("animal").is_in(filter["animals"]))
+        # Extracts the project's Polars DataFrame from the manifest instance
+        df = project_manifest.data
 
-        if "sessions" in filter:
-            include_lst = [] if "include" not in filter else filter["sessions"]["include"]
-            if "start" in filter["sessions"]:
-                start = parser.parse(filter["sessions"]["start_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df.filter(pl.col("date") >= start | pl.col("session").is_in(include_lst))
-            if "end" in filter["sessions"]:
-                end = parser.parse(filter["sessions"]["end_date"]).astimezone(ZoneInfo("America/New_York"))
-                df = df.filter(pl.col("date") <= end | pl.col("session").is_in(include_lst))
-            if "exclude" in filter["sessions"]:
-                df = df.filter(~pl.col("session").is_in(filter["sessions"]["exclude"]))
-
-        if filter.get("exclude_lick_training"):
-            df = df.filter(pl.col("type") != "lick training")
-
-        if filter.get("exclude_run_training"):
-            df = df.filter(pl.col("type") != "run training")
-
-        for session_name in df.filter(pl.col("dataset") == 0)["session"]:
-            console.echo(
-                f"Excluded session {session_name}, which has data that is not ready to be integrated into the dataset.",
-                level=LogLevel.WARNING)
-        df = df.filter(pl.col("dataset") != 0)
-
-        manifest._data = df
-
-    @classmethod
-    def create(cls, project_name: str, working_directory: Path, manifest_path: Path,
-               filter_path: Path) -> "ProjectData":
-
-        manifest = ProjectManifest(manifest_path)
-        ProjectData.filter_manifest(manifest, filter_path)
-
-        project_path = working_directory / project_name
-        animals = list(AnimalData(name=animal_id, sessions=list(
-            ProcessedSessionData(name=session_name) for session_name in manifest.get_sessions(animal_id))) for animal_id
-                       in manifest.animals)
-        for animal in animals:
-            animal.resolve_paths(root_directory=project_path / str(animal.name))
-            animal.make_directories()
-
-        instance = ProjectData(
-            name=project_name,
-            animals=animals,
-            manifest=manifest
+        # Filters the dataframe by session type, acquisition system, and session data completeness status
+        df_filtered = df.filter(
+            (pl.col("type") == str(self._manifest.session_type)) &
+            (pl.col("system") == str(self._manifest.acquisition_system)) &
+            (pl.col("complete") == 1)
         )
 
-        instance.root_path = project_path
+        # Filters the dataframe for each animal specified in the dataset manifest file
+        for animal_dataset in self._manifest.animals:
+            animal_id = animal_dataset.animal
 
-        instance._save()
-        return instance
+            # Filters for the target animal ID
+            animal_df = df_filtered.filter(pl.col("animal") == animal_id)
 
-    @classmethod
-    def load(cls, working_directory: Path, yml_path: Path):
-        instance: ProjectData = cls.from_yaml(yml_path)
+            # If no sessions are found for the target animal, skips processing the animal
+            if animal_df.is_empty():
+                console.echo(
+                    message=(
+                        f"No complete sessions with type {self._manifest.session_type} and "
+                        f"acquisition system {self._manifest.acquisition_system} found for animal {animal_id}. "
+                        f"Excluding the animal from dataset integration..."
+                    ),
+                    level=LogLevel.WARNING
+                )
+                result[animal_id] = []
+                continue
 
-        instance.root_path = working_directory / instance.name
-        for animal in instance.animals:
-            animal.resolve_paths(root_directory=instance.root_path / str(animal.name))
-            animal.make_directories()
+            # Parses the session date and time range. Converts to EDT/EST timezone for comparison with session dates.
+            start_date = self._parse_date_boundary(date_string=animal_dataset.start_date, is_end_date=False)
+            end_date = self._parse_date_boundary(date_string=animal_dataset.end_date, is_end_date=True)
 
-        return instance
+            # Applies the date and time filter OR include list
+            # Sessions are included if they fall within the date range OR are in the include list
+            date_filter = (
+                    (pl.col("date") >= start_date) &
+                    (pl.col("date") <= end_date)
+            )
 
-    def _save(self) -> None:
-        origin = copy.deepcopy(self)
+            # Include list override
+            if animal_dataset.include:
+                include_filter = pl.col("session").is_in(animal_dataset.include)
+                combined_filter = date_filter | include_filter
+            else:
+                combined_filter = date_filter
 
-        origin.root_path = None
-        for animal in origin.animals:
-            animal.root_path = None
-            for session in animal.sessions:
-                session.root_path = None
-                session.behavior_data = None
-                session.single_day_data = None
-                session.multi_day_data = None
+            # Filters the animal dataset to only include the requested sessions
+            animal_df = animal_df.filter(combined_filter)
 
-        origin.to_yaml(file_path=self.root_path / "project_data.yaml")
+            # Applies exclusion list (takes precedence over everything)
+            if animal_dataset.exclude:
+                animal_df = animal_df.filter(~pl.col("session").is_in(animal_dataset.exclude))
+
+            # Additional filtering: excludes sessions not ready for dataset integration:
+
+            # These processing tasks must be carried out for all session types
+            readiness_conditions = [
+                pl.col("prepared") == 1,
+                pl.col("behavior") == 1
+            ]
+
+            # Mesoscope experiment also requires the 'suite2p' processing
+            if self._manifest.session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
+                readiness_conditions.append(pl.col("suite2p") == 1)
+
+            # Combines all readiness conditions (all must be true)
+            readiness_filter = pl.all_horizontal(readiness_conditions)
+
+            # Finds sessions that are NOT ready (inverts the filter)
+            excluded_sessions = animal_df.filter(~readiness_filter)
+
+            # If the session range contains sessions not ready for dataset integration, excludes them from processing.
+            if not excluded_sessions.is_empty():
+
+                # For each excluded session, determines the exclusion criteria to display them as a warning message.
+                for row in excluded_sessions.iter_rows(named=True):
+                    session_name = row["session"]
+                    missing_steps = []
+
+                    if row["prepared"] == 0:
+                        missing_steps.append("prepared")
+                    if row["behavior"] == 0:
+                        missing_steps.append("behavior")
+                    if self._manifest.session_type == SessionTypes.MESOSCOPE_EXPERIMENT and row["suite2p"] == 0:
+                        missing_steps.append("suite2p")
+
+                    console.echo(
+                        message=(
+                            f"The session {session_name} for animal {animal_id} is missing processing steps:"
+                            f" {', '.join(missing_steps)}. Excluding the session from dataset integration..."
+                        ),
+                        level=LogLevel.WARNING
+                    )
+            # Filters out the sessions that are not ready for the dataset integration
+            animal_df = animal_df.filter(readiness_filter)
+
+            # Extracts the session names that passed the filtering and appends them to the output list for the
+            # processed animal
+            session_names = animal_df["session"].sort().to_list()
+            result[animal_id] = session_names
+
+            # Notifies the user about the filtering outcome for each animal.
+            console.echo(
+                message=(
+                    f"Animal {animal_id}: Processed. Selected {len(session_names)} sessions "
+                    f"(date range: {animal_dataset.start_date} to {animal_dataset.end_date})."
+                ),
+                level=LogLevel.SUCCESS
+            )
 
     @staticmethod
     def parse_session(session_name):
