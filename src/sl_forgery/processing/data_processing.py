@@ -807,7 +807,7 @@ def _construct_behavior_processing_pipeline(
         project=project,
         session=session,
         server=server,
-        pipeline=ProcessingPipelines.PREPARATION,
+        pipeline=ProcessingPipelines.BEHAVIOR,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
             SessionTypes.LICK_TRAINING,
@@ -956,8 +956,8 @@ def _construct_behavior_processing_pipeline(
             error_log=working_directory.joinpath(f"errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
-            cpus_to_use=20,
-            ram_gb=60,
+            cpus_to_use=30,
+            ram_gb=130,
             time_limit=90,
         )
         job.add_command(
