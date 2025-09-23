@@ -957,7 +957,7 @@ def _construct_behavior_processing_pipeline(
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
-            ram_gb=180,
+            ram_gb=200,
             time_limit=90,
         )
         job.add_command(
