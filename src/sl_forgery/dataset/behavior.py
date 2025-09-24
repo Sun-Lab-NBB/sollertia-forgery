@@ -173,7 +173,7 @@ def collect_behavior_data(source_root: Path, destination_root: Path) -> None:
         combined_path / "ops.npy",
         combined_path / "spks.npy",
         combined_path / "stat.npy",
-        source_root / "single_day_ss2p_configuration.yaml"
+        source_root / "single_day_ss2p_configuration.yaml",
     }
 
     for file in files:

@@ -5,18 +5,17 @@ import numpy as np
 from scipy import stats
 import polars as pl
 from ataraxis_base_utilities import console
-
 from sl_forgery.utils.dataclass import ProjectData, TargetGroup, ProcessedSessionData
 
 track_length = 240
 cue_length = 30
 bin_size = 5
 
-class Processing:
 
+class Processing:
     @staticmethod
     def _create_grouped_df(distance_df, signal_df, start_indices):
-        '''
+        """
         Helper function to bin_data
 
         Args:
@@ -31,47 +30,45 @@ class Processing:
             The distance and signal arrays in each row are of the same length. These can be used for plotting signal over
             entire trials.
 
-        '''
+        """
         row_indices = distance_df["frame"]
-        group_ids = np.searchsorted(start_indices, row_indices, side='right')
+        group_ids = np.searchsorted(start_indices, row_indices, side="right")
 
         # Add group_id column to distance dataframe
-        distance_with_groups = distance_df.with_columns(
-            pl.Series("group_id", group_ids)
-        )
+        distance_with_groups = distance_df.with_columns(pl.Series("group_id", group_ids))
 
         # Add group_id column to signal dataframe
-        signal_with_groups = signal_df.with_columns(
-            pl.Series("group_id", group_ids)
-        )
+        signal_with_groups = signal_df.with_columns(pl.Series("group_id", group_ids))
 
         # Create the grouped result for distances
-        distance_grouped = distance_with_groups.group_by("group_id").agg([
-            pl.col("frame").first().alias("start_index"),
-            pl.col("traveled_distance_cm").alias("distance_array")]
-        ).sort("group_id")
+        distance_grouped = (
+            distance_with_groups.group_by("group_id")
+            .agg([pl.col("frame").first().alias("start_index"), pl.col("traveled_distance_cm").alias("distance_array")])
+            .sort("group_id")
+        )
 
         # Get the actual cell column names from the signal dataframe
         cell_columns = [col for col in signal_df.columns if col.startswith("cell_")]
 
         # Create the grouped result for signals
-        signal_grouped = signal_with_groups.group_by("group_id").agg([
-            *[pl.col(f"{col}").alias(f"{col}_signal") for col in cell_columns]
-        ]).sort("group_id")
+        signal_grouped = (
+            signal_with_groups.group_by("group_id")
+            .agg([*[pl.col(f"{col}").alias(f"{col}_signal") for col in cell_columns]])
+            .sort("group_id")
+        )
 
         # Combine the results
         result = pl.concat([distance_grouped, signal_grouped.drop("group_id")], how="horizontal")
 
         return result
 
-
-    #TODO: delete cache, it is only for developement and memory intensive
+    # TODO: delete cache, it is only for developement and memory intensive
     @staticmethod
     def bin_data(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
         Bins calcium imaging and behavioral data into fixed spatial bins along the track.
         This method identifies active periods, segments trials, normalizes distance traveled,
-        and averages cell activity within position bins to produce both trial-level and 
+        and averages cell activity within position bins to produce both trial-level and
         session-level statistics.
 
         Args:
@@ -87,7 +84,7 @@ class Processing:
 
         Returns:
             tuple[pl.DataFrame, list[np.ndarray], pl.DataFrame, pl.DataFrame]:
-                - session_avg_df (pl.DataFrame): Session-level averaged activity across bins 
+                - session_avg_df (pl.DataFrame): Session-level averaged activity across bins
                   for each cell, appended to trial averages.
                 - sess_sem (list[np.ndarray]): Standard error of the mean (SEM) per cell across trials.
                 - result (pl.DataFrame): Intermediate grouped DataFrame containing trial-level
@@ -96,17 +93,17 @@ class Processing:
 
         Notes:
             - Currently assumes fixed track length and bin size (hardcoded to 48 bins of 5 cm).
-            - Only includes frames where the system is in the active running state 
+            - Only includes frames where the system is in the active running state
               (system_state == 2).
-            - This function consolidates much of the original place field plotting code and 
+            - This function consolidates much of the original place field plotting code and
               should ideally be refactored into smaller, modular components.
         """
-        # I left the commmented print statements in this function because they give explanation of what each part is 
+        # I left the commmented print statements in this function because they give explanation of what each part is
         # doing which will be useful when extracting this code into smaller helper functions
         # print("getting data")
 
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
-        
+
         if isinstance(target_group, str):
             target_group = TargetGroup(target_group)
 
@@ -118,13 +115,10 @@ class Processing:
             case TargetGroup.MULTI_DAY:
                 data_loader = session_data.multi_day_data
 
-
         fluorescence = data_loader.load(data_loader.F_path)
         fluorescence_df = pl.DataFrame(fluorescence.T, schema=[f"cell_{i}" for i in range(fluorescence.shape[0])])
-        
 
         # print("got data")
-
 
         # print("grouping data")
         # 1st, choose only identified cells (currently suite2P is using 50% cutoff)
@@ -136,7 +130,7 @@ class Processing:
             # only keep columns (cell data) for positive id cells  ->  cell_mask=True
             # np.where returns a tuple containing a numpy array with the indices ([idx], )
             cell_fluorescence_df = fluorescence_df.select([fluorescence_df.columns[i] for i in np.where(cell_mask)[0]])
-        else: #target_group = "multi_day"
+        else:  # target_group = "multi_day"
             cell_fluorescence_df = fluorescence_df
 
         # then choose only frames where the system was in the active state i.e. mouse running
@@ -146,21 +140,20 @@ class Processing:
         active_behavior_df = behavior_df.filter(active_state_mask)
         active_fluorescence_df = cell_fluorescence_df.filter(active_state_mask)
 
-
         # TODO: 1. Check that the distance keeps increasing, otherwise there will be cell activity that is being compressed
         #  on the plot.  change this to group by trial
 
         # Find indices where the column value changes i.e. a new trial starts
-        trial_start = active_behavior_df.filter(
-            pl.col("trial") != pl.col("trial").shift(1)
-        )
-        #TODO ^^^could also just "group_by" the trial value column; easier?
+        trial_start = active_behavior_df.filter(pl.col("trial") != pl.col("trial").shift(1))
+        # TODO ^^^could also just "group_by" the trial value column; easier?
 
         trial_indices = trial_start["frame"].to_numpy()
 
-        result = Processing._create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "traveled_distance_cm"]),
-                                                    active_fluorescence_df,
-                                                    trial_indices)
+        result = Processing._create_grouped_df(
+            active_behavior_df.select(active_behavior_df["frame", "traveled_distance_cm"]),
+            active_fluorescence_df,
+            trial_indices,
+        )
 
         # print("grouped data")
         # print("normalizing data")
@@ -170,8 +163,6 @@ class Processing:
         #   this only works with set lengths
         # this wont work w my task, with variable track lengths
         n_bins = int(track_length / bin_size)  # here, 48 bins of 5 cm each
-
-
 
         # normalize arrays
         normalized_arrays = []
@@ -194,29 +185,31 @@ class Processing:
 
         # bin the normalized arrays
 
-        bin_edges = np.arange(0, track_length + bin_size, bin_size)  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
+        bin_edges = np.arange(
+            0, track_length + bin_size, bin_size
+        )  # [0, 5, 10, ..., 240]  --> again soft code for track_length + bin_size
         num_trials = len(normalized_arrays)
-        binned_arrays = np.empty((num_trials, 48), dtype=object)   #arrays of binned distance arrays for each trial (i.e. N
+        binned_arrays = np.empty(
+            (num_trials, 48), dtype=object
+        )  # arrays of binned distance arrays for each trial (i.e. N
         # trial arrays, each with 48 bins of
         # 5cm distances); make the 48 softcoded
-        bin_assignments = np.empty(num_trials, dtype=object)   # indexes of bins to use for cell activity
+        bin_assignments = np.empty(num_trials, dtype=object)  # indexes of bins to use for cell activity
 
         for e, arr in enumerate(normalized_arrays):
             # get the indices of the bins to which each value belongs in an array; use np.digitize
             bin_indices = np.digitize(arr, bin_edges, right=False) - 1
             # Handle values exactly equal to 240 (put in last bin)
             bin_indices = np.where(arr == track_length, 47, bin_indices)
-            bin_assignments[e] = bin_indices #use these in future df to split up cell activity
+            bin_assignments[e] = bin_indices  # use these in future df to split up cell activity
 
-
-        # Create the 5 cm arrays for each bin
+            # Create the 5 cm arrays for each bin
             for i in range(48):
                 mask = bin_indices == i
                 bin_values = arr[mask]
                 binned_arrays[e, i] = bin_values
 
-
-        #TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
+        # TODO -- not sure if binned_df is necessary; make reduced df from start?  OR skip all together and just use as a
         # series
 
         # CREATE NEW DF - bin the trials into 5 cm bins, and average each bin for signal along position
@@ -232,13 +225,12 @@ class Processing:
 
         # print("binned data")
         # print("averaging over trials")
-        
+
         # create dict for trial avgs
         trial_avgs = {}
 
         max_bins = n_bins  # this was calculated earlier
         for col in signal_columns:  # for each cell
-
             col_results = []
 
             # process all rows for this column
@@ -252,20 +244,19 @@ class Processing:
                 bin_counts = np.bincount(index_array, minlength=max_bins)  # find the length of the bin
 
                 # calculate averages by dividing signal sum by bin length
-                bin_averages = np.divide(bin_sums, bin_counts,
-                                        out=np.full_like(bin_sums, np.nan),
-                                        where=bin_counts != 0)
+                bin_averages = np.divide(
+                    bin_sums, bin_counts, out=np.full_like(bin_sums, np.nan), where=bin_counts != 0
+                )
 
                 col_results.append(bin_averages)
 
-            trial_avgs[f'{col}_binned'] = col_results
+            trial_avgs[f"{col}_binned"] = col_results
 
         trial_avg_df = pl.DataFrame(trial_avgs)
 
-
         # now create dict for the average signal for each cell in the session
         avg_data = {}
-        sess_sem = []       #had to make list bc I couldnt get both arrays into a single cell, there was some issue with
+        sess_sem = []  # had to make list bc I couldnt get both arrays into a single cell, there was some issue with
         # polars.  Should try to use polars arrays instead of numpy arrays, or just use arrays outside df
 
         for col in trial_avg_df.columns:
@@ -288,15 +279,15 @@ class Processing:
 
         # print("averaged over trials")
 
-        return session_avg_df, sess_sem, result, trial_avg_df    
-    
+        return session_avg_df, sess_sem, result, trial_avg_df
+
     # TODO: delete or reencaspulate compute_single_session_umap, currently nothing calls this function.
     @staticmethod
     def _filter_for_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
         """
         Filters neural and behavioral data before inputting into UMAP. Specifically,
-        selects frames where the system is active (system_state == 2) and the mouse 
-        is in experiment stage 2 or 4. The method also ensures the correct data source 
+        selects frames where the system is active (system_state == 2) and the mouse
+        is in experiment stage 2 or 4. The method also ensures the correct data source
         is chosen depending on whether the analysis is single-day or multi-day.
 
         Args:
@@ -307,14 +298,14 @@ class Processing:
                 - TargetGroup.MULTI_DAY (or "multi_day"):
                     Uses the multi-day data loader without additional cell filtering.
                 Passing any other string will raise a ValueError.
-            session_data (SessionData): Object containing references to 
+            session_data (SessionData): Object containing references to
                 behavior and spike data loaders and their associated file paths.
 
         Returns:
             tuple[pl.DataFrame, pl.DataFrame]:
-                - spikes_filtered (pl.DataFrame): Filtered spike activity, 
+                - spikes_filtered (pl.DataFrame): Filtered spike activity,
                   with each column representing a cell.
-                - behavior_filtered (pl.DataFrame): Filtered behavioral data 
+                - behavior_filtered (pl.DataFrame): Filtered behavioral data
                   corresponding to the same frames.
         """
         behavior_df = session_data.behavior_data.load(session_data.behavior_data.behavior_path)
@@ -333,7 +324,7 @@ class Processing:
         spikes = data_loader.load(data_loader.spks_path)
         spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
 
-        # Filter data 
+        # Filter data
 
         active_state_mask = (behavior_df["experiment_stage"].is_in([2, 4])) & (behavior_df["system_state"] == 2)
         behavior_filtered = behavior_df.filter(active_state_mask)
@@ -343,19 +334,19 @@ class Processing:
 
     @staticmethod
     def compute_single_session_umap(
-        target_group: str | TargetGroup, 
+        target_group: str | TargetGroup,
         session_data: ProcessedSessionData,
-        use_saved: bool=True,
-        save: bool=True,
-        alternate_path: Path | None = None
-        ):
+        use_saved: bool = True,
+        save: bool = True,
+        alternate_path: Path | None = None,
+    ):
         """
         Compute or load a UMAP embedding for a single session.
 
         This function filters neural and behavioral data for active states,
         computes a UMAP embedding if needed, and returns both the embedding
-        and the filtered behavior data. By default, it will reuse a saved 
-        embedding if one exists, and only save to disk when a new embedding 
+        and the filtered behavior data. By default, it will reuse a saved
+        embedding if one exists, and only save to disk when a new embedding
         is generated.
 
         Args:
@@ -368,14 +359,14 @@ class Processing:
                 Passing any other string will raise a ValueError.
             session_data (ProcessedSessionData): Container for the session's
                 spike and behavioral data, and associated DataLoader objects.
-            use_saved (bool, default=True): 
-                If True and an embedding file already exists, load the saved 
+            use_saved (bool, default=True):
+                If True and an embedding file already exists, load the saved
                 embedding instead of recomputing.
-            save (bool, default=True): 
-                If True, save the newly computed embedding to disk. Ignored 
+            save (bool, default=True):
+                If True, save the newly computed embedding to disk. Ignored
                 when loading an existing embedding (no re-save).
-            alternate_path (Path, optional): 
-                If provided, use this path instead of the default embedding 
+            alternate_path (Path, optional):
+                If provided, use this path instead of the default embedding
                 path defined in the DataLoader.
 
         Returns:
@@ -402,7 +393,7 @@ class Processing:
         spikes = data_loader.load(data_loader.spks_path)
         spikes_df = pl.DataFrame(spikes.T, schema=[f"cell_{i}" for i in range(spikes.shape[0])])
 
-        # Filter data 
+        # Filter data
         active_state_mask = (behavior_df["experiment_stage"].is_in([2, 4])) & (behavior_df["system_state"] == 2)
         behavior_filtered = behavior_df.filter(active_state_mask)
 
@@ -410,23 +401,19 @@ class Processing:
             embedding_path = alternate_path
         else:
             embedding_path = data_loader.umap_embedding_path
-        
+
         if use_saved and embedding_path.exists():
             embedding = data_loader.load(embedding_path)
         else:
             spikes_filtered = spikes_df.filter(active_state_mask)
-            spikes = spikes_filtered.to_numpy() # umap needs cells x frames
+            spikes = spikes_filtered.to_numpy()  # umap needs cells x frames
 
-            umap_data = umap.UMAP(
-                n_neighbors=100,
-                n_components=3,
-                min_dist=0.1,
-                n_jobs=-1,
-                metric='correlation'
-            ).fit(spikes)
+            umap_data = umap.UMAP(n_neighbors=100, n_components=3, min_dist=0.1, n_jobs=-1, metric="correlation").fit(
+                spikes
+            )
 
             embedding = umap_data.embedding_
-        
+
             if save:
                 data_loader.save(embedding_path, embedding)
 

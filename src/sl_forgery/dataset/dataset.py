@@ -1,17 +1,18 @@
 import re
 import copy
+from enum import IntEnum
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from dataclasses import field, dataclass
-import polars as pl
 
+import polars as pl
 from dateutil import parser
-from ..utils import ProjectManifest
+from sl_shared_assets import SessionTypes, AcquisitionSystems
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
-from sl_shared_assets import SessionTypes, AcquisitionSystems
-from enum import IntEnum
+
+from ..utils import ProjectManifest
 
 # Stores the types of sessions that currently support dataset integration.
 _supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)
@@ -22,6 +23,7 @@ _supported_acquisition_systems = (AcquisitionSystems.MESOSCOPE_VR,)
 
 class DatasetTypes(IntEnum):
     """Stores the types of datasets currently supported by the Sun lab's data processing workflow."""
+
     MESOSCOPE_VR_LICK_TRAINING = 1
     """Mesoscope-VR acquisition system + Lick training session type."""
     MESOSCOPE_VR_RUN_TRAINING = 2
@@ -50,6 +52,7 @@ class AnimalDataset:
             4. Sessions can either be in the `include` list or fall within the `start_date` / `end_date` range.
 
     """
+
     animal: int = 11
     """The ID of the animal for which to generate the dataset."""
     start_date: str = "2025-07-01"
@@ -73,6 +76,7 @@ class DatasetManifest(YamlConfig):
     This class is used to build analysis datasets using the raw and processed data of the target project. Instances
     of this class are used by the ProjectData class during the dataset assembly process.
     """
+
     name: str
     """The name of the dataset."""
     project: str
@@ -88,7 +92,6 @@ class DatasetManifest(YamlConfig):
     into the dataset."""
 
     def __post_init__(self):
-
         # Ensures that enumeration-mapped arguments are stored as proper enumeration types.
         self.session_type = SessionTypes(self.session_type)
         self.acquisition_system = AcquisitionSystems(self.acquisition_system)
@@ -127,68 +130,88 @@ class DatasetManifest(YamlConfig):
 
 @dataclass
 class ProcessedSessionData:
+    """Stores the processed data of a single data acquisition session."""
+
     name: str
     """Stores the name of the session."""
     directory_path: Path
-    """Stores the path to the session's directory under the broader dataset structure."""
-    metadata: pl.DataFrame = field(init=False)
-    """Stores the memory-mapped contents of the session's metadata file as a Polars dataframe."""
+    """Stores the path to the session's data directory under the broader dataset structure."""
     data: pl.DataFrame = field(init=False)
     """Stores the memory-mapped contents of the session's data file as a Polars dataframe."""
 
     def __post_init__(self):
-        """Loads the session's data and metadata by memory-mapping their respective .feather files."""
-        # memory-maps the session's data
-        self.data = pl.read_ipc(source=self.directory_path.joinpath("data"), use_pyarrow=True, memory_map=True,
-                                rechunk=True)
-        self.metadata = pl.read_ipc(source=self.directory_path.joinpath("metadata"), use_pyarrow=True, memory_map=True,
-                                    rechunk=True)
+        """Loads the session's data by memory-mapping its data.feather file."""
+        self.data = pl.read_ipc(
+            source=self.directory_path.joinpath("data.feather"), use_pyarrow=True, memory_map=True, rechunk=True
+        )
 
 
 @dataclass
 class AnimalData:
     name: int
-    sessions: list[ProcessedSessionData]
-    root_path: Path = Path()
+    """Stores the unique identifier (name) of the animal."""
+    directory_path: Path
+    """Stores the path to the animal's data directory under the broader dataset structure."""
+    sessions: dict[str, ProcessedSessionData]
+    """Stores the processed data for each of the data acquisition sessions performed by the animal. The data for each 
+    session is queryable by session name."""
 
-    def resolve_paths(self, root_directory: Path) -> None:
-        self.root_path = root_directory
-        for session in self.sessions:
-            session.resolve_paths(root_directory / session.name)
-
-    def make_directories(self):
-        ensure_directory_exists(self.root_path)
-        for session in self.sessions:
-            session.make_directories()
-
-    def get_session(self, name: str):
-        for session in self.sessions:
-            if session.name == name:
-                return session
-        console.error(f"Session {name} is not present.", error=ValueError)
+    def get_session_data(self, name: str):
+        if name in self.sessions:
+            return self.sessions[name]
+        else:
+            message = (
+                f"Unable to retrieve the processed session data for the session {name}. The animal's data does not "
+                f"contain a session with this name."
+            )
+            console.error(message, error=ValueError)
+            # Fallback to appease mypy, should not be reachable
+            raise ValueError(message)  # pragma: no cover
 
 
 @dataclass
 class ProjectData:
-
     def __init__(self, dataset_path: Path):
-        self._dataset_path: Path = dataset_path
-
         # Resolves the path to the dataset's root directory
         # The root dataset directory is resolved through the presence of the dataset.manifest file. It is expected
         # that a single copy of the file is stored under the root directory of the dataset hierarchy.
-        manifest_candidates = [candidate for candidate in self._dataset_path.rglob("manifest.yaml")]
+        manifest_candidates = [candidate for candidate in dataset_path.rglob("manifest.yaml")]
         if len(manifest_candidates) != 1:
             message = (
-                f"Unable to construct a ProjectData instance for the dataset stored under the path "
-                f"'{self._dataset_path}'. Expected a single manifest.yaml file found under the input path, but found "
-                f"a total of {len(manifest_candidates)} candidates."
+                f"Unable to construct a ProjectData instance for the dataset stored under the path '{dataset_path}'. "
+                f"Expected a single manifest.yaml file found under the input path, but found a total of "
+                f"{len(manifest_candidates)} candidates."
             )
             console.error(message, error=ValueError)
-            raise ValueError(message)  # Fallback to appease mypy, should not be reachable
+            # Fallback to appease mypy, should not be reachable
+            raise ValueError(message)  # pragma: no cover
+
+        # Extracts the (only) manifest candidate path
+        manifest_path = manifest_candidates.pop()
+
+        # The parent of the manifest file path is the root dataset directory
+        self._dataset_path: Path = manifest_path.parent
 
         # Loads the dataset's manifest data as a DatasetManifest instance
-        self._manifest: DatasetManifest = DatasetManifest.load(file_path=manifest_candidates.pop())
+        self._manifest: DatasetManifest = DatasetManifest.load(file_path=manifest_path)
+
+        # If the dataset contains a metadata file, loads the metadata as a Polars DataFrame. Otherwise, initializes
+        # the metadata attribute to None.
+        metadata_path = dataset_path.joinpath("metadata.feather")
+        self._metadata: pl.DataFrame | None = None
+        if metadata_path.exists():
+            self._metadata = pl.read_ipc(source=metadata_path, use_pyarrow=True, memory_map=True, rechunk=True)
+
+        self._animals: dict[int, AnimalData] = {}
+        for animal in [candidate for candidate in self._dataset_path.glob("") if candidate.is_dir()]:
+            session_data: dict[str, ProcessedSessionData] = {}
+            for session in animal.rglob("data.feather"):
+                session_data[session.parent.stem] = ProcessedSessionData(
+                    name=session.parent.stem, directory_path=session
+                )
+            self._animals[int(animal.stem)] = AnimalData(
+                name=int(animal.stem), directory_path=animal, sessions=session_data
+            )
 
     @staticmethod
     def create(output_directory: Path, dataset_name: str, project: str, dataset_type: int | DatasetTypes) -> None:
@@ -207,7 +230,7 @@ class ProjectData:
             output_directory: The directory where to create the dataset hierarchy.
             dataset_name: The name of the dataset.
             project: The name of the project for which the dataset is created.
-            dataset_type: A DatasetTypes enumeration members that specifies the type of the dataset.
+            dataset_type: A DatasetTypes enumeration member that specifies the type of the dataset.
         """
 
         # Ensures that the dataset type is one of the supported types.
@@ -224,7 +247,7 @@ class ProjectData:
                 project=project,
                 session_type=SessionTypes.LICK_TRAINING,
                 acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
-                animals=[AnimalDataset()]
+                animals=[AnimalDataset()],
             )
         elif dataset_type == DatasetTypes.MESOSCOPE_VR_RUN_TRAINING:
             precursor_manifest = DatasetManifest(
@@ -232,7 +255,7 @@ class ProjectData:
                 project=project,
                 session_type=SessionTypes.RUN_TRAINING,
                 acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
-                animals=[AnimalDataset()]
+                animals=[AnimalDataset()],
             )
         elif dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
             precursor_manifest = DatasetManifest(
@@ -240,7 +263,7 @@ class ProjectData:
                 project=project,
                 session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
                 acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
-                animals=[AnimalDataset()]
+                animals=[AnimalDataset()],
             )
         else:
             message = (
@@ -309,9 +332,9 @@ class ProjectData:
 
         # Filters the dataframe by session type, acquisition system, and session data completeness status
         df_filtered = df.filter(
-            (pl.col("type") == str(self._manifest.session_type)) &
-            (pl.col("system") == str(self._manifest.acquisition_system)) &
-            (pl.col("complete") == 1)
+            (pl.col("type") == str(self._manifest.session_type))
+            & (pl.col("system") == str(self._manifest.acquisition_system))
+            & (pl.col("complete") == 1)
         )
 
         # Filters the dataframe for each animal specified in the dataset manifest file
@@ -329,7 +352,7 @@ class ProjectData:
                         f"acquisition system {self._manifest.acquisition_system} found for animal {animal_id}. "
                         f"Excluding the animal from dataset integration..."
                     ),
-                    level=LogLevel.WARNING
+                    level=LogLevel.WARNING,
                 )
                 result[animal_id] = []
                 continue
@@ -340,10 +363,7 @@ class ProjectData:
 
             # Applies the date and time filter OR include list
             # Sessions are included if they fall within the date range OR are in the include list
-            date_filter = (
-                    (pl.col("date") >= start_date) &
-                    (pl.col("date") <= end_date)
-            )
+            date_filter = (pl.col("date") >= start_date) & (pl.col("date") <= end_date)
 
             # Include list override
             if animal_dataset.include:
@@ -362,10 +382,7 @@ class ProjectData:
             # Additional filtering: excludes sessions not ready for dataset integration:
 
             # These processing tasks must be carried out for all session types
-            readiness_conditions = [
-                pl.col("prepared") == 1,
-                pl.col("behavior") == 1
-            ]
+            readiness_conditions = [pl.col("prepared") == 1, pl.col("behavior") == 1]
 
             # Mesoscope experiment also requires the 'suite2p' processing
             if self._manifest.session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
@@ -379,7 +396,6 @@ class ProjectData:
 
             # If the session range contains sessions not ready for dataset integration, excludes them from processing.
             if not excluded_sessions.is_empty():
-
                 # For each excluded session, determines the exclusion criteria to display them as a warning message.
                 for row in excluded_sessions.iter_rows(named=True):
                     session_name = row["session"]
@@ -397,7 +413,7 @@ class ProjectData:
                             f"The session {session_name} for animal {animal_id} is missing processing steps:"
                             f" {', '.join(missing_steps)}. Excluding the session from dataset integration..."
                         ),
-                        level=LogLevel.WARNING
+                        level=LogLevel.WARNING,
                     )
             # Filters out the sessions that are not ready for the dataset integration
             animal_df = animal_df.filter(readiness_filter)
@@ -413,7 +429,7 @@ class ProjectData:
                     f"Animal {animal_id}: Processed. Selected {len(session_names)} sessions "
                     f"(date range: {animal_dataset.start_date} to {animal_dataset.end_date})."
                 ),
-                level=LogLevel.SUCCESS
+                level=LogLevel.SUCCESS,
             )
 
     @staticmethod
@@ -434,12 +450,3 @@ class ProjectData:
                 pass  # If parsing fails, return the original
 
         return session_name
-
-    def get_animal(self, name: int | str):
-        for mouse in self.animals:
-            if str(mouse.name) == str(name):
-                return mouse
-        console.error(f"Animal {name} is not present.", error=ValueError)
-
-    def get_session(self, name: str):
-        return self.get_animal(self.manifest.get_session_info(name)['animal'].item()).get_session(name)

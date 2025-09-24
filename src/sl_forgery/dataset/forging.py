@@ -1,4 +1,3 @@
-
 from pathlib import Path
 
 from tqdm import tqdm
@@ -18,7 +17,7 @@ from sl_shared_assets import (
     get_working_directory,
     get_credentials_file_path,
 )
-from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists, chunk_iterable
+from ataraxis_base_utilities import LogLevel, console, chunk_iterable, ensure_directory_exists
 
 from ..utils import ProjectManifest, get_remote_job_work_directory
 from ..processing import fetch_remote_project_manifest
@@ -69,15 +68,15 @@ def _construct_forging_pipeline(
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
-            manifest=manifest,
-            project=project,
-            session=session,
-            server=server,
-            pipeline=ProcessingPipelines.SUITE2P,
-            supported_systems={AcquisitionSystems.MESOSCOPE_VR},
-            supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
-            allow_reprocessing=reprocess,
-            configuration_file=configuration_file,
+        manifest=manifest,
+        project=project,
+        session=session,
+        server=server,
+        pipeline=ProcessingPipelines.SUITE2P,
+        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
+        supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
+        allow_reprocessing=reprocess,
+        configuration_file=configuration_file,
     ):
         # If the session is not eligible, skips processing the session.
         return None
@@ -95,7 +94,6 @@ def _construct_forging_pipeline(
     stage_3 = []
 
     if system == AcquisitionSystems.MESOSCOPE_VR:
-
         # Stage 1: Binarization
         job_name = f"{session}_ss2p_binarization"
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)

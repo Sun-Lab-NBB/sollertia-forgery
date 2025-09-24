@@ -1,4 +1,4 @@
-# Before access to data, need to test all pipelines on the manually created data for mouse 6. To test the full pipeline 
+# Before access to data, need to test all pipelines on the manually created data for mouse 6. To test the full pipeline
 # on this data, you really need a manifest file associated with this mouse. This script manually creates such a manifest
 # file for the project TM-06-Pilot.
 
@@ -60,7 +60,7 @@ def make_manifest_from_structure(project_name: str, sessions: list[dict], out_di
 
     schema = {
         "animal": pl.UInt64 if all_numeric else pl.String,
-        "date": pl.Datetime,          # keeps the timezone from the values
+        "date": pl.Datetime,  # keeps the timezone from the values
         "session": pl.String,
         "type": pl.String,
         "notes": pl.String,
@@ -80,13 +80,51 @@ def make_manifest_from_structure(project_name: str, sessions: list[dict], out_di
     df.write_ipc(file=out_path, compression="lz4")
     return out_path
 
+
 rows = [
-    {"animal": 6, "session": "2025-06-23-13-32-06-980761", "type": "MESOSCOPE_EXPERIMENT", "complete": True, "integrity": True, "dataset": True},
-    {"animal": 6, "session": "2025-06-24-13-17-47-781337", "type": "MESOSCOPE_EXPERIMENT", "complete": True, "integrity": True, "dataset": True},
-    {"animal": 6, "session": "2025-06-25-16-35-01-581331", "type": "MESOSCOPE_EXPERIMENT", "complete": True, "integrity": True, "dataset": True},
-    {"animal": 6, "session": "2025-06-26-12-57-38-495382", "type": "MESOSCOPE_EXPERIMENT", "complete": True, "integrity": True, "dataset": True},
-    {"animal": 6, "session": "2025-06-27-12-44-58-770644", "type": "MESOSCOPE_EXPERIMENT", "complete": True, "integrity": True, "dataset": True},
+    {
+        "animal": 6,
+        "session": "2025-06-23-13-32-06-980761",
+        "type": "MESOSCOPE_EXPERIMENT",
+        "complete": True,
+        "integrity": True,
+        "dataset": True,
+    },
+    {
+        "animal": 6,
+        "session": "2025-06-24-13-17-47-781337",
+        "type": "MESOSCOPE_EXPERIMENT",
+        "complete": True,
+        "integrity": True,
+        "dataset": True,
+    },
+    {
+        "animal": 6,
+        "session": "2025-06-25-16-35-01-581331",
+        "type": "MESOSCOPE_EXPERIMENT",
+        "complete": True,
+        "integrity": True,
+        "dataset": True,
+    },
+    {
+        "animal": 6,
+        "session": "2025-06-26-12-57-38-495382",
+        "type": "MESOSCOPE_EXPERIMENT",
+        "complete": True,
+        "integrity": True,
+        "dataset": True,
+    },
+    {
+        "animal": 6,
+        "session": "2025-06-27-12-44-58-770644",
+        "type": "MESOSCOPE_EXPERIMENT",
+        "complete": True,
+        "integrity": True,
+        "dataset": True,
+    },
 ]
 
-manifest_path = make_manifest_from_structure("TM_06_pilot", rows, Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\slf_data"))
+manifest_path = make_manifest_from_structure(
+    "TM_06_pilot", rows, Path(r"C:\Users\jacob\OneDrive\Desktop\PlaceFields\slf_data")
+)
 pm = ProjectManifest(manifest_path)

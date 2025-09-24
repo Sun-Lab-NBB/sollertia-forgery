@@ -21,7 +21,7 @@ from sl_shared_assets import (
     get_working_directory,
     get_credentials_file_path,
 )
-from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists, chunk_iterable
+from ataraxis_base_utilities import LogLevel, console, chunk_iterable, ensure_directory_exists
 
 from ..utils import ProjectManifest, get_remote_job_work_directory
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
@@ -1039,15 +1039,15 @@ def _construct_suite2p_processing_pipeline(
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
-            manifest=manifest,
-            project=project,
-            session=session,
-            server=server,
-            pipeline=ProcessingPipelines.SUITE2P,
-            supported_systems={AcquisitionSystems.MESOSCOPE_VR},
-            supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
-            allow_reprocessing=reprocess,
-            configuration_file=configuration_file,
+        manifest=manifest,
+        project=project,
+        session=session,
+        server=server,
+        pipeline=ProcessingPipelines.SUITE2P,
+        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
+        supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
+        allow_reprocessing=reprocess,
+        configuration_file=configuration_file,
     ):
         # If the session is not eligible, skips processing the session.
         return None
@@ -1152,10 +1152,10 @@ def _construct_suite2p_processing_pipeline(
 
 
 def _execute_pipelines(
-        pipelines: tuple[ProcessingPipeline],
-        batch_size: int,
-        stage_name: str,
-        poll_delay: int = 30,
+    pipelines: tuple[ProcessingPipeline],
+    batch_size: int,
+    stage_name: str,
+    poll_delay: int = 30,
 ) -> tuple[int, int, int]:
     """Executes the input pipelines as sequential batches.
 
@@ -1196,7 +1196,6 @@ def _execute_pipelines(
 
     # Executes the current processing stage with a progress bar
     with tqdm(total=len(pipelines), desc=f"Executing {stage_name} pipelines", unit="pipeline") as pbar:
-
         # Processes each batch sequentially (one at a time)
         for batch in batches:
             batch_complete = False
@@ -1239,23 +1238,23 @@ def _execute_pipelines(
 
 
 def process_project_data(
-        project: str,
-        sessions: list[str] | tuple[str, ...] | None = None,
-        animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
-        management_batch_size: int = 1,
-        processing_batch_size: int = 4,
-        process_checksum: bool = False,
-        prepare_sessions: bool = False,
-        process_behavior: bool = False,
-        process_suite2p: bool = False,
-        update_manifest: bool = False,
-        reprocess: bool = False,
-        keep_job_logs: bool = False,
-        force_lock: bool = False,
-        recalculate_checksum: bool = False,
-        reset_trackers: bool = False,
-        suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
-        plane_count: int = 3,
+    project: str,
+    sessions: list[str] | tuple[str, ...] | None = None,
+    animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
+    management_batch_size: int = 1,
+    processing_batch_size: int = 4,
+    process_checksum: bool = False,
+    prepare_sessions: bool = False,
+    process_behavior: bool = False,
+    process_suite2p: bool = False,
+    update_manifest: bool = False,
+    reprocess: bool = False,
+    keep_job_logs: bool = False,
+    force_lock: bool = False,
+    recalculate_checksum: bool = False,
+    reset_trackers: bool = False,
+    suite2p_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
+    plane_count: int = 3,
 ) -> None:
     """Resolves and executes the necessary data processing pipelines for the specified project.
 
