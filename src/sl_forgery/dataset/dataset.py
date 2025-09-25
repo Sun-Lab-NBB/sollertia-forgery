@@ -148,6 +148,8 @@ class ProcessedSessionData:
 
 @dataclass
 class AnimalData:
+    """Stores the processed data for multiple sessions performed by a single animal."""
+
     name: int
     """Stores the unique identifier (name) of the animal."""
     directory_path: Path
@@ -156,7 +158,8 @@ class AnimalData:
     """Stores the processed data for each of the data acquisition sessions performed by the animal. The data for each 
     session is queryable by session name."""
 
-    def get_session_data(self, name: str):
+    def get_session_data(self, name: str) -> ProcessedSessionData:
+        """Returns the processed data for the specified session."""
         if name in self.sessions:
             return self.sessions[name]
         else:
@@ -167,6 +170,11 @@ class AnimalData:
             console.error(message, error=ValueError)
             # Fallback to appease mypy, should not be reachable
             raise ValueError(message)  # pragma: no cover
+
+    @property
+    def session_names(self) -> tuple[str, ...]:
+        """Returns a tuple of all session names present in the animal's data."""
+        return tuple(self.sessions.keys())
 
 
 @dataclass
@@ -283,8 +291,8 @@ class ProjectData:
 
         Args:
             date_string: A Date and Time string in various formats (YYYY-MM-DD or with time).
-            is_end_date: If True and only the date data is provided in the string, sets the time component to end of
-                day.
+            is_end_date: If True and only the date data is provided in the string, sets the time component to the
+                end of the day.
 
         Returns:
             The Timezone-aware datetime object in America/New_York timezone constructed from the input string's data.
@@ -375,7 +383,7 @@ class ProjectData:
             # Filters the animal dataset to only include the requested sessions
             animal_df = animal_df.filter(combined_filter)
 
-            # Applies exclusion list (takes precedence over everything)
+            # Applies the exclusion list (takes precedence over everything)
             if animal_dataset.exclude:
                 animal_df = animal_df.filter(~pl.col("session").is_in(animal_dataset.exclude))
 
