@@ -191,14 +191,13 @@ def assemble_mesoscope_data(session_data_path: Path, multiday_data_path: Path) -
 
 
 def _add_categorical_vr_data(
-    df: pl.DataFrame,
-    source_data_path: Path,
+        df: pl.DataFrame,
+        source_data_path: Path,
 ) -> pl.DataFrame:
-    """Converts categorical VR data columns in the target DataFrame to Categorical type, using the data from the
+    """Converts categorical VR data columns in the target DataFrame to the Polars Enum type, using the data from the
     appropriate experiment configuration file.
 
-    This worker function is used by the assemble_vr_data() function to ensure categorical data columns are stored as
-    appropriate pl.Categorical types.
+    This worker function is used by the assemble_vr_data() function to optimize how categorical data is stored.
 
     Args:
         df: The DataFrame to which to add the categorical VR data columns.
@@ -213,16 +212,33 @@ def _add_categorical_vr_data(
     experiment_config = MesoscopeExperimentConfiguration.from_yaml(
         source_data_path.joinpath("experiment_configuration.yaml")
     )
-    trial_type_mapping = {i: name for i, name in enumerate(experiment_config.trial_structures.keys())}
 
-    # Replaces the trial type columns with the categorical column that accurately reflects the trial categories
-    # (as read from the experiment configuration file).
+    # Map trial types
+    trial_type_mapping = {i: name for i, name in enumerate(experiment_config.trial_structures.keys())}
+    trial_categories = list(trial_type_mapping.values()) + ["UNKNOWN"]
+    trial_enum_dtype = pl.Enum(trial_categories)
+
+    # Map experiment states from config
+    # The experiment_state codes in the yaml are 1, 2, 3 for baseline, run, cooldown
+    experiment_state_mapping = {
+        state_config.experiment_state_code: state_name
+        for state_name, state_config in experiment_config.experiment_states.items()
+    }
+    experiment_state_categories = list(experiment_state_mapping.keys()) + ["UNKNOWN"]
+    experiment_state_enum_dtype = pl.Enum(experiment_state_categories)
+
+    # Replace columns with Enum types
     df = df.with_columns(
         [
             pl.col("trial_type")
             .replace_strict(trial_type_mapping, default="UNKNOWN")
-            .cast(pl.Categorical)
-            .alias("trial_type")
+            .cast(trial_enum_dtype)
+            .alias("trial_type"),
+
+            pl.col("experiment_state")
+            .replace_strict(experiment_state_mapping, default="UNKNOWN")
+            .cast(experiment_state_enum_dtype)
+            .alias("experiment_state")
         ]
     )
 
@@ -237,7 +253,8 @@ def assemble_vr_data(session_data_path: Path, reference_time: NDArray[np.uint64]
         reference_time: The time-value at which to align (interpolate) the VR data.
 
     Returns:
-        DataFrame with columns: time_us, traveled_distance_cm, trial, trial_type, in_reward_zone, cue
+        DataFrame with columns: time_us, traveled_distance_cm, trial, trial_type, in_reward_zone, cue,
+        experiment_state, guided
     """
     behavior_data_path = session_data_path.joinpath("processed_data", "behavior_data")
     source_data_path = session_data_path.joinpath("source_data")
@@ -247,6 +264,10 @@ def assemble_vr_data(session_data_path: Path, reference_time: NDArray[np.uint64]
     reward_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_reward_zone_data.feather"), use_pyarrow=True)
     cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), use_pyarrow=True)
     trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), use_pyarrow=True)
+
+    # Load new data sources
+    experiment_state_df = pl.read_ipc(behavior_data_path.joinpath("experiment_state_data.feather"), use_pyarrow=True)
+    guidance_state_df = pl.read_ipc(behavior_data_path.joinpath("guidance_state_data.feather"), use_pyarrow=True)
 
     # Process trial data
     trial_df = trial_df.with_columns([pl.int_range(1, len(trial_df) + 1).cast(pl.UInt32).alias("trial")])
@@ -260,6 +281,24 @@ def assemble_vr_data(session_data_path: Path, reference_time: NDArray[np.uint64]
 
     # Map cue based on distance
     vr_df = vr_df.join_asof(cue_df, on="traveled_distance_cm", strategy="backward").rename({"vr_cue": "cue"})
+
+    # Map experiment state based on time
+    vr_df = vr_df.join_asof(
+        experiment_state_df,
+        on="time_us",
+        strategy="backward"
+    )
+
+    # Map guidance state based on time and convert to boolean
+    vr_df = vr_df.join_asof(
+        guidance_state_df,
+        on="time_us",
+        strategy="backward"
+    )
+    # Convert lick_guidance_state to boolean guided (1 = guided, 0 = not guided)
+    vr_df = vr_df.with_columns([
+        pl.col("lick_guidance_state").cast(pl.UInt8).alias("guided")
+    ]).drop("lick_guidance_state")
 
     # Calculate in_reward_zone
     in_zone_expr = pl.lit(False)
@@ -276,6 +315,8 @@ def assemble_vr_data(session_data_path: Path, reference_time: NDArray[np.uint64]
             pl.col("trial").fill_null(1),
             pl.col("trial_type").fill_null(0),
             pl.col("cue").fill_null(0),
+            pl.col("experiment_state").fill_null(0),
+            pl.col("guided").fill_null(0),
         ]
     )
 
@@ -289,6 +330,8 @@ def assemble_vr_data(session_data_path: Path, reference_time: NDArray[np.uint64]
         ("trial_type", True),  # discrete
         ("in_reward_zone", True),  # discrete
         ("cue", True),  # discrete
+        ("experiment_state", True),  # discrete
+        ("guided", True),  # discrete
     ]
 
     for column_name, is_discrete in interpolation_configs:
@@ -383,3 +426,6 @@ data = assemble_mesoscope_data(session, dataset)
 # print(b_data)
 
 print(assemble_vr_data(session, data["time_us"].to_numpy()))
+
+# target = session.joinpath("processed_data", "behavior_data", "guidance_state_data.feather")
+# print(pl.read_ipc(target, use_pyarrow=True, memory_map=True))
