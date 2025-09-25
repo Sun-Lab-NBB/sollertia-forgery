@@ -224,7 +224,8 @@ def _add_categorical_vr_data(
         state_config.experiment_state_code: state_name
         for state_name, state_config in experiment_config.experiment_states.items()
     }
-    experiment_state_categories = list(experiment_state_mapping.keys()) + ["UNKNOWN"]
+    # Use values() not keys() - we want the state names, not the codes
+    experiment_state_categories = list(experiment_state_mapping.values()) + ["UNKNOWN"]
     experiment_state_enum_dtype = pl.Enum(experiment_state_categories)
 
     # Replace columns with Enum types
