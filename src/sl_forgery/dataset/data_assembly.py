@@ -164,30 +164,29 @@ def assemble_mesoscope_data(session_data_path: Path, multiday_data_path: Path) -
     # Re-assigns frame IDs starting from 1 as unsigned 32-bit integers
     frame_df = frame_df.with_columns([pl.int_range(1, len(frame_df) + 1, dtype=pl.UInt32).alias("frame")])
 
-    # Single-Day (SD) Cell Classification:
-    # Uses the cell classification data to create a filtering mask to exclude non-cells from the analysis dataset.
+    # Uses the single-day cell classification data to create a filtering mask to exclude non-cells from the analysis
+    # dataset.
     classification: NDArray[np.float64] = np.load(single_day_data.joinpath("iscell.npy"), mmap_mode="r")
     is_cell_mask = classification[:, 0] == 1
 
-    # Processes single-day data with cell filtering
+    # Extracts and adds single-day fluorescence data at each frame to the dataframe using cell classification to filter
+    # non-cell objects.
     single_day_files = [
         ("F.npy", "single_day_cell_fluorescence"),
         ("Fneu.npy", "single_day_neuropil_fluorescence"),
         ("Fsub.npy", "single_day_baseline_subtracted_fluorescence"),
         ("spks.npy", "single_day_cell_spikes"),
     ]
-
     for filename, column_name in single_day_files:
         frame_df = _add_fluorescence_column(frame_df, single_day_data, filename, column_name, is_cell_mask)
 
-    # Processes multi-day data (no cell filtering needed as it's pre-filtered)
+    # Same as above, but adds the multi-day fluorescence data at each frame to the dataframe.
     multi_day_files = [
         ("F.npy", "multi_day_cell_fluorescence"),
         ("Fneu.npy", "multi_day_neuropil_fluorescence"),
         ("Fsub.npy", "multi_day_baseline_subtracted_fluorescence"),
         ("spks.npy", "multi_day_cell_spikes"),
     ]
-
     for filename, column_name in multi_day_files:
         frame_df = _add_fluorescence_column(frame_df, multiday_data_path, filename, column_name, cell_mask=None)
 
@@ -195,9 +194,9 @@ def assemble_mesoscope_data(session_data_path: Path, multiday_data_path: Path) -
     return frame_df
 
 
-def _add_categorical_vr_data(
-        df: pl.DataFrame,
-        source_data_path: Path,
+def _resolve_categorical_vr_data(
+    df: pl.DataFrame,
+    source_data_path: Path,
 ) -> pl.DataFrame:
     """Converts categorical columns in the target Mesoscope-VR (experiment) DataFrame to the Polars Enum type, using
     the data from the experiment configuration .yaml file.
@@ -214,111 +213,103 @@ def _add_categorical_vr_data(
         data in the session's experiment configuration file.
     """
 
-    # Uses the experiment configuration file to map the Mesoscope-VR trial names to their positional indices used in
-    # the vr dataframe.
+    # Loads the session's experiment configuration file into memory.
     experiment_config = MesoscopeExperimentConfiguration.from_yaml(
         source_data_path.joinpath("experiment_configuration.yaml")
     )
 
-    # Map trial types
+    # Uses the experiment configuration file to map the user-defined Mesoscope-VR trial names to their indices used in
+    # the input dataframe. For example, trial index 0 -> trial name "ABC".
     trial_type_mapping = {i: name for i, name in enumerate(experiment_config.trial_structures.keys())}
-    trial_categories = list(trial_type_mapping.values()) + ["UNKNOWN"]
-    trial_enum_dtype = pl.Enum(trial_categories)
 
-    # Map experiment states from config
-    # The experiment_state codes in the yaml are 1, 2, 3 for baseline, run, cooldown
+    # Sets up an Enum type using the available trial names as categories.
+    trial_enum_dtype = pl.Enum(list(trial_type_mapping.values()))
+
+    # Maps experiment state (stage) names to the numeric experiment state codes used in the input dataframe.
     experiment_state_mapping = {
         state_config.experiment_state_code: state_name
         for state_name, state_config in experiment_config.experiment_states.items()
     }
+
+    # Adds the default system state (code 0) as an "idle" state category. This state is reserved for system use and,
+    # therefore, is not referenced in the experiment configuration file.
     experiment_state_mapping[0] = "idle"
-    # Use values() not keys() - we want the state names, not the codes
-    experiment_state_categories = list(experiment_state_mapping.values()) + ["UNKNOWN"]
-    experiment_state_enum_dtype = pl.Enum(experiment_state_categories)
 
-    # Replace columns with Enum types
-    df = df.with_columns(
+    # Sets up an Enum type using the experiment state (stage) names as categories.
+    experiment_state_enum_dtype = pl.Enum(list(experiment_state_mapping.values()))
+
+    # Converts the trial_type and experiment_state columns from a numeric to Enum type.
+    return df.with_columns(
         [
-            pl.col("trial_type")
-            .replace_strict(trial_type_mapping, default="UNKNOWN")
-            .cast(trial_enum_dtype)
-            .alias("trial_type"),
-
+            pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype).alias("trial_type"),
             pl.col("experiment_state")
-            .replace_strict(experiment_state_mapping, default="UNKNOWN")
+            .replace_strict(experiment_state_mapping)
             .cast(experiment_state_enum_dtype)
-            .alias("experiment_state")
+            .alias("experiment_state"),
         ]
     )
 
-    return df
-
 
 def assemble_mesoscope_experiment_data(session_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
-    """Assembles VR-related data from multiple sources and interpolates to reference timestamps.
+    """Assembles all Mesoscope-VR experiment data and interpolates it to the reference time stream.
 
     Args:
-        session_data_path: The path to the processed session's processed data directory.
-        reference_time: The time-value at which to align (interpolate) the VR data.
+        session_data_path: The path to the processed session's directory that stores the processed data.
+        reference_time: An array of time-values at which to align (interpolate) the experiment data. Must store
+            time-values as microseconds elapsed since the UTC epoch onset.
 
     Returns:
-        DataFrame with columns: time_us, traveled_distance_cm, trial, trial_type, in_reward_zone, cue,
-        experiment_state, guided
+        The Polars DataFrame that contains the Mesoscope-VR experiment metadata (trial, experiment stage, etc.) data
+        aligned to the reference time-points.
     """
+    # Resolves the paths to the root data directories.
     behavior_data_path = session_data_path.joinpath("processed_data", "behavior_data")
     source_data_path = session_data_path.joinpath("source_data")
 
-    # Load all data sources
-    encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), use_pyarrow=True)
-    reward_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_reward_zone_data.feather"), use_pyarrow=True)
-    cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), use_pyarrow=True)
-    trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), use_pyarrow=True)
+    # Loads all Mesoscope-VR experiment processed data sources.
+    encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), use_pyarrow=True, memory_map=True)
+    reward_zones_df = pl.read_ipc(
+        behavior_data_path.joinpath("vr_reward_zone_data.feather"), use_pyarrow=True, memory_map=True
+    )
+    cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), use_pyarrow=True, memory_map=True)
+    trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), use_pyarrow=True, memory_map=True)
+    experiment_state_df = pl.read_ipc(
+        behavior_data_path.joinpath("experiment_state_data.feather"), use_pyarrow=True, memory_map=True
+    )
+    guidance_state_df = pl.read_ipc(
+        behavior_data_path.joinpath("guidance_state_data.feather"), use_pyarrow=True, memory_map=True
+    )
 
-    # Load new data sources
-    experiment_state_df = pl.read_ipc(behavior_data_path.joinpath("experiment_state_data.feather"), use_pyarrow=True)
-    guidance_state_df = pl.read_ipc(behavior_data_path.joinpath("guidance_state_data.feather"), use_pyarrow=True)
-
-    # Process trial data
+    # Generates the trial number column.
     trial_df = trial_df.with_columns([pl.int_range(1, len(trial_df) + 1).cast(pl.UInt32).alias("trial")])
 
-    # Start with encoder data
+    # Uses the encoder data (traveled distance in centimeters) to translate vr-specific data to use time-referencing,
+    # rather than traveled distance referencing.
     vr_df = encoder_df.select(["time_us", "traveled_distance_cm"])
 
-    # Map trial number and trial type based on distance
+    # Maps all data sources given in relation to the traveled distance to instead be in relation to the experiment
+    # time by using the encoder data.
     vr_df = vr_df.join_asof(trial_df, on="traveled_distance_cm", strategy="backward")
     vr_df = vr_df.rename({"trial_type_index": "trial_type"})
-
-    # Map cue based on distance
     vr_df = vr_df.join_asof(cue_df, on="traveled_distance_cm", strategy="backward").rename({"vr_cue": "cue"})
+    vr_df = vr_df.join_asof(experiment_state_df, on="time_us", strategy="backward")
+    vr_df = vr_df.join_asof(guidance_state_df, on="time_us", strategy="backward")
 
-    # Map experiment state based on time
-    vr_df = vr_df.join_asof(
-        experiment_state_df,
-        on="time_us",
-        strategy="backward"
+    # Converts lick_guidance_state to a boolean guided column (1 = guided, 0 = not guided)
+    vr_df = vr_df.with_columns([pl.col("lick_guidance_state").cast(pl.UInt8).alias("guided")]).drop(
+        "lick_guidance_state"
     )
 
-    # Map guidance state based on time and convert to boolean
-    vr_df = vr_df.join_asof(
-        guidance_state_df,
-        on="time_us",
-        strategy="backward"
-    )
-    # Convert lick_guidance_state to boolean guided (1 = guided, 0 = not guided)
-    vr_df = vr_df.with_columns([
-        pl.col("lick_guidance_state").cast(pl.UInt8).alias("guided")
-    ]).drop("lick_guidance_state")
-
-    # Calculate in_reward_zone
+    # Determines which portions of the data correspond to periods when the animal is in the reward zone and generates
+    # a boolean 'in_reward_zone' column to track those periods.
     in_zone_expr = pl.lit(False)
     for row in reward_zones_df.iter_rows():
         start_cm, end_cm = row[0], row[1]
         zone_condition = (pl.col("traveled_distance_cm") >= start_cm) & (pl.col("traveled_distance_cm") <= end_cm)
         in_zone_expr = in_zone_expr | zone_condition
-
     vr_df = vr_df.with_columns([in_zone_expr.cast(pl.UInt8).alias("in_reward_zone")])
 
-    # Handle nulls before interpolation
+    # Handles (removes) null data before interpolating the data to the reference time stream.
     vr_df = vr_df.with_columns(
         [
             pl.col("trial").fill_null(1),
@@ -329,10 +320,10 @@ def assemble_mesoscope_experiment_data(session_data_path: Path, reference_time: 
         ]
     )
 
-    # Now interpolate to reference timestamps
+    # Pre-creates the output dataframe using the reference time-stream
     result_df = pl.DataFrame({"time_us": reference_time})
 
-    # Define columns to interpolate and their types
+    # Builds the interpolation configuration to streamline the process
     interpolation_configs = [
         ("traveled_distance_cm", False),  # continuous
         ("trial", True),  # discrete
@@ -343,6 +334,7 @@ def assemble_mesoscope_experiment_data(session_data_path: Path, reference_time: 
         ("guided", True),  # discrete
     ]
 
+    # Interpolates the data
     for column_name, is_discrete in interpolation_configs:
         interpolated = interpolate_dataframe_data(
             df=vr_df,
@@ -351,16 +343,17 @@ def assemble_mesoscope_experiment_data(session_data_path: Path, reference_time: 
             seed_timestamps=reference_time,
             is_discrete=is_discrete,
         )
-
         result_df = result_df.join(interpolated, on="time_us", how="left")
 
-    # After interpolation, add categorical types
-    result_df = _add_categorical_vr_data(df=result_df, source_data_path=source_data_path)
-
-    return result_df
+    # Converts interpolated categorical columns to an appropriate Enum datatype and returns the resultant DataFrame
+    return _resolve_categorical_vr_data(df=result_df, source_data_path=source_data_path)
 
 
-def assemble_behavior_data(session_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
+def assemble_behavior_data(
+        session_data_path: Path,
+        reference_time: NDArray[np.uint64],
+        system_state_mapping: dict[int, str] = None
+) -> pl.DataFrame:
     """Assembles all processed data acquired by the MicroControllers into a uniform DataFrame.
 
     This function interpolates (aligns) all non-video behavior data acquired during the session to the 'reference_time'
@@ -369,41 +362,69 @@ def assemble_behavior_data(session_data_path: Path, reference_time: NDArray[np.u
     Args:
         session_data_path: The path to the processed session's processed data directory.
         reference_time: The time-value at which to align (interpolate) the behavior data.
+        system_state_mapping: Optional mapping of system state codes to names.
 
     Returns:
         The Polars DataFrame that contains all behavior data aligned to the reference time source.
     """
-
-    # Resolves the path to the behavior data directory
     behavior_data_path = session_data_path.joinpath("processed_data", "behavior_data")
 
-    # Starts with the reference time as the base dataframe
+    # Load encoder data first to calculate speed
+    encoder_df = pl.read_ipc(
+        behavior_data_path.joinpath("encoder_data.feather"),
+        use_pyarrow=True,
+        memory_map=True
+    )
+
+    # Calculate running speed using the 100ms sliding window
+    encoder_df = calculate_running_speed(encoder_df, window_ms=100)
+
+    # Process valve data to create reward categorical
+    valve_df = pl.read_ipc(
+        behavior_data_path.joinpath("valve_data.feather"),
+        use_pyarrow=True,
+        memory_map=True
+    )
+    valve_df = create_reward_categorical(valve_df)
+
+    # Process system state to categorical if mapping provided
+    system_state_df = pl.read_ipc(
+        behavior_data_path.joinpath("system_state_data.feather"),
+        use_pyarrow=True,
+        memory_map=True
+    )
+    if system_state_mapping:
+        system_state_df = make_system_state_categorical(system_state_df, system_state_mapping)
+
+    # Start with reference time
     result_df = pl.DataFrame({"time_us": reference_time})
 
-    # Defines the data extraction configuration. The values are in the order of: source file name, data column name,
-    # output column name, and whether the data is discrete (True) or continuous (False).
+    # Define data sources and columns to interpolate
     data_configs = [
-        ("break_data.feather", "break_torque_N_cm", "break_torque_N_cm", True),
-        ("encoder_data.feather", "traveled_distance_cm", "traveled_distance_cm", False),
-        ("torque_data.feather", "torque_N_cm", "torque_N_cm", False),
-        ("screen_data.feather", "screen_state", "screens_active", True),
-        ("guidance_state_data.feather", "lick_guidance_state", "guided", True),
-        ("lick_data.feather", "lick_state", "lick", True),
-        ("valve_data.feather", "tone_state", "tone", True),
-        ("valve_data.feather", "dispensed_water_volume_uL", "reward_volume_uL", True),
-        ("trial_data.feather", "trial_type_index", "trial_type", True),
-        ("trial_data.feather", "traveled_distance_cm", "trial_start_distance_cm", True),
-        ("experiment_state_data.feather", "experiment_state", "experiment_stage", True),
-        ("system_state_data.feather", "system_state", "system_state", True),
+        # (dataframe, value_column, output_column, is_discrete)
+        (pl.read_ipc(behavior_data_path.joinpath("break_data.feather"), use_pyarrow=True, memory_map=True),
+         "break_torque_N_cm", "break_torque_N_cm", False),
+        (encoder_df, "traveled_distance_cm", "traveled_distance_cm", False),
+        (encoder_df, "speed_cm_s", "speed_cm_s", False),
+        (pl.read_ipc(behavior_data_path.joinpath("torque_data.feather"), use_pyarrow=True, memory_map=True),
+         "torque_N_cm", "torque_N_cm", False),
+        (pl.read_ipc(behavior_data_path.joinpath("screen_data.feather"), use_pyarrow=True, memory_map=True),
+         "screen_state", "screens_active", True),
+        (pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), use_pyarrow=True, memory_map=True),
+         "lick_state", "lick", True),
+        (valve_df, "reward", "reward", True),
+        (valve_df, "dispensed_water_volume_uL", "reward_volume_uL", True),
+        (valve_df, "tone_state", "tone", True),
+        (system_state_df, "system_state", "system_state", True),
     ]
 
-    # Processes each data source
-    for file_name, value_col, output_col, is_discrete in data_configs:
-        # Loads the data
-        file_path = behavior_data_path.joinpath(file_name)
-        data_df = pl.read_ipc(file_path, use_pyarrow=True)
+    # Process each data source
+    for data_df, value_col, output_col, is_discrete in data_configs:
+        # Skip if the column doesn't exist
+        if value_col not in data_df.columns:
+            continue
 
-        # Interpolates the loaded data to the reference time source
+        # Interpolate data
         interpolated_df = interpolate_dataframe_data(
             df=data_df,
             timestamp_column_name="time_us",
@@ -412,14 +433,12 @@ def assemble_behavior_data(session_data_path: Path, reference_time: NDArray[np.u
             is_discrete=is_discrete,
         )
 
-        # Joins the interpolated values to the result dataframe
+        # Join to result
         result_df = result_df.join(
-            interpolated_df.select(
-                [
-                    pl.col("time_us"),
-                    pl.col(value_col).alias(output_col),  # Renames the column if necessary
-                ]
-            ),
+            interpolated_df.select([
+                pl.col("time_us"),
+                pl.col(value_col).alias(output_col)
+            ]),
             on="time_us",
             how="left",
         )
@@ -427,14 +446,130 @@ def assemble_behavior_data(session_data_path: Path, reference_time: NDArray[np.u
     return result_df
 
 
-session = Path("/home/cyberaxolotl/server/workdir/sun_data/StateSpaceOdyssey/26/2025-09-12-17-08-39-426502/")
-dataset = Path("/home/cyberaxolotl/server/workdir/sun_data/Datasets/SSOData/26/2025-09-12-17-08-39-426502/")
-data = assemble_mesoscope_data(session, dataset)
+def calculate_running_speed(encoder_df: pl.DataFrame, window_ms: int = 100) -> pl.DataFrame:
+    """Calculate running speed using a sliding window.
+
+    Args:
+        encoder_df: DataFrame with time_us and traveled_distance_cm columns
+        window_ms: Window size in milliseconds
+
+    Returns:
+        DataFrame with speed_cm_s column added
+    """
+    window_us = window_ms * 1000
+
+    # Sort by time
+    encoder_df = encoder_df.sort("time_us")
+
+    # Method 1: Simple difference approach
+    # Calculate speed as change in distance over time window
+    encoder_df = encoder_df.with_columns([
+        # Find the row that was ~window_ms ago
+        pl.col("traveled_distance_cm").shift(1).alias("prev_distance"),
+        pl.col("time_us").shift(1).alias("prev_time"),
+    ])
+
+    # For each row, look back window_us microseconds
+    encoder_df = encoder_df.with_columns([
+        # Speed = distance change / time change (convert to seconds)
+        ((pl.col("traveled_distance_cm") - pl.col("prev_distance")) /
+         ((pl.col("time_us") - pl.col("prev_time")) / 1_000_000))
+        .fill_null(0)
+        .clip(lower_bound=0)  # Speed can't be negative
+        .alias("speed_cm_s")
+    ])
+
+    # Apply smoothing using rolling mean on the calculated speeds
+    encoder_df = encoder_df.with_columns([
+        pl.col("speed_cm_s")
+        .rolling_mean(window_size=10)  # Smooth over 10 samples
+        .fill_null(0)
+        .alias("speed_cm_s")
+    ])
+
+    # Clean up intermediate columns
+    encoder_df = encoder_df.select(["time_us", "traveled_distance_cm", "speed_cm_s"])
+
+    return encoder_df
+
+
+def create_reward_categorical(valve_df: pl.DataFrame) -> pl.DataFrame:
+    """Create a categorical reward column from valve data.
+
+    Args:
+        valve_df: DataFrame with tone_state and dispensed_water_volume_uL
+
+    Returns:
+        DataFrame with reward categorical column added
+    """
+    # Create reward categories based on conditions
+    valve_df = valve_df.with_columns([
+        pl.when(pl.col("dispensed_water_volume_uL") > 0)
+        .then(pl.lit("reward"))
+        .when(pl.col("tone_state") > 0)
+        .then(pl.lit("tone"))
+        .otherwise(pl.lit("no"))
+        .cast(pl.Enum(["no", "tone", "reward"]))
+        .alias("reward")
+    ])
+
+    return valve_df
+
+
+def make_system_state_categorical(
+    system_state_df: pl.DataFrame,
+    source_data_path: Path,
+) -> pl.DataFrame:
+    """Convert system_state to categorical using mapping.
+
+    Args:
+        system_state_df: DataFrame with system_state column
+        state_mapping: Dict mapping state codes to names
+
+    Returns:
+        DataFrame with categorical system_state
+    """
+    # Loads the session's experiment configuration file into memory.
+    hardware_state_data = MesoscopeHardwareState.from_yaml(
+        source_data_path.joinpath("hardware_state.yaml")
+    )
+
+    # Create an enum with all possible states
+    state_categories = list(hardware_state_data.system_state_codes.values()) + ["UNKNOWN"]
+    state_enum = pl.Enum(state_categories)
+
+    # Replace numeric codes with categorical names
+    system_state_df = system_state_df.with_columns([
+        pl.col("system_state")
+        .replace_strict(state_mapping, default="UNKNOWN")
+        .cast(state_enum)
+        .alias("system_state")
+    ])
+
+    return system_state_df
+
+
+session = Path("/home/cyberaxolotl/server/workdir/sun_data/StateSpaceOdyssey/26/2025-08-27-17-18-55-361099/")
+dataset = Path("/home/cyberaxolotl/server/workdir/sun_data/Datasets/SSOData/26/2025-08-27-17-18-55-361099/")
+# data = assemble_mesoscope_data(session, dataset)
 
 # b_data = assemble_behavior_data(session, data["time_us"].to_numpy())
-# print(b_data)
 
-print(assemble_mesoscope_experiment_data(session, data["time_us"].to_numpy()))
+# exp_data = assemble_mesoscope_experiment_data(session, data["time_us"].to_numpy())
+#
+# with pl.Config(
+#     set_fmt_table_cell_list_len=5,
+#     set_tbl_cols=50,
+#     set_tbl_rows=5000
+# ):
+#     # print(data)
+#     # print(b_data.schema)
+#     print(exp_data.head(n=5000))
 
-# target = session.joinpath("processed_data", "behavior_data", "guidance_state_data.feather")
-# print(pl.read_ipc(target, use_pyarrow=True, memory_map=True))
+target = session.joinpath("processed_data", "behavior_data", "experiment_state_data.feather")
+with pl.Config(
+    set_fmt_table_cell_list_len=5,
+    set_tbl_cols=50,
+    set_tbl_rows=5000
+):
+    print(pl.read_ipc(target, use_pyarrow=True, memory_map=True))
