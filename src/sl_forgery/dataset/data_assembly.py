@@ -373,7 +373,7 @@ def assemble_mesoscope_experiment_data(session_data_path: Path, reference_time: 
             source_coordinates=encoder_df["time_us"].to_numpy(),
             source_values=encoder_df["traveled_distance_cm"].to_numpy(),
             target_coordinates=reference_time,
-            is_discrete=True,
+            is_discrete=False,
         ),
     }
 
@@ -483,7 +483,7 @@ def _calculate_running_speed(
         while window_start_index < i and times[window_start_index] < window_start_time:
             window_start_index += 1
 
-        # Calculates the running speed (in cm / second) over the resolved window and appends it to the speeds array.
+        # Calculates the running speed (in cm / second) over the resolved window and appends it to the 'speeds' array.
         if i > window_start_index:
             time_delta = times[i] - times[window_start_index]
             if time_delta > 0:
@@ -568,7 +568,7 @@ def _resolve_categorical_behavior_data(df: pl.DataFrame, source_data_path: Path)
 
 
 def assemble_behavior_data(
-    session_data_path: Path, reference_time: NDArray[np.uint64], system_state_mapping: dict[int, str] = None
+    session_data_path: Path, reference_time: NDArray[np.uint64]
 ) -> pl.DataFrame:
     """Assembles all processed data acquired by the MicroControllers into a uniform DataFrame.
 
@@ -578,7 +578,6 @@ def assemble_behavior_data(
     Args:
         session_data_path: The path to the processed session's processed data directory.
         reference_time: The time-value at which to align (interpolate) the behavior data.
-        system_state_mapping: Optional mapping of system state codes to names.
 
     Returns:
         The Polars DataFrame that contains all behavior data aligned to the reference time source.
@@ -707,15 +706,24 @@ timer.reset()
 data = assemble_mesoscope_data(session, dataset)
 b_data = assemble_behavior_data(session, data["time_us"].to_numpy())
 exp_data = assemble_mesoscope_experiment_data(session, data["time_us"].to_numpy())
+
+
+# Drops duplicate columns
+b_data = b_data.drop("time_us")
+exp_data = exp_data.drop("time_us", "traveled_distance_cm")
+
+# Joins the dataframes together
+result = pl.concat([data, b_data, exp_data], how="horizontal")
+
+# Drops non-unique columns
+result = result.select(pl.all().unique(maintain_order=True))
 elapsed = timer.elapsed
 
-with pl.Config(set_fmt_table_cell_list_len=5, set_tbl_cols=20, set_tbl_rows=2000):
-    # print(data)
-    print(b_data)
-    # print(exp_data)
+with pl.Config(set_fmt_table_cell_list_len=5, set_tbl_cols=50, set_tbl_rows=1000):
+    print(result.slice(offset=5000, length=100))
 
 print(f"Processing took {elapsed} seconds.")
 
-# target = session.joinpath("processed_data", "behavior_data", "torque_data.feather")
+# target = session.joinpath("processed_data", "behavior_data", "encoder_data.feather")
 # with pl.Config(set_fmt_table_cell_list_len=5, set_tbl_cols=10, set_tbl_rows=20):
 #     print(pl.read_ipc(target, use_pyarrow=True, memory_map=True))
