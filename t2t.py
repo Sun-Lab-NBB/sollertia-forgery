@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from sl_forgery.dataset.data_assembly import assemble_session_data
-from sl_forgery.dataset.dataset import SessionTypes
 import polars as pl
+
+from sl_forgery.dataset.data_assembly import DatasetTypes, assemble_session_data
 
 # od = Path("/home/cyberaxolotl/data/")
 # # ProjectData.create(
@@ -24,19 +24,19 @@ assemble_session_data(
     session_data_path=session,
     session_multiday_path=dataset,
     output_path=session.joinpath("/home/data/test.feather"),
-    session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+    dataset_type=DatasetTypes.MESOSCOPE_VR_EXPERIMENT,
 )
 
 target = pl.read_ipc(session.joinpath("/home/data/test.feather"), memory_map=True, use_pyarrow=True)
 with pl.Config(
-        set_fmt_table_cell_list_len=1,
-        set_float_precision=2,
-        set_tbl_cols=50,
-        set_tbl_rows=1000,
-        set_tbl_width_chars=300,
+    set_fmt_table_cell_list_len=1,
+    set_float_precision=2,
+    set_tbl_cols=50,
+    set_tbl_rows=1000,
+    set_tbl_width_chars=300,
 ):
     print(target.slice(offset=2800, length=500))
 
-# target = session.joinpath("processed_data", "behavior_data", "encoder_data.feather")
+# target = session.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
 # with pl.Config(set_fmt_table_cell_list_len=5, set_tbl_cols=10, set_tbl_rows=20):
 #     print(pl.read_ipc(target, use_pyarrow=True, memory_map=True))
