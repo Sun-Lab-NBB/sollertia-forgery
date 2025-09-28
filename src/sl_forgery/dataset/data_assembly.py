@@ -11,7 +11,6 @@ from .dataset import SessionTypes
 from sl_shared_assets import MesoscopeHardwareState, MesoscopeExperimentConfiguration
 from numba import njit
 from typing import Any
-from ataraxis_base_utilities import console
 
 
 def _add_sls2p_fluorescence_column(
@@ -175,10 +174,10 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
 
     # Extracts and adds single-day fluorescence data to each frame using cell classification to filter non-cell ROIs.
     single_day_files = [
-        ("F.npy", "single_day_cell_fluorescence"),
-        ("Fneu.npy", "single_day_neuropil_fluorescence"),
-        ("Fsub.npy", "single_day_baseline_subtracted_fluorescence"),
-        ("spks.npy", "single_day_cell_spikes"),
+        ("F.npy", "single_day_f"),
+        ("Fneu.npy", "single_day_f_neuropil"),
+        ("Fsub.npy", "single_day_dff"),
+        ("spks.npy", "single_day_spikes"),
     ]
     for filename, column_name in single_day_files:
         frame_aligned_data = _add_sls2p_fluorescence_column(
@@ -187,10 +186,10 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
 
     # Same as above, but adds the multi-day fluorescence data to each frame.
     multi_day_files = [
-        ("F.npy", "multi_day_cell_fluorescence"),
-        ("Fneu.npy", "multi_day_neuropil_fluorescence"),
-        ("Fsub.npy", "multi_day_baseline_subtracted_fluorescence"),
-        ("spks.npy", "multi_day_cell_spikes"),
+        ("F.npy", "multi_day_f"),
+        ("Fneu.npy", "multi_day_f_neuropil"),
+        ("Fsub.npy", "multi_day_dff"),
+        ("spks.npy", "multi_day_spikes"),
     ]
     for filename, column_name in multi_day_files:
         frame_aligned_data = _add_sls2p_fluorescence_column(
@@ -702,8 +701,6 @@ def assemble_session_data(
     session_data_path: Path, session_multiday_path: Path, output_path: Path, session_type: SessionTypes
 ) -> None:
     if session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
-        console.enable()
-        console.echo("Start")
         # Assembles the 2-photon fluorescence dataset.
         fluorescence_data = _assemble_2p_fluorescence_dataset(
             session_data_path=session_data_path, multiday_data_path=session_multiday_path
@@ -726,14 +723,3 @@ def assemble_session_data(
 
         # Saves the constructed DataFrame to disk as an uncompressed .feather file.
         result.write_ipc(file=output_path)
-
-        console.echo("Stop")
-
-        with pl.Config(
-            set_fmt_table_cell_list_len=1,
-            set_float_precision=2,
-            set_tbl_cols=50,
-            set_tbl_rows=1000,
-            set_tbl_width_chars=400,
-        ):
-            print(result.slice(offset=2800, length=500))
