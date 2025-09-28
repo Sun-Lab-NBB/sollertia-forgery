@@ -692,17 +692,20 @@ def _assemble_behavior_dataset(
     return behavior_data.select(columns_to_select)
 
 
-def assemble_session_data(
+def assemble_session_dataset(
     session_data_path: Path, session_multiday_path: Path, output_path: Path, dataset_type: DatasetTypes | int
 ) -> None:
-    """
+    """Assembles the requested analysis dataset for the target session.
+
+    This function acts as the entry-point for all dataset assembly (forging) runtimes. It extracts, post-processes, and
+    combines all relevant data for the processed session into a Polars DataFrame object and saves it to an uncompressed
+    .feather file under the output_path directory.
 
     Args:
         session_data_path: The path to the session's processed data directory.
         session_multiday_path: The path to the session's multi-day data directory.
         output_path: The path to the directory where to save the assembled dataset as a .feather file.
         dataset_type: The type of the processed session. Must be one of the valid DatasetTypes enumeration members.
-
     """
 
     # Experiment dataset.

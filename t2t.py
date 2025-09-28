@@ -2,7 +2,7 @@ from pathlib import Path
 
 import polars as pl
 
-from sl_forgery.dataset.data_assembly import DatasetTypes, assemble_session_data
+from sl_forgery.forging import DatasetTypes, assemble_session_dataset
 
 # od = Path("/home/cyberaxolotl/data/")
 # # ProjectData.create(
@@ -20,7 +20,7 @@ from sl_forgery.dataset.data_assembly import DatasetTypes, assemble_session_data
 session = Path("/home/data/2025-09-16-18-44-32-476061")
 dataset = Path("/home/data/md_data/2025-09-16-18-44-32-476061")
 
-assemble_session_data(
+assemble_session_dataset(
     session_data_path=session,
     session_multiday_path=dataset,
     output_path=session.joinpath("/home/data/test.feather"),
