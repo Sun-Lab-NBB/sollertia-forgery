@@ -1,5 +1,6 @@
 """This module provides the assets used to aggregate the processed data from multiple sources into a unified Polars
 dataframe that forms the basis of the Sun lab's analysis dataset hierarchy."""
+
 from typing import Any
 from pathlib import Path
 from functools import partial
@@ -659,10 +660,7 @@ def _assemble_behavior_dataset(
                 .fill_null(0.0)
                 .alias("distance_cm"),
                 # Fixes running speed at the same time
-                pl.when(pl.col("system_state") == "run")
-                .then(pl.col("speed_cm_s"))
-                .otherwise(0.0)
-                .alias("speed_cm_s"),
+                pl.when(pl.col("system_state") == "run").then(pl.col("speed_cm_s")).otherwise(0.0).alias("speed_cm_s"),
             )
             .drop("_past_idle")
         )
@@ -714,8 +712,7 @@ def assemble_session_dataset(
         # datasets
         with tqdm(total=3, desc=f"Assembling session {session_data_path.stem} datasets") as pbar:
             fluorescence_data = _assemble_2p_fluorescence_dataset(
-                session_data_path=session_data_path,
-                multiday_data_path=session_multiday_path
+                session_data_path=session_data_path, multiday_data_path=session_multiday_path
             )
             pbar.update(1)
 
@@ -728,22 +725,17 @@ def assemble_session_dataset(
                     _assemble_behavior_dataset,
                     session_data_path=session_data_path,
                     reference_time=reference_time,
-                    drop_time_columns=True
+                    drop_time_columns=True,
                 ),
                 "experiment": partial(
-                    _assemble_experiment_dataset,
-                    session_data_path=session_data_path,
-                    reference_time=reference_time
-                )
+                    _assemble_experiment_dataset, session_data_path=session_data_path, reference_time=reference_time
+                ),
             }
 
             # Executes the processing in parallel
             results = {}
             with ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_name = {
-                    executor.submit(task): name
-                    for name, task in tasks.items()
-                }
+                future_to_name = {executor.submit(task): name for name, task in tasks.items()}
 
                 for future in as_completed(future_to_name):
                     name = future_to_name[future]
@@ -762,7 +754,6 @@ def assemble_session_dataset(
 
     # Behavior-only training dataset.
     elif DatasetTypes.MESOSCOPE_VR_LICK_TRAINING | DatasetTypes.MESOSCOPE_VR_RUN_TRAINING:
-
         # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
         # timepoints from the face camera timestamp data.
         face_camera_path = session_data_path.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
@@ -772,8 +763,7 @@ def assemble_session_dataset(
         # Assembles and saves the behavior dataset to disk as an uncompressed.feather file (to support memory-mapping).
         with tqdm(total=1, desc=f"Assembling session {session_data_path.stem} datasets") as pbar:
             behavior_data = _assemble_behavior_dataset(
-                session_data_path=session_data_path,
-                reference_time=reference_time
+                session_data_path=session_data_path, reference_time=reference_time
             )
             behavior_data.write_ipc(file=output_path)
             pbar.update(1)
