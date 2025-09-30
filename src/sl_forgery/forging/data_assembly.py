@@ -206,7 +206,7 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
 
 
 @njit(cache=True)
-def _rectify_mesoscope_vr_experiment_state_assignment(experiment_states: NDArray[np.uint8]) -> NDArray[np.uint8]:
+def _rectify_mesoscope_vr_experiment_state_assignment(experiment_states: NDArray[np.uint8], system_states: NDArray[np.uint8]) -> NDArray[np.uint8]:
     """Fixes an issue with experiment state logging observed during interrupted experiment runtimes recorded with early
     sl-experiment library versions.
 
@@ -219,6 +219,7 @@ def _rectify_mesoscope_vr_experiment_state_assignment(experiment_states: NDArray
 
     Args:
         experiment_states: The incorrect experiment state sequence.
+        system_states: The system state sequence used to determine when to apply the experiment state corrections.
 
     Returns:
         The rectified experiment state sequence.
@@ -226,19 +227,18 @@ def _rectify_mesoscope_vr_experiment_state_assignment(experiment_states: NDArray
     # Due to memory mapping, this function needs to copy the data before modifying it.
     processed = experiment_states.copy()
 
-    # Precreates the output sequence array
+    # Tracks the last non-zero experiment state
     last_nonzero = np.uint8(0)
-    zero_count = 0
 
-    # Iterates over the sequence and fixes instances of repeating 0-value sequences.
+    # Iterates over the sequence and fixes erroneous logging instances based on system states
     for i in range(len(experiment_states)):
         if experiment_states[i] != 0:
+            # Updates the last non-zero when a non-zero experiment state is encountered
             last_nonzero = experiment_states[i]
-            zero_count = 0
-        elif i > 0:
-            zero_count += 1
-            if zero_count % 2 == 0:
-                processed[i] = last_nonzero
+        elif system_states[i] != 0 and last_nonzero != 0:
+            # If the system state is non-zero and the experiment state is zero, sets the experiment state to the last
+            # non-zero value
+            processed[i] = last_nonzero
 
     return processed
 
@@ -348,6 +348,9 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
     guidance_state_df = pl.read_ipc(
         behavior_data_path.joinpath("guidance_state_data.feather"), use_pyarrow=True, memory_map=True
     )
+    system_state_df = pl.read_ipc(
+        behavior_data_path.joinpath("system_state_data.feather"), use_pyarrow=True, memory_map=True
+    )
 
     # Adds a trial number column to the trials dataframe.
     trial_df = trial_df.with_columns(pl.int_range(start=1, end=len(trial_df) + 1, dtype=pl.UInt32).alias("trial"))
@@ -392,7 +395,8 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
         "experiment_state": interpolate_data(
             source_coordinates=experiment_state_df["time_us"].to_numpy(),
             source_values=_rectify_mesoscope_vr_experiment_state_assignment(
-                experiment_state_df["experiment_state"].to_numpy()
+                experiment_states=experiment_state_df["experiment_state"].to_numpy(),
+                system_states=system_state_df["system_state"].to_numpy()
             ),
             target_coordinates=reference_time,
             is_discrete=True,
