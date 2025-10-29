@@ -90,11 +90,12 @@ def test_plot(f_cells, f_neuropils, spks, roi_index) -> None:
 
 
 #Path to the target session
-session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
+session_root = Path("/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061")   #explicit path
+# to final day on chelsea's mac
 
 # Parses behavior data as one-dimensional NumPy arrays
 frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
-    source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
+    source_file=Path(session_root.joinpath(".feather"))     #behavior data
 )
 
 # Loads either single-day or multi-day data for the target session
@@ -121,6 +122,7 @@ def extract_data(filepath, day=None):
     '''
 
     #session_root = Path("/Users/cs963/Desktop/TM_06_pilot/{}/{}-13-32-06-980761/".format(mouse, date))
+    # "/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061"
     session_root = Path(filepath)
 
 

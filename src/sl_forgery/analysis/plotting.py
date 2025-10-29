@@ -1,5 +1,5 @@
 from numba.cpython.unsafe.numbers import trailing_zeros
-from sl_forgery.analysis.io import behavior_to_numpy, extract_data
+from src.sl_forgery.analysis.io import behavior_to_numpy, extract_data
 from pathlib import Path
 from scipy import stats
 from matplotlib import pyplot as plt
@@ -304,4 +304,4 @@ def plotting(mouse, kind):
         plt.show()
 
 
-plotting(mouse="6", kind="place")
+plotting(mouse="26", kind="place")
