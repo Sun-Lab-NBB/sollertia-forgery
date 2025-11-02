@@ -2,9 +2,6 @@
 runtime."""
 
 from .manifest import ProjectManifest
-from .pipelines import get_remote_job_work_directory
+from .pipelines import interpolate_data, get_remote_job_work_directory
 
-__all__ = [
-    "ProjectManifest",
-    "get_remote_job_work_directory",
-]
+__all__ = ["ProjectManifest", "get_remote_job_work_directory", "interpolate_data"]
