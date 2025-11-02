@@ -42,6 +42,7 @@ dependencies = [
     "ataraxis-time>=3,<4",
     "ataraxis-base-utilities>=3.1.0,<4",
     "ataraxis-data-structures>=3.1.1,<4",
+    "sl-shared-assets==6.0.0rc2",
     "polars>=1,<2",
     "pyarrow>=21,<22",
     "numpy>=2,<3",
@@ -51,9 +52,10 @@ dependencies = [
     "PyQt6>=6,<7",
     "tqdm>=4,<5",
     "appdirs>=1,<2",
-    "sl-shared-assets==6.0.0rc2",
     "plotly>=6,<7",
     "umap-learn==0.5.9.post2",
+    "pytz>=2025,<2026",
+    "filelock>=3,<4",
 ]
 
 [project.urls]
@@ -76,6 +78,8 @@ dev = [
     # Types
     "types-appdirs>=1,<2",
     "types-tqdm>=4,<5",
+    "types-filelock>=3,<4",
+    "types-pytz>=2025,<2026",
 ]
 
 # Exports CLIs upon library installation into an environment

@@ -206,7 +206,9 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
 
 
 @njit(cache=True)
-def _rectify_mesoscope_vr_experiment_state_assignment(experiment_states: NDArray[np.uint8], system_states: NDArray[np.uint8]) -> NDArray[np.uint8]:
+def _rectify_mesoscope_vr_experiment_state_assignment(
+    experiment_states: NDArray[np.uint8], system_states: NDArray[np.uint8]
+) -> NDArray[np.uint8]:
     """Fixes an issue with experiment state logging observed during interrupted experiment runtimes recorded with early
     sl-experiment library versions.
 
@@ -396,7 +398,7 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
             source_coordinates=experiment_state_df["time_us"].to_numpy(),
             source_values=_rectify_mesoscope_vr_experiment_state_assignment(
                 experiment_states=experiment_state_df["experiment_state"].to_numpy(),
-                system_states=system_state_df["system_state"].to_numpy()
+                system_states=system_state_df["system_state"].to_numpy(),
             ),
             target_coordinates=reference_time,
             is_discrete=True,
