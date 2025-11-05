@@ -84,6 +84,26 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
     # Step 1: Filter for active trials only <-- this could be an arg in the function, for Ivan's rest
     active_df = df.filter(pl.col('system_state')=="run")
 
+    trial_distances = (
+        active_df.group_by(['trial', 'trial_type'])
+        .agg([
+            (pl.col('distance_cm').max() - pl.col('distance_cm').min()).alias('trial_distance_cm')
+        ])
+    )
+
+    # Step 2: Check what distances each trial type typically covers
+    print("Trial type distance summary:")
+    print(
+        trial_distances.group_by('trial_type')
+        .agg([
+            pl.col('trial_distance_cm').mean().alias('avg_distance'),  # Changed here
+            pl.col('trial_distance_cm').min().alias('min_distance'),  # Changed here
+            pl.col('trial_distance_cm').max().alias('max_distance'),  # Changed here
+            pl.col('trial_distance_cm').count().alias('n_trials')  # Changed here
+        ])
+    )
+
+
     # Step 2: Normalize distance within each trial (0 to trial_length)
     # This is crucial for consistent binning across trials
     normalized_df = active_df.with_columns([
@@ -92,7 +112,7 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
          pl.col('distance_cm').min().over('trial')).alias('trial_distance')
     ])
 
-  #inspect the max and min trial distance.  how can we take care of this?
+  #inspect the max and min trial distance.  how can we take care of the discrepancies?
     result = normalized_df.group_by('trial').agg([
         pl.col('trial_distance').first().alias('start_distance'),
         pl.col('trial_distance').last().alias('final_distance'),
