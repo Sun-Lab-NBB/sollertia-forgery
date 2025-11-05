@@ -1,5 +1,6 @@
 from numba.cpython.unsafe.numbers import trailing_zeros
-from src.sl_forgery.analysis.io import behavior_to_numpy, extract_data
+from src.sl_forgery.analysis.io import behavior_to_numpy, extract_data, behavior_from_feather, extract_data_new
+import io
 from pathlib import Path
 from scipy import stats
 from matplotlib import pyplot as plt
@@ -65,19 +66,26 @@ def create_grouped_df(distance_df, signal_df, start_indices):
     #   add arguments for cue length, bin size, day type for meso (single, multi)
     #   what are the other "kind" options
 
-def plotting(mouse, kind):
-    session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-27-12-44-58-770644/single_day")
+def plotting(mouse, kind=None, path=None):
+
+    if path is not None:
+        session_root = Path(path)
+        beh_path = session_root  #joins w behavior_data dir in behavior_from_feather
+    else:
+        session_root = Path("/Users/cs963/Desktop/TM_06_pilot/6/2025-06-23-13-32-06-980761/")
+        beh_path= session_root.joinpath("behavior", "behavior_at_frame.feather")
+
 
     date = 1  # fix this
 
     #meso data is structured by cell# --> data; so shape is (cells, frames) - 2D array
-    fluorescence, neuropil, spikes, iscell = extract_data(session_root, None)
+    fluorescence, neuropil, spikes, iscell = extract_data_new(session_root)
+
 
 
     #beh data is structured by frame --> so shape is (frames, ) 1D array
-    frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
-        source_file=Path(session_root.joinpath("behavior", "behavior_at_frame.feather"))
-    )
+    frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = (
+        behavior_from_feather(source_dir=beh_path))
 
 #TODO working on this as an outer function with df, optional filtering w keywords
 
@@ -135,7 +143,7 @@ def plotting(mouse, kind):
     result = create_grouped_df(active_behavior_df.select(active_behavior_df["frame", "distance"]),
                                                 active_fluorescence_df,
                                                 trial_indices)
-
+    #print(result.head)
     # create 5 cm bins
     # TODO:  need to soft code bin size and cue length late
     #   this only works with set lengths
@@ -231,6 +239,9 @@ def plotting(mouse, kind):
 
     trial_avg_df = pl.DataFrame(trial_avgs)
 
+    #print(binned_df.columns)
+    print(trial_avg_df.head)
+
     # now create dict for the average signal for each cell in the session
     avg_data = {}
     sess_sem = []       #had to make list bc I couldnt get both arrays into a single cell, there was some issue with
@@ -302,6 +313,8 @@ def plotting(mouse, kind):
         plt.xlabel("distance in cm")
         plt.ylabel("Fluorescent signal")
         plt.show()
+#%%%%%%%%%%
 
+#plotting(mouse="6", kind="place")
 
-plotting(mouse="26", kind="place")
+plotting(mouse=26, path='/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-15-15-53-47-956713/processed_data')

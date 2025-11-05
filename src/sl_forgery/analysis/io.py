@@ -40,74 +40,6 @@ def behavior_to_numpy(
     return frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state
 
 
-def test_plot(f_cells, f_neuropils, spks, roi_index) -> None:
-    plt.figure(figsize=(20.0, 20.0), dpi=100)
-    plt.suptitle(f"Fluorescence and Deconvolved Traces for ROI {roi_index} Across Sessions", y=0.92)
-
-    # Assigns distinct color to visualized traces
-    colors = ["#1f77b4", "#2ca02c", "#d62728"]  # Blue, Green, Red
-
-    frame_in = 6400
-    frame_out = 7500
-    cell_start = 500
-    cell_stop = 510
-
-    # Extracts data for the specific ROI from this session
-    # f_neu = f_neuropils[roi_index][frame_in:frame_out]
-    # sp = spks[roi_index][frame_in:frame_out]
-
-    # # Adjust range to match fluorescence traces
-    # fmax = np.maximum(f.max(), f_neu.max())
-    # fmin = np.minimum(f.min(), f_neu.min())
-    # frange = fmax - fmin
-
-    # # Normalizes spikes
-    # if sp.max() > 0:
-    #     sp = sp / sp.max() * frange + fmin
-    # else:
-    #     sp = np.zeros_like(sp) + fmin
-
-    for ind in range(500, 510, 1):
-        f = f_cells[ind][frame_in:frame_out]
-        plt.plot(f, label=f"cell_{ind}")
-
-    # plt.plot(f_neu, color=colors[1], label="Neuropil Fluorescence")
-    # plt.plot(sp, color=colors[2], label="Deconvolved")
-
-    plt.xticks(np.arange(0, f.shape[0], f.shape[0] // 10))
-
-    # Add y-axis label for fluorescence/pixel intensity
-    plt.ylabel("fluorescence")
-
-    plt.xlabel("frame")
-    plt.grid(True, linestyle=":", alpha=0.6)
-
-    plt.legend(bbox_to_anchor=(1.01, 1), loc="upper left")
-
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.9)
-    plt.show()
-
-
-#Path to the target session
-session_root = Path("/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061")   #explicit path
-# to final day on chelsea's mac
-
-# Parses behavior data as one-dimensional NumPy arrays
-frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_stage, system_state = behavior_to_numpy(
-    source_file=Path(session_root.joinpath(".feather"))     #behavior data
-)
-
-# Loads either single-day or multi-day data for the target session
-target_group = "multi_day"  # Supported values: single_day multi_day
-f_path = session_root.joinpath(target_group, "F.npy")
-f_neu_path = session_root.joinpath(target_group, "Fneu.npy")
-spks_path = session_root.joinpath(target_group, "spks.npy")
-fluorescence = np.load(file=f_path, mmap_mode="r")
-neuropil = np.load(file=f_neu_path, mmap_mode="r")
-spks = np.load(file=spks_path, mmap_mode="r")
-
-
 def extract_data(filepath, day=None):
     '''
     Loads either single-day or multi-day data for the mouse
@@ -123,15 +55,63 @@ def extract_data(filepath, day=None):
 
     #session_root = Path("/Users/cs963/Desktop/TM_06_pilot/{}/{}-13-32-06-980761/".format(mouse, date))
     # "/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061"
-    session_root = Path(filepath)
+    session_root = Path(filepath.joinpath("mesoscope_data/suite2p/combined/"))
 
 
     #Loads either single-day or multi-day data for the target session
-    target_group = day # Supported values: single_day multi_day
+    target_group = "single_day" # Supported values: single_day multi_day
     f_path = session_root.joinpath(target_group, "F.npy")
     f_neu_path = session_root.joinpath(target_group, "Fneu.npy")
     spks_path = session_root.joinpath(target_group, "spks.npy")
     iscell_path = session_root.joinpath(target_group, "iscell.npy")
+    fluorescence = np.load(file=f_path, mmap_mode="r")
+    neuropil = np.load(file=f_neu_path, mmap_mode="r")
+    spks = np.load(file=spks_path, mmap_mode="r")
+    iscell = np.load(file=iscell_path, mmap_mode="r")
+
+    return fluorescence, neuropil, spks, iscell
+
+
+
+
+
+####################
+
+
+
+
+def behavior_from_feather(source_dir):
+q
+    """Temp function for testing new data with old plotting code"
+    """
+    source_dir = Path(source_dir.joinpath("behavior_data"))
+
+    print(pl.read_ipc(source_dir.joinpath("mesoscope_frame_data.feather")))
+
+    #frame_index = pl.read_ipc(source_dir.joinpath("mesoscope_frame_data.feather")).to_numpy()
+    traveled_distance = pl.read_ipc(source_dir.joinpath("trial_data.feather"))["traveled_distance_cm"].to_numpy()
+    frame_index = np.arange(traveled_distance.shape[0])
+    timestamps = np.zeros(len(frame_index))
+    trial = pl.read_ipc(source_dir.joinpath("trial_data.feather"))["trial_type_index"].to_numpy()
+    lick = pl.read_ipc(source_dir.joinpath("lick_data.feather"))["lick_state"].to_numpy()
+    reward = pl.read_ipc(source_dir.joinpath("valve_data.feather"))["dispensed_water_volume_uL"].to_numpy()
+    experiment_state = pl.read_ipc(source_dir.joinpath("experiment_state_data.feather"))["experiment_state"].to_numpy()
+    system_state = pl.read_ipc(source_dir.joinpath("system_state_data.feather"))["system_state"].to_numpy()
+
+    return frame_index, timestamps, traveled_distance, trial, lick, reward, experiment_state, system_state
+
+
+def extract_data_new(filepath):
+    """again temporary function for testing new data with old plotting code"""
+    session_root = Path(filepath)
+    session_root = session_root.joinpath("mesoscope_data/suite2p/combined")
+
+    #Loads either single-day or multi-day data for the target session
+
+    f_path = session_root.joinpath("F.npy")
+    f_neu_path = session_root.joinpath( "Fneu.npy")
+    spks_path = session_root.joinpath( "spks.npy")
+    iscell_path = session_root.joinpath("iscell.npy")
     fluorescence = np.load(file=f_path, mmap_mode="r")
     neuropil = np.load(file=f_neu_path, mmap_mode="r")
     spks = np.load(file=spks_path, mmap_mode="r")
