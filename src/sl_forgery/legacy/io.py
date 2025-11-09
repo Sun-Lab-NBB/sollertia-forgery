@@ -8,7 +8,7 @@ from tqdm import tqdm
 import zarr
 import numpy as np
 import pandas as pd
-from natsort import natsorted
+from natsort_rs import natsorted
 import numcodecs
 
 

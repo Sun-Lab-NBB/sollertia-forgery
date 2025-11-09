@@ -39,12 +39,12 @@ classifiers = [
 
 # Runtime project dependencies.
 dependencies = [
-    "ataraxis-time>=3,<4",
-    "ataraxis-base-utilities>=3.1.0,<4",
-    "ataraxis-data-structures>=3.1.1,<4",
-    "sl-shared-assets==6.0.0rc2",
+    "ataraxis-time>=5,<6",
+    "ataraxis-base-utilities>=5,<6",
+    "ataraxis-data-structures>=5,<6",
+    "sl-shared-assets==6.0.1rc1",
     "polars>=1,<2",
-    "pyarrow>=21,<22",
+    "pyarrow>=22,<23",
     "numpy>=2,<3",
     "numba>=0,<1",
     "scipy>=1,<2",
@@ -56,6 +56,10 @@ dependencies = [
     "umap-learn==0.5.9.post2",
     "pytz>=2025,<2026",
     "filelock>=3,<4",
+    "paramiko>=4,<5",
+    "simple-slurm>=0,<1",
+    "natsort-rs>=0,<1",
+    "xxhash>=3,<4",
 ]
 
 [project.urls]
