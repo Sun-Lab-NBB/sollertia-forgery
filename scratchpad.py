@@ -216,7 +216,7 @@ def select_best_duplicate_pairs(
     correlations: NDArray[np.float32],
     cell_sizes: NDArray[np.uint16],
     cell_radii: NDArray[np.float32],
-    stripe_indices: NDArray[np.uint16]
+    stripe_indices: NDArray[np.uint16],
 ) -> np.ndarray:
     """
     Select the best duplicate pairs ensuring each cell appears at most once.
@@ -240,11 +240,7 @@ def select_best_duplicate_pairs(
         radius_ratio = abs(cell_radii[cell_1] - cell_radii[cell_2]) / max(cell_radii[cell_1], cell_radii[cell_2])
 
         # Combined score: 50% correlation, 25% size similarity, 25% radius similarity
-        similarity_scores[idx] = (
-                0.5 * correlations[idx] +
-                0.25 * (1 - npix_ratio) +
-                0.25 * (1 - radius_ratio)
-        )
+        similarity_scores[idx] = 0.5 * correlations[idx] + 0.25 * (1 - npix_ratio) + 0.25 * (1 - radius_ratio)
 
     # Sort by similarity score (descending)
     sorted_indices = np.argsort(similarity_scores)[::-1]
@@ -390,11 +386,7 @@ def discover_duplicate_cells(
 
     # Select best duplicate pairs (returns numpy array)
     cells_to_remove_array = select_best_duplicate_pairs(
-        pair_candidates,
-        correlations,
-        cell_sizes,
-        cell_radii,
-        stripe_indices
+        pair_candidates, correlations, cell_sizes, cell_radii, stripe_indices
     )
 
     # Convert to set if needed for compatibility with existing code
@@ -418,5 +410,7 @@ def discover_duplicate_cells(
 
 
 # Usage
-cells_to_keep = discover_duplicate_cells(root_path, correlation_threshold=0.5, height_threshold=200, size_threshold=0.5, radius_threshold=0.5)
+cells_to_keep = discover_duplicate_cells(
+    root_path, correlation_threshold=0.5, height_threshold=200, size_threshold=0.5, radius_threshold=0.5
+)
 console.echo(f"Final cell count: {len(cells_to_keep)}.", level=LogLevel.SUCCESS)
