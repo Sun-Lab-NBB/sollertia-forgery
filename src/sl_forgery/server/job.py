@@ -1,10 +1,5 @@
-"""This module provides the core Job class, used as the starting point for all SLURM-managed jobs executed on remote
-compute server(s). Specifically, the Job class encapsulates the SLURM configuration and specific logic of each job.
-During runtime, the Server class interacts with input Job objects to manage their transfer and execution on the remote
-compute servers.
-
-Since version 3.0.0, this module also provides the specialized JupyterJob class used to launch remote Jupyter notebook
-servers.
+"""This module provides the Job and JupyterJob classes, used as the starting point for all non-interactive and
+interactive SLURM-managed jobs executed on remote compute server(s).
 """
 
 import re
