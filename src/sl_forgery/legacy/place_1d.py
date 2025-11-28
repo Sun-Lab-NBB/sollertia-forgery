@@ -4,7 +4,7 @@ of neurons on linear tracks.
 """
 
 from copy import deepcopy
-from typing import Any, Union, Optional
+from typing import Any
 
 import dask
 import vr2p
@@ -114,7 +114,7 @@ class PlaceFields1d:
 
         return np.argsort(order)
 
-    def remove_fields(self, ind: np.ndarray) -> "PlaceFields1d":
+    def remove_fields(self, ind: np.ndarray) -> PlaceFields1d:
         """Remove specified place fields.
 
         Args:
@@ -136,7 +136,7 @@ class PlaceFields1d:
 
         return pf
 
-    def filter_cells(self, ind: np.ndarray) -> "PlaceFields1d":
+    def filter_cells(self, ind: np.ndarray) -> PlaceFields1d:
         """Filter to keep only specified cells.
 
         Args:

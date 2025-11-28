@@ -59,10 +59,10 @@ class AnimalDataset:
     """The data slice start date. All sessions recorded on or after this date are included in the dataset."""
     end_date: str = "2025-08-01"
     """The data slice end date. All sessions recorded on or before this date are included in the dataset."""
-    include: list[str] = field(default_factory=lambda: [])
+    include: list[str] = field(default_factory=list)
     """The sessions to include in the dataset even if they fall outside of the `start_date` / `end_date` range. This 
     field must use the full session ID (name), rather than a shortened session date."""
-    exclude: list[str] = field(default_factory=lambda: [])
+    exclude: list[str] = field(default_factory=list)
     """The sessions to exclude from the dataset even if they fall within the `start_date` / `end_date` range. This 
     field takes precedence over the `include` field if a session is included in both fields. This field must use the 
     full session ID (name), rather than a shortened session date.
@@ -123,7 +123,7 @@ class DatasetManifest(YamlConfig):
         original.to_yaml(file_path=file_path)
 
     @classmethod
-    def load(cls, file_path: Path) -> "DatasetManifest":
+    def load(cls, file_path: Path) -> DatasetManifest:
         """Loads the data from the specified .yaml file and uses it to initialize and return the class instance."""
         return cls.from_yaml(file_path=file_path)
 
@@ -162,14 +162,13 @@ class AnimalData:
         """Returns the processed data for the specified session."""
         if name in self.sessions:
             return self.sessions[name]
-        else:
-            message = (
-                f"Unable to retrieve the processed session data for the session {name}. The animal's data does not "
-                f"contain a session with this name."
-            )
-            console.error(message, error=ValueError)
-            # Fallback to appease mypy, should not be reachable
-            raise ValueError(message)  # pragma: no cover
+        message = (
+            f"Unable to retrieve the processed session data for the session {name}. The animal's data does not "
+            f"contain a session with this name."
+        )
+        console.error(message, error=ValueError)
+        # Fallback to appease mypy, should not be reachable
+        raise ValueError(message)  # pragma: no cover
 
     @property
     def session_names(self) -> tuple[str, ...]:
@@ -240,7 +239,6 @@ class ProjectData:
             project: The name of the project for which the dataset is created.
             dataset_type: A DatasetTypes enumeration member that specifies the type of the dataset.
         """
-
         # Ensures that the dataset type is one of the supported types.
         dataset_type = DatasetTypes(dataset_type)
 
@@ -331,7 +329,6 @@ class ProjectData:
             method, it could be refactored into the `ProjectManifest` class itself to avoid passing the manifest
             object explicitly.
         """
-
         # Initializes the result dictionary
         result = {}
 
@@ -442,8 +439,7 @@ class ProjectData:
 
     @staticmethod
     def parse_session(session_name):
-        """
-        If the session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
+        """If the session matches the form YYYY-MM-DD-HH-MM-SS-microseconds,
         return only 'MM-DD'. Otherwise, return the session unchanged.
         """
         pattern = r"^\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d+$"

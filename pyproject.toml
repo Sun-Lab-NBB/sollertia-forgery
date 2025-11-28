@@ -42,7 +42,7 @@ dependencies = [
     "ataraxis-time>=5,<6",
     "ataraxis-base-utilities>=5,<6",
     "ataraxis-data-structures>=5,<6",
-    "sl-shared-assets>=6.0.1rc7,<7",
+    "sl-shared-assets>=6.0.1rc8,<7",
     "polars>=1,<2",
     "pyarrow>=22,<23",
     "numpy>=2,<3",
@@ -53,7 +53,7 @@ dependencies = [
     "tqdm>=4,<5",
     "appdirs>=1,<2",
     "plotly>=6,<7",
-    "umap-learn==0.5.9.post2",
+    "umap-learn>=0.5.9.post2,<1",
     "pytz>=2025,<2026",
     "filelock>=3,<4",
     "paramiko>=4,<5",
@@ -113,6 +113,15 @@ lint.select = ["ALL"]
 
 # General ignore directives
 lint.ignore = [
+    "W291",  # Conflicts with docstring formatting.
+    "W293",  # Conflicts with UI style formatting.
+    "C901",  # Sometimes complex functions are necessary
+    "PLR0913",  # Sometimes complex functions are necessary
+    "PLR0912",  # Sometimes complex functions are necessary
+    "PLR0915",  # Sometimes complex type defenitions are necessary
+    "PLR0911", # Sometimes complex return graphs are necessary
+    "TID252", # Conflicts with the project's import management strategy
+    "BLE001",  # Catching blind exceptions is necessary for the functioning of this library.
     "COM812", # Conflicts with the formatter
     "ISC001", # Conflicts with the formatter
     "PT001", # https://github.com/astral-sh/ruff/issues/8796#issuecomment-182590771

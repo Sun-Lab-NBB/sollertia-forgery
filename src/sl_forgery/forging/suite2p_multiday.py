@@ -49,14 +49,13 @@ def _construct_suite2p_multiday_pipeline(
     Returns:
         The configured ProcessingPipeline instance.
     """
-
     # Resolves the path to the local Sun lab working directory
     local_working_directory = get_working_directory()
 
     # Constructs the list of session paths to use int he multiday processing command.
     session_command = ""
     for session in sessions:
-        session_path = server.raw_data_root.joinpath(project, str(animal), session)
+        session_path = server.shared_storage_root.joinpath(project, str(animal), session)
         session_command += f"-sp {session_path} "
 
     # Resolves additional shared flags for the processing CLI.
@@ -75,8 +74,8 @@ def _construct_suite2p_multiday_pipeline(
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="suite2p",
         cpus_to_use=30,
@@ -85,7 +84,7 @@ def _construct_suite2p_multiday_pipeline(
     )
     job.add_command(
         f"ss2p run {configuration_command} -w -1 sl-multi-day {session_command} "
-        f"-pdr {server.processed_data_root} -id {manager_id} {job_command} {tracker_command} -o "
+        f"-pdr {server.shared_working_root} -id {manager_id} {job_command} {tracker_command} -o "
         f"{server.user_working_root.joinpath(dataset_name)} -d"
     )
     stage_1.append((job, working_directory))
@@ -94,11 +93,11 @@ def _construct_suite2p_multiday_pipeline(
     for session in sessions:
         job_name = f"{dataset_name}_ss2p_session_{session}"
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-        server.create_directory(remote_path=working_directory)
+        server.create(remote_path=working_directory, is_dir=True)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="suite2p",
             cpus_to_use=30,
@@ -107,7 +106,7 @@ def _construct_suite2p_multiday_pipeline(
         )
         job.add_command(
             f"ss2p run {configuration_command} -w -1 sl-multi-day {session_command} "
-            f"-pdr {server.processed_data_root} -id {manager_id} {job_command} {tracker_command} -o "
+            f"-pdr {server.shared_working_root} -id {manager_id} {job_command} {tracker_command} -o "
             f"{server.user_working_root.joinpath(project, dataset_name)} -e -t {session}"
         )
         stage_2.append((job, working_directory))

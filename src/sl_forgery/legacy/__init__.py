@@ -205,7 +205,7 @@ class ObjectSessionData:
     def __len__(self) -> int:
         return self._file[f"{self._field}"].__len__()
 
-    def __iter__(self) -> "ObjectSessionData":
+    def __iter__(self) -> ObjectSessionData:
         self.index = -1
         return self
 
@@ -257,7 +257,7 @@ class RegisteredCells:
 
     def __iter__(
         self,
-    ) -> "RegisteredCells":
+    ) -> RegisteredCells:
         self._index = -1
         self._values = self._file["cells/multi_session/registered"][()]
         return self
@@ -339,9 +339,8 @@ class BehaviorTypeSessionData:
         if dataset_path in self._file:
             structured_array = self._file[dataset_path][()]
             return pd.DataFrame.from_records(structured_array)
-        else:
-            # Return an empty DataFrame if data for the session_index is not found
-            return pd.DataFrame()
+        # Return an empty DataFrame if data for the session_index is not found
+        return pd.DataFrame()
 
     def __len__(self) -> int:
         """Returns the number of sessions for which this behavior data type is available."""
