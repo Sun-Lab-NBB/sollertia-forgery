@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from sl_shared_assets import Server
+from ..server import Server
 from ataraxis_time.time_helpers import get_timestamp
 
 
