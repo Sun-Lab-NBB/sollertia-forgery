@@ -16,7 +16,7 @@ import contextlib
 import paramiko
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 from ataraxis_base_utilities import LogLevel, console
-from ataraxis_time.time_helpers import get_timestamp
+from ataraxis_time.time_helpers import TimestampFormats, get_timestamp
 
 from .job import Job, JupyterJob
 
@@ -24,6 +24,26 @@ if TYPE_CHECKING:
     from paramiko.client import SSHClient
     from sl_shared_assets import ServerConfiguration
     from paramiko.sftp_client import SFTPClient
+
+
+def get_remote_job_work_directory(server: Server, job_name: str) -> Path:
+    """Resolves and creates the remote compute server working directory for the specified job.
+
+    Args:
+        server: The Server instance that interfaces with the remote compute server used to execute the job.
+        job_name: The name of the job to be executed.
+
+    Returns:
+        The path to the job's working directory on the remote compute server.
+    """
+    # Resolves working directory name using timestamp (accurate to minutes) and the job's name.
+    timestamp = "-".join(get_timestamp(output_format=TimestampFormats.STRING).split("-")[:5])
+    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}", f"{timestamp}")
+
+    # Creates the working directory on the remote server.
+    server.create(remote_path=working_directory, is_dir=True, parents=True)
+
+    return working_directory
 
 
 class JobStatus(StrEnum):
@@ -290,11 +310,8 @@ class Server:
             TimeoutError: If the Jupyter server doesn't start within 120 seconds of being submitted.
             RuntimeError: If the job submission fails for any reason.
         """
-        # Statically configures the working directory to be stored under:
-        # user working root / job_logs / job_name_timestamp
-        timestamp = get_timestamp()
-        working_directory = Path(self.user_working_root.joinpath("job_logs", f"{job_name}_{timestamp}"))
-        self.create(remote_path=working_directory, is_dir=True, parents=True)
+        # Resolves the job's working directory
+        working_directory = get_remote_job_work_directory(server=self, job_name=job_name)
 
         # If necessary, generates and sets port to a random value between 8888 and 9999.
         if port == 0:

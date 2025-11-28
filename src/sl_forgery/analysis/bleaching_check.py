@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
+
 from sl_forgery.analysis.io import extract_data, behavior_to_numpy
 
 files = [

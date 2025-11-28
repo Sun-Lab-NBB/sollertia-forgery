@@ -4,6 +4,7 @@ import umap
 import numpy as np
 from scipy import stats
 import polars as pl
+
 from sl_forgery.utils.dataclass import TargetGroup, ProcessedSessionData
 
 track_length = 240

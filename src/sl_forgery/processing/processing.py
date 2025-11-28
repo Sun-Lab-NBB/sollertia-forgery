@@ -21,9 +21,8 @@ from sl_shared_assets import (
 )
 from ataraxis_base_utilities import LogLevel, console, chunk_iterable
 
-from ..utils import ProjectManifest, get_remote_job_work_directory
-from ..server import Server
-from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
+from ..server import Server, ProcessingTrackers, get_remote_job_work_directory
+from ..managing import ProjectManifest, resolve_project_manifest
 
 
 def _check_session_eligibility(
@@ -953,12 +952,8 @@ def process_project_data(
     # Initializes a delay timer to support better visual separation of various terminal printouts and progress bars.
     delay_timer = PrecisionTimer("s")
 
-    # Depending on the configuration, updates the project manifest file stored on the remote server and fetches it to
-    # the local machine.
-    if update_manifest:
-        generate_remote_project_manifest(project=project, server=server)
-    else:
-        fetch_remote_project_manifest(project=project, server=server)
+    # Resolves the project manifest file, optionally regenerating it on the remote server.
+    resolve_project_manifest(project=project, server=server, generate=update_manifest)
 
     # Loads the fetched manifest file into memory as a ProjectManifest instance.
     manifest_path = get_working_directory().joinpath(project, "manifest.feather")
@@ -1051,8 +1046,8 @@ def process_project_data(
             # Ensures the visual separation between terminal printouts
             delay_timer.delay_noblock(delay=1, allow_sleep=True)
 
-            # Refreshes the local manifest file to include the processing outcome data
-            fetch_remote_project_manifest(project=project, server=server)
+            # Refreshes the local manifest file to include the processing outcome data.
+            resolve_project_manifest(project=project, server=server, generate=False)
             manifest = ProjectManifest(manifest_file=manifest_path)
 
             # Ensures the visual separation between terminal printouts
@@ -1113,8 +1108,8 @@ def process_project_data(
             # Ensures the visual separation between terminal printouts
             delay_timer.delay_noblock(delay=1, allow_sleep=True)
 
-            # Refreshes the local manifest file to include the processing outcome data
-            fetch_remote_project_manifest(project=project, server=server)
+            # Refreshes the local manifest file to include the processing outcome data.
+            resolve_project_manifest(project=project, server=server, generate=False)
             manifest = ProjectManifest(manifest_file=manifest_path)
 
             # Ensures the visual separation between terminal printouts
@@ -1197,8 +1192,8 @@ def process_project_data(
             # Ensures the visual separation between terminal printouts
             delay_timer.delay_noblock(delay=1, allow_sleep=True)
 
-            # Refreshes the local manifest file to include the processing outcome data
-            fetch_remote_project_manifest(project=project, server=server)
+            # Refreshes the local manifest file to include the processing outcome data.
+            resolve_project_manifest(project=project, server=server, generate=False)
             manifest = ProjectManifest(manifest_file=manifest_path)
 
             # Ensures the visual separation between terminal printouts

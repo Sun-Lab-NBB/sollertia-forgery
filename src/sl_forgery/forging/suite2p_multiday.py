@@ -10,7 +10,7 @@ from sl_shared_assets import (
     get_working_directory,
 )
 
-from ..utils import get_remote_job_work_directory
+from ..server import get_remote_job_work_directory
 
 
 def _construct_suite2p_multiday_pipeline(

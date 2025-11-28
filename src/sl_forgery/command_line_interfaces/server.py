@@ -5,8 +5,12 @@ from sl_shared_assets import get_server_configuration
 
 from ..server import Server
 
+# Ensures that displayed CLICK help messages are formatted according to the lab standard.
+CONTEXT_SETTINGS = {"max_content_width": 120}
 
-@click.command(name="jupyter")
+
+@click.command(name="jupyter", context_settings=CONTEXT_SETTINGS)
+@click.pass_context
 @click.option(
     "-e",
     "--environment",
@@ -41,7 +45,7 @@ from ..server import Server
     type=int,
     default=120,
     show_default=True,
-    help=("The maximum uptime duration for the Jupyter session, in minutes."),
+    help="The maximum uptime duration for the Jupyter session, in minutes.",
 )
 @click.option(
     "-p",
