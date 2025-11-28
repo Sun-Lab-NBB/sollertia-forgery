@@ -1,97 +1,76 @@
-"""This module provides the Job and JupyterJob classes, used as the starting point for all non-interactive and
-interactive SLURM-managed jobs executed on remote compute server(s).
+"""This module provides the Job and JupyterJob classes that serve as the starting point for all SLURM-managed jobs
+executed on remote compute server(s).
 """
 
 import re
-from pathlib import Path
+from typing import TYPE_CHECKING
 import datetime
 from dataclasses import dataclass
 
 # noinspection PyProtectedMember
 from simple_slurm import Slurm
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import console
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass
 class _JupyterConnectionInfo:
     """Stores the data used to establish the connection with a Jupyter notebook server running under SLURM control on a
-    remote Sun lab server.
+    remote compute server.
 
     This class is used to transfer the connection metadata collected on the remote server back to the local machine
-    that requested the server to be established.
+    that requested the Jupyter server session.
     """
 
     compute_node: str
     """The hostname of the compute node where Jupyter is running."""
 
     port: int
-    """The port number on which Jupyter is listening for communication. Usually, this is the default port 8888 or 9999.
-    """
+    """The port number on which Jupyter is listening for communication."""
 
     token: str
-    """The authentication token for the Jupyter server. This token is used to authenticate the user when establishing 
-    communication with the Jupyter server."""
+    """The authentication token for connecting to the Jupyter server."""
 
     @property
     def localhost_url(self) -> str:
-        """Returns the localhost URL for connecting to the server.
+        """Returns the localhost URL that can be used to connect to the server from the host-machine.
 
-        To use this URL, first set up an SSH tunnel to the server via the specific Jupyter communication port and the
-        remote server access credentials.
+        Note:
+            To use the URL returned by this function, first set up an SSH tunnel to the server via the specific Jupyter
+            communication port and the remote server access credentials.
         """
         return f"http://localhost:{self.port}/?token={self.token}"
 
 
 class Job:
-    """Aggregates the data of a single SLURM-managed job to be executed on the Sun lab's remote compute server.
+    """Defines a non-interactive SLURM-managed job to be executed on the remote compute server.
 
-    This class provides the API for constructing any server-side job in the Sun lab. Internally, it wraps an instance
-    of a Slurm class to package the job data into the format expected by the SLURM job manager. All jobs managed by this
-    class instance should be submitted to an initialized Server instance's submit_job() method to be executed on the
-    server.
+    This class provides the API for constructing and managing the non-interactive jobs running on remote compute
+    servers.
 
     Notes:
-        The initialization method of the class contains the arguments for configuring the SLURM and Conda environments
-        used by the job. Do not submit additional SLURM or Conda commands via the 'add_command' method, as this may
-        produce unexpected behavior.
-
-        Each job can be conceptualized as a sequence of shell instructions to execute on the remote compute server. For
-        the lab, that means that the bulk of the command consists of calling various CLIs exposed by data processing or
-        analysis pipelines, installed in the calling user's Conda environments on the server. The Job instance also
-        contains commands for activating the target conda environment and, in some cases, doing other preparatory or
-        cleanup work. The source code of a 'remote' job is typically identical to what a human operator would type in a
-        'local' terminal to run the same job on their PC.
-
-        A key feature of server-side jobs is that they are executed on virtual machines managed by SLURM. Since the
-        server has a lot more compute and memory resources than likely needed by individual jobs, each job typically
-        requests a subset of these resources. Upon being executed, SLURM creates an isolated environment with the
-        requested resources and runs the job in that environment.
+        Instances of this class should be submitted to an initialized Server instance's submit_job() method to be
+        executed on the remote compute server.
 
     Args:
-        job_name: The descriptive name of the SLURM job to be created. Primarily, this name is used in terminal
-            printouts to identify the job to human operators.
-        output_log: The absolute path to the .txt file on the processing server, where to store the standard output
-            data of the job.
-        error_log: The absolute path to the .txt file on the processing server, where to store the standard error
-            data of the job.
-        working_directory: The absolute path to the directory where temporary job files will be stored. During runtime,
-            classes from this library use that directory to store files such as the job's shell script. All such files
-            are automatically removed from the directory at the end of a non-errors runtime.
-        conda_environment: The name of the conda environment to activate on the server before running the job logic. The
-            environment should contain the necessary Python packages and CLIs to support running the job's logic.
-        cpus_to_use: The number of CPUs to use for the job.
-        ram_gb: The amount of RAM to allocate for the job, in Gigabytes.
-        time_limit: The maximum time limit for the job, in minutes. If the job is still running at the end of this time
-            period, it will be forcibly terminated. It is highly advised to always set adequate maximum runtime limits
-            to prevent jobs from hogging the server in case of runtime or algorithm errors.
+        job_name: The descriptive name of the SLURM job to be created.
+        output_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
+            the job to the 'stdout' pipe.
+        error_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
+            the job to the 'stderr' pipe.
+        working_directory: The absolute path to the compute server's directory where to store the temporary job's files.
+        conda_environment: The name of the mamba / conda environment to activate on the server before running the job.
+        cpu_threads: The number of CPU threads to use for the job.
+        ram: The amount of RAM to allocate for the job, in Gigabytes.
+        time: The maximum period of time to run the job, in minutes.
 
     Attributes:
-        remote_script_path: Stores the path to the script file relative to the root of the remote server that runs the
-            command.
-        job_id: Stores the unique job identifier assigned by the SLURM manager to this job when it is accepted for
-            execution. This field is initialized to None and is overwritten by the Server class that submits the job.
-        job_name: Stores the descriptive name of the SLURM job.
-        _command: Stores the managed SLURM command object.
+        remote_script_path: The path to the job's script file on the remote compute server.
+        job_id: The unique job identifier assigned by the SLURM manager to this job when it is accepted for execution.
+        job_name: The descriptive name of the SLURM job.
+        _command: The SLURM command object used to assemble the job before it is translated into a shell script.
     """
 
     def __init__(
@@ -101,9 +80,9 @@ class Job:
         error_log: Path,
         working_directory: Path,
         conda_environment: str,
-        cpus_to_use: int = 10,
-        ram_gb: int = 10,
-        time_limit: int = 60,
+        cpu_threads: int = 10,
+        ram: int = 10,
+        time: int = 60,
     ) -> None:
         # Resolves the paths to the remote (server-side) .sh script file. This is the path where the job script
         # will be stored on the server, once it is transferred by the Server class instance.
@@ -115,12 +94,12 @@ class Job:
 
         # Builds the slurm command object filled with configuration information
         self._command: Slurm = Slurm(
-            cpus_per_task=cpus_to_use,
+            cpus_per_task=cpu_threads,
             job_name=job_name,
             output=str(output_log),
             error=str(error_log),
-            mem=f"{ram_gb}G",
-            time=datetime.timedelta(minutes=time_limit),
+            mem=f"{ram}G",
+            time=datetime.timedelta(minutes=time),
         )
 
         # Conda shell initialization commands
@@ -131,27 +110,29 @@ class Job:
         self._command.add_cmd(f"source activate {conda_environment}")  # Need to use old syntax for our server.
 
     def __repr__(self) -> str:
-        """Returns the string representation of the Job instance."""
+        """Returns the string representation of the instance."""
         return f"Job(name={self.job_name}, id={self.job_id})"
 
     def add_command(self, command: str) -> None:
-        """Adds the input command string to the end of the managed SLURM job command list.
+        """Adds the input command string to the end of the job's command sequence.
 
-        This method is a wrapper around simple-slurm's add_cmd() method. It is used to iteratively build the shell
-        command sequence for the managed job.
+        Notes:
+            The instance generates a preamble section that configures the job's SLURM and Conda environments during
+            class initialization. Do not submit additional SLURM or Conda commands via this method, as this may produce
+            unexpected behavior.
 
         Args:
-            command: The command string to add to the command list, e.g.: 'python main.py --input 1'.
+            command: The command string to append to the job's command sequence, e.g.: 'python main.py --input 1'.
         """
         self._command.add_cmd(command)
 
     @property
     def command_script(self) -> str:
-        """Translates the managed job data into a shell-script-writable string and returns it to caller.
+        """Translates the managed job into a shell-script-writable string.
 
-        This method is used by the Server class to translate the job into the format that can be submitted to and
-        executed on the remote compute server. The returned string is safe to dump into a .sh (shell script) file and
-        move to the remote compute server for execution.
+        Notes:
+            This method is used by the Server class to translate the job into the format that can be submitted to and
+            executed by the remote compute server. Do not call this method directly.
         """
         # Appends the command to clean up (remove) the temporary script file after processing runtime is over
         self._command.add_cmd(f"rm -f {self.remote_script_path}")
@@ -160,54 +141,45 @@ class Job:
         script_content = str(self._command)
 
         # Replaces escaped $ (/$) with $. This is essential, as without this correction, things like conda
-        # initialization would not work as expected.
-        fixed_script_content = script_content.replace("\\$", "$")
-
-        # Returns the script content to the caller as a string
-        return fixed_script_content
+        # initialization would not work as expected. Returns the finalized script content to the caller.
+        return script_content.replace("\\$", "$")
 
 
 class JupyterJob(Job):
-    """Aggregates the data of a specialized job used to launch a Jupyter notebook server under SLURM's control.
+    """Defines a SLURM-managed job that launches an interactive Jupyter notebook on the remote compute server.
 
-    This class extends the base Job class to include specific configuration and commands for starting a Jupyter notebook
-    server in a SLURM environment. Using this specialized job allows users to set up remote Jupyter servers while
-    benefitting from SLURM's job scheduling and resource management policies.
+    This class extends the functionality of the base Job class to support running interactive Jupyter notebook sessions
+    on the remote compute server while benefitting from resource allocation management offered by SLURM.
 
     Notes:
-        Jupyter servers directly compete for resources with headless data processing jobs. Therefore, it is important
-        to minimize the resource footprint and the runtime of each Jupyter server, if possible.
+        Jupyter notebook sessions directly compete for resources with headless data processing jobs.
 
     Args:
-        job_name: The descriptive name of the Jupyter SLURM job to be created. Primarily, this name is used in terminal
-            printouts to identify the job to human operators.
-        output_log: The absolute path to the .txt file on the processing server, where to store the standard output
-            data of the job.
-        error_log: The absolute path to the .txt file on the processing server, where to store the standard error
-            data of the job.
-        working_directory: The absolute path to the directory where to store temporary job files.
-        conda_environment: The name of the conda environment to activate on the server before running the job. The
-            environment should contain the necessary Python packages and CLIs to support running the job's logic. For
-            Jupyter jobs, this necessarily includes the Jupyter notebook and jupyterlab packages.
-        port: The connection port to use for the Jupyter server.
-        notebook_directory: The root directory where to run the Jupyter notebook. During runtime, the notebook will
-            only have access to items stored under this directory. For most runtimes, this should be set to the user's
-            root working directory.
-        cpus_to_use: The number of CPUs to allocate to the Jupyter server.
-        ram_gb: The amount of RAM, in GB, to allocate to the Jupyter server.
-        time_limit: The maximum Jupyter server uptime, in minutes.
-        jupyter_args: Stores additional arguments to pass to the jupyter notebook initialization command.
+        job_name: The descriptive name of the SLURM job to be created.
+        output_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
+            the job to the 'stdout' pipe.
+        error_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
+            the job to the 'stderr' pipe.
+        working_directory: The absolute path to the compute server's directory where to store the temporary job's files.
+        conda_environment: The name of the mamba / conda environment to activate on the server before running the job.
+            For Jupyter notebook jobs, the environment must contain the 'jupyterlab' and 'notebook' Python packages.
+        cpu_threads: The number of CPU threads to use for the job.
+        ram: The amount of RAM to allocate for the job, in Gigabytes.
+        time: The maximum period of time to run the job, in minutes.
+        port: The connection port to use for the Jupyter server communication.
+        notebook_directory: The remote compute server's directory where to run the Jupyter notebook.
+        jupyter_arguments: Stores additional arguments to pass to the jupyter notebook initialization command.
 
     Attributes:
-        port: Stores the connection port for the managed Jupyter server.
-        notebook_dir: Stores the absolute path to the directory used to run the Jupyter notebook, relative to the
-            remote server root.
-        connection_info: Stores the JupyterConnectionInfo instance after the Jupyter server is instantiated.
-        host: Stores the hostname of the remote server.
-        user: Stores the username used to connect with the remote server.
-        connection_info_file: Stores the absolute path to the file that contains the connection information for the
-            initialized Jupyter session, relative to the remote server root.
-        _command: Stores the shell command for launching the Jupyter server.
+        port: The communication port for the managed Jupyter server.
+        notebook_dir: The absolute path to the directory compute server's directory where to run the Jupyter notebook.
+        connection_info: TheJupyterConnectionInfo instance that stores the initialized Jupyter notebook session's
+            connection data.
+        host: The hostname of the remote server.
+        user: The username used to connect with the remote server.
+        connection_info_file: The absolute path to the file on the remote compute server that contains the connection
+            information for the initialized Jupyter notebook session.
+        _command: The SLURM command object used to assemble the job before it is translated into a shell script.
     """
 
     def __init__(
@@ -219,10 +191,10 @@ class JupyterJob(Job):
         conda_environment: str,
         notebook_directory: Path,
         port: int = 9999,  # Defaults to using port 9999
-        cpus_to_use: int = 2,  # Defaults to 2 CPU cores
-        ram_gb: int = 32,  # Defaults to 32 GB of RAM
-        time_limit: int = 120,  # Defaults to 2 hours of runtime (120 minutes)
-        jupyter_args: str = "",
+        cpu_threads: int = 2,  # Defaults to 2 CPU cores
+        ram: int = 32,  # Defaults to 32 GB of RAM
+        time: int = 120,  # Defaults to 2 hours of runtime (120 minutes)
+        jupyter_arguments: str = "",
     ) -> None:
         # Initializes parent Job class
         super().__init__(
@@ -231,9 +203,9 @@ class JupyterJob(Job):
             error_log=error_log,
             working_directory=working_directory,
             conda_environment=conda_environment,
-            cpus_to_use=cpus_to_use,
-            ram_gb=ram_gb,
-            time_limit=time_limit,
+            cpu_threads=cpu_threads,
+            ram=ram,
+            time=time,
         )
 
         # Saves important jupyter configuration parameters to class attributes
@@ -250,10 +222,14 @@ class JupyterJob(Job):
         self.connection_info_file = working_directory.joinpath(f"{job_name}_connection.txt")
 
         # Builds Jupyter launch command.
-        self._build_jupyter_command(jupyter_args)
+        self._build_jupyter_command(jupyter_arguments)
 
-    def _build_jupyter_command(self, jupyter_args: str) -> None:
-        """Builds the command to launch the Jupyter notebook server on the remote Sun lab server."""
+    def _build_jupyter_command(self, jupyter_arguments: str) -> None:
+        """Builds the command to launch the Jupyter notebook server on the remote compute server.
+
+        Args:
+            jupyter_arguments: Additional arguments to pass to the Jupyter notebook initialization command.
+        """
         # Gets the hostname of the compute node and caches it in the connection data file. Also caches the port name.
         self.add_command(f'echo "COMPUTE_NODE: $(hostname)" > {self.connection_info_file}')
         self.add_command(f'echo "PORT: {self.port}" >> {self.connection_info_file}')
@@ -276,26 +252,26 @@ class JupyterJob(Job):
         ]
 
         # Adds any additional arguments.
-        if jupyter_args:
-            jupyter_cmd.append(jupyter_args)
+        if jupyter_arguments:
+            jupyter_cmd.append(jupyter_arguments)
 
         # Adds the resolved jupyter command to the list of job commands.
         jupyter_cmd_str = " ".join(jupyter_cmd)
         self.add_command(jupyter_cmd_str)
 
-    def parse_connection_info(self, info_file: Path) -> None:
-        """Parses the connection information file created by the Jupyter job on the remote server.
+    def parse_connection_data(self, data_file: Path) -> None:
+        """Parses the connection information file created by the managed job on the remote server.
 
-        This method is used to finalize the remote Jupyter session initialization by parsing the connection session
-        instructions from the temporary storage file created by the remote Job running on the server. After this
-        method's runtime, the print_connection_info() method can be used to print the connection information to the
-        terminal.
+        Notes:
+            This method is used by the Server instance to finalize the remote Jupyter session's initialization by
+            parsing the connection instructions from the temporary storage file created by the job running on the
+            remote server. Do not call this method directly.
 
         Args:
-            info_file: The path to the .txt file generated by the remote server that stores the Jupyter connection
-                information to be parsed.
+            data_file: The path to the .txt file generated on the remote compute server that stores the Jupyter
+                connection data to be parsed.
         """
-        with info_file.open() as f:
+        with data_file.open() as f:
             content = f.read()
 
         # Extracts information using regex
@@ -304,47 +280,14 @@ class JupyterJob(Job):
         token_match = re.search(r"TOKEN: (.+)", content)
 
         if not all([compute_node_match, port_match, token_match]):
-            message = f"Could not parse connection information file for the Jupyter server job with id {self.job_id}."
+            message = (
+                f"Could not parse the connection data file for the Jupyter notebook session with id {self.job_id}."
+            )
             console.error(message, ValueError)
 
         # Stores extracted data inside the connection_info attribute as a JupyterConnectionInfo instance.
         self.connection_info = _JupyterConnectionInfo(
-            compute_node=compute_node_match.group(1).strip(),  # type: ignore
-            port=int(port_match.group(1)),  # type: ignore
-            token=token_match.group(1).strip(),  # type: ignore
+            compute_node=compute_node_match.group(1).strip(),
+            port=int(port_match.group(1)),
+            token=token_match.group(1).strip(),
         )
-
-    def print_connection_info(self) -> None:
-        """Constructs and displays the command to set up the SSH tunnel to the server and the link to the localhost
-        server view in the terminal.
-
-        The SSH command should be used via a separate terminal or subprocess call to establish the secure SSH tunnel to
-        the Jupyter server. Once the SSH tunnel is established, the printed localhost url can be used to view the
-        server from the local machine's browser.
-        """
-        # If connection information is not available, there is nothing to print
-        if self.connection_info is None:
-            console.echo(
-                message=(
-                    f"No connection information is available for the job {self.job_name}, which indicates that the job "
-                    f"has not been submitted to the server. Submit the job for execution to the remote Sun lab server "
-                    f"to generate the connection information"
-                ),
-                level=LogLevel.WARNING,
-            )
-            return  # No connection information available, so does not proceed with printing.
-
-        # Prints generic connection details to the terminal
-        console.echo(f"Jupyter is running on: {self.connection_info.compute_node}")
-        console.echo(f"Port: {self.connection_info.port}")
-        console.echo(f"Token: {self.connection_info.token}")
-
-        # Constructs and displays the SSH tunnel command and the localhost url for connecting to the server
-        tunnel_cmd = (
-            f"ssh -N -L {self.connection_info.port}:{self.connection_info.compute_node}:{self.connection_info.port} "
-            f"{self.user}@{self.host}"
-        )
-        localhost_url = f"http://localhost:{self.connection_info.port}/?token={self.connection_info.token}"
-        print("\nTo access locally, run this in a terminal:")
-        print(tunnel_cmd)
-        print(f"\nThen open: {localhost_url}")

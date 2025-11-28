@@ -1,5 +1,6 @@
 """This module provides the assets used to aggregate the processed data from multiple sources into a unified Polars
-dataframe that forms the basis of the Sun lab's analysis dataset hierarchy."""
+dataframe that forms the basis of the Sun lab's analysis dataset hierarchy.
+"""
 
 from typing import Any
 from pathlib import Path
@@ -36,7 +37,6 @@ def _add_sls2p_fluorescence_column(
         The dataframe that includes the loaded fluorescence data stored as an Array datatype under the specified column
         name.
     """
-
     # Extracts the data using memory-mapping.
     fluorescence = np.load(data_path.joinpath(filename), mmap_mode="r")
 
@@ -74,7 +74,6 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
     Returns:
         The Polars DataFrame that contains the assembled single-day and multi-day cell fluorescence data.
     """
-
     # Resolves the path to the single-day mesoscope data directory
     single_day_data = session_data_path.joinpath("processed_data", "mesoscope_data", "suite2p", "combined")
 
@@ -98,7 +97,7 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during session's
     # data acquisition.
     mesoscope_frame_data = pl.read_ipc(
-        behavior_data.joinpath(f"mesoscope_frame_data.feather"), use_pyarrow=True, memory_map=True, rechunk=True
+        behavior_data.joinpath("mesoscope_frame_data.feather"), use_pyarrow=True, memory_map=True, rechunk=True
     )
 
     # Sorts by time to ensure the correct order
@@ -265,7 +264,6 @@ def _check_reward_zones(
     Returns:
         A NumPy array that stores whether each distance-point corresponds to a reward zone (1) or not (0).
     """
-
     # Preallocates the output boolean array.
     distance_value_count = len(traversed_distance)
     reward_zone_count = len(reward_zone_starts)
@@ -295,13 +293,12 @@ def _check_reward_zones(
                 break
 
             # If the distance falls within the reward zone, marks the corresponding mask point as 1 (in reward zone).
-            elif evaluated_distance <= reward_zone_ends[zone_index]:
+            if evaluated_distance <= reward_zone_ends[zone_index]:
                 in_zone[i] = 1
                 break
 
             # If the distance is past the evaluated reward zone, moves to the next zone.
-            else:
-                zone_index += 1
+            zone_index += 1
 
     return in_zone
 
@@ -436,7 +433,6 @@ def _calculate_running_speed(
         distance: The cumulative distance, in centimeters, traveled by the animal at each time-point.
         window_size_us: The size of the sliding window, microseconds.
     """
-
     # Preallocates the output running speed array based on the requested number of time-points for which to compute
     # the running speed.
     value_count = len(time)
@@ -711,7 +707,6 @@ def assemble_session_dataset(
         output_path: The path to the directory where to save the assembled dataset as a .feather file.
         dataset_type: The type of the processed session. Must be one of the valid DatasetTypes enumeration members.
     """
-
     # Experiment dataset.
     if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
         # First assembles the fluorescence data, which is needed to generate the reference time vector for other

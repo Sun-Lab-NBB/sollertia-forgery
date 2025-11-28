@@ -8,13 +8,11 @@ from pathlib import Path
 import click
 from ataraxis_base_utilities import LogLevel, console
 
-from sl_shared_assets import (
-    acquire_lock,
-    release_lock,
+from .project_management import (
+    prepare_session,
+    resolve_checksum,
     generate_project_manifest,
 )
-
-from ..processing.project_management import archive_session, prepare_session, resolve_checksum
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = dict(max_content_width=120)  # or any width you want
@@ -89,55 +87,6 @@ def manage_session(
 
 
 # noinspection PyUnresolvedReferences
-@manage_session.command("lock")
-@click.pass_context
-def lock_session(ctx: Any) -> None:
-    """Acquires the lock for the target session's data.
-
-    This command is used to ensure that the target session's data can only be accessed from the specified manager
-    process. Calling this command is a prerequisite for all other session data management, processing, or dataset
-    formation commands. If this command is called as part of runtime, the 'unlock' command must be called at the end
-    of that runtime to properly release the session's data lock. This command respects the '--reset-tracker' flag of the
-    'session' command group and, if this flag is present, forcibly resets the session lock file before re-acquiring it
-    for the specified manager process.
-    """
-    # Extracts shared parameters from context
-    session_path = ctx.obj["session_path"]
-    processed_data_root = ctx.obj["processed_data_root"]
-    manager_id = ctx.obj["manager_id"]
-    reset_tracker = ctx.obj["reset_tracker"]
-
-    acquire_lock(
-        session_path=session_path,
-        manager_id=manager_id,
-        processed_data_root=processed_data_root,
-        reset_lock=reset_tracker,
-    )
-
-
-# noinspection PyUnresolvedReferences
-@manage_session.command("unlock")
-@click.pass_context
-def unlock_session(ctx: Any) -> None:
-    """Releases the lock for the target session's data.
-
-    This command is used to reverse the effect of the 'lock' command, allowing other manager processes to work with
-    the session's data. This command can only be called from the same manager process used to acquire the
-    session's data lock.
-    """
-    # Extracts shared parameters from context
-    session_path = ctx.obj["session_path"]
-    processed_data_root = ctx.obj["processed_data_root"]
-    manager_id = ctx.obj["manager_id"]
-
-    release_lock(
-        session_path=session_path,
-        manager_id=manager_id,
-        processed_data_root=processed_data_root,
-    )
-
-
-# noinspection PyUnresolvedReferences
 @manage_session.command("checksum")
 @click.pass_context
 @click.option(
@@ -192,33 +141,6 @@ def prepare_session_for_processing(
     reset_tracker = ctx.obj["reset_tracker"]
 
     prepare_session(
-        session_path=session_path,
-        manager_id=manager_id,
-        processed_data_root=processed_data_root,
-        reset_tracker=reset_tracker,
-    )
-
-
-# noinspection PyUnresolvedReferences
-@manage_session.command("archive")
-@click.pass_context
-def archive_session_for_storage(
-    ctx: Any,
-) -> None:
-    """Prepares the target session for long-term storage by moving all session data to the storage volume.
-
-    This command is primarily intended to run on remote compute servers that use slow HDD volumes to maximize data
-    integrity and fast NVME volumes to maximize data processing speed. For such systems, moving all sessions that are no
-    longer actively processed or analyzed to the slow drive volume frees up the processing volume space and ensures
-    long-term data integrity.
-    """
-    # Extracts shared parameters from context
-    session_path = ctx.obj["session_path"]
-    processed_data_root = ctx.obj["processed_data_root"]
-    manager_id = ctx.obj["manager_id"]
-    reset_tracker = ctx.obj["reset_tracker"]
-
-    archive_session(
         session_path=session_path,
         manager_id=manager_id,
         processed_data_root=processed_data_root,

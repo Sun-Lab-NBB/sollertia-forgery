@@ -1,6 +1,7 @@
 """This module contains the bindings for all Sun lab data processing pipelines. The assets from this module are
 designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
-configured to execute all data processing tasks."""
+configured to execute all data processing tasks.
+"""
 
 from pathlib import Path
 
@@ -8,22 +9,20 @@ from tqdm import tqdm
 from ataraxis_time import PrecisionTimer
 from sl_shared_assets import (
     Job,
-    Server,
-    SessionLock,
     SessionTypes,
     ProcessingStatus,
     TrackerFileNames,
     AcquisitionSystems,
     ProcessingPipeline,
     ProcessingPipelines,
-    delete_directory,
     generate_manager_id,
     get_working_directory,
-    get_credentials_file_path,
+    get_server_configuration,
 )
-from ataraxis_base_utilities import LogLevel, console, chunk_iterable, ensure_directory_exists
+from ataraxis_base_utilities import LogLevel, console, chunk_iterable
 
 from ..utils import ProjectManifest, get_remote_job_work_directory
+from ..server import Server
 from .project_management import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
@@ -165,368 +164,6 @@ def _check_session_eligibility(
     return True
 
 
-def _construct_lock_acquisition_job(
-    project: str,
-    animal: str,
-    session: str,
-    server: Server,
-    manager_id: int,
-    force: bool = False,
-    keep_job_logs: bool = False,
-) -> Job:
-    """Constructs the remote job used to acquire exclusive access to the data of the target session for the specified
-    manager ID.
-
-    This worker function is used as part of the overall lock acquisition step to efficiently construct and submit
-    session data lock acquisition jobs to the remote compute server.
-
-    Args:
-        project: The name of the project under which the target session was acquired.
-        animal: The ID of the animal that participated in the target session.
-        session: The name of the session for which to acquire the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target session's
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-        force: Determines whether to forcibly reset the access lock, if it is held by a different manager process. This
-            option should only be enabled when recovering from improper runtime terminations.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If the job fails, the logs are always kept regardless of this parameter.
-
-    Returns:
-        The initialized Job instance for the constructed and submitted session data lock acquisition job.
-    """
-    # Resolves the job name and its remote working directory.
-    job_name = f"{session}_lock_acquisition"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-
-    # Generates the remote job header
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
-        working_directory=working_directory,
-        conda_environment="forge",
-        cpus_to_use=1,
-        ram_gb=1,
-        time_limit=20,
-    )
-
-    # Parses the path to the shared Sun lab directory used to store raw session data
-    session_folder = server.raw_data_root.joinpath(project, animal, session)
-
-    # Parses additional processing flags for the lock acquisition command
-    tracker_command = ""
-    if force:
-        tracker_command = "-r"
-
-    # Configures the job to use the sl-shared-assets library installed on the server to acquire exclusive access to the
-    # session's data for the specified manager process
-    job.add_command(
-        f"sl-manage session -sp {session_folder} -pdr {server.processed_data_root} -id {manager_id} {tracker_command} "
-        f"lock"
-    )
-
-    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
-    if not keep_job_logs:
-        job.add_command(f"rm -rf {working_directory}")
-
-    # Submits the remote job to the server and returns the updated Job object to caller
-    return server.submit_job(job, verbose=False)
-
-
-def _verify_lock_acquisition_job(
-    job: Job,
-    project: str,
-    animal: str,
-    session: str,
-    server: Server,
-    manager_id: int,
-) -> None:
-    """Verifies the outcome of a session data lock acquisition job that ran on a remote compute server.
-
-    This worker function is used as part of the overall session data lock acquisition step to efficiently verify the
-    outcome of completed session data lock acquisition jobs submitted to the remote compute server.
-
-    Args:
-        job: The initialized Job instance for the lock acquisition job to be verified.
-        project: The name of the project under which the target session was acquired.
-        animal: The ID of the animal that participated in the target session.
-        session: The name of the session for which to acquire the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target session's
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-    """
-
-    # Resolves the paths to the local and remote session lock files.
-    local_working_directory = get_working_directory()
-    remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
-    local_lock_path = local_working_directory.joinpath(project, job.job_name, "manifest.feather", "session_lock.yaml")
-    ensure_directory_exists(local_lock_path)
-
-    # Pulls the remote session lock file to the local machine
-    server.pull_file(
-        local_file_path=local_lock_path,
-        remote_file_path=remote_lock_path,
-    )
-
-    # Ensures that the caller process has exclusive access to session's data. This raises an error if the expectation
-    # is violated.
-    lock = SessionLock(file_path=local_lock_path)
-    lock.check_owner(manager_id=manager_id)
-
-    # If the lock has been acquired successfully, removes the local working directory
-    delete_directory(local_lock_path.parent)
-
-
-def _acquire_session_lock(
-    manifest: ProjectManifest,
-    project: str,
-    sessions: tuple[str, ...],
-    server: Server,
-    manager_id: int,
-    force: bool = False,
-    keep_job_logs: bool = False,
-) -> None:
-    """Acquires exclusive access to the target sessions' data for the specified manager process.
-
-    This function is used to verify that the data of each processed session stored on the remote compute server is
-    accessible to a single manager process at a time to ensure safe access while using multiple parallel processes.
-    Acquiring exclusive data access lock is a prerequisite for all other session data processing functions.
-
-    Notes:
-        Each runtime that calls this function must also call the _release_session_lock() function.
-
-    Args:
-        project: The name of the project under which the target session was acquired.
-        sessions: The sessions for which to acquire the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target session's
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-        force: Determines whether to forcibly reset the access lock, if it is held by a different manager process. This
-            option should only be enabled when recovering from improper runtime terminations.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If the job fails, the logs are always kept regardless of this parameter.
-
-    """
-    # Pre-creates a list of animal IDs for each session to be processed
-    animals = [manifest.get_animal_for_session(session=session) for session in sessions]
-
-    # Constructs and submits remote processing jobs to the server
-    jobs = []
-    for session, animal in tqdm(
-        zip(sessions, animals), total=len(sessions), desc="Submitting session lock acquisition jobs", unit="job"
-    ):
-        jobs.append(
-            _construct_lock_acquisition_job(
-                project=project,
-                animal=animal,
-                session=session,
-                server=server,
-                manager_id=manager_id,
-                force=force,
-                keep_job_logs=keep_job_logs,
-            )
-        )
-
-    completed_jobs = []
-    with tqdm(total=len(jobs), desc="Waiting for the session lock acquisition jobs to complete", unit="job") as pbar:
-        for index, job in enumerate(jobs):
-            # Waits for each job to complete. Ensures that each job is verified exactly once.
-            if not server.job_complete(job=job) or index in completed_jobs:
-                continue
-
-            _verify_lock_acquisition_job(
-                job=job,
-                project=project,
-                animal=animals[index],
-                session=sessions[index],
-                server=server,
-                manager_id=manager_id,
-            )
-
-            # Ensures that this job is not processed again as part of this function's cycle
-            completed_jobs.append(index)
-
-            # Increments the progress bar
-            pbar.update()
-
-
-def _construct_lock_release_job(
-    project: str,
-    animal: str,
-    session: str,
-    server: Server,
-    manager_id: int,
-    keep_job_logs: bool = False,
-) -> Job:
-    """Constructs the remote job used to release exclusive access to the data of the target session for the specified
-    manager ID.
-
-    This worker function is used as part of the overall lock release step to efficiently construct and submit
-    session data lock release jobs to the remote compute server.
-
-    Args:
-        project: The name of the project under which the target session was acquired.
-        animal: The ID of the animal that participated in the target session.
-        session: The name of the session for which to release the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target session's
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If the job fails, the logs are always kept regardless of this parameter.
-
-    Returns:
-        The initialized Job instance for the constructed and submitted session data lock release job.
-    """
-    # Resolves the job name and its remote working directory.
-    job_name = f"{session}_lock_release"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-
-    # Generates the remote job header
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
-        working_directory=working_directory,
-        conda_environment="forge",
-        cpus_to_use=1,
-        ram_gb=1,
-        time_limit=20,
-    )
-
-    # Parses the path to the shared Sun lab directory used to store raw session data
-    session_folder = server.raw_data_root.joinpath(project, animal, session)
-
-    # Configures the job to use the sl-shared-assets library installed on the server to release the exclusive access to
-    # the session's data from the specified manager process
-    job.add_command(f"sl-manage session -sp {session_folder} -pdr {server.processed_data_root} -id {manager_id} unlock")
-
-    # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
-    if not keep_job_logs:
-        job.add_command(f"rm -rf {working_directory}")
-
-    # Submits the remote job to the server and returns the updated Job object to caller
-    return server.submit_job(job, verbose=False)
-
-
-def _verify_lock_release_job(
-    job: Job,
-    project: str,
-    animal: str,
-    session: str,
-    server: Server,
-    manager_id: int,
-) -> None:
-    """Verifies the outcome of a session data lock release job that ran on a remote compute server.
-
-    This worker function is used as part of the overall session data lock release step to efficiently verify the
-    outcome of completed session data lock release jobs submitted to the remote compute server.
-
-    Args:
-        job: The initialized Job instance for the lock release job to be verified.
-        project: The name of the project under which the target session was acquired.
-        animal: The ID of the animal that participated in the target session.
-        session: The name of the session for which to release the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target session's
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-    """
-
-    # Resolves the paths to the local and remote session lock files.
-    local_working_directory = get_working_directory()
-    remote_lock_path = server.raw_data_root.joinpath(project, animal, session, "tracking_data", "session_lock.yaml")
-    local_lock_path = local_working_directory.joinpath(project, job.job_name, "manifest.feather", "session_lock.yaml")
-    ensure_directory_exists(local_lock_path)
-
-    # Pulls the remote session lock file to the local machine
-    server.pull_file(
-        local_file_path=local_lock_path,
-        remote_file_path=remote_lock_path,
-    )
-
-    # Ensures that the caller process has exclusive access to session's data. This raises an error if the expectation
-    # is violated.
-    lock = SessionLock(file_path=local_lock_path)
-    try:
-        lock.check_owner(manager_id=manager_id)
-    except Exception:
-        # Since the lock is expected to be released, the 'success' outcome of this check is failing with an exception.
-        # If the lock has been released successfully, removes the local working directory.
-        delete_directory(local_lock_path.parent)
-        return
-    else:
-        message = (
-            f"Failed to release the session data lock from the manager process {manager_id}. Check the job logs "
-            f"stored on the remote server for the details on the error that prevented releasing the lock."
-        )
-        console.error(message=message, error=RuntimeError)
-
-
-def _release_session_lock(
-    manifest: ProjectManifest,
-    project: str,
-    sessions: tuple[str, ...],
-    server: Server,
-    manager_id: int,
-    keep_job_logs: bool = False,
-) -> None:
-    """Releases exclusive access to the target sessions' data if it is currently held by the specified manager.
-
-    This function is used to release the lock after it has been acquired via the _acquire_session_lock() function
-    runtime. Releasing the lock allows other manager processes to acquire the lock and work with the sessions' data.
-
-    Args:
-        manifest: The ProjectManifest instance containing session metadata.
-        project: The name of the project under which the target sessions were acquired.
-        sessions: The sessions for which to release the exclusive data access rights.
-        server: The Server class instance that manages access to the remote server that stores the target sessions'
-            data.
-        manager_id: The unique identifier of the process that calls this function.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If the job fails, the logs are always kept regardless of this parameter.
-    """
-    # Pre-creates a list of animal IDs for each session to be processed
-    animals = [manifest.get_animal_for_session(session=session) for session in sessions]
-
-    # Constructs and submits remote processing jobs to the server
-    jobs = []
-    for session, animal in tqdm(
-        zip(sessions, animals), total=len(sessions), desc="Submitting session lock release jobs", unit="job"
-    ):
-        jobs.append(
-            _construct_lock_release_job(
-                project=project,
-                animal=animal,
-                session=session,
-                server=server,
-                manager_id=manager_id,
-                keep_job_logs=keep_job_logs,
-            )
-        )
-
-    completed_jobs = []
-    with tqdm(total=len(jobs), desc="Waiting for the session lock release jobs to complete", unit="job") as pbar:
-        for index, job in enumerate(jobs):
-            # Waits for each job to complete. Ensures that each job is verified exactly once.
-            if not server.job_complete(job=job) or index in completed_jobs:
-                continue
-
-            _verify_lock_release_job(
-                job=job,
-                project=project,
-                animal=animals[index],
-                session=sessions[index],
-                server=server,
-                manager_id=manager_id,
-            )
-
-            # Ensures that this job is not processed again as part of this function's cycle
-            completed_jobs.append(index)
-
-            # Increments the progress bar
-            pbar.update()
-
-
 def _construct_checksum_resolution_pipeline(
     manifest: ProjectManifest,
     project: str,
@@ -566,13 +203,12 @@ def _construct_checksum_resolution_pipeline(
         The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
         if the session is excluded from processing for any reason.
     """
-
     # Resolves the path to the local Sun lab working directory.
     local_working_directory = get_working_directory()
 
     # Parses the path to the session directory on the remote server.
     animal = manifest.get_animal_for_session(session=session)
-    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
+    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
@@ -600,8 +236,8 @@ def _construct_checksum_resolution_pipeline(
     # Generates the remote job header and configures it to run behavior processing.
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="forge",
         cpus_to_use=1,
@@ -619,12 +255,12 @@ def _construct_checksum_resolution_pipeline(
 
     # Instructs the server to execute the target processing pipeline.
     job.add_command(
-        f"sl-manage session -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
+        f"sl-manage session -sp {remote_session_path} -pdr {server.shared_working_root} -id {manager_id} "
         f"{tracker_command} checksum {recalculate_command}"
     )
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.raw_data_root).joinpath(
+    remote_tracker_path = Path(server.shared_storage_root).joinpath(
         project, animal, session, "tracking_data", TrackerFileNames.CHECKSUM
     )
     local_tracker_path = local_working_directory.joinpath(project, f"{session}_checksum", TrackerFileNames.CHECKSUM)
@@ -678,7 +314,6 @@ def _construct_preparation_pipeline(
         The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
         if the session is excluded from processing for any reason.
     """
-
     # Resolves the path to the local Sun lab working directory.
     local_working_directory = get_working_directory()
 
@@ -686,7 +321,7 @@ def _construct_preparation_pipeline(
     animal = manifest.get_animal_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
-    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
+    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
@@ -713,8 +348,8 @@ def _construct_preparation_pipeline(
     # Generates the remote job header and configures it to run behavior processing.
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="forge",
         cpus_to_use=1,
@@ -729,12 +364,12 @@ def _construct_preparation_pipeline(
 
     # Instructs the server to execute the target processing pipeline.
     job.add_command(
-        f"sl-manage session -sp {remote_session_path} -pdr {server.processed_data_root} -id {manager_id} "
+        f"sl-manage session -sp {remote_session_path} -pdr {server.shared_working_root} -id {manager_id} "
         f"{tracker_command} prepare"
     )
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.raw_data_root).joinpath(
+    remote_tracker_path = Path(server.shared_storage_root).joinpath(
         project, animal, session, "tracking_data", TrackerFileNames.PREPARATION
     )
     local_tracker_path = local_working_directory.joinpath(
@@ -790,7 +425,6 @@ def _construct_behavior_processing_pipeline(
         The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
         if the session is excluded from processing for any reason.
     """
-
     # Resolves the path to the local Sun lab working directory.
     local_working_directory = get_working_directory()
 
@@ -799,7 +433,7 @@ def _construct_behavior_processing_pipeline(
     system = manifest.get_system_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
-    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
+    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
@@ -835,8 +469,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=2,
@@ -847,7 +481,7 @@ def _construct_behavior_processing_pipeline(
         # resetting the tracker in rapid succession may overwrite legitimate job completion data written to the tracker
         # file by the jobs that complete quickly.
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 1 "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 1 "
             f"{tracker_command} runtime"
         )
         stage_1.append((job, working_directory))
@@ -857,8 +491,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
@@ -866,7 +500,7 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 51  "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 51  "
             f"camera"
         )
         stage_1.append((job, working_directory))
@@ -876,8 +510,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
@@ -885,7 +519,7 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 62 "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 62 "
             f"camera"
         )
         stage_1.append((job, working_directory))
@@ -895,8 +529,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
@@ -904,7 +538,7 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 73 "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 73 "
             f"camera"
         )
         stage_1.append((job, working_directory))
@@ -914,8 +548,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=5,
@@ -923,7 +557,7 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 101  "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 101  "
             f"microcontroller"
         )
         stage_1.append((job, working_directory))
@@ -933,8 +567,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=15,
@@ -942,7 +576,7 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 152  "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 152  "
             f"microcontroller"
         )
         stage_1.append((job, working_directory))
@@ -952,8 +586,8 @@ def _construct_behavior_processing_pipeline(
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="forge",
             cpus_to_use=30,
@@ -961,13 +595,13 @@ def _construct_behavior_processing_pipeline(
             time_limit=90,
         )
         job.add_command(
-            f"sl-behavior -sp {remote_session_path} -pdr {server.processed_data_root} -j 7 -id {manager_id} -l 203  "
+            f"sl-behavior -sp {remote_session_path} -pdr {server.shared_working_root} -j 7 -id {manager_id} -l 203  "
             f"microcontroller"
         )
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.raw_data_root).joinpath(
+    remote_tracker_path = Path(server.shared_storage_root).joinpath(
         project, animal, session, "tracking_data", TrackerFileNames.BEHAVIOR
     )
     local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", TrackerFileNames.BEHAVIOR)
@@ -1027,7 +661,6 @@ def _construct_suite2p_processing_pipeline(
         The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
         if the session is excluded from processing for any reason.
     """
-
     # Resolves the path to the local Sun lab working directory
     local_working_directory = get_working_directory()
 
@@ -1035,7 +668,7 @@ def _construct_suite2p_processing_pipeline(
     animal = manifest.get_animal_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
-    remote_session_path = server.raw_data_root.joinpath(project, animal, session)
+    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     if not _check_session_eligibility(
@@ -1069,8 +702,8 @@ def _construct_suite2p_processing_pipeline(
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="suite2p",
         cpus_to_use=1,
@@ -1080,7 +713,7 @@ def _construct_suite2p_processing_pipeline(
     # Note, reset tracker command is only issued as part of the binarization processing stage.
     job.add_command(
         f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-        f"-pdr {server.processed_data_root} -id {manager_id} {job_command} {tracker_command} -b"
+        f"-pdr {server.shared_working_root} -id {manager_id} {job_command} {tracker_command} -b"
     )
     stage_1.append((job, working_directory))
 
@@ -1088,11 +721,11 @@ def _construct_suite2p_processing_pipeline(
     for plane in range(plane_count):
         job_name = f"{session}_ss2p_plane_{plane}"
         working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-        server.create_directory(remote_path=working_directory)
+        server.create(remote_path=working_directory, is_dir=True)
         job = Job(
             job_name=job_name,
-            output_log=working_directory.joinpath(f"output.txt"),
-            error_log=working_directory.joinpath(f"errors.txt"),
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
             conda_environment="suite2p",
             cpus_to_use=30,
@@ -1101,18 +734,18 @@ def _construct_suite2p_processing_pipeline(
         )
         job.add_command(
             f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-            f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -p -t {plane}"
+            f"-pdr {server.shared_working_root} -id {manager_id} {job_command} -p -t {plane}"
         )
         stage_2.append((job, working_directory))
 
     # Stage 3: Combination
     job_name = f"{session}_ss2p_combination"
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-    server.create_directory(remote_path=working_directory)
+    server.create(remote_path=working_directory, is_dir=True)
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="suite2p",
         cpus_to_use=1,
@@ -1121,12 +754,12 @@ def _construct_suite2p_processing_pipeline(
     )
     job.add_command(
         f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} "
-        f"-pdr {server.processed_data_root} -id {manager_id} {job_command} -c"
+        f"-pdr {server.shared_working_root} -id {manager_id} {job_command} -c"
     )
     stage_3.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = Path(server.raw_data_root).joinpath(
+    remote_tracker_path = Path(server.shared_storage_root).joinpath(
         project, animal, session, "tracking_data", TrackerFileNames.SUITE2P
     )
     local_tracker_path = local_working_directory.joinpath(
@@ -1174,7 +807,6 @@ def _execute_pipelines(
         the number of aborted pipelines.
 
     """
-
     # If the list of pipelines is empty, returns 0 for all count updates.
     if not pipelines:
         return 0, 0, 0
@@ -1311,13 +943,12 @@ def process_project_data(
             pipeline. Note; for mesoscope recordings this number is equal to the number of ROI(s) (stripes) * the number
             of z-planes. This argument is only used if the 'process_suite2p' argument is set to True.
     """
-
     # Entry message
     console.echo(message=f"Initializing project '{project}' data processing...", level=LogLevel.INFO)
 
     # Establishes SSH connection to the processing server.
-    credentials = get_credentials_file_path(service=True)
-    server = Server(credentials_path=credentials)
+    configuration = get_server_configuration(service=True)
+    server = Server(configuration=configuration)
 
     # Initializes a delay timer to support better visual separation of various terminal printouts and progress bars.
     delay_timer = PrecisionTimer("s")
@@ -1598,19 +1229,19 @@ def process_project_data(
     for pipeline in all_pipelines:
         if pipeline.pipeline_status == ProcessingStatus.FAILED:
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
+                f"The {pipeline.pipeline} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Failed."
             )
             console.echo(message=message, level=LogLevel.ERROR)
         elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
+                f"The {pipeline.pipeline} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
             )
             console.echo(message=message, level=LogLevel.SUCCESS)
         elif pipeline.pipeline_status == ProcessingStatus.ABORTED:
             message = (
-                f"The {pipeline.pipeline_type} processing pipeline for session '{pipeline.session}' "
+                f"The {pipeline.pipeline} processing pipeline for session '{pipeline.session}' "
                 f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Aborted."
             )
             console.echo(message=message, level=LogLevel.WARNING)
@@ -1626,4 +1257,4 @@ def process_project_data(
             keep_job_logs=keep_job_logs,
         )
 
-    console.echo(message=f"Processing: Complete.", level=LogLevel.SUCCESS)
+    console.echo(message="Processing: Complete.", level=LogLevel.SUCCESS)

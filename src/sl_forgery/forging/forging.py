@@ -1,31 +1,10 @@
 from pathlib import Path
 
-from tqdm import tqdm
-from ataraxis_time import PrecisionTimer
-from sl_shared_assets import (
-    Job,
-    Server,
-    SessionLock,
-    SessionTypes,
-    ProcessingStatus,
-    TrackerFileNames,
-    AcquisitionSystems,
-    ProcessingPipeline,
-    ProcessingPipelines,
-    delete_directory,
-    generate_manager_id,
-    get_working_directory,
-    get_credentials_file_path,
-)
-from ataraxis_base_utilities import LogLevel, console, chunk_iterable, ensure_directory_exists
-
-from ..utils import ProjectManifest, get_remote_job_work_directory
-from ..processing import fetch_remote_project_manifest
+from ataraxis_base_utilities import console
 
 
 def forge_dataset(processed_data_root: Path, dataset_precursor: Path) -> None:
     """Forges an analysis dataset by expanding the dataset precursor to include additional data."""
-
     # Extracts the list of animals to process.
     animals = [candidate for candidate in dataset_precursor.glob("*") if candidate.is_dir()]
 

@@ -1,11 +1,9 @@
 from pathlib import Path
 
 import numpy as np
-from scipy import stats
 import polars as pl
 from matplotlib import pyplot as plt
 from sl_forgery.analysis.io import extract_data, behavior_to_numpy
-from numba.cpython.unsafe.numbers import trailing_zeros
 
 files = [
     "2025-06-23-13-32-06-980761",
@@ -87,10 +85,10 @@ for i in fsignals:
     trial_mean.append(by_frame_mean.select(pl.col("row_avg")))
 
 # Simple plot showing just the overall mean
-plt.scatter(range(0, 5), total_mean)
+plt.scatter(range(5), total_mean)
 plt.title("Overall Mean F")
 plt.ylabel("Mean Value")
-plt.xticks(range(0, 5))
+plt.xticks(range(5))
 plt.show()
 
 

@@ -2,29 +2,8 @@
 module are primarily used to support data processing pipelines that make up the Sun lab data workflow and run on the
 remote compute server. While most of these tools are intended to be used by data processing pipelines and require
 'service' server access, a small subset of tools is also intended to be used by lab users (and requires 'user' server
-access)."""
-
-from ataraxis_time import PrecisionTimer
-from sl_shared_assets import (
-    Job,
-    Server,
-    TrackerFileNames,
-    ProcessingTracker,
-    get_working_directory,
-    SessionData,
-    SessionLock,
-    SessionTypes,
-    RunTrainingDescriptor,
-    LickTrainingDescriptor,
-    WindowCheckingDescriptor,
-    MesoscopeExperimentDescriptor,
-    delete_directory,
-    transfer_directory,
-    calculate_directory_checksum,
-)
-from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
-
-from ..utils import get_remote_job_work_directory
+access).
+"""
 
 from pathlib import Path
 from datetime import datetime
@@ -32,6 +11,24 @@ from datetime import datetime
 import pytz
 import polars as pl
 from filelock import FileLock
+from ataraxis_time import PrecisionTimer
+from sl_shared_assets import (
+    SessionData,
+    SessionTypes,
+    ProcessingTracker,
+    RunTrainingDescriptor,
+    LickTrainingDescriptor,
+    WindowCheckingDescriptor,
+    MesoscopeExperimentDescriptor,
+    delete_directory,
+    transfer_directory,
+    get_working_directory,
+    calculate_directory_checksum,
+)
+from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
+
+from ..utils import get_remote_job_work_directory
+from ..server import Job, Server, JobStatus
 
 
 def generate_remote_project_manifest(project: str, server: Server, keep_job_logs: bool = False) -> None:
@@ -61,8 +58,7 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
         FileNotFoundError: If the remote (server-side) project manifest generation job fails with an error and does not
             generate the manifest file.
     """
-
-    console.echo(message=f"Constructing the project manifest generation job...")
+    console.echo(message="Constructing the project manifest generation job...")
 
     local_working_directory = get_working_directory()
 
@@ -71,57 +67,57 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
     working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
 
     # Resolves the paths to the remote and local manifest generation tracker files
-    remote_manifest_tracker_path = server.raw_data_root.joinpath(project, TrackerFileNames.MANIFEST)
+    remote_manifest_tracker_path = server.shared_storage_root.joinpath(project, TrackerFileNames.MANIFEST)
     local_manifest_tracker_path = local_working_directory.joinpath(project, job_name, TrackerFileNames.MANIFEST)
     ensure_directory_exists(local_manifest_tracker_path)
 
     # Generates the remote job header
     job = Job(
         job_name=job_name,
-        output_log=working_directory.joinpath(f"output.txt"),
-        error_log=working_directory.joinpath(f"errors.txt"),
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
         conda_environment="forge",
-        cpus_to_use=1,
-        ram_gb=1,
-        time_limit=20,
+        cpu_threads=1,
+        ram=1,
+        time=20,
     )
 
     # Parses the path to the shared Sun lab directory used to store raw project data on the remote server.
-    project_storage_root = server.raw_data_root.joinpath(project)
+    project_storage_root = server.shared_storage_root.joinpath(project)
 
     # Configures the job to use the sl-shared-assets library installed on the server to generate the manifest file
     # inside the project's root raw data directory.
-    job.add_command(f"sl-manage project -pp {project_storage_root} -pdr {server.processed_data_root} manifest")
+    job.add_command(f"sl-manage project -pp {project_storage_root} -pdr {server.shared_working_root} manifest")
 
     # If the function is configured to remove job logs after runtime, adds a command to delete job working directory.
     if not keep_job_logs:
         job.add_command(f"rm -rf {working_directory}")
 
     # Submits the remote job to the server
-    job = server.submit_job(job, verbose=False)
+    job = server.submit_job(job=job, verbose=False)
 
     # Waits for the server to complete the job
     delay_timer = PrecisionTimer("s")
     message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
     console.echo(message=message, level=LogLevel.INFO)
-    while not server.job_complete(job=job):
+    while server.get_job_status(slurm_job_id=int(job.job_id)) in (JobStatus.PENDING, JobStatus.RUNNING):
         delay_timer.delay_noblock(delay=5, allow_sleep=True)
 
     # Verifies the outcome of the manifest generation job by pulling the remote tracker file to the local machine and
     # Checking the final status of the job.
-    console.echo(message=f"Verifying the outcome of the manifest generation job...")
-    server.pull_file(
-        local_file_path=local_manifest_tracker_path,
-        remote_file_path=remote_manifest_tracker_path,
+    console.echo(message="Verifying the outcome of the manifest generation job...")
+    server.pull(
+        local_path=local_manifest_tracker_path,
+        remote_path=remote_manifest_tracker_path,
     )
     tracker = ProcessingTracker(file_path=local_manifest_tracker_path)
 
     # If the job did not complete successfully, raises an error
     if not tracker.is_complete:
         message = (
-            f"Manifest generation job: Failed. Check the processing logs stored on the remote compute server for "
-            f"details about the error that caused the failure."
+            "Manifest generation job: Failed. Check the processing logs stored on the remote compute server for "
+            "details about the error that caused the failure."
         )
         console.error(message=message, error=RuntimeError)
     else:
@@ -129,7 +125,7 @@ def generate_remote_project_manifest(project: str, server: Server, keep_job_logs
         delete_directory(local_manifest_tracker_path.parent)
 
     # Otherwise, fetches the created manifest file to the local machine via the fetch function.
-    console.echo(message=f"Project manifest file: Generated.", level=LogLevel.SUCCESS)
+    console.echo(message="Project manifest file: Generated.", level=LogLevel.SUCCESS)
 
     # If the job completes as expected, pulls the generated manifest file to the project-specific subdirectory under
     # the local working directory. This ensures that the user has continued access to the most recent manifest file
@@ -154,12 +150,11 @@ def fetch_remote_project_manifest(project: str, server: Server) -> None:
         FileNotFoundError: If the manifest file does not exist on the server, indicating that the file has not been
             generated.
     """
-
     # Resolves the path to the local directory used to work with Sun lab data.
     local_working_directory = get_working_directory()
 
     # Resolves the paths to the remote and local manifest files
-    remote_manifest_path = server.raw_data_root.joinpath(project, f"{project}_manifest.feather")
+    remote_manifest_path = server.shared_storage_root.joinpath(project, f"{project}_manifest.feather")
     local_manifest_path = local_working_directory.joinpath(project, "manifest.feather")
 
     # Ensures that the project-specific folder exists under the local working directory
@@ -186,9 +181,9 @@ def fetch_remote_project_manifest(project: str, server: Server) -> None:
             f"Fetching the '{project}' project's manifest file from the remote compute server to the local machine..."
         )
     )
-    server.pull_file(
-        local_file_path=local_manifest_path,
-        remote_file_path=remote_manifest_path,
+    server.pull(
+        local_path=local_manifest_path,
+        remote_path=remote_manifest_path,
     )
     console.echo(message=f"Most recent manifest file for the '{project}' project: Fetched.", level=LogLevel.SUCCESS)
 
@@ -699,17 +694,17 @@ def generate_project_manifest(
                 # Depending on the session type, instantiates the appropriate descriptor instance and uses it to read
                 # the experimenter notes
                 if session_data.session_type == SessionTypes.LICK_TRAINING:
-                    descriptor: LickTrainingDescriptor = LickTrainingDescriptor.from_yaml(  # type: ignore
+                    descriptor: LickTrainingDescriptor = LickTrainingDescriptor.from_yaml(
                         file_path=session_data.raw_data.session_descriptor_path
                     )
                     manifest["notes"].append(descriptor.experimenter_notes)
                 elif session_data.session_type == SessionTypes.RUN_TRAINING:
-                    descriptor: RunTrainingDescriptor = RunTrainingDescriptor.from_yaml(  # type: ignore
+                    descriptor: RunTrainingDescriptor = RunTrainingDescriptor.from_yaml(
                         file_path=session_data.raw_data.session_descriptor_path
                     )
                     manifest["notes"].append(descriptor.experimenter_notes)
                 elif session_data.session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
-                    descriptor: MesoscopeExperimentDescriptor = MesoscopeExperimentDescriptor.from_yaml(  # type: ignore
+                    descriptor: MesoscopeExperimentDescriptor = MesoscopeExperimentDescriptor.from_yaml(
                         file_path=session_data.raw_data.session_descriptor_path
                     )
                     manifest["notes"].append(descriptor.experimenter_notes)
@@ -717,7 +712,7 @@ def generate_project_manifest(
                     # sl-experiment version 3.0.0 added session descriptors to Window Checking runtimes. Since the file
                     # does not exist in prior versions, this section is written to statically handle the discrepancy.
                     try:
-                        descriptor: WindowCheckingDescriptor = WindowCheckingDescriptor.from_yaml(  # type: ignore
+                        descriptor: WindowCheckingDescriptor = WindowCheckingDescriptor.from_yaml(
                             file_path=session_data.raw_data.session_descriptor_path
                         )
                         manifest["notes"].append(descriptor.experimenter_notes)
@@ -789,7 +784,7 @@ def generate_project_manifest(
             animal_type: type[pl.UInt64 | pl.String]
             if all([str(animal).isdigit() for animal in manifest["animal"]]):
                 # Converts all strings to integers
-                manifest["animal"] = [int(animal) for animal in manifest["animal"]]  # type: ignore
+                manifest["animal"] = [int(animal) for animal in manifest["animal"]]
                 animal_type = pl.UInt64  # Uint64 for future proofing
             else:
                 animal_type = pl.String

@@ -11,8 +11,7 @@ from sl_shared_assets import ProjectManifest
 
 
 def make_manifest_from_structure(project_name: str, sessions: list[dict], out_dir: Path) -> Path:
-    """
-    sessions: list of dicts. Required keys per row:
+    """sessions: list of dicts. Required keys per row:
       - animal: str|int              # your animal id
       - session: str                 # 'YYYY-MM-DD-hh-mm-ss' or 'YYYY-MM-DD-hh-mm-ss-ffffff'
       - type: str                    # any descriptive string (e.g., 'MESOSCOPE_EXPERIMENT', 'RUN_TRAINING')

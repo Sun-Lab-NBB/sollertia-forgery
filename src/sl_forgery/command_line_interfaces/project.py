@@ -5,10 +5,11 @@ on the remote compute server.
 from typing import Any
 
 import click
-from sl_shared_assets import Server, get_working_directory, get_credentials_file_path
+from sl_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
 
 from ..utils import ProjectManifest
+from ..server import Server
 from ..processing import fetch_remote_project_manifest, generate_remote_project_manifest
 
 
@@ -61,15 +62,15 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     # regeneration requires service account credentials.
     if regenerate_manifest:
         # Establishes SSH connection to the processing server using the service account credentials.
-        credentials = get_credentials_file_path(service=True)
-        server = Server(credentials_path=credentials)
+        configuration = get_server_configuration(service=True)
+        server = Server(configuration=configuration)
         generate_remote_project_manifest(project=project, server=server)
 
     # Otherwise, fetches the most recent manifest file instance from the remote server to the working directory
     else:
         # Establishes SSH connection to the processing server using the user account credentials.
-        credentials = get_credentials_file_path(service=False)
-        server = Server(credentials_path=credentials)
+        configuration = get_server_configuration(service=False)
+        server = Server(configuration=configuration)
         fetch_remote_project_manifest(project=project, server=server)
 
 
@@ -125,8 +126,8 @@ def print_project_manifest_data(
 
     if not summary and not notes:
         message = (
-            f"No data display options were selected when calling the command. Pass either the 'notes' (-n), "
-            f"'summary' (-s), or both flags when calling the command to display the data using the target format."
+            "No data display options were selected when calling the command. Pass either the 'notes' (-n), "
+            "'summary' (-s), or both flags when calling the command to display the data using the target format."
         )
         console.error(message=message, error=ValueError)
 
@@ -137,8 +138,8 @@ def print_project_manifest_data(
     # continuing with this command.
     if not manifest_path.exists():
         # Establishes SSH connection to the processing server using the user account credentials.
-        credentials = get_credentials_file_path(service=False)
-        server = Server(credentials_path=credentials)
+        configuration = get_server_configuration(service=False)
+        server = Server(configuration=configuration)
         fetch_remote_project_manifest(project=project, server=server)
 
     # Loads the manifest file data into memory

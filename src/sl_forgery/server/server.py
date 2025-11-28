@@ -1,89 +1,256 @@
-"""This module provides the API for submitting jobs to compute servers and clusters (managed via SLURM) and
-monitoring the running jobs status. Many Sun lab data workflow pipelines use this interface for accessing shared
-compute resources.
+"""This module provides the API for submitting jobs to the SLURM-managed compute servers and monitoring their
+runtime status, and managing the data stored on the remote compute servers.
 """
 
+from enum import StrEnum
 import stat
-from random import randint
+import select
+import socket
+from typing import TYPE_CHECKING
 from pathlib import Path
+from secrets import randbelow
 import tempfile
+import threading
+import contextlib
 
 import paramiko
-
-# noinspection PyProtectedMember
-from ataraxis_time import PrecisionTimer
-from paramiko.client import SSHClient
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 from ataraxis_base_utilities import LogLevel, console
 from ataraxis_time.time_helpers import get_timestamp
 
 from .job import Job, JupyterJob
 
+if TYPE_CHECKING:
+    from paramiko.client import SSHClient
+    from sl_shared_assets import ServerConfiguration
+    from paramiko.sftp_client import SFTPClient
+
+
+class JobStatus(StrEnum):
+    """Defines the set of status codes returned by SLURM for managed jobs."""
+
+    PENDING = "PENDING"
+    """The job is queued and waiting for resources."""
+    RUNNING = "RUNNING"
+    """The job is currently executing."""
+    COMPLETED = "COMPLETED"
+    """The job finished successfully."""
+    FAILED = "FAILED"
+    """The job terminated with a non-zero exit code."""
+    CANCELLED = "CANCELLED"
+    """The job was cancelled by the user or administrator."""
+    TIMEOUT = "TIMEOUT"
+    """The job exceeded its time limit."""
+    NODE_FAIL = "NODE_FAIL"
+    """The job terminated due to node failure."""
+    OUT_OF_MEMORY = "OUT_OF_MEMORY"
+    """The job was terminated for exceeding memory limits."""
+    UNKNOWN = "UNKNOWN"
+    """The job status could not be determined."""
+
+
+class _SSHTunnel:
+    """Manages an SSH tunnel for local port forwarding using paramiko's direct-tcpip channel.
+
+    This class creates a local socket server that listens for incoming connections and forwards them through an
+    SSH channel to a remote destination. It is used to enable localhost access to services running on remote
+    compute nodes.
+
+    Args:
+        ssh_client: The paramiko SSHClient instance to use for creating the tunnel.
+        local_port: The local port to listen on for incoming connections.
+        remote_host: The hostname of the remote destination (e.g., compute node).
+        remote_port: The port on the remote destination to forward traffic to.
+
+    Attributes:
+        _ssh_client: The SSH client used for the tunnel.
+        _local_port: The local listening port.
+        _remote_host: The remote destination hostname.
+        _remote_port: The remote destination port.
+        _server_socket: The local socket server accepting connections.
+        _running: Flag indicating whether the tunnel is active.
+        _accept_thread: The thread running the connection accept loop.
+    """
+
+    def __init__(
+        self,
+        ssh_client: SSHClient,
+        local_port: int,
+        remote_host: str,
+        remote_port: int,
+    ) -> None:
+        self._ssh_client = ssh_client
+        self._local_port = local_port
+        self._remote_host = remote_host
+        self._remote_port = remote_port
+        self._server_socket: socket.socket | None = None
+        self._running = False
+        self._accept_thread: threading.Thread | None = None
+
+    def __del__(self) -> None:
+        """Ensures graceful resource deallocation when the tunnel instance is garbage collected."""
+        self.stop()
+
+    def start(self) -> None:
+        """Starts the SSH tunnel by creating a local socket server and spawning the 'accept' loop thread."""
+        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_socket.settimeout(1.0)  # Allows periodic checking of _running flag
+        self._server_socket.bind(("127.0.0.1", self._local_port))
+        self._server_socket.listen(5)
+        self._running = True
+
+        # Starts the 'accept' loop in a daemon thread
+        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self._accept_thread.start()
+
+    def stop(self) -> None:
+        """Stops the SSH tunnel and closes all connections."""
+        self._running = False
+        if self._server_socket:
+            with contextlib.suppress(OSError):
+                self._server_socket.close()
+
+    def _accept_loop(self) -> None:
+        """Accepts incoming connections on the local socket and spawns forwarding threads for each connection."""
+        while self._running:
+            try:
+                client_socket, addr = self._server_socket.accept()
+
+                # Opens a direct-tcpip channel to the remote destination
+                transport = self._ssh_client.get_transport()
+                if transport is None:
+                    client_socket.close()
+                    continue
+
+                try:
+                    channel = transport.open_channel("direct-tcpip", (self._remote_host, self._remote_port), addr)
+                except Exception:
+                    client_socket.close()
+                    continue
+
+                # Starts bidirectional forwarding in a separate thread
+                forward_thread = threading.Thread(
+                    target=self._forward_tunnel, args=(client_socket, channel), daemon=True
+                )
+                forward_thread.start()
+
+            except TimeoutError:
+                # Timeout allows periodic checking of the _running flag
+                continue
+            except OSError:
+                # Socket was closed
+                if self._running:
+                    continue
+                break
+
+    def _forward_tunnel(self, client_socket: socket.socket, channel: paramiko.Channel) -> None:
+        """Bidirectionally forwards the data between the local client socket and the SSH channel.
+
+        Args:
+            client_socket: The local socket connected to the client application.
+            channel: The paramiko channel connected to the remote destination.
+        """
+        try:
+            while self._running:
+                # Uses select to wait for data on either the socket or the channel
+                r, _, _ = select.select([client_socket, channel], [], [], 0.5)
+
+                if client_socket in r:
+                    data = client_socket.recv(4096)
+                    if len(data) == 0:
+                        break
+                    channel.send(data)
+
+                if channel in r:
+                    data = channel.recv(4096)
+                    if len(data) == 0:
+                        break
+                    client_socket.send(data)
+
+        except OSError:
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                channel.close()
+            with contextlib.suppress(OSError):
+                client_socket.close()
+
 
 class Server:
     """Establishes and maintains a bidirectional interface that allows working with a remote compute server.
 
-    This class provides the API that allows accessing the remote processing server. Primarily, the class is used to
-    submit SLURM-managed jobs to the server and monitor their execution status. It functions as the central interface
-    used by many data workflow pipelines in the lab to execute costly data processing on the server.
+    This class provides the central API that allows submitting SLURM-managed jobs to the server and monitoring their
+    execution status. Additionally, it also provides the API for managing the data stored on the remote compute server
+    via the SFTP protocol.
 
     Notes:
-        This class assumes that the target server has SLURM job manager installed and accessible to the user whose
-        credentials are used to connect to the server as part of this class instantiation.
+        This class assumes that the target server has the SLURM job manager installed and accessible to the user whose
+        credentials are used to connect to the server as part of class initialization.
 
     Args:
-        credentials_path: The path to the locally stored .yaml file that contains the server hostname and access
-            credentials.
+        configuration: The ServerConfiguration instance that contains the server hostname and access credentials.
 
     Attributes:
-        _open: Tracks whether the connection to the server is open or not.
-        _client: Stores the initialized SSHClient instance used to interface with the server.
+        _open: Tracks whether the connection to the server is open.
+        _client: Stores the SSHClient instance used to interface with the server.
+        _sftp: Stores the SFTPClient instance used for file transfer operations.
+        _configuration: Stores the ServerConfiguration instance used to configure the server connection.
     """
 
-    def __init__(self, credentials_path: Path) -> None:
-        # Tracker used to prevent __del__ from calling stop() for a partially initialized class.
+    def __init__(self, configuration: ServerConfiguration) -> None:
+        # Tracker used to prevent __del__ from calling close() for a partially initialized class.
         self._open: bool = False
 
-        # Loads the credentials from the provided .yaml file
-        self._credentials: ServerCredentials = ServerCredentials.from_yaml(credentials_path)  # type: ignore
+        # Stores the server configuration
+        self._configuration: ServerConfiguration = configuration
 
         # Initializes a timer class to optionally delay loop cycling below
-        timer = PrecisionTimer("s")
+        timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
         # Establishes the SSH connection to the specified processing server. At most, attempts to connect to the server
         # 30 times before terminating with an error
         attempt = 0
+        _maximum_connection_attempts = 30
         while True:
             console.echo(
-                f"Trying to connect to {self._credentials.host} (attempt {attempt}/30)...", level=LogLevel.INFO
+                message=f"Connecting to {self._configuration.host} (attempt {attempt}/30)...", level=LogLevel.INFO
             )
             try:
                 self._client: SSHClient = paramiko.SSHClient()
                 self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 self._client.connect(
-                    self._credentials.host, username=self._credentials.username, password=self._credentials.password
+                    hostname=self._configuration.host,
+                    username=self._configuration.username,
+                    password=self._configuration.password,
                 )
-                console.echo(f"Connected to {self._credentials.host}", level=LogLevel.SUCCESS)
+                console.echo(message=f"Connected to {self._configuration.host}", level=LogLevel.SUCCESS)
+
+                # Initializes the SFTP client using the established SSH connection. This client is reused for all
+                # file transfer operations during the lifetime of the Server instance.
+                self._sftp: SFTPClient = self._client.open_sftp()
+
                 self._open = True
                 break
             except paramiko.AuthenticationException:
                 message = (
-                    f"Authentication failed when connecting to {self._credentials.host} using "
-                    f"{self._credentials.username} user."
+                    f"Authentication failed when connecting to {self._configuration.host} using "
+                    f"{self._configuration.username} user."
                 )
-                console.error(message, RuntimeError)
-                raise RuntimeError
-            except:
-                if attempt == 30:
-                    message = f"Could not connect to {self._credentials.host} after 30 attempts. Aborting runtime."
-                    console.error(message, RuntimeError)
-                    raise RuntimeError
+                console.error(message, PermissionError)
+                raise PermissionError(message) from None  # Fallback to appease mypy, should not be reachable
+            except Exception:
+                if attempt == _maximum_connection_attempts:
+                    message = f"Could not connect to {self._configuration.host} after 30 attempts. Aborting runtime."
+                    console.error(message, ConnectionError)
+                    raise ConnectionError(message) from None  # Fallback to appease mypy, should not be reachable
 
                 console.echo(
-                    f"Could not SSH into {self._credentials.host}, retrying after a 2-second delay...",
+                    message=f"Could not SSH into {self._configuration.host}, retrying after a 2-second delay...",
                     level=LogLevel.WARNING,
                 )
                 attempt += 1
-                timer.delay_noblock(delay=2, allow_sleep=True)
+                timer.delay(delay=2, allow_sleep=True, block=False)
 
     def __del__(self) -> None:
         """If the instance is connected to the server, terminates the connection before the instance is destroyed."""
@@ -94,49 +261,44 @@ class Server:
         job_name: str,
         conda_environment: str,
         notebook_directory: Path,
-        cpus_to_use: int = 2,
-        ram_gb: int = 32,
-        time_limit: int = 240,
+        cpu_threads: int = 2,
+        ram: int = 32,
+        time: int = 240,
         port: int = 0,
-        jupyter_args: str = "",
+        jupyter_arguments: str = "",
     ) -> JupyterJob:
-        """Launches a remote Jupyter notebook session (server) on the target remote compute server.
-
-        This method allows running interactive Jupyter sessions on the remote server under SLURM control.
+        """Launches a remote Jupyter notebook session on the target remote compute server.
 
         Args:
             job_name: The descriptive name of the Jupyter SLURM job to be created.
             conda_environment: The name of the conda environment to activate on the server before running the job logic.
-                The environment should contain the necessary Python packages and CLIs to support running the job's
-                logic. For Jupyter jobs, this necessarily includes the Jupyter notebook and jupyterlab packages.
+                For Jupyter jobs, the environment must include the 'notebook' and 'jupyterlab' packages.
             port: The connection port number for the Jupyter server. If set to 0 (default), a random port number between
                 8888 and 9999 is assigned to this connection to reduce the possibility of colliding with other
                 user sessions.
-            notebook_directory: The root directory where to run the Jupyter notebook. During runtime, the notebook will
-                only have access to items stored under this directory. For most runtimes, this should be set to the
-                user's root working directory.
-            cpus_to_use: The number of CPUs to allocate to the Jupyter server.
-            ram_gb: The amount of RAM, in GB, to allocate to the Jupyter server.
-            time_limit: The maximum Jupyter server uptime, in minutes.
-            jupyter_args: Stores additional arguments to pass to jupyter notebook initialization command.
+            notebook_directory: The root directory where to run the Jupyter notebook. During runtime, the notebook
+                only has access to items stored under this directory.
+            cpu_threads: The number of CPU threads to allocate to the Jupyter server.
+            ram: The amount of RAM, in GB, to allocate to the Jupyter server.
+            time: The maximum Jupyter server uptime, in minutes.
+            jupyter_arguments: The additional arguments to pass to the jupyter notebook initialization command.
 
         Returns:
-            The initialized JupyterJob instance that stores information on how to connect to the created Jupyter server.
-            Do NOT re-submit the job to the server, as this is done as part of this method's runtime.
+            The JupyterJob instance containing information about the completed session.
 
         Raises:
-            TimeoutError: If the target Jupyter server doesn't start within 120 minutes of this method being called.
+            TimeoutError: If the Jupyter server doesn't start within 120 seconds of being submitted.
             RuntimeError: If the job submission fails for any reason.
         """
         # Statically configures the working directory to be stored under:
         # user working root / job_logs / job_name_timestamp
         timestamp = get_timestamp()
         working_directory = Path(self.user_working_root.joinpath("job_logs", f"{job_name}_{timestamp}"))
-        self.create_directory(remote_path=working_directory, parents=True)
+        self.create(remote_path=working_directory, is_dir=True, parents=True)
 
         # If necessary, generates and sets port to a random value between 8888 and 9999.
         if port == 0:
-            port = randint(8888, 9999)
+            port = 8888 + randbelow(1112)  # Range: 8888-9999
 
         job = JupyterJob(
             job_name=job_name,
@@ -146,29 +308,73 @@ class Server:
             conda_environment=conda_environment,
             notebook_directory=notebook_directory,
             port=port,
-            cpus_to_use=cpus_to_use,
-            ram_gb=ram_gb,
-            time_limit=time_limit,
-            jupyter_args=jupyter_args,
+            cpu_threads=cpu_threads,
+            ram=ram,
+            time=time,
+            jupyter_arguments=jupyter_arguments,
         )
 
-        # Submits the job to the server and, if submission is successful, returns the JupyterJob object extended to
-        # include connection data received from the server.
-        return self.submit_job(job)  # type: ignore[return-value]
+        # Submits the job to the server and waits for connection info
+        job = self.submit_job(job=job)  # type: ignore[assignment]
 
-    def submit_job(self, job: Job | JupyterJob, verbose: bool = True) -> Job | JupyterJob:
+        # At this point, submit_job should populate connection_info for JupyterJob
+        if job.connection_info is None:
+            message = f"Failed to retrieve connection information for Jupyter session {job.job_name}."
+            console.error(message, RuntimeError)
+            raise RuntimeError(message)
+
+        # Creates and starts the SSH tunnel to enable localhost access to the Jupyter server
+        tunnel = _SSHTunnel(
+            ssh_client=self._client,
+            local_port=job.connection_info.port,
+            remote_host=job.connection_info.compute_node,
+            remote_port=job.connection_info.port,
+        )
+
+        try:
+            tunnel.start()
+            console.echo(message="SSH tunnel: Established.", level=LogLevel.SUCCESS)
+
+            # Prints connection information for the user
+            console.echo(message=f"Jupyter server running on the compute node: {job.connection_info.compute_node}")
+            console.echo(message=f"Local access port: {job.connection_info.port}")
+            console.echo(message=f"Access URL: {job.connection_info.localhost_url}", level=LogLevel.INFO)
+
+            # Blocks until the user presses Enter
+            console.echo(message="Enter anything to terminate the interactive Jupyter session...")
+            input()
+
+        except KeyboardInterrupt:
+            # Handles Ctrl+C gracefully
+            console.echo(
+                message=(
+                    f"Keyboard interrupt signal: Detected. Terminating the interactive Jupyter session "
+                    f"{job.job_name}..."
+                ),
+                level=LogLevel.WARNING,
+            )
+
+        finally:
+            # Cleanup: stops the tunnel and aborts the SLURM job
+            console.echo(message=f"Terminating the interactive Jupyter session {job.job_name}...")
+            tunnel.stop()
+
+            if job.job_id is not None:
+                self.abort_job(slurm_job_id=int(job.job_id))
+
+        return job
+
+    def submit_job(self, job: Job | JupyterJob, *, verbose: bool = True) -> Job | JupyterJob:
         """Submits the input job to the managed remote compute server via the SLURM job manager.
 
-        This method functions as the entry point for all headless jobs that are executed on the remote compute
-        server.
+        This method is the entry point for all headless jobs that are executed on the remote compute server.
 
         Args:
-            job: The initialized Job instance that contains remote job's data.
-            verbose: Determines whether to notify the user about non-error states of the job submission process.
+            job: The Job instance that defines the job to be executed.
+            verbose: Determines whether to notify the user about non-error states of the submission process.
 
         Returns:
-            The job object whose 'job_id' attribute had been modified to include the SLURM-assigned job ID if the job
-            was successfully submitted.
+            The job object whose 'job_id' attribute had been replaced with the SLURM-assigned job ID.
 
         Raises:
             RuntimeError: If the job cannot be submitted to the server for any reason.
@@ -180,10 +386,7 @@ class Server:
         # In this case returns it to the caller with no further modifications.
         if job.job_id is not None:
             console.echo(
-                message=(
-                    f"The '{job.job_name}' job has already been submitted to the server. No further actions have "
-                    f"been taken as part of this submission cycle."
-                ),
+                message=f"The '{job.job_name}' job has already been submitted to the server.",
                 level=LogLevel.WARNING,
             )
             return job
@@ -198,10 +401,8 @@ class Server:
             with local_script_path.open("w") as f:
                 f.write(fixed_script_content)
 
-            # Uploads the command script to the server
-            sftp = self._client.open_sftp()
-            sftp.put(localpath=local_script_path, remotepath=job.remote_script_path)
-            sftp.close()
+            # Uploads the command script to the server using the persistent SFTP client
+            self._sftp.put(localpath=str(local_script_path), remotepath=job.remote_script_path)
 
         # Makes the server-side script executable
         self._client.exec_command(f"chmod +x {job.remote_script_path}")
@@ -212,7 +413,7 @@ class Server:
         # If batch_job is not in the output received from SLURM in response to issuing the submission command, raises an
         # error.
         if "Submitted batch job" not in job_output:
-            message = f"Failed to submit the '{job.job_name}' job to the BioHPC cluster."
+            message = f"Failed to submit the '{job.job_name}' job to the remote compute server."
             console.error(message, RuntimeError)
 
             # Fallback to appease mypy, should not be reachable
@@ -223,25 +424,26 @@ class Server:
         job_id = job_output.split()[-1]
         job.job_id = job_id
 
-        # Special processing for Jupyter jobs
+        # Special processing for Jupyter jobs: waits for and parses connection information
         if isinstance(job, JupyterJob):
             # Transfers host and user information to the JupyterJob object
             job.host = self.host
             job.user = self.user
 
             # Initializes a timer class to optionally delay loop cycling below
-            timer = PrecisionTimer("s")
+            timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
             timer.reset()
-            while timer.elapsed < 120:  # Waits for at most 2 minutes before terminating with an error
+            _wait_time = 120  # 2 minutes
+            while timer.elapsed < _wait_time:  # Waits for at most 2 minutes before terminating with an error
                 # Checks if the connection info file exists
                 try:
                     # Pulls the connection info file
-                    local_info_file = Path(f"/tmp/{job.job_name}_connection.txt")
-                    self.pull_file(local_file_path=local_info_file, remote_file_path=job.connection_info_file)
+                    local_info_file = Path(tempfile.gettempdir()) / f"{job.job_name}_connection.txt"
+                    self.pull(local_path=local_info_file, remote_path=job.connection_info_file)
 
                     # Parses connection data from the file and caches it inside Job class attributes
-                    job.parse_connection_info(local_info_file)
+                    job.parse_connection_data(local_info_file)
 
                     # Removes the local file copy after it is parsed
                     local_info_file.unlink(missing_ok=True)
@@ -253,24 +455,27 @@ class Server:
                     break
 
                 except Exception:
-                    # The file doesn't exist yet or job initialization failed
-                    if self.job_complete(job):
-                        message = (
-                            f"Remote jupyter server job {job.job_name} with id {job.job_id} encountered a startup "
-                            f"error and was terminated prematurely."
-                        )
-                        console.error(message, RuntimeError)
+                    # The file doesn't exist yet or job initialization failed. Checks if the job has already
+                    # terminated, indicating a startup error.
+                    if job.job_id is not None:
+                        status = self.get_job_status(slurm_job_id=int(job.job_id))
+                        if status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                            message = (
+                                f"Remote jupyter session job {job.job_name} with id {job.job_id} encountered a "
+                                f"startup error and was terminated prematurely."
+                            )
+                            console.error(message, RuntimeError)
 
-                timer.delay_noblock(delay=5, allow_sleep=True)  # Waits for 5 seconds before checking again
+                timer.delay(delay=5, allow_sleep=True, block=False)  # Waits for 5 seconds before checking again
             else:
                 # Aborts the job if the server is busy running other jobs
-                self.abort_job(job=job)
+                self.abort_job(slurm_job_id=int(job.job_id))
 
                 # Only raises the timeout error if the while loop is not broken in 120 seconds
                 message = (
-                    f"Remote jupyter server job {job.job_name} with id {job.job_id} did not start within 120 seconds "
+                    f"Remote jupyter session job {job.job_name} with id {job.job_id} did not start within 120 seconds "
                     f"from being submitted. Since all jupyter jobs are intended to be interactive and the server is "
-                    f"busy running other jobs, this job is cancelled. Try again when the server is less busy."
+                    f"busy running other jobs, this job has been cancelled."
                 )
                 console.error(message, TimeoutError)
                 raise TimeoutError(message)  # Fallback to appease mypy
@@ -281,143 +486,227 @@ class Server:
         # Returns the updated job object
         return job
 
-    def job_complete(self, job: Job | JupyterJob) -> bool:
-        """Returns True if the job managed by the input Job instance has been completed or terminated its runtime due
-        to an error.
-
-        If the job is still running or queued for runtime, the method returns False.
+    def abort_job(self, slurm_job_id: int) -> None:
+        """Aborts the job with the specified SLURM-assigned ID if it is currently running or pending on the server.
 
         Args:
-            job: The Job object whose status needs to be checked.
+            slurm_job_id: The SLURM-assigned job ID to abort.
+        """
+        if self.get_job_status(slurm_job_id=slurm_job_id) in (JobStatus.PENDING, JobStatus.RUNNING):
+            self._client.exec_command(f"scancel {slurm_job_id}")
+
+    def get_job_status(self, slurm_job_id: int) -> JobStatus:
+        """Queries the managed server's SLURM manager for the runtime status of the job with the specified
+        SLURM-assigned ID.
+
+        Notes:
+            This method uses the 'sacct' command to determine the current state of the job, returning the actual status
+            (e.g., PENDING, RUNNING, COMPLETED, FAILED) assigned by the SLURM manager.
+
+        Args:
+            slurm_job_id: The SLURM-assigned job ID for which to query the runtime status.
+
+        Returns:
+            The current status of the job as a JobStatus enumeration value.
+        """
+        # Uses the 'sacct' command with a specific format to get the job's state. The '--parsable2' flag provides clean
+        # output. Queries both the main job and any job steps (.batch, .extern), taking the primary job status.
+        result = (
+            self._client.exec_command(f"sacct -j {slurm_job_id} --format=State --noheader --parsable2")[1]
+            .read()
+            .decode()
+            .strip()
+        )
+
+        # The output may contain multiple lines (for job steps). The first line contains the main job status.
+        if result:
+            statuses = result.split("\n")
+            if statuses:
+                status_str = statuses[0].strip()
+                # Attempts to match the status string to a JobStatus enum value
+                try:
+                    return JobStatus(status_str)
+                except ValueError:
+                    # SLURM may return statuses with suffixes (e.g., "CANCELLED+"). Strips non-alpha characters
+                    # and retries.
+                    cleaned = "".join(c for c in status_str if c.isalpha() or c == "_")
+                    try:
+                        return JobStatus(cleaned)
+                    except ValueError:
+                        return JobStatus.UNKNOWN
+
+        return JobStatus.UNKNOWN
+
+    def pull(self, local_path: Path, remote_path: Path) -> None:
+        """Downloads a file or directory from the remote server to the local machine.
+
+        This method automatically detects whether the remote path points to a file or directory and handles the
+        transfer accordingly. For directories, all contents are recursively downloaded.
+
+        Args:
+            local_path: The path on the local machine where the file or directory will be saved.
+            remote_path: The path to the file or directory on the remote server to download.
 
         Raises:
-            ValueError: If the input Job object does not contain a valid job_id, suggesting that it has not been
-                submitted to the server.
+            FileNotFoundError: If the remote path does not exist on the server.
         """
-        if job.job_id is None:
-            message = (
-                f"The input Job object for the job {job.job_name} does not contain a valid job_id. This indicates that "
-                f"the job has not been submitted to the server."
-            )
-            console.error(message, ValueError)
-
-            # This is here to appease mypy, it should not be reachable
-            raise ValueError(message)
-
-        if job.job_id not in self._client.exec_command(f"squeue -j {job.job_id}")[1].read().decode().strip():
-            return True
-        return False
-
-    def abort_job(self, job: Job | JupyterJob) -> None:
-        """Aborts the target job if it is currently running on the server.
-
-        If the job is currently running, this method forcibly terminates its runtime. If the job is queued for
-        execution, this method removes it from the SLURM queue. If the job is already terminated, this method will do
-        nothing.
-
-        Args:
-            job: The Job object that needs to be aborted.
-        """
-        # Sends the 'scancel' command to the server targeting the specific Job via ID, unless the job is already
-        # complete
-        if not self.job_complete(job):
-            self._client.exec_command(f"scancel {job.job_id}")
-
-        console.echo(message=f"{job.job_name} job: Aborted.", level=LogLevel.SUCCESS)
-
-    def pull_file(self, local_file_path: Path, remote_file_path: Path) -> None:
-        """Moves the specified file from the remote server to the local machine.
-
-        Args:
-            local_file_path: The path to the local instance of the file (where to copy the file).
-            remote_file_path: The path to the target file on the remote server (the file to be copied).
-        """
-        sftp = self._client.open_sftp()
+        # Checks if the remote path exists and determines if it is a file or directory
         try:
-            sftp.get(localpath=local_file_path, remotepath=str(remote_file_path))
-        finally:
-            sftp.close()
+            remote_stat = self._sftp.stat(str(remote_path))
+        except FileNotFoundError:
+            message = f"The remote path {remote_path} does not exist on the server."
+            console.error(message, FileNotFoundError)
+            raise FileNotFoundError(message) from None
 
-    def push_file(self, local_file_path: Path, remote_file_path: Path) -> None:
-        """Moves the specified file from the remote server to the local machine.
+        # Determines if the remote path is a directory or file and handles accordingly
+        if stat.S_ISDIR(remote_stat.st_mode):
+            self._pull_directory(local_path, remote_path)
+        else:
+            # Ensures the parent directory exists locally
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            self._sftp.get(localpath=str(local_path), remotepath=str(remote_path))
 
-        Args:
-            local_file_path: The path to the file that needs to be copied to the remote server.
-            remote_file_path: The path to the file on the remote server (where to copy the file).
-        """
-        sftp = self._client.open_sftp()
-        try:
-            sftp.put(localpath=local_file_path, remotepath=str(remote_file_path))
-        finally:
-            sftp.close()
+    def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
+        """Recursively downloads a directory from the remote server.
 
-    def pull_directory(self, local_directory_path: Path, remote_directory_path: Path) -> None:
-        """Recursively downloads the entire target directory from the remote server to the local machine.
-
-        Args:
-            local_directory_path: The path to the local directory where the remote directory will be copied.
-            remote_directory_path: The path to the directory on the remote server to be downloaded.
-        """
-        sftp = self._client.open_sftp()
-
-        try:
-            # Creates the local directory if it doesn't exist
-            local_directory_path.mkdir(parents=True, exist_ok=True)
-
-            # Gets the list of items in the remote directory
-            remote_items = sftp.listdir_attr(str(remote_directory_path))
-
-            for item in remote_items:
-                remote_item_path = remote_directory_path.joinpath(item.filename)
-                local_item_path = local_directory_path.joinpath(item.filename)
-
-                # Checks if the item is a directory
-                if stat.S_ISDIR(item.st_mode):  # type: ignore
-                    # Recursively pulls the subdirectory
-                    self.pull_directory(local_item_path, remote_item_path)
-                else:
-                    # Pulls the individual file using the existing method
-                    sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
-
-        finally:
-            sftp.close()
-
-    def push_directory(self, local_directory_path: Path, remote_directory_path: Path) -> None:
-        """Recursively uploads the entire target directory from the local machine to the remote server.
+        This is an internal helper method used by pull() to handle directory transfers.
 
         Args:
-            local_directory_path: The path to the local directory to be uploaded.
-            remote_directory_path: The path on the remote server where the directory will be copied.
+            local_path: The local directory path where contents will be saved.
+            remote_path: The remote directory path to download.
         """
-        if not local_directory_path.exists() or not local_directory_path.is_dir():
-            message = (
-                f"Unable to upload the target local directory {local_directory_path} to the server, as it does not "
-                f"exist."
-            )
-            console.error(message=message, error=FileNotFoundError)
+        # Creates the local directory if it doesn't exist
+        local_path.mkdir(parents=True, exist_ok=True)
 
-        sftp = self._client.open_sftp()
+        # Gets the list of items in the remote directory
+        remote_items = self._sftp.listdir_attr(str(remote_path))
 
-        try:
-            # Creates the remote directory using the existing method
-            self.create_directory(remote_directory_path, parents=True)
+        for item in remote_items:
+            remote_item_path = remote_path / item.filename
+            local_item_path = local_path / item.filename
 
-            # Iterates through all items in the local directory
-            for local_item_path in local_directory_path.iterdir():
-                remote_item_path = remote_directory_path.joinpath(local_item_path.name)
+            # Checks if the item is a directory
+            if stat.S_ISDIR(item.st_mode):
+                # Recursively pulls the subdirectory
+                self._pull_directory(local_item_path, remote_item_path)
+            else:
+                # Downloads the individual file
+                self._sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
 
-                if local_item_path.is_dir():
-                    # Recursively pushes subdirectory
-                    self.push_directory(local_item_path, remote_item_path)
-                else:
-                    # Pushes the individual file using the existing method
-                    sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
+    def push(self, local_path: Path, remote_path: Path) -> None:
+        """Uploads a file or directory from the local machine to the remote server.
 
-        finally:
-            sftp.close()
+        This method automatically detects whether the local path points to a file or directory and handles the
+        transfer accordingly. For directories, all contents are recursively uploaded.
 
-    def remove(self, remote_path: Path, is_dir: bool, recursive: bool = False) -> None:
-        """Removes the specified file or directory from the remote server.
+        Args:
+            local_path: The path to the file or directory on the local machine to upload.
+            remote_path: The path on the remote server where the file or directory will be saved.
+
+        Raises:
+            FileNotFoundError: If the local path does not exist.
+        """
+        if not local_path.exists():
+            message = f"The local path {local_path} does not exist."
+            console.error(message, FileNotFoundError)
+            raise FileNotFoundError(message)
+
+        if local_path.is_dir():
+            self._push_directory(local_path, remote_path)
+        else:
+            # Ensures the parent directory exists on the remote server
+            self._create_directory(remote_path.parent, parents=True)
+            self._sftp.put(localpath=str(local_path), remotepath=str(remote_path))
+
+    def _push_directory(self, local_path: Path, remote_path: Path) -> None:
+        """Recursively uploads a directory to the remote server.
+
+        This is an internal helper method used by push() to handle directory transfers.
+
+        Args:
+            local_path: The local directory path to upload.
+            remote_path: The remote directory path where contents will be saved.
+        """
+        # Creates the remote directory
+        self._create_directory(remote_path, parents=True)
+
+        # Iterates through all items in the local directory
+        for local_item_path in local_path.iterdir():
+            remote_item_path = remote_path / local_item_path.name
+
+            if local_item_path.is_dir():
+                # Recursively pushes subdirectory
+                self._push_directory(local_item_path, remote_item_path)
+            else:
+                # Uploads the individual file
+                self._sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
+
+    def create(self, remote_path: Path, *, is_dir: bool = True, parents: bool = True) -> None:
+        """Creates a file or directory on the remote server.
+
+        Args:
+            remote_path: The absolute path to the file or directory to create on the remote server.
+            is_dir: If True, creates a directory. If False, creates an empty file.
+            parents: If True and is_dir is True, creates parent directories if they are missing. If False and parents
+                do not exist, raises a FileNotFoundError. This parameter is ignored when creating files (parents are
+                always created for files).
+
+        Notes:
+            This method silently succeeds if the target already exists.
+        """
+        if is_dir:
+            self._create_directory(remote_path, parents=parents)
+        else:
+            # For files, always ensure parent directories exist
+            self._create_directory(remote_path.parent, parents=True)
+
+            # Creates an empty file if it doesn't exist
+            if not self.exists(remote_path):
+                # Opens the file in 'write' mode and immediately closes it to create an empty file
+                with self._sftp.open(str(remote_path), "w"):
+                    pass
+
+    def _create_directory(self, remote_path: Path, *, parents: bool = True) -> None:
+        """Creates a directory on the remote server.
+
+        This is an internal helper method used by create() and other methods that need to create directories.
+
+        Args:
+            remote_path: The absolute path to the directory to create on the remote server.
+            parents: If True, creates parent directories if they are missing.
+        """
+        remote_path_str = str(remote_path)
+
+        if parents:
+            # Creates parent directories if needed by splitting the path into parts and creating each level
+            path_parts = Path(remote_path_str).parts
+            current_path = ""
+
+            for part in path_parts:
+                # Skips empty path parts
+                if not part:
+                    continue
+
+                # Builds the full path by concatenating the current path and the part
+                current_path = str(Path(current_path) / part) if current_path else part
+
+                try:
+                    # Checks if the directory exists by trying to 'stat' it
+                    self._sftp.stat(current_path)
+                except FileNotFoundError:
+                    # If the directory does not exist, creates it
+                    self._sftp.mkdir(current_path)
+        else:
+            # Only creates the final directory
+            try:
+                # Checks if the directory already exists
+                self._sftp.stat(remote_path_str)
+            except FileNotFoundError:
+                # Creates the directory if it does not exist
+                self._sftp.mkdir(remote_path_str)
+
+    def remove(self, remote_path: Path, *, is_dir: bool, recursive: bool = False) -> None:
+        """Removes a file or directory from the remote server.
 
         Args:
             remote_path: The path to the file or directory on the remote server to be removed.
@@ -425,174 +714,115 @@ class Server:
             recursive: If True and is_dir is True, recursively deletes all contents of the directory
                 before removing it. If False, only removes empty directories (standard rmdir behavior).
         """
-        sftp = self._client.open_sftp()
-        try:
-            if is_dir:
-                if recursive:
-                    # Recursively deletes all contents first and then removes the top-level (now empty) directory
-                    self._recursive_remove(sftp, remote_path)
-                else:
-                    # Only removes empty directories
-                    sftp.rmdir(path=str(remote_path))
+        if is_dir:
+            if recursive:
+                # Recursively deletes all contents first and then removes the top-level (now empty) directory
+                self._recursive_remove(remote_path)
             else:
-                sftp.unlink(path=str(remote_path))
-        finally:
-            sftp.close()
+                # Only removes empty directories
+                self._sftp.rmdir(path=str(remote_path))
+        else:
+            self._sftp.unlink(path=str(remote_path))
 
-    def _recursive_remove(self, sftp: paramiko.SFTPClient, remote_path: Path) -> None:
-        """Recursively removes the specified remote directory and all its contents.
+    def _recursive_remove(self, remote_path: Path) -> None:
+        """Recursively removes a directory and all its contents from the remote server.
 
-        This worker method is used by the user-facing remove() method to recursively remove non-empty directories.
+        This is an internal helper method used by remove() to handle recursive directory deletion.
 
         Args:
-            sftp: The SFTP client instance to use for remove operations.
             remote_path: The path to the remote directory to recursively remove.
         """
         try:
             # Lists all items in the directory
-            items = sftp.listdir_attr(str(remote_path))
+            items = self._sftp.listdir_attr(str(remote_path))
 
             for item in items:
                 item_path = remote_path / item.filename
 
                 # Checks if the item is a directory
-                if stat.S_ISDIR(item.st_mode):  # type: ignore
+                if stat.S_ISDIR(item.st_mode):
                     # Recursively removes subdirectories
-                    self._recursive_remove(sftp, item_path)
+                    self._recursive_remove(item_path)
                 else:
-                    # Recursively removes files
-                    sftp.unlink(str(item_path))
+                    # Removes files
+                    self._sftp.unlink(str(item_path))
 
             # After all contents are removed, removes the empty directory
-            sftp.rmdir(str(remote_path))
+            self._sftp.rmdir(str(remote_path))
 
         except Exception as e:
-            console.echo(f"Unable to remove the specified directory {remote_path}: {e!s}", level=LogLevel.WARNING)
-
-    def create_directory(self, remote_path: Path, parents: bool = True) -> None:
-        """Creates the specified directory tree on the managed remote server.
-
-        Args:
-            remote_path: The absolute path to the directory to create on the remote server, relative to the server
-                root.
-            parents: Determines whether to create parent directories, if they are missing. Otherwise, if parents do not
-                exist, raises a FileNotFoundError.
-
-        Notes:
-            This method silently assumes that it is fine if the directory already exists and treats it as a successful
-            runtime end-point.
-        """
-        sftp = self._client.open_sftp()
-
-        try:
-            # Converts the target path to string for SFTP operations
-            remote_path_str = str(remote_path)
-
-            if parents:
-                # Creates parent directories if needed:
-                # Split the path into parts and create each level
-                path_parts = Path(remote_path_str).parts
-                current_path = ""
-
-                for part in path_parts:
-                    # Skips empty path parts
-                    if not part:
-                        continue
-
-                    if current_path:
-                        # Keeps stacking path components on top of the current_path object
-                        current_path = str(Path(current_path).joinpath(part))
-                    else:
-                        # Initially, the current path is empty, so it is set to the first part
-                        current_path = part
-
-                    try:
-                        # Checks if the directory exists by trying to 'stat' it
-                        sftp.stat(current_path)
-                    except FileNotFoundError:
-                        # If the directory does not exist, creates it
-                        sftp.mkdir(current_path)
-            else:
-                # Otherwise, only creates the final directory
-                try:
-                    # Checks if the directory already exists
-                    sftp.stat(remote_path_str)
-                except FileNotFoundError:
-                    # Creates the directory if it does not exist
-                    sftp.mkdir(remote_path_str)
-
-        # Ensures sftp connection is closed.
-        finally:
-            sftp.close()
+            console.echo(
+                message=f"Unable to remove the specified directory {remote_path}: {e!s}", level=LogLevel.WARNING
+            )
 
     def exists(self, remote_path: Path) -> bool:
-        """Returns True if the target file or directory exists on the remote server."""
-        sftp = self._client.open_sftp()
-        try:
-            # Checks if the target file or directory exists by trying to 'stat' it
-            sftp.stat(str(remote_path))
+        """Returns True if the target file or directory exists on the remote server.
 
-        # If the directory or file does not exist, returns False
+        Args:
+            remote_path: The path to check on the remote server.
+
+        Returns:
+            True if the path exists, False otherwise.
+        """
+        try:
+            self._sftp.stat(str(remote_path))
         except FileNotFoundError:
             return False
-
         else:
-            # If the request does not err, returns True (file or directory exists)
             return True
 
     def close(self) -> None:
-        """Closes the SSH connection to the server.
-
-        This method has to be called before destroying the class instance to ensure proper resource cleanup.
-        """
+        """Closes the SFTP and SSH connections to the server."""
         # Prevents closing already closed connections
         if self._open:
+            self._sftp.close()
             self._client.close()
+            self._open = False
 
     @property
-    def raw_data_root(self) -> Path:
-        """Returns the absolute path to the directory used to store the raw data for all Sun lab projects on the server
-        accessible through this class.
+    def shared_storage_root(self) -> Path:
+        """Returns the absolute path to the shared storage volume directory of the remote compute server accessible
+        through this instance.
         """
-        return Path(self._credentials.raw_data_root)
+        return Path(self._configuration.shared_storage_root)
 
     @property
-    def processed_data_root(self) -> Path:
-        """Returns the absolute path to the directory used to store the processed data for all Sun lab projects on the
-        server accessible through this class.
+    def shared_working_root(self) -> Path:
+        """Returns the absolute path to the shared working volume directory of the remote compute server accessible
+        through this instance.
         """
-        return Path(self._credentials.processed_data_root)
+        return Path(self._configuration.shared_working_root)
 
     @property
     def user_data_root(self) -> Path:
-        """Returns the absolute path to the directory used to store user-specific data on the server accessible through
-        this class.
+        """Returns the absolute path to the storage volume directory used to store user's data on the remote compute
+        server accessible through this instance.
         """
-        return Path(self._credentials.user_data_root)
+        return Path(self._configuration.user_data_root)
 
     @property
     def user_working_root(self) -> Path:
-        """Returns the absolute path to the user-specific working (fast) directory on the server accessible through
-        this class.
+        """Returns the absolute path to the working volume directory used to store user's data on the remote compute
+        server accessible through this instance.
         """
-        return Path(self._credentials.user_working_root)
+        return Path(self._configuration.user_working_root)
 
     @property
     def host(self) -> str:
         """Returns the hostname or IP address of the server accessible through this class."""
-        return self._credentials.host
+        return self._configuration.host
 
     @property
     def user(self) -> str:
         """Returns the username used to authenticate with the server."""
-        return self._credentials.username
+        return self._configuration.username
 
     @property
     def suite2p_configurations_directory(self) -> Path:
-        """Returns the absolute path to the shared directory that stores all sl-suite2p runtime configuration files."""
-        return self.raw_data_root.joinpath("suite2p_configurations")
+        """Returns the absolute path to the user's sl-suite2p configuration directory."""
+        return self.user_working_root.joinpath("suite2p_configurations")
 
     @property
     def dlc_projects_directory(self) -> Path:
-        """Returns the absolute path to the shared directory that stores all DeepLabCut projects."""
-        return self.raw_data_root.joinpath("deeplabcut_projects")
+        """Returns the absolute path to the user's DeepLabCut project directory."""
+        return self.user_working_root.joinpath("deeplabcut_projects")

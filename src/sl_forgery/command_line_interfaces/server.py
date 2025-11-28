@@ -1,14 +1,19 @@
+"""This module provides the command-line interface for interacting with the remote Sun lab compute server."""
+
 import click
-from sl_shared_assets import Server, JupyterJob, get_credentials_file_path
+from sl_shared_assets import get_server_configuration
+
+from ..server import Server
 
 
+@click.command(name="jupyter")
 @click.option(
     "-e",
     "--environment",
     type=str,
     required=True,
     help=(
-        "The name of the conda environment to use for running the Jupyter server. At a minimum, the target environment "
+        "The name of the conda environment to use for running the Jupyter notebook session. The environment "
         "must contain the 'jupyterlab' and the 'notebook' Python packages. Note, the user whose credentials are used "
         "to connect to the server must have a configured conda / mamba shell that exposes the target environment for "
         "the job to run as expected."
@@ -18,90 +23,64 @@ from sl_shared_assets import Server, JupyterJob, get_credentials_file_path
     "-c",
     "--cores",
     type=int,
-    required=True,
-    show_default=True,
     default=2,
-    help="The number of CPU cores to allocate to the Jupyter server.",
+    show_default=True,
+    help="The number of CPU cores to allocate to the Jupyter session.",
 )
 @click.option(
     "-m",
     "--memory",
     type=int,
-    required=True,
-    show_default=True,
     default=32,
-    help="The memory (RAM), in Gigabytes, to allocate to the Jupyter server.",
+    show_default=True,
+    help="The memory (RAM), in Gigabytes, to allocate to the Jupyter session.",
 )
 @click.option(
     "-t",
     "--time",
     type=int,
-    required=True,
+    default=120,
     show_default=True,
-    default=240,
-    help=(
-        "The maximum runtime duration for this Jupyter server instance, in minutes. If the server job is still running "
-        "at the end of this time limit, the job will be forcibly terminated by SLURM. To prevent hogging the server, "
-        "make sure this parameter is always set to the smallest feasible period of time."
-    ),
+    help=("The maximum uptime duration for the Jupyter session, in minutes."),
 )
 @click.option(
     "-p",
     "--port",
     type=int,
-    required=True,
-    show_default=True,
     default=0,
+    show_default=True,
     help=(
-        "The port to use for the Jupyter server communication on the remote server. Valid port values are from 8888 "
-        "to 9999. Most runtimes should leave this set to the default value (0), which randomly selects one of the "
-        "valid ports. Using random selection minimizes the chances of colliding with other interactive jupyter "
-        "sessions."
+        "The port to use for communicating with the Jupyter session. Valid port values are from 8888 to 9999. Most "
+        "use contexts should leave this set to the default value (0), which randomly selects one of the valid ports. "
+        "Using random selection minimizes the chance of colliding with other interactive jupyter sessions."
     ),
 )
 def start_jupyter_server(environment: str, cores: int, memory: int, time: int, port: int) -> None:
-    """Starts an interactive Jupyter session on the remote Sun lab server.
+    """Starts the interactive Jupyter notebook session on the remote compute server.
 
-    This command allows running Jupyter lab and notebook sessions on the remote Sun lab server. Since all lab data is
-    stored on the server, this allows running interactive analysis sessions on the same node as the data,
-    while leveraging considerable compute resources of the server.
-
-    Calling this command initializes a SLURM session that runs the interactive Jupyter server. Since this server
+    Calling this command initializes a SLURM job that runs the interactive Jupyter notebook session. Since this session
     directly competes for resources with all other headless jobs running on the server, it is imperative that each
-    jupyter runtime uses the minimum amount of resources as necessary. Do not use this command to run
-    heavy data processing pipelines! Instead, consult the API documentation for this library and use the headless
-    Job or Pipeline class.
+    jupyter runtime uses the minimum amount of resources necessary to support its runtime. Jupyter sessions are intended
+    for lightweight data exploration and visualization tasks and should not be used for resource-intensive data
+    processing tasks. Those tasks should be executed using the headless processing pipeline classes from this library.
     """
     # Initializes server connection
-    credentials_path = get_credentials_file_path(service=False)
-    server = Server(credentials_path)
+    configuration = get_server_configuration(service=False)
+    server = Server(configuration=configuration)
 
-    job: JupyterJob | None = None
-    job_name = f"interactive_jupyter_server"
     try:
-        # Launches the Jupyter server
-        job = server.launch_jupyter_server(
-            job_name=job_name,
+        # Launches the Jupyter server. This method establishes an SSH tunnel, prints connection info, blocks until
+        # the user terminates the session, and handles job cleanup automatically.
+        server.launch_jupyter_server(
+            job_name="interactive_jupyter_server",
             conda_environment=environment,
             notebook_directory=server.user_working_root,
-            cpus_to_use=cores,
-            ram_gb=memory,
+            cpu_threads=cores,
+            ram=memory,
             port=port,
-            time_limit=time,
+            time=time,
         )
 
-        # Displays the server connection details to the user via terminal
-        job.print_connection_info()
-
-        # Blocks in-place until the user shuts down the server. This allows terminating the jupyter job early if the
-        # user is done working with the server
-        input("Enter anything to shut down the server: ")
-
-    # Ensures that the server created as part of this CLI is always terminated when the CLI terminates
     finally:
-        # Terminates the server job
-        if isinstance(job, JupyterJob) and not server.job_complete(job):
-            server.abort_job(job)
-
-        # Closes the server connection if it is still open
+        # Closes the server connection
         server.close()

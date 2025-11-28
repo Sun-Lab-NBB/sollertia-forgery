@@ -4,8 +4,7 @@ import umap
 import numpy as np
 from scipy import stats
 import polars as pl
-from ataraxis_base_utilities import console
-from sl_forgery.utils.dataclass import ProjectData, TargetGroup, ProcessedSessionData
+from sl_forgery.utils.dataclass import TargetGroup, ProcessedSessionData
 
 track_length = 240
 cue_length = 30
@@ -15,8 +14,7 @@ bin_size = 5
 class Processing:
     @staticmethod
     def _create_grouped_df(distance_df, signal_df, start_indices):
-        """
-        Helper function to bin_data
+        """Helper function to bin_data
 
         Args:
             distance_df: behavior dataframe distance column
@@ -65,8 +63,7 @@ class Processing:
     # TODO: delete cache, it is only for developement and memory intensive
     @staticmethod
     def bin_data(target_group: str | TargetGroup, session_data: ProcessedSessionData):
-        """
-        Bins calcium imaging and behavioral data into fixed spatial bins along the track.
+        """Bins calcium imaging and behavioral data into fixed spatial bins along the track.
         This method identifies active periods, segments trials, normalizes distance traveled,
         and averages cell activity within position bins to produce both trial-level and
         session-level statistics.
@@ -284,8 +281,7 @@ class Processing:
     # TODO: delete or reencaspulate compute_single_session_umap, currently nothing calls this function.
     @staticmethod
     def _filter_for_umap(target_group: str | TargetGroup, session_data: ProcessedSessionData):
-        """
-        Filters neural and behavioral data before inputting into UMAP. Specifically,
+        """Filters neural and behavioral data before inputting into UMAP. Specifically,
         selects frames where the system is active (system_state == 2) and the mouse
         is in experiment stage 2 or 4. The method also ensures the correct data source
         is chosen depending on whether the analysis is single-day or multi-day.
@@ -340,8 +336,7 @@ class Processing:
         save: bool = True,
         alternate_path: Path | None = None,
     ):
-        """
-        Compute or load a UMAP embedding for a single session.
+        """Compute or load a UMAP embedding for a single session.
 
         This function filters neural and behavioral data for active states,
         computes a UMAP embedding if needed, and returns both the embedding

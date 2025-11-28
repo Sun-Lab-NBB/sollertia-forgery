@@ -39,14 +39,14 @@ class Plotting:
 
     @staticmethod
     def save_fig(fig, save_path: Path | None):
-        """
-        Saves the file at the specificed path.
+        """Saves the file at the specificed path.
 
         Args:
             fig (plotly.graph_objects.Figure):
                 The Plotly figure object to be saved.
             save_path (Path | None, optional):
                 If provided, the figure is saved to this path.
+
         Raises:
             ValueError: If `save_path` has an unsupported file extension.
         """
@@ -63,8 +63,7 @@ class Plotting:
     def plot_session(
         target_group: str | TargetGroup, cell: int, session_data: ProcessedSessionData, save_path: Path | None = None
     ):
-        """
-        Plots binned fluorescence activity for a single cell across a session.
+        """Plots binned fluorescence activity for a single cell across a session.
         Uses pre-binned data from `Processing.bin_data` to generate either
         the session average (with SEM shading) or trial-by-trial averages.
         Cues are overlaid as shaded regions and annotated along the track.
@@ -86,7 +85,6 @@ class Plotting:
         Returns:
             plotly.graph_objects.Figure:
         """
-
         if isinstance(target_group, str):
             target_group = TargetGroup(target_group)
 
@@ -147,7 +145,7 @@ class Plotting:
 
         fig.update_layout(
             title=dict(
-                text=f"Cell Fluorescence Trial Averages",
+                text="Cell Fluorescence Trial Averages",
                 x=0.5,
             ),
             plot_bgcolor="white",
@@ -329,7 +327,7 @@ class Plotting:
         # Axes
         fig.update_layout(
             title=dict(
-                text=f"Cell Fluorescence Trial Averages",
+                text="Cell Fluorescence Trial Averages",
                 x=0.5,
             ),
             plot_bgcolor="white",
@@ -380,8 +378,7 @@ class Plotting:
 
     @staticmethod
     def _add_plotting_columns(behavior_df):
-        """
-        Adds columns for track_position, region, cue, to a behavior dataframe if not already present
+        """Adds columns for track_position, region, cue, to a behavior dataframe if not already present
 
         Args:
             behavior_df
@@ -452,8 +449,7 @@ class Plotting:
         session_data: ProcessedSessionData,
         save_path: Path | None = None,
     ):
-        """
-        Creates an interactive 3D UMAP visualization of neural activity with behavioral annotations.
+        """Creates an interactive 3D UMAP visualization of neural activity with behavioral annotations.
         The embedding is computed from filtered spike and behavioral data, and points can be colored
         dynamically by cue, region, track position, or trial using a dropdown menu.
 
@@ -469,6 +465,7 @@ class Plotting:
                 behavior and spike data loaders, including file paths.
             save_path (Path | None, optional):
                 If provided, the figure is saved to this path.
+
         Returns:
             plotly.graph_objects.Figure:
                 An interactive 3D scatter plot where:
@@ -624,8 +621,7 @@ class Plotting:
         animal: AnimalData,
         save_path: Path | None = None,
     ):
-        """
-        Creates an animated 3D UMAP visualization across all sessions for a given animal.
+        """Creates an animated 3D UMAP visualization across all sessions for a given animal.
         Each frame corresponds to one session, showing neural activity structure over time.
 
         Args:
@@ -639,7 +635,6 @@ class Plotting:
             plotly.graph_objects.Figure:
                 Interactive 3D scatter animation with a session slider.
         """
-
         if isinstance(target_group, str):
             target_group = TargetGroup(target_group)
 
@@ -683,9 +678,7 @@ class Plotting:
 
     @staticmethod
     def _clear_axes(fig):
-        """
-        Makes it so  axes are invisible for a plotly figure
-        """
+        """Makes it so  axes are invisible for a plotly figure"""
         axis_settings = dict(
             visible=False,  # hides axis, labels, ticks
             showbackground=False,  # hides background plane

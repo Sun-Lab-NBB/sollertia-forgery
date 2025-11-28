@@ -1,5 +1,6 @@
 """This module stores assets used by other library modules to streamline constructing, submitting, and monitoring data
-processing pipelines that run on remote compute servers."""
+processing pipelines that run on remote compute servers.
+"""
 
 from typing import Any
 from pathlib import Path
@@ -18,13 +19,12 @@ def get_remote_job_work_directory(server: Server, job_name: str) -> Path:
     job_name to construct the working directory name. It then resolves the path to that directory relative to the user
     working root on the remote server, creates the directory on the server, and returns the resolved path.
     """
-
     # Resolves working directory name using timestamp (accurate to minutes) and the job_name.
-    timestamp = "-".join(get_timestamp().split("-")[:5])  # type: ignore
+    timestamp = "-".join(get_timestamp().split("-")[:5])
     working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
 
     # Creates the working directory on the remote server.
-    server.create_directory(remote_path=working_directory, parents=True)
+    server.create(remote_path=working_directory, is_dir=True, parents=True)
 
     return working_directory
 
@@ -85,5 +85,4 @@ def interpolate_data(
         return interpolated_data
 
     # Continuous data. Note, due to interpolation, continuous data is always returned using float_64 datatype.
-    else:
-        return np.interp(target_coordinates, source_coordinates, source_values)
+    return np.interp(target_coordinates, source_coordinates, source_values)

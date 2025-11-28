@@ -102,7 +102,6 @@ class ProjectManifest:
             animal: The ID of the animal for which to display the data. If an ID is provided, this method will only
                 display the data for that animal. Otherwise, it will display the data for all animals.
         """
-
         # Pre-selects the columns to display
         df = self._data.select(["animal", "date", "session", "type", "system", "notes"])
 
@@ -133,7 +132,6 @@ class ProjectManifest:
 
         This provides a tuple of all animal IDs participating in the target project.
         """
-
         # If animal IDs are stored as integers, converts them to string to support consistent return types.
         return tuple(
             [str(animal) for animal in self._data.select("animal").unique().sort("animal").to_series().to_list()]
@@ -233,7 +231,6 @@ class ProjectManifest:
             A Polars DataFrame with the following columns: 'animal', 'date', 'notes', 'session', 'type', 'system',
             'complete', 'integrity', 'suite2p', 'behavior', 'video', 'archived'.
         """
-
         df = self._data
         df = df.filter(pl.col("session").eq(session))
         return df

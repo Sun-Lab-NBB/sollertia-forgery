@@ -82,15 +82,22 @@ server = Server(credentials_path=Path("/temp/server_credentials.yaml"))
 job = server.submit_job(job)
 
 # Wait for the server to complete the job
+from sl_forgery.server import JobStatus
 delay_timer = PrecisionTimer("s")
-while not server.job_complete(job=job):
+while server.get_job_status(int(job.job_id)) in (JobStatus.PENDING, JobStatus.RUNNING):
     delay_timer.delay_noblock(delay=5, allow_sleep=True)
+
+# Check the final job status
+final_status = server.get_job_status(int(job.job_id))
+if final_status == JobStatus.COMPLETED:
+    print("Job completed successfully!")
+elif final_status == JobStatus.FAILED:
+    print("Job failed!")
 ```
 
-**Note!** The Server class only checks whether the job is running on the server, but not the outcome of the job. For 
-that, you can either manually check the output and error logs for the job or come up with a programmatic way of 
-checking the outcome. All developers are highly advised to study the API documentation for the Job and Server classes 
-to use them most effectively.
+**Note!** The Server class provides detailed job status information via the `get_job_status()` method, which returns
+a `JobStatus` enumeration value (PENDING, RUNNING, COMPLETED, FAILED, CANCELLED, TIMEOUT, etc.). All developers are
+highly advised to study the API documentation for the Job and Server classes to use them most effectively.
 
 **Critical!** Since running remote jobs is largely equivalent to executing them locally, all users are highly encouraged
 to test their job scripts locally before deploying them server-side. If a script works on a local machine, it is likely 
