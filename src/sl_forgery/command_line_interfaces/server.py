@@ -69,7 +69,7 @@ def start_jupyter_server(environment: str, cores: int, memory: int, time: int, p
     processing tasks. Those tasks should be executed using the headless processing pipeline classes from this library.
     """
     # Initializes server connection
-    configuration = get_server_configuration(service=False)
+    configuration = get_server_configuration()
     server = Server(configuration=configuration)
 
     try:

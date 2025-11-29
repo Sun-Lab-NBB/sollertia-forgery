@@ -1,7 +1,8 @@
 """This package provides the assets for managing the session and project data acquired in the Sun lab."""
 
 from .interface import resolve_project_manifest
-from .processing import ProjectManifest, resolve_checksum, transfer_session, generate_project_manifest
+from .processing import resolve_checksum, transfer_session, generate_project_manifest
+from ..shared_assets import ProjectManifest
 
 __all__ = [
     "ProjectManifest",

@@ -10,7 +10,7 @@ from ataraxis_base_utilities import console
 
 from ..server import Server
 from ..managing import resolve_project_manifest
-from ..managing.processing import ProjectManifest
+from ..shared_assets import ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

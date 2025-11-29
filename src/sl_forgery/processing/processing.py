@@ -23,144 +23,7 @@ from ataraxis_base_utilities import LogLevel, console, chunk_iterable
 
 from ..server import Server, ProcessingTrackers, get_remote_job_work_directory
 from ..managing import ProjectManifest, resolve_project_manifest
-
-
-def _check_session_eligibility(
-    manifest: ProjectManifest,
-    project: str,
-    session: str,
-    pipeline: ProcessingPipelines | str,
-    server: Server,
-    supported_systems: set[str | AcquisitionSystems],
-    supported_sessions: set[str | SessionTypes],
-    allow_reprocessing: bool = False,
-    configuration_file: str | None = None,
-) -> bool:
-    """Checks whether the target session meets the eligibility criteria for being processed with the specified pipeline.
-
-    This worker function aggregates common eligibility checks to streamline the process for all supported processing
-    pipelines.
-
-    Args:
-        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
-        project: The name of the session's project.
-        session: The name (ID) of the session to be processed.
-        pipeline: The processing pipeline to be used to process the session's data.
-        server: The initialized Server instance that manages the access to the remote compute server that stores the
-            session's data and executes the processing pipelines.
-        supported_systems: A set of data acquisition systems that support this type of processing.
-        supported_sessions: A set of session types that support this type of processing.
-        allow_reprocessing: Determines whether to allow reprocessing already processed sessions.
-        configuration_file: The name of the configuration file to use during processing, if the pipeline requires it.
-
-    Returns:
-        True if the session meets the eligibility criteria, False otherwise.
-    """
-    # Parses the target session data from the manifest file
-    session_data = manifest.get_session_info(session=session)
-    session_type = session_data["type"][0]
-    session_system = session_data["system"][0]
-    animal = str(session_data["animal"][0])
-    complete = session_data["complete"][0]
-
-    # Determines whether the session has already been processed using the specified pipeline
-    prepared = True
-    configuration_path: Path | None = None
-    if pipeline == ProcessingPipelines.CHECKSUM:
-        processed = bool(session_data["integrity"][0])
-    elif pipeline == ProcessingPipelines.PREPARATION:
-        processed = bool(session_data["prepared"][0])
-    elif pipeline == ProcessingPipelines.ARCHIVING:
-        prepared = bool(session_data["prepared"][0])
-        processed = bool(session_data["archived"][0])
-    elif pipeline == ProcessingPipelines.BEHAVIOR:
-        prepared = bool(session_data["prepared"][0])
-        processed = bool(session_data["behavior"][0])
-    elif pipeline == ProcessingPipelines.SUITE2P:
-        prepared = bool(session_data["prepared"][0])
-        processed = bool(session_data["suite2p"][0])
-        configuration_path = server.suite2p_configurations_directory.joinpath(configuration_file)
-    else:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The pipeline '{pipeline}' is not supported. "
-            f"Use one of the supported pipelines: {list(ProcessingPipelines)}. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # Ensures that the pipeline's name is stored as a ProcessingPipelines instance
-    pipeline = ProcessingPipelines(pipeline)
-
-    # If the session was acquired using a data acquisition system that does not support this type of processing,
-    # skips processing the session
-    if session_system not in supported_systems:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session was acquired using the acquisition system "
-            f"'{session_system},' which does not support this form of processing. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # If the session type is not one of the supported types, skips processing the session
-    if session_type not in supported_sessions:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session is of type '{session_type},' which does not support "
-            f"this form of processing. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # Prevents processing incomplete sessions
-    if not complete:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed "
-            f"by the animal '{animal}' for the '{project}' project. The session is marked as 'incomplete,' which "
-            f"excludes it from all further data processing. To enable processing, manually mark it as 'complete' by "
-            f"creating the 'telomere.bin' marker file in the session's 'raw_data' directory on the remote server and "
-            f"setting the integrity_verification_tracker.yaml file to indicate that the verification was passed."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # If the session has already been processed and reprocessing is not allowed, skips processing the session.
-    if processed and not allow_reprocessing:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session has already been processed with this pipeline "
-            f"and reprocessing is disabled. To enable reprocessing, call this command with the '--reprocess (-r)' "
-            f"flag."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # If the target processing pipeline requires the session data to be prepared, excludes any unprepared sessions from
-    # processing.
-    if not prepared:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The pipeline requires the session data to be prepared for "
-            f"processing before it can be executed. Call the project data processing CLI with the '--prepare (-p)' "
-            f"flag to prepare the target session for processing."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # If the target processing pipeline requires a specific server-side configuration file, ensures that the file is
-    # present at the expected remote server location.
-    if configuration_path is not None and not server.exists(remote_path=configuration_path):
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The target configuration file '{configuration_file}' does not "
-            f"exist on the remote server at the expected path: {configuration_path}."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # The session is eligible for processing with this pipeline.
-    return True
+from ..shared_assets import check_session_eligibility
 
 
 def _construct_checksum_resolution_pipeline(
@@ -210,11 +73,10 @@ def _construct_checksum_resolution_pipeline(
     remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
-    if not _check_session_eligibility(
+    if not check_session_eligibility(
         manifest=manifest,
         project=project,
         session=session,
-        server=server,
         pipeline=ProcessingPipelines.CHECKSUM,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
@@ -323,11 +185,10 @@ def _construct_preparation_pipeline(
     remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
-    if not _check_session_eligibility(
+    if not check_session_eligibility(
         manifest=manifest,
         project=project,
         session=session,
-        server=server,
         pipeline=ProcessingPipelines.PREPARATION,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
@@ -435,11 +296,10 @@ def _construct_behavior_processing_pipeline(
     remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
-    if not _check_session_eligibility(
+    if not check_session_eligibility(
         manifest=manifest,
         project=project,
         session=session,
-        server=server,
         pipeline=ProcessingPipelines.BEHAVIOR,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
@@ -670,16 +530,16 @@ def _construct_suite2p_processing_pipeline(
     remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
-    if not _check_session_eligibility(
+    configuration_path = server.suite2p_configurations_directory.joinpath(configuration_file)
+    if not check_session_eligibility(
         manifest=manifest,
         project=project,
         session=session,
-        server=server,
         pipeline=ProcessingPipelines.SUITE2P,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
         allow_reprocessing=reprocess,
-        configuration_file=configuration_file,
+        configuration_exists=server.exists(remote_path=configuration_path),
     ):
         # If the session is not eligible, skips processing the session.
         return None
