@@ -19,9 +19,10 @@ from .server import Server, JobStatus
 if TYPE_CHECKING:
     from pathlib import Path
 
+    # noinspection PyUnusedImports
     from .job import Job
 
-# Type alias for jobs dictionary to improve readability
+# Type alias for the jobs' dictionary to improve readability
 JobsDict = dict[int, tuple[tuple["Job", "Path"], ...]]
 
 
@@ -158,6 +159,18 @@ class ProcessingPipeline:
             if job_status == ProcessingStatus.FAILED:
                 self._finalize_pipeline_failure()
                 return
+
+            # If the tracker shows the job as RUNNING, reconciles with SLURM to detect externally terminated jobs
+            if job_status == ProcessingStatus.RUNNING:
+                job_state = tracker.jobs.get(job_id)
+                if job_state is not None and job_state.slurm_job_id is not None:
+                    slurm_status = self.server.get_job_status(slurm_job_id=job_state.slurm_job_id)
+                    mapped_status = _SLURM_TO_TRACKER_STATUS.get(slurm_status)
+
+                    # If SLURM reports failure but the tracker shows running, the job was terminated externally
+                    if mapped_status == ProcessingStatus.FAILED:
+                        self._finalize_pipeline_aborted()
+                        return
 
             # If any job is not yet succeeded, the stage is not complete
             if job_status != ProcessingStatus.SUCCEEDED:

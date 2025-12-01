@@ -6,6 +6,7 @@ from .pipelines import (
     ManagingTrackers,
     ProcessingTrackers,
     ProcessingPipelines,
+    execute_pipelines,
     check_session_eligibility,
 )
 from .utilities import interpolate_data
@@ -17,5 +18,6 @@ __all__ = [
     "ProcessingTrackers",
     "ProjectManifest",
     "check_session_eligibility",
+    "execute_pipelines",
     "interpolate_data",
 ]

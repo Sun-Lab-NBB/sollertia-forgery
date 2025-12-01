@@ -1,12 +1,30 @@
-"""This module provides the interface functions for resolving project manifest files from the remote compute server."""
+"""This module provides the interface functions for using the assets from this package while working with the
+Sun lab's remote compute servers.
+"""
 
 from typing import TYPE_CHECKING
 
+from tqdm import tqdm
 from ataraxis_time import PrecisionTimer, TimerPrecisions
-from sl_shared_assets import ProcessingTracker, delete_directory, get_working_directory
+from sl_shared_assets import (
+    SessionTypes,
+    ProcessingStatus,
+    ProcessingTracker,
+    AcquisitionSystems,
+    delete_directory,
+    get_working_directory,
+    get_server_configuration,
+)
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
-from ..server import Job, Server, JobStatus, ManagingTrackers, get_remote_job_work_directory
+from ..server import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
+from ..shared_assets import (
+    ProjectManifest,
+    ManagingTrackers,
+    ProcessingPipelines,
+    execute_pipelines,
+    check_session_eligibility,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -100,7 +118,9 @@ def _generate_remote_manifest(
 
     # Resolves the job name and its remote working directory.
     job_name = f"{project}_manifest_generation"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    working_directory = get_remote_job_work_directory(
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MANIFEST
+    )
 
     # Resolves the paths to the remote and local manifest generation tracker files.
     remote_manifest_tracker_path = server.shared_storage_root.joinpath(project, ManagingTrackers.MANIFEST)
@@ -159,3 +179,477 @@ def _generate_remote_manifest(
         delete_directory(local_manifest_tracker_path.parent)
 
     console.echo(message=f"Manifest file for the '{project}' project: Generated.", level=LogLevel.SUCCESS)
+
+
+def _execute_adoption_jobs(
+    session_animal_pairs: list[tuple[str, str]],
+    project: str,
+    server: Server,
+    *,
+    keep_job_logs: bool = False,
+    poll_delay: int = 10,
+) -> tuple[int, int]:
+    """Executes the adoption jobs for the specified sessions sequentially (batch size of 1).
+
+    Unlike other pipelines, adoption does not use ProcessingPipeline tracking since the manifest is not available
+    until after adoption completes. Instead, this worker function submits and monitors SLURM jobs directly.
+
+    Args:
+        session_animal_pairs: A list of (animal, session) tuples specifying the sessions to adopt.
+        project: The name of the project containing the sessions.
+        server: The Server instance used to communicate with the remote compute server.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job fails, its logs are kept regardless of this argument's value.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of two integers: (successful_count, failed_count).
+    """
+    if not session_animal_pairs:
+        return 0, 0
+
+    successful_count = 0
+    failed_count = 0
+
+    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+
+    with tqdm(total=len(session_animal_pairs), desc="Executing adoption jobs", unit="session") as pbar:
+        for animal, session in session_animal_pairs:
+            # Resolves source and destination paths
+            source_path = server.shared_storage_root.joinpath(project, animal, session)
+            destination_path = server.user_working_root.joinpath(project, animal, session)
+
+            # Resolves the job name and working directory
+            job_name = f"{session}_adoption"
+            working_directory = get_remote_job_work_directory(
+                server=server, job_name=job_name, pipeline_name=ProcessingPipelines.ADOPTION
+            )
+
+            # Creates and configures the adoption job
+            job = Job(
+                job_name=job_name,
+                output_log=working_directory.joinpath("output.txt"),
+                error_log=working_directory.joinpath("errors.txt"),
+                working_directory=working_directory,
+                conda_environment="forge",
+                cpu_threads=1,
+                ram=4,
+                time=60,
+            )
+
+            # Adds the transfer command
+            job.add_command(f"sl-process transfer -sp {source_path} -dp {destination_path}")
+
+            # Submits the job to the server
+            job = server.submit_job(job=job, verbose=False)
+
+            # Waits for the job to complete
+            while True:
+                job_status = server.get_job_status(slurm_job_id=int(job.job_id))
+                if job_status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                    break
+                delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+
+            # Checks the outcome and updates counters
+            if job_status == JobStatus.COMPLETED:
+                # If the job completed successfully, increments the successful count.
+                successful_count += 1
+                # Removes job logs if configured to do so
+                if not keep_job_logs:
+                    server.remove(remote_path=working_directory, recursive=True, is_dir=True)
+            else:
+                # Otherwise, increments the failed counter and notifies the user about the failed job.
+                failed_count += 1
+                console.echo(
+                    message=(
+                        f"Adoption job for session '{session}' performed by animal '{animal}': Failed "
+                        f"(status: {job_status}). Check job logs at: {working_directory}"
+                    ),
+                    level=LogLevel.ERROR,
+                )
+
+            pbar.update()
+
+    return successful_count, failed_count
+
+
+def _discover_sessions_from_project_folder(project: str, server: Server) -> dict[str, list[str]]:
+    """Discovers the sessions potentially available for adoption by scanning the project's directory on the remote
+    server.
+
+    This function recursively searches the project directory for session_data.yaml files to identify available
+    sessions that can be adopted.
+
+    Args:
+        project: The name of the project for which to discover sessions.
+        server: The Server instance used to communicate with the remote compute server.
+
+    Returns:
+        A dictionary mapping the unique animal identifiers to lists of session names.
+    """
+    project_path = server.shared_storage_root.joinpath(project)
+
+    # Uses the server to find all session_data.yaml files in the project directory
+    console.echo(message=f"Discovering '{project}' project's sessions on the remote server...", level=LogLevel.INFO)
+
+    # Builds a dictionary that uses animal IDs as keys and lists all available sessions for each animal.
+    animal_sessions: dict[str, list[str]] = {}
+    for animal_dir in server.list_directory(remote_path=project_path):
+        animal_path = project_path.joinpath(animal_dir)
+
+        # Skips non-directory entries (like manifest files)
+        if not server.is_directory(remote_path=animal_path):
+            continue
+
+        # Finds valid sessions (those containing session_data.yaml)
+        valid_sessions = [
+            session_dir
+            for session_dir in server.list_directory(remote_path=animal_path)
+            if server.exists(remote_path=animal_path.joinpath(session_dir, "raw_data", "session_data.yaml"))
+        ]
+
+        if valid_sessions:
+            animal_sessions[animal_dir] = valid_sessions
+
+    total_sessions = sum(len(sessions) for sessions in animal_sessions.values())
+    console.echo(
+        message=f"Discovered {total_sessions} sessions across {len(animal_sessions)} animals.",
+        level=LogLevel.SUCCESS,
+    )
+
+    return animal_sessions
+
+
+def _check_session_already_adopted(
+    project: str,
+    animal: str,
+    session: str,
+    server: Server,
+) -> bool:
+    """Returns True if the user has already adopted the target session.
+
+    The session is considered adopted if its destination directory exists and contains the ax_checksum.txt file,
+    which indicates that the data transfer has completed successfully.
+
+    Args:
+        project: The name of the project containing the session.
+        animal: The unique identifier of the animal that performed the session.
+        session: The name of the session to check.
+        server: The Server instance used to communicate with the remote compute server.
+
+    Returns:
+        True if the session has already been adopted, False otherwise.
+    """
+    destination_path = server.user_working_root.joinpath(project, animal, session)
+    checksum_file_path = destination_path.joinpath("raw_data", "ax_checksum.txt")
+
+    return server.exists(remote_path=checksum_file_path)
+
+
+def _construct_checksum_resolution_pipeline(
+    manifest: ProjectManifest,
+    project: str,
+    session: str,
+    server: Server,
+    *,
+    reprocess: bool = False,
+    keep_job_logs: bool = False,
+    recreate_checksum: bool = False,
+) -> ProcessingPipeline | None:
+    """Generates and returns the ProcessingPipeline instance used to execute the raw data integrity checksum resolution
+    pipeline for the target session.
+
+    Notes:
+        This pipeline only works with sessions stored under the user's server working directory.
+
+    Args:
+        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
+        project: The name of the project for which to execute the target processing pipeline.
+        session: The name of the session to process with the target processing pipeline.
+        server: The Server class instance that manages access to the remote server that executes the pipeline and
+            stores the target session's data.
+        reprocess: Determines whether to reprocess the session if it has already been processed with the target
+            processing pipeline.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
+            value.
+        recreate_checksum: Determines whether to recalculate and overwrite the data integrity checksum stored in the
+            session's 'raw data' directory instead of verifying its' integrity. This flag allows updating the checksum
+            following expected changes to the session's raw data.
+
+    Returns:
+        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
+        if the session is excluded from processing for any reason.
+    """
+    # Resolves the path to the local Sun lab working directory.
+    local_working_directory = get_working_directory()
+
+    # Parses the path to the session's directory on the remote server.
+    animal = manifest.get_animal_for_session(session=session)
+    remote_session_path = server.user_working_root.joinpath(project, animal, session)
+
+    # Determines whether the session is eligible for processing.
+    if not check_session_eligibility(
+        manifest=manifest,
+        project=project,
+        session=session,
+        pipeline=ProcessingPipelines.CHECKSUM,
+        server=server,
+        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
+        supported_sessions={
+            SessionTypes.LICK_TRAINING,
+            SessionTypes.RUN_TRAINING,
+            SessionTypes.MESOSCOPE_EXPERIMENT,
+        },
+        allow_reprocessing=recreate_checksum or reprocess,
+    ):
+        # If the session is not eligible, skips processing the session.
+        return None
+
+    # Resolves the name and working directory for the job.
+    job_name = f"{session}_checksum"
+    working_directory = get_remote_job_work_directory(
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.CHECKSUM
+    )
+
+    # Generates the remote job header and configures it to run checksum verification.
+    job = Job(
+        job_name=job_name,
+        output_log=working_directory.joinpath("output.txt"),
+        error_log=working_directory.joinpath("errors.txt"),
+        working_directory=working_directory,
+        conda_environment="forge",
+        cpu_threads=1,
+        ram=30,
+        time=40,
+    )
+
+    # Instructs the server to execute the target processing pipeline via the sl-process CLI.
+    job.add_command(f"sl-process checksum -sp {remote_session_path} {'-rc' if recreate_checksum else ''}")
+
+    # Resolves the paths to the local and remote job tracker files.
+    remote_tracker_path = remote_session_path.joinpath("tracking_data", ManagingTrackers.CHECKSUM)
+    local_tracker_path = local_working_directory.joinpath(project, f"{session}_checksum", ManagingTrackers.CHECKSUM)
+
+    # Packages job data into a ProcessingPipeline object and returns it to the caller.
+    return ProcessingPipeline(
+        pipeline=ProcessingPipelines.CHECKSUM,
+        server=server,
+        data_path=remote_session_path,
+        jobs={1: ((job, working_directory),)},
+        remote_tracker_path=remote_tracker_path,
+        local_tracker_path=local_tracker_path,
+        session=session,
+        animal=animal,
+        project=project,
+        keep_job_logs=keep_job_logs,
+    )
+
+
+def manage_project_data(
+    project: str,
+    sessions: list[str] | tuple[str, ...] | None = None,
+    animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
+    *,
+    reprocess: bool = False,
+    keep_job_logs: bool = False,
+    recalculate_checksum: bool = False,
+) -> None:
+    """Discovers, adopts, and verifies session data for the specified project.
+
+    This function acts as the entry point for data management operations in the Sun lab. It performs two stages:
+    1. Adoption: Copies session data from shared storage to the user's working volume.
+    2. Verification: Verifies the integrity of the adopted session data via checksum validation.
+
+    Notes:
+        If sessions and animals are not explicitly provided, the function discovers available sessions by scanning
+        the project directory on the remote server.
+
+    Args:
+        project: The name of the project to manage.
+        sessions: An iterable of session names to process. If not provided, the function discovers sessions by
+            scanning the project directory on the remote server.
+        animals: An iterable of animal IDs to process. If not provided, all animals in the project are processed.
+            Animal filtering is applied after session discovery/selection.
+        reprocess: Determines whether to reprocess sessions that have already been adopted or verified.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            each pipeline completes successfully. If the pipeline fails, the job logs are kept regardless of this
+            argument's value.
+        recalculate_checksum: Determines whether to regenerate and overwrite the raw data integrity checksum instead
+            of verifying its integrity.
+    """
+    # Entry message
+    console.echo(message=f"Initializing project '{project}' data management...", level=LogLevel.INFO)
+
+    # Establishes SSH connection to the processing server.
+    configuration = get_server_configuration()
+    server = Server(configuration=configuration)
+
+    # Initializes a delay timer to support better visual separation of terminal printouts
+    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+
+    # If sessions are not specified, discover them from the project directory
+    if sessions is None:
+        # Discover sessions from the project directory
+        animal_sessions = _discover_sessions_from_project_folder(project=project, server=server)
+
+        # Flatten into a list of (animal, session) tuples for processing
+        session_animal_pairs: list[tuple[str, str]] = [
+            (animal, session)
+            for animal, animal_session_list in animal_sessions.items()
+            for session in animal_session_list
+        ]
+    else:
+        # If sessions are explicitly provided, we need a manifest to look up animal IDs
+        # First, resolve or generate the manifest
+        resolve_project_manifest(project=project, server=server, generate=False)
+
+        # Load the manifest
+        manifest_path = get_working_directory().joinpath(project, "manifest.feather")
+        manifest = ProjectManifest(manifest_file=manifest_path)
+
+        # Build session-animal pairs from the manifest
+        session_animal_pairs = []
+        for session in sessions:
+            animal = manifest.get_animal_for_session(session=session)
+            session_animal_pairs.append((animal, session))
+
+    # Apply animal filtering if specified
+    if animals is not None:
+        animals_set = {str(animal) for animal in animals}
+        session_animal_pairs = [(animal, session) for animal, session in session_animal_pairs if animal in animals_set]
+
+    if not session_animal_pairs:
+        console.echo(
+            message=f"No sessions found for project '{project}' matching the specified criteria.",
+            level=LogLevel.WARNING,
+        )
+        return
+
+    # Tracks checksum pipelines for final outcome reporting
+    checksum_pipelines: list[ProcessingPipeline] = []
+
+    # Tracks processing overall statistics
+    total_adoption_successful = 0
+    total_adoption_failed = 0
+    total_checksum_successful = 0
+    total_checksum_failed = 0
+
+    # STAGE 1: ADOPTION
+    console.echo(message="Stage 1: Session Adoption", level=LogLevel.INFO)
+    delay_timer.delay(delay=1, allow_sleep=True, block=False)
+
+    # Filters out already adopted sessions unless reprocessing is enabled
+    sessions_to_adopt: list[tuple[str, str]] = []
+    for animal, session in tqdm(session_animal_pairs, desc="Checking adoption status", unit="session"):
+        if not reprocess and _check_session_already_adopted(
+            project=project, animal=animal, session=session, server=server
+        ):
+            console.echo(
+                message=(
+                    f"Session '{session}' performed by animal '{animal}' has already been adopted. "
+                    f"Skipping. Use '--reprocess (-r)' to force re-adoption."
+                ),
+                level=LogLevel.WARNING,
+            )
+            continue
+        sessions_to_adopt.append((animal, session))
+
+    if sessions_to_adopt:
+        # Executes adoption jobs sequentially (batch size of 1)
+        total_adoption_successful, total_adoption_failed = _execute_adoption_jobs(
+            session_animal_pairs=sessions_to_adopt,
+            project=project,
+            server=server,
+            keep_job_logs=keep_job_logs,
+            poll_delay=5,
+        )
+        delay_timer.delay(delay=1, allow_sleep=True, block=False)
+
+    # STAGE 2: CHECKSUM VERIFICATION
+    console.echo(message="Stage 2: Checksum Verification", level=LogLevel.INFO)
+    delay_timer.delay(delay=1, allow_sleep=True, block=False)
+
+    # Generates or refreshes the manifest on the remote server after adoption
+    resolve_project_manifest(project=project, server=server, generate=True)
+
+    # Loads the manifest
+    manifest_path = get_working_directory().joinpath(project, "manifest.feather")
+    manifest = ProjectManifest(manifest_file=manifest_path)
+
+    # Determines which sessions to verify: successfully adopted sessions + already adopted sessions
+    sessions_to_verify: set[str] = set()
+
+    # Adds successfully adopted sessions
+    for animal, session in sessions_to_adopt:
+        if _check_session_already_adopted(project=project, animal=animal, session=session, server=server):
+            sessions_to_verify.add(session)
+
+    # If no sessions were adopted in stage 1, verifies all sessions that were already adopted
+    if not sessions_to_adopt:
+        for animal, session in session_animal_pairs:
+            if _check_session_already_adopted(project=project, animal=animal, session=session, server=server):
+                sessions_to_verify.add(session)
+
+    for session in tqdm(sessions_to_verify, desc="Resolving the checksum processing graph", unit="session"):
+        pipeline = _construct_checksum_resolution_pipeline(
+            manifest=manifest,
+            project=project,
+            session=session,
+            server=server,
+            reprocess=reprocess,
+            keep_job_logs=keep_job_logs,
+            recreate_checksum=recalculate_checksum,
+        )
+        if pipeline is not None:
+            checksum_pipelines.append(pipeline)
+
+    if checksum_pipelines:
+        # Executes checksum pipelines sequentially (batch size of 1)
+        total_checksum_successful, total_checksum_failed = execute_pipelines(
+            pipelines=tuple(checksum_pipelines),
+            stage_name="checksum",
+            poll_delay=5,
+        )
+        delay_timer.delay(delay=1, allow_sleep=True, block=False)
+
+        # Refreshes the manifest to include verification results
+        resolve_project_manifest(project=project, server=server, generate=True)
+
+    # Checks if any processing was done
+    total_processed = len(sessions_to_adopt) + len(checksum_pipelines)
+    if total_processed == 0:
+        message = (
+            f"All target sessions for project '{project}' have been excluded from all management pipelines. "
+            f"Management: Aborted."
+        )
+        console.echo(message=message, level=LogLevel.WARNING)
+        return
+
+    # Creates a visual separation before the final summary
+    delay_timer.delay(delay=1, allow_sleep=True, block=False)
+
+    # Displays the overall processing summary message
+    message = (
+        f"Project '{project}' data: Managed. "
+        f"Adoption: {total_adoption_successful} succeeded, {total_adoption_failed} failed. "
+        f"Checksum: {total_checksum_successful} succeeded, {total_checksum_failed} failed."
+    )
+    console.echo(message=message, level=LogLevel.INFO)
+
+    # Prints detailed results for checksum pipelines
+    for pipeline in checksum_pipelines:
+        if pipeline.pipeline_status == ProcessingStatus.FAILED:
+            message = (
+                f"The {pipeline.pipeline} pipeline for session '{pipeline.session}' "
+                f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Failed."
+            )
+            console.echo(message=message, level=LogLevel.ERROR)
+        elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
+            message = (
+                f"The {pipeline.pipeline} pipeline for session '{pipeline.session}' "
+                f"performed by animal '{pipeline.animal}' for '{pipeline.project}' project: Complete."
+            )
+            console.echo(message=message, level=LogLevel.SUCCESS)
+
+    console.echo(message="Management: Complete.", level=LogLevel.SUCCESS)

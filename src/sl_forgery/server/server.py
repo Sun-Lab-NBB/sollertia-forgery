@@ -26,19 +26,22 @@ if TYPE_CHECKING:
     from paramiko.sftp_client import SFTPClient
 
 
-def get_remote_job_work_directory(server: Server, job_name: str) -> Path:
+def get_remote_job_work_directory(server: Server, job_name: str, pipeline_name: str) -> Path:
     """Resolves and creates the remote compute server working directory for the specified job.
 
     Args:
         server: The Server instance that interfaces with the remote compute server used to execute the job.
         job_name: The name of the job to be executed.
+        pipeline_name: The name of the pipeline to which this job belongs.
 
     Returns:
         The path to the job's working directory on the remote compute server.
     """
     # Resolves working directory name using timestamp (accurate to minutes) and the job's name.
     timestamp = "-".join(get_timestamp(output_format=TimestampFormats.STRING).split("-")[:5])
-    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}", f"{timestamp}")
+    working_directory = Path(server.user_working_root).joinpath(
+        "job_logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}"
+    )
 
     # Creates the working directory on the remote server.
     server.create(remote_path=working_directory, is_dir=True, parents=True)
@@ -311,7 +314,7 @@ class Server:
             RuntimeError: If the job submission fails for any reason.
         """
         # Resolves the job's working directory
-        working_directory = get_remote_job_work_directory(server=self, job_name=job_name)
+        working_directory = get_remote_job_work_directory(server=self, job_name=job_name, pipeline_name="JUPYTER")
 
         # If necessary, generates and sets port to a random value between 8888 and 9999.
         if port == 0:
@@ -787,6 +790,35 @@ class Server:
             return False
         else:
             return True
+
+    def is_directory(self, remote_path: Path) -> bool:
+        """Returns True if the target path is a directory on the remote server.
+
+        Args:
+            remote_path: The path to check on the remote server.
+
+        Returns:
+            True if the path exists and is a directory, False otherwise.
+        """
+        try:
+            file_stat = self._sftp.stat(str(remote_path))
+            return stat.S_ISDIR(file_stat.st_mode)
+        except FileNotFoundError:
+            return False
+
+    def list_directory(self, remote_path: Path) -> list[str]:
+        """Lists the contents of a directory on the remote server.
+
+        Args:
+            remote_path: The path to the directory on the remote server.
+
+        Returns:
+            A list of filenames (not full paths) in the directory.
+
+        Raises:
+            FileNotFoundError: If the directory does not exist.
+        """
+        return self._sftp.listdir(str(remote_path))
 
     def close(self) -> None:
         """Closes the SFTP and SSH connections to the server."""

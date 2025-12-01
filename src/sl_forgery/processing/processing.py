@@ -15,8 +15,9 @@ from sl_shared_assets import (
 from ataraxis_base_utilities import LogLevel, console, chunk_iterable
 
 from ..server import Job, Server, ProcessingPipeline, get_remote_job_work_directory
-from ..managing import ProjectManifest, resolve_project_manifest, _construct_checksum_resolution_pipeline
+from ..managing import ProjectManifest, resolve_project_manifest
 from ..shared_assets import ProcessingTrackers, ProcessingPipelines, check_session_eligibility
+from ..managing.interface import _construct_checksum_resolution_pipeline
 
 
 def _construct_behavior_processing_pipeline(
@@ -90,7 +91,9 @@ def _construct_behavior_processing_pipeline(
 
         # Runtime data processing job
         job_name = f"{session}_runtime_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -112,7 +115,9 @@ def _construct_behavior_processing_pipeline(
 
         # Face camera processing job
         job_name = f"{session}_face_camera_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -128,7 +133,9 @@ def _construct_behavior_processing_pipeline(
 
         # Left camera processing job
         job_name = f"{session}_left_camera_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -144,7 +151,9 @@ def _construct_behavior_processing_pipeline(
 
         # Right camera processing job
         job_name = f"{session}_right_camera_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -160,7 +169,9 @@ def _construct_behavior_processing_pipeline(
 
         # Actor microcontroller data processing job
         job_name = f"{session}_actor_microcontroller_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -178,7 +189,9 @@ def _construct_behavior_processing_pipeline(
 
         # Sensor microcontroller data processing job
         job_name = f"{session}_sensor_microcontroller_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -196,7 +209,9 @@ def _construct_behavior_processing_pipeline(
 
         # Encoder microcontroller data processing job
         job_name = f"{session}_encoder_microcontroller_processing"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+        )
         job = Job(
             job_name=job_name,
             output_log=working_directory.joinpath("output.txt"),
@@ -309,7 +324,9 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 1: Binarization
     job_name = f"{session}_ss2p_binarization"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    working_directory = get_remote_job_work_directory(
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+    )
     job = Job(
         job_name=job_name,
         output_log=working_directory.joinpath("output.txt"),
@@ -330,7 +347,9 @@ def _construct_suite2p_processing_pipeline(
     # Stage 2: Plane processing
     for plane in range(plane_count):
         job_name = f"{session}_ss2p_plane_{plane}"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+        )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
             job_name=job_name,
@@ -350,7 +369,9 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 3: Combination
     job_name = f"{session}_ss2p_combination"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    working_directory = get_remote_job_work_directory(
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+    )
     server.create(remote_path=working_directory, is_dir=True)
     job = Job(
         job_name=job_name,

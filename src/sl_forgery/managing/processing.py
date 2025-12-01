@@ -3,7 +3,7 @@ generating snapshots of the lab's research project's states. Assets from this mo
 other data processing and analysis pipelines available from this library.
 """
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 from datetime import datetime
 
 import pytz
@@ -13,26 +13,20 @@ from sl_shared_assets import (
     SessionData,
     SessionTypes,
     ProcessingTracker,
-    AcquisitionSystems,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
     MesoscopeExperimentDescriptor,
     delete_directory,
     transfer_directory,
-    get_working_directory,
     calculate_directory_checksum,
 )
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import Job, Server, ProcessingPipeline, get_remote_job_work_directory
-from ..shared_assets import (
-    ProjectManifest,
-    ManagingTrackers,
-    ProcessingTrackers,
-    ProcessingPipelines,
-    check_session_eligibility,
-)
+from ..shared_assets import ManagingTrackers, ProcessingTrackers
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def transfer_session(
@@ -376,188 +370,3 @@ def generate_project_manifest(
             # If the code reaches this section, this means that the runtime encountered an error.
             runtime_tracker.fail_job(job_id=job_id)
             raise  # Re-raises the exception to log the error message.
-
-
-def _construct_adoption_pipeline(
-    project: str,
-    animal: str,
-    session: str,
-    server: Server,
-    keep_job_logs: bool = False,
-) -> ProcessingPipeline:
-    """Generates and returns the ProcessingPipeline instance used to copy session data from the shared storage volume
-    to the user's working volume.
-
-    This pipeline 'adopts' session data by transferring it from the shared storage location
-    (shared_storage_root/project/animal/session) to the user's working directory
-    (user_working_root/project/animal/session), making it available for user-specific processing and analysis.
-
-    Args:
-        project: The name of the project containing the session to adopt.
-        animal: The identifier of the animal that performed the session.
-        session: The name of the session to adopt.
-        server: The Server class instance that manages access to the remote server that executes the pipeline and
-            stores the target session's data.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
-            value.
-
-    Returns:
-        The configured ProcessingPipeline instance for the adoption operation.
-    """
-    # Resolves the path to the local Sun lab working directory.
-    local_working_directory = get_working_directory()
-
-    # Resolves the source path (shared storage) and destination path (user working volume).
-    source_path = server.shared_storage_root.joinpath(project, animal, session)
-    destination_path = server.user_working_root.joinpath(project, animal, session)
-
-    # Resolves the name and working directory for the job.
-    job_name = f"{session}_adoption"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-
-    # Generates the remote job header and configures it to run the transfer operation.
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath("output.txt"),
-        error_log=working_directory.joinpath("errors.txt"),
-        working_directory=working_directory,
-        conda_environment="forge",
-        cpu_threads=1,
-        ram=4,
-        time=60,
-    )
-
-    # Instructs the server to execute the transfer pipeline via the sl-process CLI.
-    job.add_command(f"sl-process transfer -sp {source_path} -dp {destination_path}")
-
-    # Resolves the paths to the local and remote job tracker files. The tracker is stored in the destination
-    # session's tracking_data directory.
-    remote_tracker_path = destination_path.joinpath("tracking_data", ManagingTrackers.CHECKSUM)
-    local_tracker_path = local_working_directory.joinpath(project, f"{session}_adoption", ManagingTrackers.CHECKSUM)
-
-    # Packages job data into a ProcessingPipeline object and returns it to the caller.
-    pipeline = ProcessingPipeline(
-        pipeline=ProcessingPipelines.ADOPTION,
-        server=server,
-        data_path=source_path,
-        jobs={1: ((job, working_directory),)},
-        remote_tracker_path=remote_tracker_path,
-        local_tracker_path=local_tracker_path,
-        session=session,
-        animal=animal,
-        project=project,
-        keep_job_logs=keep_job_logs,
-    )
-
-    return pipeline
-
-
-def _construct_checksum_resolution_pipeline(
-    manifest: ProjectManifest,
-    project: str,
-    session: str,
-    server: Server,
-    reprocess: bool = False,
-    reset_tracker: bool = False,
-    keep_job_logs: bool = False,
-    recreate_checksum: bool = False,
-) -> ProcessingPipeline | None:
-    """Generates and returns the ProcessingPipeline instance used to execute the raw data integrity checksum resolution
-    pipeline for the target session.
-
-    Notes:
-        This pipeline always works with data stored on the shared storage volume of the remote compute server.
-
-    Args:
-        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
-        project: The name of the project for which to execute the target processing pipeline.
-        session: The name of the session to process with the target processing pipeline.
-        server: The Server class instance that manages access to the remote server that executes the pipeline and
-            stores the target session's data.
-        reprocess: Determines whether to reprocess the session if it has already been processed with the target
-            processing pipeline.
-        reset_tracker: Determines whether to reset the processing tracker for the pipeline before executing the
-            processing. This option should only be enabled when recovering from improper runtime terminations.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
-            value.
-        recreate_checksum: Determines whether to recalculate and overwrite the data integrity checksums stored in the
-            'raw data' folder instead of verifying its' integrity. This flag is used to update the checksum following
-            expected changes to the session's raw data.
-
-    Returns:
-        The configured ProcessingPipeline instance if the target session can be processed with this pipeline. None,
-        if the session is excluded from processing for any reason.
-    """
-    # Resolves the path to the local Sun lab working directory.
-    local_working_directory = get_working_directory()
-
-    # Parses the path to the session directory on the remote server.
-    animal = manifest.get_animal_for_session(session=session)
-    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
-
-    # Determines whether the session is eligible for processing.
-    if not check_session_eligibility(
-        manifest=manifest,
-        project=project,
-        session=session,
-        pipeline=ProcessingPipelines.CHECKSUM,
-        server=server,
-        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
-        supported_sessions={
-            SessionTypes.WINDOW_CHECKING,
-            SessionTypes.LICK_TRAINING,
-            SessionTypes.RUN_TRAINING,
-            SessionTypes.MESOSCOPE_EXPERIMENT,
-        },
-        allow_reprocessing=True if recreate_checksum or reprocess else False,
-    ):
-        # If the session is not eligible, skips processing the session.
-        return None
-
-    # Resolves the name and working directory for the job.
-    job_name = f"{session}_checksum"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
-
-    # Generates the remote job header and configures it to run checksum verification.
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath("output.txt"),
-        error_log=working_directory.joinpath("errors.txt"),
-        working_directory=working_directory,
-        conda_environment="forge",
-        cpu_threads=1,
-        ram=17,
-        time=20,
-    )
-
-    # Resolves additional flags for the processing CLI.
-    tracker_command = ""
-    if reset_tracker:
-        tracker_command = "-r"
-    recalculate_command = ""
-    if recreate_checksum:
-        recalculate_command = "-rc"
-
-    # Instructs the server to execute the target processing pipeline via the sl-process CLI.
-    job.add_command(f"sl-process checksum -sp {remote_session_path} {tracker_command} {recalculate_command}")
-
-    # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = remote_session_path.joinpath("tracking_data", ManagingTrackers.CHECKSUM)
-    local_tracker_path = local_working_directory.joinpath(project, f"{session}_checksum", ManagingTrackers.CHECKSUM)
-
-    # Packages job data into a ProcessingPipeline object and returns it to the caller.
-    pipeline = ProcessingPipeline(
-        pipeline=ProcessingPipelines.CHECKSUM,
-        server=server,
-        data_path=remote_session_path,
-        jobs={1: ((job, working_directory),)},
-        remote_tracker_path=remote_tracker_path,
-        local_tracker_path=local_tracker_path,
-        session=session,
-        animal=animal,
-        project=project,
-        keep_job_logs=keep_job_logs,
-    )
-    return pipeline

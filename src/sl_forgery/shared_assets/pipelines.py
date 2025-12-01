@@ -1,12 +1,15 @@
-"""This module provides the pipeline tracker filename enumerations used by various data management, processing, and
-analysis pipelines available from this library.
+"""This module provides the pipeline tracker filename enumerations and execution utilities used by various data
+management, processing, and analysis pipelines available from this library.
 """
 
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from tqdm import tqdm
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sl_shared_assets import (
     SessionTypes,
+    ProcessingStatus,
     ProcessingTracker,
     AcquisitionSystems,
     delete_directory,
@@ -17,13 +20,17 @@ from ataraxis_base_utilities import LogLevel, console
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from ..server import Server
+    from ..server import Server, ProcessingPipeline
     from .manifest import ProjectManifest
 
 
 class ProcessingPipelines(StrEnum):
     """Defines the set of data processing pipelines currently supported by the Sun lab data workflow."""
 
+    MANIFEST = "manifest"
+    """The project manifest generation pipeline. This pipeline generates a .feather file that stores the snapshot of the
+    target project's data processing state. The created manifest file is then used as the entry-point for all other 
+    data processing pipelines other than the ADOPTION pipeline."""
     ADOPTION = "adoption"
     """The session data adoption pipeline. This pipeline copies session's data stored in the shared Sun lab 
     data directory on the remote compute server to the user's working directory. This is the entry-point for all 
@@ -290,3 +297,76 @@ class DatasetTrackers(StrEnum):
     """The tracker file used by the dataset forging pipeline."""
     MULTIDAY = "multiday.yaml"
     """The tracker file used by the multi-day suite2p registration pipeline."""
+
+
+def execute_pipelines(
+    pipelines: tuple[ProcessingPipeline, ...],
+    stage_name: str,
+    batch_size: int | None = 1,
+    poll_delay: int = 10,
+) -> tuple[int, int]:
+    """Executes the input processing pipelines as sequential batches.
+
+    This function provides a standardized interface for executing ProcessingPipeline instances in configurable batch
+    sizes. Batch execution allows controlling the degree of parallelism to balance the throughput against the I/O load
+    on the remote compute server.
+
+    Args:
+        pipelines: The ProcessingPipeline instances that define the pipelines execute.
+        stage_name: The name of the current processing stage, used for the progress bar labeling.
+        batch_size: The maximum number of pipelines to execute concurrently within each batch. A batch size of 1
+            executes pipelines sequentially. A batch size of None submits and executes all pipelines at once.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of two integers: (successful_count, failed_count).
+    """
+    if not pipelines:
+        return 0, 0
+
+    successful_count = 0
+    failed_count = 0
+
+    # Tracks which pipelines have been counted using their index
+    counted_indices: set[int] = set()
+
+    # Splits the overall sequence of pipelines into batches. If batch_size is None, all pipelines are executed at once.
+    indexed_pipelines = list(enumerate(pipelines))
+    effective_batch_size = len(pipelines) if batch_size is None else batch_size
+    batches = [
+        indexed_pipelines[i : i + effective_batch_size]
+        for i in range(0, len(indexed_pipelines), effective_batch_size)
+    ]
+
+    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+
+    with tqdm(total=len(pipelines), desc=f"Executing {stage_name} pipelines", unit="pipeline") as pbar:
+        for batch in batches:
+            batch_complete = False
+
+            # Processes the current batch until all batch pipelines complete
+            while not batch_complete:
+                batch_complete = True
+
+                for idx, pipeline in batch:
+                    # Checks if the pipeline is still running
+                    if pipeline.is_running:
+                        pipeline.runtime_cycle()
+                        batch_complete = False
+
+                    # If the pipeline completed and is not yet counted, updates the counters
+                    if idx not in counted_indices:
+                        if pipeline.pipeline_status == ProcessingStatus.FAILED:
+                            failed_count += 1
+                            counted_indices.add(idx)
+                            pbar.update()
+                        elif pipeline.pipeline_status == ProcessingStatus.SUCCEEDED:
+                            successful_count += 1
+                            counted_indices.add(idx)
+                            pbar.update()
+
+                # Delays between pipeline resolution cycles to avoid overwhelming the communication line
+                if not batch_complete:
+                    delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+
+    return successful_count, failed_count
