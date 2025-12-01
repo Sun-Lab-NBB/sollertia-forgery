@@ -100,9 +100,7 @@ def resolve_session_checksum(session_path: Path, job_id: str, regenerate_checksu
     "--destination-path",
     type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
     required=False,
-    help=(
-        "The absolute path to the destination directory where to transfer the session's data."
-    ),
+    help=("The absolute path to the destination directory where to transfer the session's data."),
 )
 @click.option(
     "-rm",

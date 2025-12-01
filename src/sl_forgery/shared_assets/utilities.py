@@ -1,9 +1,11 @@
 """This module provides shared utility functions used across multiple other library modules."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 # noinspection PyTypeHints
@@ -11,6 +13,7 @@ def interpolate_data(
     source_coordinates: NDArray[np.number[Any]],
     source_values: NDArray[np.number[Any]],
     target_coordinates: NDArray[np.number[Any]],
+    *,
     is_discrete: bool,
 ) -> NDArray[np.number[Any]]:
     """Interpolates the data values at the requested coordinates using the source coordinate-value distribution.

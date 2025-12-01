@@ -5,7 +5,7 @@ data processing tasks and pipelines.
 from .job import Job, JupyterJob
 from .server import Server, JobStatus, get_remote_job_work_directory
 from .pipeline import ProcessingPipeline
-from ..shared_assets import ManagingTrackers, ProcessingTrackers, DatasetTrackers
+from ..shared_assets import DatasetTrackers, ManagingTrackers, ProcessingTrackers
 
 __all__ = [
     "DatasetTrackers",

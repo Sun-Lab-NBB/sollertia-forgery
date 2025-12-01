@@ -6,11 +6,11 @@ from sl_shared_assets import (
     ProcessingStatus,
     TrackerFileNames,
     ProcessingPipeline,
-    ProcessingPipelines,
     get_working_directory,
 )
 
 from ..server import get_remote_job_work_directory
+from ..shared_assets import ProcessingPipelines
 
 
 def _construct_suite2p_multiday_pipeline(
@@ -52,7 +52,7 @@ def _construct_suite2p_multiday_pipeline(
     # Resolves the path to the local Sun lab working directory
     local_working_directory = get_working_directory()
 
-    # Constructs the list of session paths to use int he multiday processing command.
+    # Constructs the list of session paths to use in the multiday processing command.
     session_command = ""
     for session in sessions:
         session_path = server.shared_storage_root.joinpath(project, str(animal), session)

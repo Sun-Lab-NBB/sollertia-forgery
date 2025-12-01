@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 
     from .job import Job
 
+# Type alias for jobs dictionary to improve readability
+JobsDict = dict[int, tuple[tuple["Job", "Path"], ...]]
+
 
 # Maps SLURM's JobStatus values to tracker's ProcessingStatus values for status reconciliation
 _SLURM_TO_TRACKER_STATUS: dict[JobStatus, ProcessingStatus | None] = {
@@ -61,7 +64,7 @@ class ProcessingPipeline:
     """Stores the Server instance that interfaces with the remote compute server running the pipeline."""
     data_path: Path
     """Stores the path to the data directory being processed by the tracked pipeline."""
-    jobs: dict[int, tuple[tuple[Job, Path], ...]]
+    jobs: JobsDict
     """Stores the dictionary that maps the pipeline processing stage integer-codes to two-element tuples. Each tuple
     stores the Job object and the path to its remote working directory to be submitted to the server as part of
     executing that stage."""

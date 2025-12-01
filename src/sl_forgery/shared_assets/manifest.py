@@ -1,10 +1,14 @@
 """This module provides the ProjectManifest class used by all data processing pipelines exposed by this library to work
-with the Sun lab project data stored on remote compute servers."""
+with the Sun lab project data stored on remote compute servers.
+"""
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import polars as pl
 from ataraxis_base_utilities import console
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ProjectManifest:
@@ -194,7 +198,7 @@ class ProjectManifest:
             exclude_incomplete=exclude_incomplete,
         )
 
-    def get_session_info(self, session: str) -> pl.DataFrame:
+    def get_session_data(self, session: str) -> pl.DataFrame:
         """Returns a Polars DataFrame that stores detailed information about the current acquisition and processing
         state of the specified session.
 
