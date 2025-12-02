@@ -233,7 +233,7 @@ def _execute_adoption_jobs(
                 working_directory=working_directory,
                 conda_environment="forge",
                 cpu_threads=1,
-                ram=4,
+                ram=20,
                 time=60,
             )
 
@@ -420,7 +420,7 @@ def _construct_checksum_resolution_pipeline(
         working_directory=working_directory,
         conda_environment="forge",
         cpu_threads=1,
-        ram=30,
+        ram=20,
         time=40,
     )
 
@@ -448,37 +448,41 @@ def _construct_checksum_resolution_pipeline(
 
 def manage_project_data(
     project: str,
-    sessions: list[str] | tuple[str, ...] | None = None,
-    animals: list[str | int] | tuple[str | int, ...] | set[str] | None = None,
+    sessions: tuple[str, ...] | None = None,
+    animals: tuple[str, ...] | None = None,
     *,
+    adopt_sessions: bool = False,
+    process_checksum: bool = False,
     reprocess: bool = False,
     keep_job_logs: bool = False,
     recalculate_checksum: bool = False,
 ) -> None:
-    """Discovers, adopts, and verifies session data for the specified project.
+    """Resolves and executes the necessary data adoption and management pipelines for the specified project.
 
-    This function acts as the entry point for data management operations in the Sun lab. It performs two stages:
-    1. Adoption: Copies session data from shared storage to the user's working volume.
-    2. Verification: Verifies the integrity of the adopted session data via checksum validation.
+    This function acts as the entry point for all data management operations in the Sun lab. Primarily, it allows users
+    to 'adopt' the project's data for further processing and analysis by copying it from the shared read-only
+    repositories.
 
     Notes:
         If sessions and animals are not explicitly provided, the function discovers available sessions by scanning
         the project directory on the remote server.
 
     Args:
-        project: The name of the project to manage.
-        sessions: An iterable of session names to process. If not provided, the function discovers sessions by
-            scanning the project directory on the remote server.
-        animals: An iterable of animal IDs to process. If not provided, all animals in the project are processed.
-            Animal filtering is applied after session discovery/selection.
-        reprocess: Determines whether to reprocess sessions that have already been adopted or verified.
+        project: The name of the project to work with.
+        sessions: The unique identifiers of the sessions to work with. If not provided, the function discovers
+            sessions by scanning the project directory on the remote server and works with all discovered sessions.
+        animals: The unique identifiers of the animals to work with. This optional argument allows filtering the list
+            of processed sessions to only include the sessions performed by the specified animals.
+        adopt_sessions: Determines whether to adopt the data of the target sessions as part of this runtime.
+        process_checksum: Determines whether to recreate or verify the raw data integrity checksum for the target
+            sessions as part of this runtime.
+        reprocess: Determines whether to rerun the requested processing pipelines for the already processed sessions.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             each pipeline completes successfully. If the pipeline fails, the job logs are kept regardless of this
             argument's value.
         recalculate_checksum: Determines whether to regenerate and overwrite the raw data integrity checksum instead
             of verifying its integrity.
     """
-    # Entry message
     console.echo(message=f"Initializing project '{project}' data management...", level=LogLevel.INFO)
 
     # Establishes SSH connection to the processing server.
@@ -488,12 +492,12 @@ def manage_project_data(
     # Initializes a delay timer to support better visual separation of terminal printouts
     delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
-    # If sessions are not specified, discover them from the project directory
+    # If sessions are not specified, discover them based on the data stored on the remote server
     if sessions is None:
-        # Discover sessions from the project directory
+        # Discover all project's sessions stored on the remote server
         animal_sessions = _discover_sessions_from_project_folder(project=project, server=server)
 
-        # Flatten into a list of (animal, session) tuples for processing
+        # Flattens the discovered sessions into a list of (animal, session) tuples for processing
         session_animal_pairs: list[tuple[str, str]] = [
             (animal, session)
             for animal, animal_session_list in animal_sessions.items()
@@ -570,10 +574,10 @@ def manage_project_data(
     console.echo(message="Stage 2: Checksum Verification", level=LogLevel.INFO)
     delay_timer.delay(delay=1, allow_sleep=True, block=False)
 
-    # Generates or refreshes the manifest on the remote server after adoption
+    # Refreshes the user-specific project manifest file and pulls it to the local machine
     resolve_project_manifest(project=project, server=server, generate=True)
 
-    # Loads the manifest
+    # Loads the manifest data
     manifest_path = get_working_directory().joinpath(project, "manifest.feather")
     manifest = ProjectManifest(manifest_file=manifest_path)
 
