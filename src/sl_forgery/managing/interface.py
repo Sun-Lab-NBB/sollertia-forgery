@@ -20,6 +20,7 @@ from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ..server import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
 from ..shared_assets import (
     ProjectManifest,
+    SessionMetadata,
     ManagingTrackers,
     ProcessingPipelines,
     execute_pipelines,
@@ -182,7 +183,7 @@ def _generate_remote_manifest(
 
 
 def _execute_adoption_jobs(
-    session_animal_pairs: list[tuple[str, str]],
+    sessions: list[SessionMetadata],
     project: str,
     server: Server,
     *,
@@ -195,7 +196,7 @@ def _execute_adoption_jobs(
     until after adoption completes. Instead, this worker function submits and monitors SLURM jobs directly.
 
     Args:
-        session_animal_pairs: A list of (animal, session) tuples specifying the sessions to adopt.
+        sessions: A list of SessionMetadata instances specifying the sessions to adopt.
         project: The name of the project containing the sessions.
         server: The Server instance used to communicate with the remote compute server.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
@@ -205,7 +206,7 @@ def _execute_adoption_jobs(
     Returns:
         A tuple of two integers: (successful_count, failed_count).
     """
-    if not session_animal_pairs:
+    if not sessions:
         return 0, 0
 
     successful_count = 0
@@ -213,14 +214,18 @@ def _execute_adoption_jobs(
 
     delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
-    with tqdm(total=len(session_animal_pairs), desc="Executing adoption jobs", unit="session") as pbar:
-        for animal, session in session_animal_pairs:
+    with tqdm(total=len(sessions), desc="Executing adoption jobs", unit="session") as pbar:
+        for session_metadata in sessions:
             # Resolves source and destination paths
-            source_path = server.shared_storage_root.joinpath(project, animal, session)
-            destination_path = server.user_working_root.joinpath(project, animal, session)
+            source_path = server.shared_storage_root.joinpath(
+                project, session_metadata.animal, session_metadata.session
+            )
+            destination_path = server.user_working_root.joinpath(
+                project, session_metadata.animal, session_metadata.session
+            )
 
             # Resolves the job name and working directory
-            job_name = f"{session}_adoption"
+            job_name = f"{session_metadata.session}_adoption"
             working_directory = get_remote_job_work_directory(
                 server=server, job_name=job_name, pipeline_name=ProcessingPipelines.ADOPTION
             )
@@ -262,8 +267,9 @@ def _execute_adoption_jobs(
                 failed_count += 1
                 console.echo(
                     message=(
-                        f"Adoption job for session '{session}' performed by animal '{animal}': Failed "
-                        f"(status: {job_status}). Check job logs at: {working_directory}"
+                        f"Adoption job for session '{session_metadata.session}' performed by animal "
+                        f"'{session_metadata.animal}': Failed (status: {job_status}). "
+                        f"Check job logs at: {working_directory}"
                     ),
                     level=LogLevel.ERROR,
                 )
@@ -448,41 +454,45 @@ def _construct_checksum_resolution_pipeline(
 
 def manage_project_data(
     project: str,
-    sessions: tuple[str, ...] | None = None,
-    animals: tuple[str, ...] | None = None,
+    sessions: tuple[SessionMetadata, ...],
     *,
-    adopt_sessions: bool = False,
-    process_checksum: bool = False,
-    reprocess: bool = False,
+    repeat_adoption: bool = False,
+    repeat_checksum_verification: bool = False,
     keep_job_logs: bool = False,
     recalculate_checksum: bool = False,
 ) -> None:
     """Resolves and executes the necessary data adoption and management pipelines for the specified project.
 
-    This function acts as the entry point for all data management operations in the Sun lab. Primarily, it allows users
-    to 'adopt' the project's data for further processing and analysis by copying it from the shared read-only
-    repositories.
+    This function acts as the entry point for all data management operations in the Sun lab. It allows users to 'adopt'
+    the project's data for further processing and analysis by copying it from the shared read-only repositories, and
+    then verifies the integrity of the adopted data using checksum verification.
 
     Notes:
-        If sessions and animals are not explicitly provided, the function discovers available sessions by scanning
-        the project directory on the remote server.
+        The input sessions are expected to be pre-filtered before calling this function. The function resolves session
+        paths relative to the shared storage root on the remote server, verifies the sessions exist, and proceeds with
+        adoption and checksum verification.
 
     Args:
         project: The name of the project to work with.
-        sessions: The unique identifiers of the sessions to work with. If not provided, the function discovers
-            sessions by scanning the project directory on the remote server and works with all discovered sessions.
-        animals: The unique identifiers of the animals to work with. This optional argument allows filtering the list
-            of processed sessions to only include the sessions performed by the specified animals.
-        adopt_sessions: Determines whether to adopt the data of the target sessions as part of this runtime.
-        process_checksum: Determines whether to recreate or verify the raw data integrity checksum for the target
-            sessions as part of this runtime.
-        reprocess: Determines whether to rerun the requested processing pipelines for the already processed sessions.
+        sessions: A tuple of SessionMetadata instances representing the sessions to process. These sessions are
+            expected to be pre-filtered and valid.
+        repeat_adoption: Determines whether to re-adopt sessions that have already been adopted. If False (default),
+            already-adopted sessions are skipped during the adoption stage.
+        repeat_checksum_verification: Determines whether to re-verify checksums for sessions that have already been
+            verified. If False (default), already-verified sessions are skipped during the checksum stage.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             each pipeline completes successfully. If the pipeline fails, the job logs are kept regardless of this
             argument's value.
         recalculate_checksum: Determines whether to regenerate and overwrite the raw data integrity checksum instead
-            of verifying its integrity.
+            of verifying its integrity. Setting this to True implies repeat_checksum_verification=True.
     """
+    if not sessions:
+        console.echo(
+            message=f"No sessions provided for project '{project}'. Management: Aborted.",
+            level=LogLevel.WARNING,
+        )
+        return
+
     console.echo(message=f"Initializing project '{project}' data management...", level=LogLevel.INFO)
 
     # Establishes SSH connection to the processing server.
@@ -491,44 +501,6 @@ def manage_project_data(
 
     # Initializes a delay timer to support better visual separation of terminal printouts
     delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
-
-    # If sessions are not specified, discover them based on the data stored on the remote server
-    if sessions is None:
-        # Discover all project's sessions stored on the remote server
-        animal_sessions = _discover_sessions_from_project_folder(project=project, server=server)
-
-        # Flattens the discovered sessions into a list of (animal, session) tuples for processing
-        session_animal_pairs: list[tuple[str, str]] = [
-            (animal, session)
-            for animal, animal_session_list in animal_sessions.items()
-            for session in animal_session_list
-        ]
-    else:
-        # If sessions are explicitly provided, we need a manifest to look up animal IDs
-        # First, resolve or generate the manifest
-        resolve_project_manifest(project=project, server=server, generate=False)
-
-        # Load the manifest
-        manifest_path = get_working_directory().joinpath(project, "manifest.feather")
-        manifest = ProjectManifest(manifest_file=manifest_path)
-
-        # Build session-animal pairs from the manifest
-        session_animal_pairs = []
-        for session in sessions:
-            animal = manifest.get_animal_for_session(session=session)
-            session_animal_pairs.append((animal, session))
-
-    # Apply animal filtering if specified
-    if animals is not None:
-        animals_set = {str(animal) for animal in animals}
-        session_animal_pairs = [(animal, session) for animal, session in session_animal_pairs if animal in animals_set]
-
-    if not session_animal_pairs:
-        console.echo(
-            message=f"No sessions found for project '{project}' matching the specified criteria.",
-            level=LogLevel.WARNING,
-        )
-        return
 
     # Tracks checksum pipelines for final outcome reporting
     checksum_pipelines: list[ProcessingPipeline] = []
@@ -543,26 +515,28 @@ def manage_project_data(
     console.echo(message="Stage 1: Session Adoption", level=LogLevel.INFO)
     delay_timer.delay(delay=1, allow_sleep=True, block=False)
 
-    # Filters out already adopted sessions unless reprocessing is enabled
-    sessions_to_adopt: list[tuple[str, str]] = []
-    for animal, session in tqdm(session_animal_pairs, desc="Checking adoption status", unit="session"):
-        if not reprocess and _check_session_already_adopted(
-            project=project, animal=animal, session=session, server=server
+    # Resolves and validates sessions from the shared storage, filtering out already adopted sessions if needed
+    sessions_to_adopt: list[SessionMetadata] = []
+    for session_metadata in tqdm(sessions, desc="Resolving session paths", unit="session"):
+        # Checks if already adopted and skips if not repeating
+        if not repeat_adoption and _check_session_already_adopted(
+            project=project, animal=session_metadata.animal, session=session_metadata.session, server=server
         ):
             console.echo(
                 message=(
-                    f"Session '{session}' performed by animal '{animal}' has already been adopted. "
-                    f"Skipping. Use '--reprocess (-r)' to force re-adoption."
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}' has already "
+                    f"been adopted. Skipping. Use '--repeat-adoption' to force re-adoption."
                 ),
                 level=LogLevel.WARNING,
             )
             continue
-        sessions_to_adopt.append((animal, session))
+
+        sessions_to_adopt.append(session_metadata)
 
     if sessions_to_adopt:
         # Executes adoption jobs sequentially (batch size of 1)
         total_adoption_successful, total_adoption_failed = _execute_adoption_jobs(
-            session_animal_pairs=sessions_to_adopt,
+            sessions=sessions_to_adopt,
             project=project,
             server=server,
             keep_job_logs=keep_job_logs,
@@ -581,27 +555,25 @@ def manage_project_data(
     manifest_path = get_working_directory().joinpath(project, "manifest.feather")
     manifest = ProjectManifest(manifest_file=manifest_path)
 
-    # Determines which sessions to verify: successfully adopted sessions + already adopted sessions
-    sessions_to_verify: set[str] = set()
+    # Determines which sessions to verify: all adopted sessions from the input list
+    sessions_to_verify: list[SessionMetadata] = [
+        session_metadata
+        for session_metadata in sessions
+        if _check_session_already_adopted(
+            project=project, animal=session_metadata.animal, session=session_metadata.session, server=server
+        )
+    ]
 
-    # Adds successfully adopted sessions
-    for animal, session in sessions_to_adopt:
-        if _check_session_already_adopted(project=project, animal=animal, session=session, server=server):
-            sessions_to_verify.add(session)
+    # Recalculating checksum implies repeating the verification
+    allow_reprocessing = repeat_checksum_verification or recalculate_checksum
 
-    # If no sessions were adopted in stage 1, verifies all sessions that were already adopted
-    if not sessions_to_adopt:
-        for animal, session in session_animal_pairs:
-            if _check_session_already_adopted(project=project, animal=animal, session=session, server=server):
-                sessions_to_verify.add(session)
-
-    for session in tqdm(sessions_to_verify, desc="Resolving the checksum processing graph", unit="session"):
+    for session_metadata in tqdm(sessions_to_verify, desc="Resolving the checksum processing graph", unit="session"):
         pipeline = _construct_checksum_resolution_pipeline(
             manifest=manifest,
             project=project,
-            session=session,
+            session=session_metadata.session,
             server=server,
-            reprocess=reprocess,
+            reprocess=allow_reprocessing,
             keep_job_logs=keep_job_logs,
             recreate_checksum=recalculate_checksum,
         )
