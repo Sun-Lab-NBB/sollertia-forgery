@@ -290,7 +290,7 @@ class ProcessingPipeline:
                 # Job failed; updates the tracker
                 tracker.fail_job(job_id)
 
-            elif slurm_status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.UNKNOWN):
+            else:
                 # Aborts the job to allow a clean restart
                 self.server.abort_job(slurm_job_id=job_state.slurm_job_id)
 

@@ -1,6 +1,6 @@
 """This package provides shared assets used across multiple other library packages and modules."""
 
-from .manifest import ProjectManifest
+from .metadata import ProjectManifest, SessionMetadata, filter_sessions
 from .pipelines import (
     DatasetTrackers,
     ManagingTrackers,
@@ -17,7 +17,9 @@ __all__ = [
     "ProcessingPipelines",
     "ProcessingTrackers",
     "ProjectManifest",
+    "SessionMetadata",
     "check_session_eligibility",
     "execute_pipelines",
+    "filter_sessions",
     "interpolate_data",
 ]
