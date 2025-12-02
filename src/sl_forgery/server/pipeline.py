@@ -262,25 +262,20 @@ class ProcessingPipeline:
         self._tracker_initialized = True
 
     def _reconcile_and_abort_running_jobs(self, tracker: ProcessingTracker) -> None:
-        """Reconciles pipeline's job states stored in the tracker file with SLURM and aborts any currently running jobs.
+        """Reconciles pipeline's job states stored in the tracker file with SLURM and aborts any active SLURM jobs.
 
-        For jobs marked as RUNNING in the tracker, queries the SLURM manager to check their actual status. Jobs that
-        are still running or pending in SLURM are aborted to allow a clean restart. Jobs that have completed are updated
-        accordingly.
+        For all jobs that have a SLURM ID, queries the SLURM manager to check their actual status. Jobs that are still
+        pending, running, or in an unknown state are aborted to allow a clean restart. Jobs that have completed or
+        failed are updated accordingly.
 
         Args:
             tracker: The ProcessingTracker instance to reconcile.
         """
         for job_id, job_state in tracker.jobs.items():
-            # Only processes jobs that are marked as RUNNING
-            if job_state.status != ProcessingStatus.RUNNING:
-                continue
-
             if job_state.slurm_job_id is None:
-                # Job was marked as RUNNING but has no SLURM ID, which is unexpected. Resets the job to SCHEDULED so
-                # that it can be resubmitted.
-                job_state.status = ProcessingStatus.SCHEDULED
-                job_state.slurm_job_id = None
+                # Job has no SLURM ID; resets to SCHEDULED if it was marked as RUNNING
+                if job_state.status == ProcessingStatus.RUNNING:
+                    job_state.status = ProcessingStatus.SCHEDULED
                 continue
 
             # Queries SLURM for the actual job status
@@ -296,7 +291,6 @@ class ProcessingPipeline:
                 tracker.fail_job(job_id)
 
             elif slurm_status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.UNKNOWN):
-
                 # Aborts the job to allow a clean restart
                 self.server.abort_job(slurm_job_id=job_state.slurm_job_id)
 
