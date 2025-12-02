@@ -83,6 +83,10 @@ class ProcessingPipeline:
     """Determines whether to keep the logs for the jobs executed as part of the pipeline or (default) to remove
     them after pipeline successfully ends its runtime. If the pipeline fails to complete its runtime, the logs are kept
     regardless of this setting."""
+    rerun_completed_jobs: bool = False
+    """Determines whether to reset the tracker and rerun all jobs regardless of their completion status. When set to
+    True, the pipeline clears the existing tracker and starts all jobs from scratch. When False (default), the
+    pipeline preserves completed jobs and only reruns failed or pending jobs."""
     pipeline_status: ProcessingStatus | int = ProcessingStatus.RUNNING
     """Stores the current status of the managed pipeline."""
     _pipeline_stage: int = 0
@@ -127,10 +131,6 @@ class ProcessingPipeline:
         if self._pipeline_stage == 0:
             self._initialize_tracker()
 
-            # If the initialization method determines that the pipeline is already complete or failed, exits early
-            if self.pipeline_status != ProcessingStatus.RUNNING:
-                return
-
             # Otherwise, starts or resumes executing the pipeline.
             self._pipeline_stage += 1
             self._submit_jobs()
@@ -162,15 +162,13 @@ class ProcessingPipeline:
 
             # If the tracker shows the job as RUNNING, reconciles with SLURM to detect externally terminated jobs
             if job_status == ProcessingStatus.RUNNING:
-                job_state = tracker.jobs.get(job_id)
-                if job_state is not None and job_state.slurm_job_id is not None:
-                    slurm_status = self.server.get_job_status(slurm_job_id=job_state.slurm_job_id)
-                    mapped_status = _SLURM_TO_TRACKER_STATUS.get(slurm_status)
+                slurm_status = self.server.get_job_status(slurm_job_id=tracker.jobs[job_id].slurm_job_id)
+                mapped_status = _SLURM_TO_TRACKER_STATUS.get(slurm_status)
 
-                    # If SLURM reports failure but the tracker shows running, the job was terminated externally
-                    if mapped_status == ProcessingStatus.FAILED:
-                        self._finalize_pipeline_aborted()
-                        return
+                # If SLURM reports failure but the tracker shows running, the job was terminated externally
+                if mapped_status == ProcessingStatus.FAILED:
+                    self._finalize_pipeline_aborted()
+                    return
 
             # If any job is not yet succeeded, the stage is not complete
             if job_status != ProcessingStatus.SUCCEEDED:
@@ -215,6 +213,7 @@ class ProcessingPipeline:
         all_job_ids = []
         for stage_job_ids in self._job_ids.values():
             all_job_ids.extend(stage_job_ids)
+        all_job_ids_set = set(all_job_ids)
 
         # Attempts to pull any existing tracker file from the server
         tracker_exists = False
@@ -227,24 +226,34 @@ class ProcessingPipeline:
         tracker = ProcessingTracker(file_path=self.local_tracker_path)
 
         if tracker_exists and tracker.jobs:
-            # Found an existing tracker with job IDs. Reconciles job states with SLURM and aborts running jobs.
-            self._reconcile_and_abort_running_jobs(tracker=tracker)
+            # Checks if the tracker's job IDs match the pipeline's job IDs
+            tracker_job_ids_set = set(tracker.jobs.keys())
 
-            # Checks if the pipeline is already complete or has failed
-            if tracker.complete:
-                self._finalize_pipeline_success()
-                self._tracker_initialized = True
-                return
+            if tracker_job_ids_set != all_job_ids_set:
+                # Tracker configuration does not match the pipeline; resets and re-initializes the tracker
+                tracker.reset()
+                tracker.initialize_jobs(all_job_ids)
+            elif self.rerun_completed_jobs:
+                # User requested to rerun all jobs; aborts any running jobs and resets the tracker
+                self._reconcile_and_abort_running_jobs(tracker=tracker)
+                tracker.reset()
+                tracker.initialize_jobs(all_job_ids)
+            else:
+                # Tracker matches pipeline configuration; reconciles job states with SLURM
+                self._reconcile_and_abort_running_jobs(tracker=tracker)
 
-            if tracker.encountered_error:
-                self._finalize_pipeline_failure()
-                self._tracker_initialized = True
-                return
+                if tracker.complete:
+                    # All jobs completed; resets the tracker and restarts from scratch
+                    tracker.reset()
+                    tracker.initialize_jobs(all_job_ids)
+                elif tracker.encountered_error:
+                    # Some jobs failed; resets only failed jobs to SCHEDULED, keeping completed jobs
+                    self._reset_failed_jobs(tracker=tracker)
 
             # Determines the stage to resume from based on job statuses
             self._pipeline_stage = self._determine_resume_stage(tracker=tracker)
         else:
-            # Otherwise, if the tracker does not exist or is empty, initializes all jobs from scratch.
+            # Tracker does not exist or is empty; initializes all jobs from scratch
             tracker.initialize_jobs(all_job_ids)
 
         # Pushes the initialized/reconciled tracker to the server. This is the only push operation performed by
@@ -281,17 +290,32 @@ class ProcessingPipeline:
             if mapped_status == ProcessingStatus.SUCCEEDED:
                 # Job completed successfully; updates the tracker
                 tracker.complete_job(job_id)
+
             elif mapped_status == ProcessingStatus.FAILED:
                 # Job failed; updates the tracker
                 tracker.fail_job(job_id)
-            elif slurm_status in (JobStatus.PENDING, JobStatus.RUNNING):
-                # Job is still running or pending in SLURM; aborts it to allow a clean restart
+
+            elif slurm_status in (JobStatus.PENDING, JobStatus.RUNNING, JobStatus.UNKNOWN):
+
+                # Aborts the job to allow a clean restart
                 self.server.abort_job(slurm_job_id=job_state.slurm_job_id)
+
                 # Resets the job to SCHEDULED so it can be resubmitted
                 job_state.status = ProcessingStatus.SCHEDULED
                 job_state.slurm_job_id = None
-            else:
-                # Unknown status; resets the job to SCHEDULED
+
+    @staticmethod
+    def _reset_failed_jobs(tracker: ProcessingTracker) -> None:
+        """Resets failed jobs in the tracker to SCHEDULED status while preserving completed jobs.
+
+        This method iterates through all jobs in the tracker and resets any job marked as FAILED back to SCHEDULED,
+        allowing them to be resubmitted. Jobs marked as SUCCEEDED are left unchanged.
+
+        Args:
+            tracker: The ProcessingTracker instance containing the jobs to reset.
+        """
+        for job_state in tracker.jobs.values():
+            if job_state.status == ProcessingStatus.FAILED:
                 job_state.status = ProcessingStatus.SCHEDULED
                 job_state.slurm_job_id = None
 
@@ -306,32 +330,20 @@ class ProcessingPipeline:
             tracker: The ProcessingTracker instance to examine.
 
         Returns:
-            The processing stage number to resume the pipeline from.
+            The processing stage number to resume the pipeline from. Returns 0 to start from the first stage.
         """
         for stage in sorted(self.jobs.keys()):
             stage_job_ids = self._job_ids[stage]
-            stage_complete = True
 
             for job_id in stage_job_ids:
-                try:
-                    # If the job is not marked as SUCCEEDED, marks the stage as incomplete
-                    if tracker.get_job_status(job_id) != ProcessingStatus.SUCCEEDED:
-                        stage_complete = False
-                        break
-                except ValueError:
-                    # The job's ID is not found inside the tracker's data, indicating that the stage is incomplete
-                    stage_complete = False
-                    break
+                # If the job is not marked as SUCCEEDED, resumes from this stage
+                if tracker.get_job_status(job_id) != ProcessingStatus.SUCCEEDED:
+                    # Returns stage - 1 to make the returned stage work with how stages are tracked during
+                    # the runtime cycle.
+                    return stage - 1
 
-            if not stage_complete:
-                # This stage has incomplete jobs; resumes from here. Returns stage - 1 to make the returned stage
-                # work with how stages are tracked during the runtime cycle.
-                return stage - 1
-
-        # All stages complete. Marks the pipeline as complete and returns the final stage number to support a graceful
-        # shutdown.
-        self._finalize_pipeline_success()
-        return max(self.jobs.keys())
+        # All jobs are scheduled (fresh start after reset); starts from stage 0
+        return 0
 
     def _submit_jobs(self) -> None:
         """Submits the processing jobs for the currently active processing stage to the remote compute server.
