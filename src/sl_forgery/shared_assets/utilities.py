@@ -1,11 +1,23 @@
-"""This module provides shared utility functions used across multiple other library modules."""
+"""This module provides the miscellaneous utility assets used across multiple other library modules."""
 
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+"""The shared PrecisionTimer instance used across the library to delay the runtime's execution."""
+
+
+def delay_terminal() -> None:
+    """Uses the shared delay_timer instance to delay the runtime execution for one second to ensure proper visual
+    separation of terminal printouts.
+    """
+    delay_timer.delay(delay=1, allow_sleep=True, block=False)
 
 
 # noinspection PyTypeHints

@@ -1,27 +1,24 @@
-"""This module provides the pipeline tracker filename enumerations and execution utilities used by various data
-management, processing, and analysis pipelines available from this library.
+"""This module provides the assets that jointly support the runtime of all data management, processing, and analysis
+pipelines available from this library.
 """
 
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from tqdm import tqdm
-from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sl_shared_assets import (
     SessionTypes,
     ProcessingStatus,
-    ProcessingTracker,
     AcquisitionSystems,
-    delete_directory,
-    get_working_directory,
 )
-from ataraxis_base_utilities import LogLevel, console
+
+from .utilities import delay_timer
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from ..server import Server, ProcessingPipeline
-    from .manifest import ProjectManifest
+    from .metadata import ProjectManifest
 
 
 class ProcessingPipelines(StrEnum):
@@ -59,7 +56,6 @@ class ProcessingPipelines(StrEnum):
 
 def check_session_eligibility(
     manifest: ProjectManifest,
-    project: str,
     session: str,
     pipeline: str | ProcessingPipelines,
     server: Server,
@@ -68,8 +64,7 @@ def check_session_eligibility(
     *,
     allow_reprocessing: bool = False,
     configuration_path: Path | None = None,
-    tracker_path: Path | None = None,
-) -> bool:
+) -> str | None:
     """Checks whether the target session meets the eligibility criteria for being processed with the specified pipeline.
 
     This function aggregates common eligibility checks to streamline the process for all supported processing pipelines.
@@ -78,7 +73,6 @@ def check_session_eligibility(
     Args:
         manifest: The ProjectManifest instance that stores the metadata for the project under which the session was
             conducted.
-        project: The name of the project under which the session was conducted.
         session: The unique identifier of the session to be processed.
         pipeline: The processing pipeline with which to process the session's data. Must be one of the
             ProcessingPipelines values except ADOPTION.
@@ -90,17 +84,15 @@ def check_session_eligibility(
         configuration_path: The path to the pipeline's configuration file on the remote server. Required for the
             SUITE2P, VIDEO, and MULTIDAY pipelines. If provided, the function verifies the file exists on the remote
             server.
-        tracker_path: The path to the pipeline's processing tracker file on the remote server. Required for the
-            MULTIDAY and FORGING pipelines to check whether the session has already been processed.
 
     Returns:
-        True if the session meets the eligibility criteria, False otherwise.
+        None if the session is eligible for processing. Otherwise, returns a string describing why the session
+        was excluded from processing.
     """
     # Parses the target session data from the manifest file.
     session_data = manifest.get_session_data(session=session)
     session_type = session_data["type"][0]
     session_system = session_data["system"][0]
-    animal = str(session_data["animal"][0])
     complete = session_data["complete"][0]
     integrity = bool(session_data["integrity"][0])
 
@@ -112,7 +104,6 @@ def check_session_eligibility(
     requires_configuration = False
     requires_integrity = True
     requires_suite2p = False
-    requires_tracker_check = False
     if pipeline == ProcessingPipelines.CHECKSUM:
         processed = integrity
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
@@ -129,145 +120,59 @@ def check_session_eligibility(
         processed = False  # Determined by the tracker check below
         requires_configuration = True
         requires_suite2p = True
-        requires_tracker_check = True
     elif pipeline == ProcessingPipelines.FORGING:
         # Forging pipeline performs internal checks for available data and adjusts its runtime accordingly
         processed = False  # Determined by the tracker check below
-        requires_tracker_check = True
     else:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The pipeline '{pipeline}' is not supported. "
-            f"Use one of the supported pipelines other than ADOPTION: {list(ProcessingPipelines)}. Skipping "
-            f"processing the session."
+        return (
+            f"The pipeline '{pipeline}' is not supported. "
+            f"Use one of the supported pipelines other than ADOPTION: {list(ProcessingPipelines)}."
         )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
 
     # If the session was acquired using a data acquisition system that does not support this type of processing,
     # skips processing the session.
     if session_system not in supported_systems:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session was acquired using the acquisition system "
-            f"'{session_system},' which does not support this form of processing. Skipping processing the session."
+        return (
+            f"The session was acquired using the acquisition system '{session_system},' "
+            f"which does not support {pipeline} processing."
         )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
 
     # If the session type is not one of the supported types, skips processing the session.
     if session_type not in supported_sessions:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session is of type '{session_type},' which does not support "
-            f"this form of processing. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
+        return f"The session is of type '{session_type},' which does not support {pipeline} processing."
 
     # Prevents processing incomplete sessions.
     if not complete:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed "
-            f"by the animal '{animal}' for the '{project}' project. The session is marked as 'incomplete,' which "
-            f"excludes it from all further unsupervised data processing. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
+        return "The session is marked as 'incomplete,' which excludes it from unsupervised data processing."
 
     # For all pipelines except CHECKSUM, the session must have passed the integrity verification pipeline.
     if requires_integrity and not integrity:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session has not been processed with the integrity "
-            f"verification pipeline. Run the CHECKSUM pipeline first to verify the session's data integrity. "
-            f"Skipping processing the session."
+        return (
+            "The session has not been processed with the integrity verification pipeline. "
+            "Run the CHECKSUM pipeline first to verify the session's data integrity."
         )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
 
     # For the MULTIDAY pipeline, the session must have been processed with the SUITE2P pipeline first.
     if requires_suite2p and not bool(session_data["suite2p"][0]):
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session has not been processed with the single-day suite2p "
-            f"pipeline. Run the SUITE2P pipeline first to extract calcium fluorescence data. "
-            f"Skipping processing the session."
+        return (
+            "The session has not been processed with the single-day suite2p pipeline. "
+            "Run the SUITE2P pipeline first to extract calcium fluorescence data."
         )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
 
     # If the session has already been processed and reprocessing is not allowed, skips processing the session.
     if processed and not allow_reprocessing:
-        message = (
-            f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-            f"'{animal}' for the '{project}' project. The session has already been processed with this pipeline "
-            f"and reprocessing is disabled. To enable reprocessing, call this command with the '--reprocess (-r)' "
-            f"flag. Skipping processing the session."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return False
-
-    # For MULTIDAY and FORGING pipelines, checks the processing tracker file to determine if the session has already
-    # been processed.
-    if requires_tracker_check and not allow_reprocessing:
-        if tracker_path is None:
-            message = (
-                f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-                f"'{animal}' for the '{project}' project. The pipeline requires a tracker path to check reprocessing "
-                f"status, but no tracker path was provided. Skipping processing the session."
-            )
-            console.echo(message=message, level=LogLevel.WARNING)
-            return False
-
-        # Checks if the tracker file exists on the remote server
-        if server.exists(remote_path=tracker_path):
-            # Downloads the tracker file to a temporary local directory
-            local_working_directory = get_working_directory()
-            temp_dir = local_working_directory.joinpath("temporary", f"{session}_{pipeline}_eligibility_check")
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            local_tracker_path = temp_dir.joinpath(tracker_path.name)
-
-            try:
-                server.pull(remote_path=tracker_path, local_path=local_tracker_path)
-                tracker = ProcessingTracker(file_path=local_tracker_path)
-
-                # If the tracker indicates the pipeline has completed, the session has already been processed
-                if tracker.complete:
-                    message = (
-                        f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the "
-                        f"animal '{animal}' for the '{project}' project. The session has already been processed with "
-                        f"this pipeline and reprocessing is disabled. To enable reprocessing, call this command with "
-                        f"the '--reprocess (-r)' flag. Skipping processing the session."
-                    )
-                    console.echo(message=message, level=LogLevel.WARNING)
-                    return False
-            finally:
-                # Cleans up the temporary directory
-                delete_directory(temp_dir)
+        return "The session has already been processed with this pipeline and reprocessing is disabled."
 
     # If the target processing pipeline requires a specific server-side configuration file, ensures that the file is
     # present at the expected remote server location.
     if requires_configuration:
         if configuration_path is None:
-            message = (
-                f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-                f"'{animal}' for the '{project}' project. The pipeline requires a configuration file, but no "
-                f"configuration path was provided. Skipping processing the session."
-            )
-            console.echo(message=message, level=LogLevel.WARNING)
-            return False
+            return "The pipeline requires a configuration file, but no configuration path was provided."
         if not server.exists(remote_path=configuration_path):
-            message = (
-                f"Unable to construct the {pipeline} pipeline for the session '{session}' performed by the animal "
-                f"'{animal}' for the '{project}' project. The target configuration file does not exist on the remote "
-                f"server at the expected path: {configuration_path}. Skipping processing the session."
-            )
-            console.echo(message=message, level=LogLevel.WARNING)
-            return False
+            return f"The pipeline's configuration file does not exist on the remote server at: {configuration_path}."
 
     # The session is eligible for processing with this pipeline.
-    return True
+    return None
 
 
 class ManagingTrackers(StrEnum):
@@ -321,9 +226,6 @@ def execute_pipelines(
     Returns:
         A tuple of two integers: (successful_count, failed_count).
     """
-    if not pipelines:
-        return 0, 0
-
     successful_count = 0
     failed_count = 0
 
@@ -334,11 +236,8 @@ def execute_pipelines(
     indexed_pipelines = list(enumerate(pipelines))
     effective_batch_size = len(pipelines) if batch_size is None else batch_size
     batches = [
-        indexed_pipelines[i : i + effective_batch_size]
-        for i in range(0, len(indexed_pipelines), effective_batch_size)
+        indexed_pipelines[i : i + effective_batch_size] for i in range(0, len(indexed_pipelines), effective_batch_size)
     ]
-
-    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
     with tqdm(total=len(pipelines), desc=f"Executing {stage_name} pipelines", unit="pipeline") as pbar:
         for batch in batches:

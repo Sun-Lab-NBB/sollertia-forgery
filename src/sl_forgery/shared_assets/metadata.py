@@ -1,5 +1,5 @@
-"""This module provides the metadata assets used by all data processing pipelines exposed by this library to work with
-the Sun lab project data stored on remote compute servers.
+"""This module provides the metadata assets that allow other library modules to work with the project data stored on
+remote compute servers.
 """
 
 from typing import TYPE_CHECKING
@@ -17,9 +17,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class SessionMetadata:
-    """Stores the metadata for a single data acquisition session used for filtering operations.
-
-    This class encapsulates the session's metadata required to filter a list of sessions for further processing.
+    """Encapsulates the identity metadata for a single data acquisition session.
 
     Attributes:
         session: The unique identifier of the session. Session names follow the format
@@ -67,7 +65,7 @@ def filter_sessions(
         exclude_animals: A set of animal names to exclude. Sessions from these animals are removed from the results.
             This takes precedence over include_animals.
         utc_timezone: Determines whether to interpret date boundaries and session timestamps in UTC (True) or
-            America/New_York (False) timezone. Session names always store UTC timestamps, but when this is False,
+            America/New_York (False) timezone. Session names reflect the UTC timestamps, but when this is False,
             the function converts them to America/New_York for comparison.
 
     Returns:
@@ -141,10 +139,8 @@ def _parse_date_boundary(date_string: str, *, is_end_date: bool = False, utc_tim
     # Determines the target timezone based on the utc_timezone flag
     target_tz = ZoneInfo("UTC") if utc_timezone else ZoneInfo("America/New_York")
 
-    # Ensures timezone awareness
-    parsed = parsed.replace(tzinfo=target_tz) if parsed.tzinfo is None else parsed.astimezone(target_tz)
-
-    return parsed
+    # Ensures timezone awareness and returns the parsed data
+    return parsed.replace(tzinfo=target_tz) if parsed.tzinfo is None else parsed.astimezone(target_tz)
 
 
 # The number of hyphen-separated components in a valid session name (YYYY-MM-DD-HH-MM-SS-microseconds)
