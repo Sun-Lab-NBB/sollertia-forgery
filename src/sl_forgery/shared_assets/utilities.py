@@ -1,32 +1,23 @@
-"""This module stores assets used by other library modules to streamline constructing, submitting, and monitoring data
-processing pipelines that run on remote compute servers.
-"""
+"""This module provides the miscellaneous utility assets used across multiple other library modules."""
 
-from typing import Any
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from numpy.typing import NDArray
-from ..server import Server
-from ataraxis_time.time_helpers import get_timestamp
+from ataraxis_time import PrecisionTimer, TimerPrecisions
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
-def get_remote_job_work_directory(server: Server, job_name: str) -> Path:
-    """Generates the working directory for the input job intended to be executed on the compute server managed by the
-    input Server class.
+delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+"""The shared PrecisionTimer instance used across the library to delay the runtime's execution."""
 
-    This worker function generates the current UTC timestamp, clips it down to minutes, and concatenates it to the
-    job_name to construct the working directory name. It then resolves the path to that directory relative to the user
-    working root on the remote server, creates the directory on the server, and returns the resolved path.
+
+def delay_terminal() -> None:
+    """Uses the shared delay_timer instance to delay the runtime execution for one second to ensure proper visual
+    separation of terminal printouts.
     """
-    # Resolves working directory name using timestamp (accurate to minutes) and the job_name.
-    timestamp = "-".join(get_timestamp().split("-")[:5])
-    working_directory = Path(server.user_working_root).joinpath("job_logs", f"{job_name}_{timestamp}")
-
-    # Creates the working directory on the remote server.
-    server.create(remote_path=working_directory, is_dir=True, parents=True)
-
-    return working_directory
+    delay_timer.delay(delay=1, allow_sleep=True, block=False)
 
 
 # noinspection PyTypeHints
@@ -34,6 +25,7 @@ def interpolate_data(
     source_coordinates: NDArray[np.number[Any]],
     source_values: NDArray[np.number[Any]],
     target_coordinates: NDArray[np.number[Any]],
+    *,
     is_discrete: bool,
 ) -> NDArray[np.number[Any]]:
     """Interpolates the data values at the requested coordinates using the source coordinate-value distribution.
@@ -48,19 +40,18 @@ def interpolate_data(
         last known value to the left of each interpolated coordinate.
 
     Args:
-        source_coordinates: The one-dimensional NumPy array that stores the source coordinate values.
-        source_values: The one-dimensional NumPy array that stores the data values at each source coordinate.
-        target_coordinates: The one-dimensional NumPy array that stores the target coordinates for which to interpolate
-            the data values.
+        source_coordinates: The source coordinate values.
+        source_values: The data values at each source coordinate.
+        target_coordinates: The target coordinates for which to interpolate the data values.
         is_discrete: Determines whether the interpolated data is discrete or continuous.
 
     Returns:
         A one-dimensional NumPy array with the same length as the 'target_coordinates' array that stores the
         interpolated data values.
     """
-    # Discrete data
+    # Discrete data.
     if is_discrete:
-        # Preallocates the output array
+        # Preallocates the output array.
         interpolated_data = np.empty(target_coordinates.shape, dtype=source_values.dtype)
 
         # Handles boundary conditions in bulk using boolean masks. Clamps all target coordinates below the first source
@@ -72,7 +63,7 @@ def interpolate_data(
         # Determines which target coordinates are within the source boundaries.
         within_bounds = ~(below_min | above_max)
 
-        # Assigns out-of-bounds values in-bulk
+        # Assigns out-of-bounds values in-bulk.
         interpolated_data[below_min] = source_values[0]
         interpolated_data[above_max] = source_values[-1]
 

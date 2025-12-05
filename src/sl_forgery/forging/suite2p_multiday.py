@@ -6,11 +6,11 @@ from sl_shared_assets import (
     ProcessingStatus,
     TrackerFileNames,
     ProcessingPipeline,
-    ProcessingPipelines,
     get_working_directory,
 )
 
-from ..utils import get_remote_job_work_directory
+from ..server import get_remote_job_work_directory
+from ..shared_assets import ProcessingPipelines
 
 
 def _construct_suite2p_multiday_pipeline(
@@ -52,7 +52,7 @@ def _construct_suite2p_multiday_pipeline(
     # Resolves the path to the local Sun lab working directory
     local_working_directory = get_working_directory()
 
-    # Constructs the list of session paths to use int he multiday processing command.
+    # Constructs the list of session paths to use in the multiday processing command.
     session_command = ""
     for session in sessions:
         session_path = server.shared_storage_root.joinpath(project, str(animal), session)
@@ -71,7 +71,9 @@ def _construct_suite2p_multiday_pipeline(
 
     # Stage 1: Discovery
     job_name = f"{dataset_name}_ss2p_discovery"
-    working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+    working_directory = get_remote_job_work_directory(
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
+    )
     job = Job(
         job_name=job_name,
         output_log=working_directory.joinpath("output.txt"),
@@ -92,7 +94,9 @@ def _construct_suite2p_multiday_pipeline(
     # Stage 2: Session data extraction.
     for session in sessions:
         job_name = f"{dataset_name}_ss2p_session_{session}"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
+        )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
             job_name=job_name,
@@ -122,7 +126,7 @@ def _construct_suite2p_multiday_pipeline(
         jobs={1: tuple(stage_1), 2: tuple(stage_2)},
         server=server,
         manager_id=manager_id,
-        pipeline_type=ProcessingPipelines.SUITE2P,
+        pipeline_type=ProcessingPipelines.MULTIDAY,
         remote_tracker_path=remote_tracker_path,
         local_tracker_path=local_tracker_path,
         session=dataset_name,

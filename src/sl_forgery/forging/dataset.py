@@ -12,7 +12,7 @@ from sl_shared_assets import SessionTypes, AcquisitionSystems
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 from ataraxis_data_structures import YamlConfig
 
-from ..utils import ProjectManifest
+from ..shared_assets import ProjectManifest
 
 # Stores the types of sessions that currently support dataset integration.
 _supported_sessions = (SessionTypes.MESOSCOPE_EXPERIMENT, SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING)

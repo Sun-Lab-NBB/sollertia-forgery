@@ -7,8 +7,8 @@ import plotly
 from plotly import graph_objects as go
 import polars as pl
 from ataraxis_base_utilities import console
-from sl_forgery.utils.dataclass import AnimalData, ProjectData, TargetGroup, ProcessedSessionData
 
+from sl_forgery.utils.dataclass import AnimalData, ProjectData, TargetGroup, ProcessedSessionData
 from sl_forgery.analysis.processing import Processing, bin_size, cue_length, track_length
 
 

@@ -8,12 +8,15 @@ import click
 from sl_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
 
-from ..utils import ProjectManifest
 from ..server import Server
-from ..processing import fetch_remote_project_manifest, generate_remote_project_manifest
+from ..managing import resolve_project_manifest
+from ..shared_assets import ProjectManifest
+
+# Ensures that displayed CLICK help messages are formatted according to the lab standard.
+CONTEXT_SETTINGS = {"max_content_width": 120}
 
 
-@click.group("project")
+@click.group("project", context_settings=CONTEXT_SETTINGS)
 @click.pass_context
 @click.option(
     "-p",
@@ -42,36 +45,27 @@ def project_cli(ctx: Any, project: str) -> None:
     default=False,
     help=(
         "Determines whether to regenerate the manifest file on the remote server before fetching it it to the local "
-        "working directory. This flag requires service access privileges and is not recommend for most use cases, as "
-        "all lab pipelines automatically update the manifest file as part of their runtime."
+        "working directory."
     ),
 )
 @click.pass_context
-def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
-    """Updates the copy of the target project's manifest file stored on the local machine with the most recent version
-    available on the remote server.
+def update_manifest(ctx: Any, regenerate_manifest: bool) -> None:
+    """Actualizes the target project's manifest file stored on the local machine.
 
-    The project manifest file stores the current state of the project's data on the remote server. It is used as an
-    entry-point for all interactions with the remotely stored data. This command should be used before issuing any other
-    command that works with the project's data to ensure that the local manifest copy contains up-to-date information.
+    The project manifest file communicates the current state of the project's data stored on the remote server, which
+    informs all other pipelines accessible from this library on how to interact with the project's data. This command
+    ensures that the local copy of the manifest file reflects the current state of the project's data stored on the
+    remote compute server.
     """
     # Retrieves shared context data.
     project = ctx.obj["project"]
 
-    # If requested, rebuilds the manifest file on the server before pulling it to the local machine. Manifest
-    # regeneration requires service account credentials.
-    if regenerate_manifest:
-        # Establishes SSH connection to the processing server using the service account credentials.
-        configuration = get_server_configuration(service=True)
-        server = Server(configuration=configuration)
-        generate_remote_project_manifest(project=project, server=server)
+    # Establishes SSH connection to the processing server.
+    configuration = get_server_configuration()
+    server = Server(configuration=configuration)
 
-    # Otherwise, fetches the most recent manifest file instance from the remote server to the working directory
-    else:
-        # Establishes SSH connection to the processing server using the user account credentials.
-        configuration = get_server_configuration(service=False)
-        server = Server(configuration=configuration)
-        fetch_remote_project_manifest(project=project, server=server)
+    # Resolves the project manifest file.
+    resolve_project_manifest(project=project, server=server, generate=regenerate_manifest)
 
 
 @project_cli.command("print")
@@ -93,7 +87,7 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     default=False,
     help=(
         "Determines whether to print the 'experimenter notes' view of the available manifest data. This data view is "
-        "optimized for checking the outcome of each data acquisition session conducted as part of the target project."
+        "optimized for checking the outcome of each data acquisition session conducted for the target project."
     ),
 )
 @click.option(
@@ -104,7 +98,7 @@ def updated_manifest(ctx: Any, regenerate_manifest: bool) -> None:
     default=False,
     help=(
         "Determines whether to print the 'data processing' view of the available manifest data. This view is optimized "
-        "for tracking the data processing state of each data acquisition session conducted as part of the project."
+        "for tracking the data processing state of each data acquisition session conducted for the target project."
     ),
 )
 @click.pass_context
@@ -114,10 +108,9 @@ def print_project_manifest_data(
     notes: bool,
     summary: bool,
 ) -> None:
-    """Parses the requested data from the locally stored project manifest file and prints it to the terminal as a
-    formatted table.
+    """Prints the requested data from the target project's manifest file to the terminal as a formatted table.
 
-    This command should be used to inform the user about the current state of the project's data stored on the remote
+    This command is designed to inform the user about the current state of the project's data stored on the remote
     server. It is recommended to always call the 'sl-project update' command before calling this command to ensure that
     the local manifest file contains up-to-date information.
     """
@@ -134,13 +127,13 @@ def print_project_manifest_data(
     # Resolves the path to the manifest file
     manifest_path = get_working_directory().joinpath(project, "manifest.feather")
 
-    # If the manifest file does not exist on the local machine, ensures it is fetched from the remove server before
+    # If the manifest file does not exist on the local machine, ensures it is fetched from the remote server before
     # continuing with this command.
     if not manifest_path.exists():
         # Establishes SSH connection to the processing server using the user account credentials.
-        configuration = get_server_configuration(service=False)
+        configuration = get_server_configuration()
         server = Server(configuration=configuration)
-        fetch_remote_project_manifest(project=project, server=server)
+        resolve_project_manifest(project=project, server=server, generate=False)
 
     # Loads the manifest file data into memory
     manifest = ProjectManifest(manifest_file=manifest_path)
@@ -148,8 +141,8 @@ def print_project_manifest_data(
     # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
         message = (
-            f"Unable to display the data for the target animal ({animal}), as the animal does not belong to the "
-            f"target project ({project})."
+            f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
+            f"target project '{project}'."
         )
         console.error(message=message, error=ValueError)
 
