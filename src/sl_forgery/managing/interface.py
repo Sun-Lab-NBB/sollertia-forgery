@@ -251,7 +251,7 @@ def _execute_adoption_jobs(
     """
     results: list[tuple[SessionMetadata, JobStatus]] = []
 
-    with tqdm(total=len(sessions), desc="Executing adoption jobs", unit="session") as pbar:
+    with tqdm(total=len(sessions), desc="Executing session adoption jobs", unit="session") as pbar:
         for session_metadata in sessions:
             # Resolves the source and destination paths. Limits the adoption process to the raw_data directory.
             source_path = server.shared_storage_root.joinpath(
@@ -279,6 +279,81 @@ def _execute_adoption_jobs(
                 time=60,
             )
             job.add_command(f"sl-process transfer -sp {source_path} -dp {destination_path}")
+
+            # Submits the job to the server.
+            job = server.submit_job(job=job, verbose=False)
+
+            # Waits for the job to complete.
+            while True:
+                job_status = server.get_job_status(slurm_job_id=int(job.job_id))
+                if job_status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                    break
+                delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+
+            # Records the outcome for this session.
+            results.append((session_metadata, job_status))
+
+            # Removes job logs if configured to do so and the job completed successfully.
+            if job_status == JobStatus.COMPLETED and not keep_job_logs:
+                server.remove(remote_path=working_directory, recursive=True, is_dir=True)
+
+            pbar.update()
+
+    return tuple(results)
+
+
+def _delete_remote_session_data(
+    manifest: ProjectManifest,
+    sessions: list[SessionMetadata],
+    project: str,
+    server: Server,
+    *,
+    keep_job_logs: bool = False,
+    poll_delay: int = 10,
+) -> tuple[tuple[SessionMetadata, JobStatus], ...]:
+    """Deletes the specified sessions from the user's working directory.
+
+    This function generates and submits the session data deletion jobs using SLURM and verifies that they successfully
+    delete the target sessions.
+
+    Args:
+        manifest: The ProjectManifest instance that stores the processed project's metadata.
+        sessions: The list of SessionMetadata instances that define the sessions to delete.
+        project: The name of the project containing the sessions.
+        server: The Server instance used to communicate with the remote compute server.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job fails, its logs are kept regardless of this argument's value.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of (SessionMetadata, JobStatus) pairs representing the outcome of each deletion job.
+    """
+    results: list[tuple[SessionMetadata, JobStatus]] = []
+
+    with tqdm(total=len(sessions), desc="Executing session deletion jobs", unit="session") as pbar:
+        for session_metadata in sessions:
+            # Resolves the path to the session directory using the manifest.
+            animal = manifest.get_animal_for_session(session=session_metadata.session)
+            session_path = server.user_working_root.joinpath(project, animal, session_metadata.session)
+
+            # Resolves the job's name and working directory.
+            job_name = f"{session_metadata.session}_deletion"
+            working_directory = get_remote_job_work_directory(
+                server=server, job_name=job_name, pipeline_name=ProcessingPipelines.ADOPTION
+            )
+
+            # Creates and configures the deletion job.
+            job = Job(
+                job_name=job_name,
+                output_log=working_directory.joinpath("output.txt"),
+                error_log=working_directory.joinpath("errors.txt"),
+                working_directory=working_directory,
+                conda_environment="forge",
+                cpu_threads=1,
+                ram=4,
+                time=30,
+            )
+            job.add_command(f"sl-process transfer -sp {session_path} -rm")
 
             # Submits the job to the server.
             job = server.submit_job(job=job, verbose=False)
@@ -406,7 +481,7 @@ def adopt_project(
 ) -> None:
     """Discovers and adopts all unadopted project's sessions from the remote compute server's shared storage directory.
 
-    This function acts as the entry point for adopting project data for further processing and analysis. It scans the
+    This function serves as the entry point for adopting project data for further processing and analysis. It scans the
     project's directory on the shared server's volume, identifies sessions that have not yet been adopted (copied to the
     user's working directory), and executes the adoption pipeline followed by the data integrity verification
     pipeline for each session.
@@ -599,11 +674,10 @@ def manage_project_data(
     delete_sessions: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
-    """Manages adopted session data by verifying/recomputing checksums or deleting sessions.
+    """Resolves and executes the necessary data management pipelines for the target project.
 
-    This function provides management operations for sessions that have already been adopted to the user's working
-    directory. It operates on a pre-filtered tuple of sessions and allows the user to either verify/recompute the
-    data integrity checksum or delete the target sessions.
+    This function allows managing the sessions adopted by the user for further processing by either
+    verifying/recomputing the data integrity checksum or deleting the target sessions.
 
     Notes:
         The verify_checksum/recompute_checksum operations and delete_sessions operation are mutually exclusive.
@@ -646,64 +720,56 @@ def manage_project_data(
     configuration = get_server_configuration()
     server = Server(configuration=configuration)
 
-    # Initializes a delay timer to support better visual separation of terminal printouts
-    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
-
     # Loads the manifest data
     manifest = ProjectManifest(manifest_file=manifest_path)
 
     # DELETE SESSIONS OPERATION
     if delete_sessions:
         console.echo(message="Operation: Session Deletion", level=LogLevel.INFO)
-        delay_timer.delay(delay=1, allow_sleep=True, block=False)
+        delay_terminal()
 
-        deleted_count = 0
-        failed_count = 0
+        # Executes deletion jobs via SLURM.
+        deletion_results = _delete_remote_session_data(
+            manifest=manifest,
+            sessions=list(sessions),
+            project=project,
+            server=server,
+            keep_job_logs=keep_job_logs,
+            poll_delay=10,
+        )
+        delay_terminal()
 
-        for session_metadata in tqdm(sessions, desc="Deleting sessions", unit="session"):
-            # Resolves the path to the session directory in the user's working directory
-            session_path = server.user_working_root.joinpath(project, session_metadata.animal, session_metadata.session)
-
-            # Checks if the session exists before attempting deletion
-            if not server.exists(remote_path=session_path):
-                console.echo(
-                    message=(
-                        f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}' "
-                        f"does not exist in the user's working directory. Skipping."
-                    ),
-                    level=LogLevel.WARNING,
-                )
-                continue
-
-            try:
-                # Deletes the session directory using the server's remove method
-                server.remove(remote_path=session_path, recursive=True, is_dir=True)
-                console.echo(
-                    message=(
-                        f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
-                        f"Deleted."
-                    ),
-                    level=LogLevel.SUCCESS,
-                )
-                deleted_count += 1
-            except Exception as e:
-                console.echo(
-                    message=(
-                        f"Failed to delete session '{session_metadata.session}' performed by animal "
-                        f"'{session_metadata.animal}': {e}"
-                    ),
-                    level=LogLevel.ERROR,
-                )
-                failed_count += 1
-
-        delay_timer.delay(delay=1, allow_sleep=True, block=False)
-
-        # Refreshes the manifest to reflect deletions
+        # Refreshes the manifest to reflect deletions.
         resolve_project_manifest(project=project, server=server, generate=True)
 
-        # Displays the deletion summary
-        message = f"Project '{project}' session deletion: Complete. Deleted: {deleted_count}, Failed: {failed_count}."
+        # Calculates the deletion outcome statistics.
+        total_deleted = sum(1 for _, status in deletion_results if status == JobStatus.COMPLETED)
+        total_failed = len(deletion_results) - total_deleted
+
+        # Displays the overall deletion summary message.
+        delay_terminal()
+        message = (
+            f"Project '{project}' session deletion: Complete. "
+            f"Deleted: {total_deleted}, Failed: {total_failed}. "
+            f"The details about the processing outcome for each session are available below:"
+        )
         console.echo(message=message, level=LogLevel.INFO)
+
+        # Prints detailed results for each deletion job.
+        for session_metadata, job_status in deletion_results:
+            if job_status == JobStatus.COMPLETED:
+                message = (
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
+                    f"Deleted."
+                )
+                console.echo(message=message, level=LogLevel.SUCCESS)
+            else:
+                message = (
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
+                    f"Deletion failed (SLURM status: {job_status})."
+                )
+                console.echo(message=message, level=LogLevel.ERROR)
+
         console.echo(message="Management: Complete.", level=LogLevel.SUCCESS)
         return
 
