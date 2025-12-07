@@ -3,9 +3,10 @@ tools from the 'processing' package.
 """
 
 from .dataset import DatasetTypes
-from .data_assembly import assemble_session_dataset
+from .data_assembly import assemble_report_dataset, assemble_session_dataset
 
 __all__ = [
     "DatasetTypes",
+    "assemble_report_dataset",
     "assemble_session_dataset",
 ]

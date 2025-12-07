@@ -832,3 +832,49 @@ def assemble_session_dataset(
             f"{session_data_path.stem}. Use one of the valid DatasetTypes enumeration members."
         )
         console.error(message=message, error=ValueError)
+
+
+def assemble_report_dataset(
+    session_data_path: Path,
+    output_path: Path,
+    progress: bool = False,
+) -> None:
+    """Assembles the dataset for report generation by combining behavior and experiment data.
+
+    Args:
+        session_data_path: The path to the session's processed data directory.
+        output_path: The path to the directory where to save the assembled dataset as a .feather file.
+        progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
+    """
+    # Ensures that the output directory exists.
+    ensure_directory_exists(output_path)
+
+    with tqdm(
+        total=2, desc=f"Assembling session {session_data_path.stem} report dataset", disable=not progress
+    ) as pbar:
+        # Uses the face camera timestamps as the reference time vector.
+        face_camera_path = session_data_path.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
+        face_camera_df = pl.read_ipc(face_camera_path, memory_map=True, use_pyarrow=True)
+        reference_time = face_camera_df["frame_time_us"].to_numpy()
+
+        # Assembles and saves the behavior and experiment datasets to disk as an uncompressed.feather file (to support
+        # memory-mapping).
+        behavior_data = _assemble_behavior_dataset(
+            session_data_path=session_data_path,
+            reference_time=reference_time,
+            drop_time_columns=False,
+        )
+        pbar.update(1)
+
+        experiment_data = _assemble_experiment_dataset(
+            session_data_path=session_data_path, reference_time=reference_time
+        )
+        pbar.update(1)
+
+    result = pl.concat([behavior_data, experiment_data], how="horizontal")
+
+    # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
+    result = _mask_non_run_experiment_data(result)
+
+    # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
+    result.write_ipc(file=output_path)
