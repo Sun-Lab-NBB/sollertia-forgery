@@ -9,8 +9,8 @@ from sl_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
 
 from ..server import Server
-from ..managing import resolve_project_manifest
-from ..shared_assets import ProjectManifest
+from ..managing import adopt_project, manage_project_data, resolve_project_manifest
+from ..shared_assets import ProjectManifest, SessionMetadata, filter_sessions
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -153,3 +153,191 @@ def print_project_manifest_data(
     # If requested, prints the data processing view of the manifest data
     if summary:
         manifest.print_summary(animal=animal)
+
+
+@project_cli.command("adopt")
+@click.option(
+    "-r",
+    "--repeat-adoption",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to re-adopt sessions that have already been adopted. If False (default), already-adopted "
+        "sessions are skipped during the adoption stage."
+    ),
+)
+@click.option(
+    "-k",
+    "--keep-job-logs",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to keep completed job logs on the server or (default) remove them after each pipeline "
+        "completes successfully. If the pipeline fails, the job logs are kept regardless of this argument's value."
+    ),
+)
+@click.pass_context
+def adopt_project_data(ctx: Any, repeat_adoption: bool, keep_job_logs: bool) -> None:
+    """Discovers and adopts all unadopted project sessions from the remote compute server.
+
+    This command scans the project's directory on the shared server's volume, identifies sessions that have not yet
+    been adopted (copied to the user's working directory), and executes the adoption pipeline followed by the data
+    integrity verification pipeline for each session.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+
+    # Executes the adoption process.
+    adopt_project(
+        project=project,
+        repeat_adoption=repeat_adoption,
+        keep_job_logs=keep_job_logs,
+    )
+
+
+@project_cli.command("manage")
+@click.option(
+    "-a",
+    "--animal",
+    type=str,
+    multiple=True,
+    help=(
+        "The animal(s) whose sessions to manage. Can be specified multiple times to include multiple animals. "
+        "If not specified, sessions from all animals are considered."
+    ),
+)
+@click.option(
+    "-s",
+    "--session",
+    type=str,
+    multiple=True,
+    help=(
+        "The specific session(s) to manage. Can be specified multiple times to include multiple sessions. "
+        "If not specified, all sessions matching other criteria are considered."
+    ),
+)
+@click.option(
+    "--start-date",
+    type=str,
+    required=False,
+    help=(
+        "The start date for filtering sessions (format: YYYY-MM-DD). Sessions recorded on or after this date are "
+        "included."
+    ),
+)
+@click.option(
+    "--end-date",
+    type=str,
+    required=False,
+    help=(
+        "The end date for filtering sessions (format: YYYY-MM-DD). Sessions recorded on or before this date are "
+        "included."
+    ),
+)
+@click.option(
+    "-vc",
+    "--verify-checksum",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to verify the data integrity checksum for the target sessions.",
+)
+@click.option(
+    "-rc",
+    "--recompute-checksum",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to recompute (regenerate) the data integrity checksum for the target sessions. "
+        "This overwrites the existing checksum stored in the ax_checksum.txt file for each session."
+    ),
+)
+@click.option(
+    "-d",
+    "--delete",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to delete the target sessions from the user's working directory. If True, checksum "
+        "operations are skipped."
+    ),
+)
+@click.option(
+    "-k",
+    "--keep-job-logs",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to keep completed job logs on the server or (default) remove them after each pipeline "
+        "completes successfully. If the pipeline fails, the job logs are kept regardless of this argument's value."
+    ),
+)
+@click.pass_context
+def manage_sessions(
+    ctx: Any,
+    animal: tuple[str, ...],
+    session: tuple[str, ...],
+    start_date: str | None,
+    end_date: str | None,
+    verify_checksum: bool,
+    recompute_checksum: bool,
+    delete: bool,
+    keep_job_logs: bool,
+) -> None:
+    """Manages the adopted project sessions on the remote compute server.
+
+    This command allows verifying or recomputing the session's data integrity checksum or deleting the adopted
+    session's data from the user's working directory. Use the filtering options to select which sessions to manage.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+
+    # Resolves the path to the manifest file.
+    manifest_path = get_working_directory().joinpath(project, "manifest.feather")
+
+    # If the manifest file does not exist on the local machine, ensures it is fetched from the remote server.
+    if not manifest_path.exists():
+        configuration = get_server_configuration()
+        server = Server(configuration=configuration)
+        resolve_project_manifest(project=project, server=server, generate=False)
+
+    # Loads the manifest file data into memory.
+    manifest = ProjectManifest(manifest_file=manifest_path)
+
+    # Builds the set of all available sessions from the manifest.
+    all_sessions: set[SessionMetadata] = set()
+    for animal_id in manifest.animals:
+        for session_name in manifest.get_sessions(animal=animal_id, exclude_incomplete=False):
+            all_sessions.add(SessionMetadata(session=session_name, animal=animal_id))
+
+    # Applies filtering based on the provided options.
+    filtered_sessions = filter_sessions(
+        sessions=all_sessions,
+        start_date=start_date,
+        end_date=end_date,
+        include_sessions=set(session) if session else None,
+        include_animals=set(animal) if animal else None,
+    )
+
+    # If no sessions match the filter criteria, raises an error.
+    if not filtered_sessions:
+        message = (
+            "No sessions match the specified filtering criteria. Please adjust the filtering options and try again."
+        )
+        console.error(message=message, error=ValueError)
+
+    # Executes the management operation.
+    manage_project_data(
+        manifest_path=manifest_path,
+        project=project,
+        sessions=tuple(filtered_sessions),
+        verify_checksum=verify_checksum,
+        recompute_checksum=recompute_checksum,
+        delete_sessions=delete,
+        keep_job_logs=keep_job_logs,
+    )
