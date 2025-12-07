@@ -405,9 +405,7 @@ def _delete_sessions_for_readoption(
     with tqdm(total=len(sessions), desc="Executing pre-adoption deletion jobs", unit="session") as pbar:
         for session_metadata in sessions:
             # Resolves the path to the session directory using the session metadata directly.
-            session_path = server.user_working_root.joinpath(
-                project, session_metadata.animal, session_metadata.session
-            )
+            session_path = server.user_working_root.joinpath(project, session_metadata.animal, session_metadata.session)
 
             # Resolves the job's name and working directory.
             job_name = f"{session_metadata.session}_preadopt_deletion"
@@ -819,7 +817,7 @@ def manage_project_data(
                 f"Call the data management CLI command with --verify-checksum (-vc), --recompute-checksum (-rc), or "
                 f"--delete (-d) flag to execute the desired management pipeline."
             ),
-            error=RuntimeError
+            error=RuntimeError,
         )
 
     console.echo(message=f"Initializing '{project}' project data management...", level=LogLevel.INFO)
@@ -833,10 +831,7 @@ def manage_project_data(
 
     # SESSION DELETION PIPELINE
     if delete_sessions:
-        console.echo(
-            message="Pipeline: Deletion...",
-            level=LogLevel.INFO
-        )
+        console.echo(message="Pipeline: Deletion...", level=LogLevel.INFO)
         delay_terminal()
 
         # Executes the deletion jobs.
@@ -869,8 +864,7 @@ def manage_project_data(
         for session_metadata, job_status in deletion_results:
             if job_status == JobStatus.COMPLETED:
                 message = (
-                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
-                    f"Deleted."
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': Deleted."
                 )
                 console.echo(message=message, level=LogLevel.SUCCESS)
             else:
