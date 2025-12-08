@@ -3,7 +3,7 @@ intermediate (processed) state. The processed data can then be integrated into a
 the 'forging' package.
 """
 
-from .data_processing import process_project_data
+from .interface import process_project_data
 
 __all__ = [
     "process_project_data",
