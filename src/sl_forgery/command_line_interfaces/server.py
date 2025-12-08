@@ -15,6 +15,8 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
 # Hardcoded SLURM output formats
 SACCT_FORMAT = "JobID,JobName%50,ReqMem,MaxRSS,AveRSS,MaxVMSize,NCPUS,AveCPU,Elapsed,State"
 """The format for the slurm accounting 'sacct' command used to display and evaluate completed job's efficiency."""
+SACCT_HEADERS = ["JobID", "JobName", "ReqMem", "MaxRSS", "AveRSS", "MaxVMSize", "NCPUS", "AveCPU", "Elapsed", "State"]
+"""The headers corresponding to SACCT_FORMAT, used for display after merging rows."""
 SQUEUE_FORMAT = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.12L"
 """The format for the slurm queue 'squeue' command used to display running and pending jobs."""
 
@@ -35,8 +37,12 @@ def _format_slurm_output(raw_output: str) -> str:
     if not lines:
         return "No data available."
 
-    # Parses header and data rows
-    rows = [line.split() for line in lines if line.strip()]
+    # Parses header and data rows, skipping separator lines (lines with only dashes and spaces)
+    rows = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not all(c in "- " for c in stripped):
+            rows.append(stripped.split())
     if not rows:
         return "No data available."
 
@@ -44,7 +50,67 @@ def _format_slurm_output(raw_output: str) -> str:
     headers = rows[0]
     data = rows[1:]
 
-    return tabulate(data, headers=headers, tablefmt="simple")
+    return tabulate(data, headers=headers, tablefmt="simple", colalign=["center"] * len(headers))
+
+
+def _format_sacct_output(raw_output: str) -> str:
+    """Formats raw 'sacct' output (parsable format) into a nicely formatted table with merged rows.
+
+    This function parses pipe-delimited sacct output and merges job rows that share the same base JobID. This
+    handles both standard jobs (where parent rows are followed by .batch step rows) and bash jobs (where multiple
+    rows share the same JobID).
+
+    Args:
+        raw_output: The raw output string from the 'sacct' command with the --parsable2 flag.
+
+    Returns:
+        A formatted string representation of the merged job data.
+    """
+    lines = raw_output.strip().split("\n")
+    if not lines:
+        return "No data available."
+
+    # Parses pipe-delimited rows
+    rows = [line.split("|") for line in lines if line.strip()]
+    if len(rows) < 2:
+        return "No data available."
+
+    # Skips the header row from sacct, uses predefined headers
+    data = rows[1:]
+
+    # Merges rows by base JobID
+    merged_data: list[list[str]] = []
+    parent_jobs: dict[str, list[str]] = {}
+
+    for row in data:
+        if len(row) < 10:
+            continue
+
+        job_id = row[0]
+
+        # Skips extern step rows
+        if ".extern" in job_id:
+            continue
+
+        # Extracts the base job ID (without .batch suffix if present)
+        base_job_id = job_id.split(".")[0]
+
+        if base_job_id in parent_jobs:
+            # Merges this row's non-empty fields into the existing parent row
+            parent_row = parent_jobs[base_job_id]
+            for i in range(len(row[:10])):
+                if row[i] and not parent_row[i]:
+                    parent_row[i] = row[i]
+        else:
+            # First occurrence of this job ID - creates a new entry
+            merged_row = list(row[:10])
+            parent_jobs[base_job_id] = merged_row
+            merged_data.append(merged_row)
+
+    if not merged_data:
+        return "No data available."
+
+    return tabulate(merged_data, headers=SACCT_HEADERS, tablefmt="simple", colalign=["center"] * len(SACCT_HEADERS))
 
 
 @click.group("server", context_settings=CONTEXT_SETTINGS)
@@ -165,29 +231,44 @@ def start_jupyter_server(environment: str, cores: int, memory: int, time: int, p
     default=None,
     help=(
         "Allows filtering the displayed queue and job data to only include the jobs submitted by the specified user. "
-        "Defaults to the username used for the server authentication."
+        "Set to 'all' to display data for all users. Defaults to the username used for the server authentication."
     ),
 )
 @click.option(
-    "-st--start-time",
+    "-jid",
+    "--job-id",
+    type=str,
+    default=None,
+    help="Determines the job for which to display the accounting data. Bypasses user and date filtering options.",
+)
+@click.option(
+    "-st",
+    "--start-time",
     type=str,
     required=False,
     help=(
         "Allows filtering displayed job data to only include the jobs that started on or after this date "
-        "(format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)."
+        "(format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)."
     ),
 )
 @click.option(
-    "-et--end-time",
+    "-et",
+    "--end-time",
     type=str,
     required=False,
     help=(
         "Allows filtering displayed job data to only include the jobs that ended on or before this date "
-        "(format: YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)."
+        "(format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)."
     ),
 )
 def print_slurm_info(
-    *, job_data: bool, queue: bool, user: str | None, start_time: str | None, end_time: str | None
+    *,
+    job_data: bool,
+    queue: bool,
+    user: str | None,
+    job_id: str | None,
+    start_time: str | None,
+    end_time: str | None,
 ) -> None:
     """Displays remote server's SLURM queue status or job data as a formatted table."""
     if not job_data and not queue:
@@ -205,16 +286,32 @@ def print_slurm_info(
     if user is None:
         user = configuration.username
 
+    # Determines whether to display data for all users
+    all_users = user.lower() == "all"
+
     try:
         # Displays sacct output if requested
         if job_data:
-            cmd = f'sacct -u {user} -o "{SACCT_FORMAT}" --units=G'
-            if start_time:
-                cmd += f" --starttime={start_time}"
-            if end_time:
-                cmd += f" --endtime={end_time}"
+            # If a specific job ID is requested, bypasses user and date filtering
+            if job_id is not None:
+                cmd = f'sacct -j {job_id} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                console.echo(message=f"Fetching job accounting data for job ID '{job_id}'...", level=LogLevel.INFO)
+            else:
+                # Builds the command with optional user filtering
+                if all_users:
+                    cmd = f'sacct -a -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                else:
+                    cmd = f'sacct -u {user} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                if start_time:
+                    cmd += f" --starttime={start_time}"
+                if end_time:
+                    cmd += f" --endtime={end_time}"
 
-            console.echo(message=f"Fetching job accounting data for the user '{user}'...", level=LogLevel.INFO)
+                if all_users:
+                    console.echo(message="Fetching job accounting data for all users...", level=LogLevel.INFO)
+                else:
+                    console.echo(message=f"Fetching job accounting data for the user '{user}'...", level=LogLevel.INFO)
+
             result = server.execute_command(command=cmd)
 
             if result.return_code != 0:
@@ -224,8 +321,13 @@ def print_slurm_info(
                 )
 
             if result.stdout.strip():
-                formatted_output = _format_slurm_output(result.stdout)
-                console.echo(message=f"Job accounting (sacct) data for the user '{user}':")
+                formatted_output = _format_sacct_output(result.stdout)
+                if job_id is not None:
+                    console.echo(message=f"Job accounting (sacct) data for job ID '{job_id}':")
+                elif all_users:
+                    console.echo(message="Job accounting (sacct) data for all users:")
+                else:
+                    console.echo(message=f"Job accounting (sacct) data for the user '{user}':")
                 click.echo(formatted_output)
             else:
                 console.echo(
@@ -234,9 +336,13 @@ def print_slurm_info(
 
         # Displays squeue output if requested
         if queue:
-            cmd = f'squeue -o "{SQUEUE_FORMAT}" -u {user}'
+            if all_users:
+                cmd = f'squeue -o "{SQUEUE_FORMAT}"'
+                console.echo(message="Fetching queue status for all users...", level=LogLevel.INFO)
+            else:
+                cmd = f'squeue -o "{SQUEUE_FORMAT}" -u {user}'
+                console.echo(message=f"Fetching queue status for user '{user}'...", level=LogLevel.INFO)
 
-            console.echo(message=f"Fetching queue status for user '{user}'...", level=LogLevel.INFO)
             result = server.execute_command(command=cmd)
 
             if result.return_code != 0:
@@ -247,10 +353,16 @@ def print_slurm_info(
 
             if result.stdout.strip():
                 formatted_output = _format_slurm_output(result.stdout)
-                console.echo(message=f"Queue status (squeue) for the user '{user}':")
+                if all_users:
+                    console.echo(message="Queue status (squeue) for all users:")
+                else:
+                    console.echo(message=f"Queue status (squeue) for the user '{user}':")
                 click.echo(formatted_output)
             else:
-                console.echo(message="No jobs found in the queue for the specified user.", level=LogLevel.WARNING)
+                if all_users:
+                    console.echo(message="No jobs found in the queue.", level=LogLevel.WARNING)
+                else:
+                    console.echo(message="No jobs found in the queue for the specified user.", level=LogLevel.WARNING)
 
     finally:
         server.close()
