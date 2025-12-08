@@ -74,7 +74,7 @@ def generate_manifest(project_path: Path, job_id: str) -> None:
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
     ),
 )
-def resolve_session_checksum(session_path: Path, job_id: str, regenerate_checksum: bool) -> None:
+def resolve_session_checksum(session_path: Path, job_id: str, *, regenerate_checksum: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
@@ -111,7 +111,7 @@ def resolve_session_checksum(session_path: Path, job_id: str, regenerate_checksu
         "path is not provided, this command deletes the source session directory without transferring."
     ),
 )
-def transfer_session_data(source_path: Path, destination_path: Path | None, remove_source: bool) -> None:
+def transfer_session_data(source_path: Path, destination_path: Path | None, *, remove_source: bool) -> None:
     """Transfers the session's data from source to destination or deletes the source session.
 
     This command can be used to move session's data between storage locations or to delete the session data that is no

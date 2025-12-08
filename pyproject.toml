@@ -60,6 +60,7 @@ dependencies = [
     "simple-slurm>=0,<1",
     "natsort-rs>=0,<1",
     "xxhash>=3,<4",
+    "tabulate>=0,<1",
 ]
 
 [project.urls]
@@ -84,12 +85,15 @@ dev = [
     "types-tqdm>=4,<5",
     "types-filelock>=3,<4",
     "types-pytz>=2025,<2026",
+    "types-tabulate>=0,<1",
 ]
 
 # Exports CLIs upon library installation into an environment
 [project.scripts]
 sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
 sl-process = "sl_forgery.command_line_interfaces.process:process_cli"
+sl-execute = "sl_forgery.command_line_interfaces.execute:execute_cli"
+sl-server = "sl_forgery.command_line_interfaces.server:server_cli"
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
