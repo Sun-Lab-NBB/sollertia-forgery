@@ -358,11 +358,10 @@ def print_slurm_info(
                 else:
                     console.echo(message=f"Queue status (squeue) for the user '{user}':")
                 click.echo(formatted_output)
+            elif all_users:
+                console.echo(message="No jobs found in the queue.", level=LogLevel.WARNING)
             else:
-                if all_users:
-                    console.echo(message="No jobs found in the queue.", level=LogLevel.WARNING)
-                else:
-                    console.echo(message="No jobs found in the queue for the specified user.", level=LogLevel.WARNING)
+                console.echo(message="No jobs found in the queue for the specified user.", level=LogLevel.WARNING)
 
     finally:
         server.close()

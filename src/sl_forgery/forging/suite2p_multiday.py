@@ -1,16 +1,13 @@
 from pathlib import Path
 
 from sl_shared_assets import (
-    Job,
-    Server,
+    DatasetTrackers,
     ProcessingStatus,
-    TrackerFileNames,
-    ProcessingPipeline,
+    ProcessingPipelines,
     get_working_directory,
 )
 
-from ..server import get_remote_job_work_directory
-from ..shared_assets import ProcessingPipelines
+from ..server import Job, Server, ProcessingPipeline, get_remote_job_work_directory
 
 
 def _construct_suite2p_multiday_pipeline(
@@ -117,9 +114,9 @@ def _construct_suite2p_multiday_pipeline(
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = Path(server.user_working_root).joinpath(
-        project, dataset_name, str(animal), TrackerFileNames.MULTIDAY
+        project, dataset_name, str(animal), DatasetTrackers.MULTIDAY
     )
-    local_tracker_path = local_working_directory.joinpath(project, dataset_name, str(animal), TrackerFileNames.MULTIDAY)
+    local_tracker_path = local_working_directory.joinpath(project, dataset_name, str(animal), DatasetTrackers.MULTIDAY)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     pipeline = ProcessingPipeline(

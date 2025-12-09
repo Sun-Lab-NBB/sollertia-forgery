@@ -12,7 +12,9 @@ from filelock import FileLock
 from sl_shared_assets import (
     SessionData,
     SessionTypes,
+    ManagingTrackers,
     ProcessingTracker,
+    ProcessingTrackers,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
@@ -22,8 +24,6 @@ from sl_shared_assets import (
     calculate_directory_checksum,
 )
 from ataraxis_base_utilities import LogLevel, console
-
-from ..shared_assets import ManagingTrackers, ProcessingTrackers
 
 if TYPE_CHECKING:
     from pathlib import Path
