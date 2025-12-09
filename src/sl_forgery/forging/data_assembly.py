@@ -834,6 +834,36 @@ def assemble_session_dataset(
         console.error(message=message, error=ValueError)
 
 
+def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
+    """Sets the reference time for aligning session data to the source with the lowest fps.
+
+    Args:
+        session_data_path: The path to the session's processed data directory.
+    """
+    camera_data = session_data_path.joinpath("processed_data", "camera_data")
+    behavior_data = session_data_path.joinpath("processed_data", "behavior_data")
+
+    # Defines the reference timestamps based on available camera timestamp files, starting with the lowest FPS.
+    timestamp_sources = [
+        (camera_data.joinpath("left_camera_timestamps.feather"), "frame_time_us"),
+        (camera_data.joinpath("right_camera_timestamps.feather"), "frame_time_us"),
+        (camera_data.joinpath("face_camera_timestamps.feather"), "frame_time_us"),
+        (behavior_data.joinpath("mesoscope_frame_data.feather"), "time_us"),
+    ]
+
+    for path, column in timestamp_sources:
+        if path.exists():
+            df = pl.read_ipc(path, memory_map=True, use_pyarrow=True)
+            return df[column].to_numpy()
+
+    message = (
+        f"No valid timestamp source found for session {session_data_path.stem}. Valid camera files are "
+        f"left_camera_timestamps.feather, right_camera_timestamps.feather, face_camera_timestamps.feather, "
+        f"or mesoscope_frame_data.feather"
+    )
+    console.error(message=message, error=FileNotFoundError)
+
+
 def assemble_report_dataset(
     session_data_path: Path,
     output_path: Path,
@@ -852,10 +882,8 @@ def assemble_report_dataset(
     with tqdm(
         total=2, desc=f"Assembling session {session_data_path.stem} report dataset", disable=not progress
     ) as pbar:
-        # Uses the face camera timestamps as the reference time vector.
-        face_camera_path = session_data_path.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
-        face_camera_df = pl.read_ipc(face_camera_path, memory_map=True, use_pyarrow=True)
-        reference_time = face_camera_df["frame_time_us"].to_numpy()
+        # Uses the timestamp source with the lowest FPS as the reference time vector.
+        reference_time = _get_reference_time(session_data_path=session_data_path)
 
         # Assembles and saves the behavior and experiment datasets to disk as an uncompressed.feather file (to support
         # memory-mapping).
