@@ -840,15 +840,16 @@ def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
     Args:
         session_data_path: The path to the session's processed data directory.
     """
-    camera_data = session_data_path.joinpath("processed_data", "camera_data")
-    behavior_data = session_data_path.joinpath("processed_data", "behavior_data")
+    processed_data = session_data_path.joinpath("processed_data")
 
-    # Defines the reference timestamps based on available camera timestamp files, starting with the lowest FPS.
+    # Defines the reference timestamps based on available mesoscope or camera timestamp files, starting with the
+    # lowest FPS.
     timestamp_sources = [
-        (camera_data.joinpath("left_camera_timestamps.feather"), "frame_time_us"),
-        (camera_data.joinpath("right_camera_timestamps.feather"), "frame_time_us"),
-        (camera_data.joinpath("face_camera_timestamps.feather"), "frame_time_us"),
-        (behavior_data.joinpath("mesoscope_frame_data.feather"), "time_us"),
+        (processed_data.joinpath("behavior_data", "mesoscope_frame_data.feather"), "time_us"),
+        (processed_data.joinpath("camera_data", "left_camera_timestamps.feather"), "frame_time_us"),
+        (processed_data.joinpath("camera_data", "right_camera_timestamps.feather"), "frame_time_us"),
+        (processed_data.joinpath("camera_data", "face_camera_timestamps.feather"), "frame_time_us"),
+        (processed_data.joinpath("camera_data", "body_camera_timestamps.feather"), "frame_time_us"),
     ]
 
     for path, column in timestamp_sources:
@@ -879,11 +880,30 @@ def assemble_report_dataset(
     # Ensures that the output directory exists.
     ensure_directory_exists(output_path)
 
+    # Resolves the paths to the root data directories.
+    camera_data_path = session_data_path.joinpath("processed_data", "camera_data")
+
     with tqdm(
         total=2, desc=f"Assembling session {session_data_path.stem} report dataset", disable=not progress
     ) as pbar:
         # Uses the timestamp source with the lowest FPS as the reference time vector.
         reference_time = _get_reference_time(session_data_path=session_data_path)
+
+        aligned_data = {}
+
+        # Recursively finds all camera timestamps in the camera_data directory.
+        if camera_data_path.exists():
+            for camera in sorted(camera_data_path.rglob("*_timestamps.feather")):
+                camera_df = pl.read_ipc(camera, use_pyarrow=True, memory_map=True)
+
+                column_name = camera.stem
+
+                aligned_data[column_name] = interpolate_data(
+                    source_coordinates=camera_df["frame_time_us"].to_numpy(),
+                    source_values=camera_df["frame_time_us"].to_numpy(),
+                    target_coordinates=reference_time,
+                    is_discrete=False,
+                )
 
         # Assembles and saves the behavior and experiment datasets to disk as an uncompressed.feather file (to support
         # memory-mapping).
@@ -899,7 +919,9 @@ def assemble_report_dataset(
         )
         pbar.update(1)
 
-    result = pl.concat([behavior_data, experiment_data], how="horizontal")
+    # Combines the aligned camera data with the behavior and experiment data
+    camera_data = pl.DataFrame(aligned_data) if aligned_data else pl.DataFrame()
+    result = pl.concat([behavior_data, experiment_data, camera_data], how="horizontal")
 
     # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
     result = _mask_non_run_experiment_data(result)
