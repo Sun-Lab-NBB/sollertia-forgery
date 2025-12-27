@@ -299,9 +299,7 @@ def generate_project_manifest(
     if job_id is None:
         # LOCAL mode: Generate job ID and initialize tracker.
         console.echo(message="Initializing the manifest processing tracker...")
-        job_id = _initialize_manifest_tracker(
-            project_directory=project_directory, project_name=project_directory.stem
-        )
+        job_id = _initialize_manifest_tracker(project_directory=project_directory, project_name=project_directory.stem)
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(str(manifest_lock))

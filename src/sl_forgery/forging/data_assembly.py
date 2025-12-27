@@ -2,6 +2,7 @@
 dataframe that forms the basis of the Sun lab's analysis dataset hierarchy.
 """
 
+from enum import IntEnum
 from typing import Any
 from pathlib import Path
 from functools import partial
@@ -15,8 +16,18 @@ from numpy.typing import NDArray
 from sl_shared_assets import MesoscopeHardwareState, MesoscopeExperimentConfiguration
 from ataraxis_base_utilities import console, ensure_directory_exists
 
-from .dataset import DatasetTypes
 from ..shared_assets import interpolate_data
+
+
+class DatasetTypes(IntEnum):
+    """Stores the types of datasets currently supported by the Sun lab's data processing workflow."""
+
+    MESOSCOPE_VR_LICK_TRAINING = 1
+    """Mesoscope-VR acquisition system + Lick training session type."""
+    MESOSCOPE_VR_RUN_TRAINING = 2
+    """Mesoscope-VR acquisition system + Run training session type."""
+    MESOSCOPE_VR_EXPERIMENT = 3
+    """Mesoscope-VR acquisition system + Mesoscope Experiment session type."""
 
 
 def _add_sls2p_fluorescence_column(

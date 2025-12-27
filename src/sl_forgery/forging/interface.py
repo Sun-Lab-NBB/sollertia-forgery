@@ -6,6 +6,7 @@ remote compute server.
 from typing import TYPE_CHECKING
 
 from sl_shared_assets import (
+    DatasetData,
     SessionTypes,
     DatasetTrackers,
     ProcessingTracker,
@@ -144,6 +145,88 @@ def _construct_suite2p_multiday_pipeline(
         local_tracker_path=local_tracker_path,
         session=dataset_name,
         animal=animal,
+        project=project,
+        keep_job_logs=keep_job_logs,
+    )
+
+
+def _construct_data_assembly_pipeline(
+    dataset: DatasetData,
+    project: str,
+    server: Server,
+    *,
+    target_session: str | None = None,
+    keep_job_logs: bool = False,
+) -> ProcessingPipeline:
+    """Generates and returns the ProcessingPipeline instance used to execute the data assembly pipeline for the target
+    dataset's sessions.
+
+    Args:
+        dataset: The initialized DatasetData instance that stores the dataset's metadata.
+        project: The name of the project for which to execute the target processing pipeline.
+        server: The Server class instance that manages access to the remote server that executes the pipeline and
+            stores the target session's data.
+        target_session: If provided, limits the pipeline to assemble only the specified session.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
+            value.
+
+    Returns:
+        The configured ProcessingPipeline instance for the data assembly pipeline.
+    """
+    # Resolves the path to the local Sun lab working directory.
+    local_working_directory = get_working_directory()
+
+    # Resolves dataset and session paths.
+    remote_dataset_path = server.user_working_root.joinpath(project, dataset.name)
+    session_data_root = server.user_working_root.joinpath(project)
+
+    # Collects the session names from the dataset.
+    session_names = [s.session for s in dataset.sessions]
+    if target_session is not None:
+        session_names = [target_session]
+
+    # Extracts the first animal from the dataset for pipeline metadata.
+    first_animal = dataset.animals[0] if dataset.animals else "unknown"
+
+    # Precreates the iterable to store the assembly jobs (single stage pipeline).
+    stage_1 = []
+
+    # Creates an assembly job for each session.
+    for session in session_names:
+        job_name = f"{dataset.name}_{ProcessingPipelines.FORGING}_session_{session}"
+        job_id = ProcessingTracker.generate_job_id(session_path=remote_dataset_path, job_name=job_name)
+        working_directory = get_remote_job_work_directory(
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING
+        )
+        server.create(remote_path=working_directory, is_dir=True)
+        job = Job(
+            job_name=job_name,
+            output_log=working_directory.joinpath("output.txt"),
+            error_log=working_directory.joinpath("errors.txt"),
+            working_directory=working_directory,
+            conda_environment="forge",
+            cpu_threads=8,
+            ram=32,
+            time=60,
+        )
+        job.add_command(f"slf forge -dp {remote_dataset_path} -sdr {session_data_root} -id {job_id} -t {session}")
+        stage_1.append((job, working_directory))
+
+    # Resolves the paths to the local and remote job tracker files.
+    remote_tracker_path = remote_dataset_path.joinpath(DatasetTrackers.FORGING)
+    local_tracker_path = local_working_directory.joinpath(project, dataset.name, DatasetTrackers.FORGING)
+
+    # Packages job data into a ProcessingPipeline object and returns it to the caller.
+    return ProcessingPipeline(
+        pipeline=ProcessingPipelines.FORGING,
+        server=server,
+        data_path=remote_dataset_path,
+        jobs={1: tuple(stage_1)},
+        remote_tracker_path=remote_tracker_path,
+        local_tracker_path=local_tracker_path,
+        session=dataset.name,
+        animal=first_animal,
         project=project,
         keep_job_logs=keep_job_logs,
     )
