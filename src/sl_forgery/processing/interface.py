@@ -108,7 +108,7 @@ def _construct_behavior_processing_pipeline(
             ram=4,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 1 runtime")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
         # Face camera processing job
@@ -127,11 +127,11 @@ def _construct_behavior_processing_pipeline(
             ram=90,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 51 camera")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
-        # Left camera processing job
-        job_name = f"{session}_left_camera_processing"
+        # Body camera processing job
+        job_name = f"{session}_body_camera_processing"
         job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
         working_directory = get_remote_job_work_directory(
             server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
@@ -146,26 +146,7 @@ def _construct_behavior_processing_pipeline(
             ram=60,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 62 camera")
-        stage_1.append((job, working_directory))
-
-        # Right camera processing job
-        job_name = f"{session}_right_camera_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
-        working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
-        )
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath("output.txt"),
-            error_log=working_directory.joinpath("errors.txt"),
-            working_directory=working_directory,
-            conda_environment="forge",
-            cpu_threads=30,
-            ram=60,
-            time=90,
-        )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 73 camera")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
         # Actor microcontroller data processing job
@@ -184,7 +165,7 @@ def _construct_behavior_processing_pipeline(
             ram=10,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 101 microcontroller")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
         # Sensor microcontroller data processing job
@@ -203,7 +184,7 @@ def _construct_behavior_processing_pipeline(
             ram=60,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 152 microcontroller")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
         # Encoder microcontroller data processing job
@@ -222,7 +203,7 @@ def _construct_behavior_processing_pipeline(
             ram=200,
             time=90,
         )
-        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -l 203 microcontroller")
+        job.add_command(f"sl-behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
@@ -327,12 +308,12 @@ def _construct_suite2p_processing_pipeline(
         ram=10,
         time=180,
     )
-    job.add_command(f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} -id {job_id} -b")
+    job.add_command(f"ss2p run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -b")
     stage_1.append((job, working_directory))
 
     # Stage 2: Plane processing
     for plane in range(plane_count):
-        job_name = f"{session}_ss2p_plane_{plane}"
+        job_name = f"{session}_ss2p_processing_plane_{plane}"
         job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
         working_directory = get_remote_job_work_directory(
             server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
@@ -349,7 +330,7 @@ def _construct_suite2p_processing_pipeline(
             time=180,
         )
         job.add_command(
-            f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} -id {job_id} -p -t {plane}"
+            f"ss2p run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -p -t {plane}"
         )
         stage_2.append((job, working_directory))
 
@@ -370,7 +351,7 @@ def _construct_suite2p_processing_pipeline(
         ram=30,
         time=180,
     )
-    job.add_command(f"ss2p run {configuration_command} -w -1 sl-single-day -sp {remote_session_path} -id {job_id} -c")
+    job.add_command(f"ss2p run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -c")
     stage_3.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
