@@ -12,6 +12,7 @@ from secrets import randbelow
 import tempfile
 import threading
 import contextlib
+from dataclasses import dataclass
 
 import paramiko
 from ataraxis_time import PrecisionTimer, TimerPrecisions
@@ -24,6 +25,21 @@ if TYPE_CHECKING:
     from paramiko.client import SSHClient
     from sl_shared_assets import ServerConfiguration
     from paramiko.sftp_client import SFTPClient
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    """Stores the result of executing a command on the remote server.
+
+    Attributes:
+        stdout: The standard output from the command.
+        stderr: The standard error output from the command.
+        return_code: The exit code of the command (0 indicates success).
+    """
+
+    stdout: str
+    stderr: str
+    return_code: int
 
 
 def get_remote_job_work_directory(server: Server, job_name: str, pipeline_name: str) -> Path:
@@ -819,6 +835,22 @@ class Server:
             FileNotFoundError: If the directory does not exist.
         """
         return self._sftp.listdir(str(remote_path))
+
+    def execute_command(self, command: str) -> CommandResult:
+        """Executes the specified command on the remote server and returns the result.
+
+        Args:
+            command: The shell command to execute on the remote server.
+
+        Returns:
+            A CommandResult instance containing stdout, stderr, and the return code of the executed command.
+        """
+        _, stdout, stderr = self._client.exec_command(command)
+        return CommandResult(
+            stdout=stdout.read().decode(),
+            stderr=stderr.read().decode(),
+            return_code=stdout.channel.recv_exit_status(),
+        )
 
     def close(self) -> None:
         """Closes the SFTP and SSH connections to the server."""

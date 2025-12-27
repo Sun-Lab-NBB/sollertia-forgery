@@ -1,15 +1,14 @@
-"""This module provides the Command Line Interfaces (CLIs) used to work with the data of any Sun lab project stored
-on the remote compute server.
+"""This module provides the Command Line Interfaces (CLIs) used to interact with the project's stored on the Sun lab's
+remote compute server. These interfaces allow fetching and displaying the project's data and processing state snapshots
+and 'adopting' the shared project's data for further processing by the calling user.
 """
 
-from typing import Any
-
 import click
-from sl_shared_assets import get_working_directory, get_server_configuration
+from sl_shared_assets import get_server_configuration
 from ataraxis_base_utilities import console
 
 from ..server import Server
-from ..managing import resolve_project_manifest
+from ..managing import adopt_project, resolve_project_manifest
 from ..shared_assets import ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
@@ -25,7 +24,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     required=True,
     help="The name of the project to work with.",
 )
-def project_cli(ctx: Any, project: str) -> None:
+def project_cli(ctx: click.Context, project: str) -> None:
     """This Command-Line Interface (CLI) group allows working with Sun lab projects stored on the remote compute server.
 
     This CLI group is intended to be called on user machines as part of the shared Sun lab data workflow interface.
@@ -34,38 +33,6 @@ def project_cli(ctx: Any, project: str) -> None:
     """
     ctx.ensure_object(dict)
     ctx.obj["project"] = project
-
-
-@project_cli.command("update")
-@click.option(
-    "-rm",
-    "--regenerate-manifest",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to regenerate the manifest file on the remote server before fetching it it to the local "
-        "working directory."
-    ),
-)
-@click.pass_context
-def update_manifest(ctx: Any, regenerate_manifest: bool) -> None:
-    """Actualizes the target project's manifest file stored on the local machine.
-
-    The project manifest file communicates the current state of the project's data stored on the remote server, which
-    informs all other pipelines accessible from this library on how to interact with the project's data. This command
-    ensures that the local copy of the manifest file reflects the current state of the project's data stored on the
-    remote compute server.
-    """
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-
-    # Establishes SSH connection to the processing server.
-    configuration = get_server_configuration()
-    server = Server(configuration=configuration)
-
-    # Resolves the project manifest file.
-    resolve_project_manifest(project=project, server=server, generate=regenerate_manifest)
 
 
 @project_cli.command("print")
@@ -101,19 +68,27 @@ def update_manifest(ctx: Any, regenerate_manifest: bool) -> None:
         "for tracking the data processing state of each data acquisition session conducted for the target project."
     ),
 )
+@click.option(
+    "-r",
+    "--regenerate",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to regenerate the manifest file on the remote server before fetching it. Use this option "
+        "to ensure the manifest reflects the latest state of the project's data on the server."
+    ),
+)
 @click.pass_context
 def print_project_manifest_data(
-    ctx: Any,
+    ctx: click.Context,
+    *,
     animal: str | None,
     notes: bool,
     summary: bool,
+    regenerate: bool,
 ) -> None:
-    """Prints the requested data from the target project's manifest file to the terminal as a formatted table.
-
-    This command is designed to inform the user about the current state of the project's data stored on the remote
-    server. It is recommended to always call the 'sl-project update' command before calling this command to ensure that
-    the local manifest file contains up-to-date information.
-    """
+    """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
     # Retrieves shared context data.
     project = ctx.obj["project"]
 
@@ -124,18 +99,14 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # Resolves the path to the manifest file
-    manifest_path = get_working_directory().joinpath(project, "manifest.feather")
+    # Establishes SSH connection to the processing server.
+    configuration = get_server_configuration()
+    server = Server(configuration=configuration)
 
-    # If the manifest file does not exist on the local machine, ensures it is fetched from the remote server before
-    # continuing with this command.
-    if not manifest_path.exists():
-        # Establishes SSH connection to the processing server using the user account credentials.
-        configuration = get_server_configuration()
-        server = Server(configuration=configuration)
-        resolve_project_manifest(project=project, server=server, generate=False)
+    # Always fetches the manifest from the server. Regenerates if requested or if manifest doesn't exist.
+    manifest_path = resolve_project_manifest(project=project, server=server, generate=regenerate)
 
-    # Loads the manifest file data into memory
+    # Loads the manifest file data into memory.
     manifest = ProjectManifest(manifest_file=manifest_path)
 
     # Ensures that the specified animal exists in the manifest data.
@@ -146,10 +117,53 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # If requested, prints the experimenter note view of the manifest data
+    # If requested, prints the experimenter note view of the manifest data.
     if notes:
         manifest.print_notes(animal=animal)
 
-    # If requested, prints the data processing view of the manifest data
+    # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
+
+
+@project_cli.command("adopt")
+@click.option(
+    "-r",
+    "--repeat-adoption",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to re-adopt sessions that have already been adopted. If False (default), already-adopted "
+        "sessions are skipped during the adoption stage."
+    ),
+)
+@click.option(
+    "-k",
+    "--keep-job-logs",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to keep completed job logs on the server or (default) remove them after each pipeline "
+        "completes successfully. If the pipeline fails, the job logs are kept regardless of this argument's value."
+    ),
+)
+@click.pass_context
+def adopt_project_data(ctx: click.Context, *, repeat_adoption: bool, keep_job_logs: bool) -> None:
+    """Discovers and adopts all unadopted project sessions from the remote compute server.
+
+    This command scans the project's directory on the shared server's volume, identifies sessions that have not yet
+    been adopted (copied to the user's working directory), and executes the adoption pipeline followed by the data
+    integrity verification pipeline. Adopting the project's session data in this way is the prerequisite for running
+    all further processing and analysis workflows.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+
+    # Executes the adoption process.
+    adopt_project(
+        project=project,
+        repeat_adoption=repeat_adoption,
+        keep_job_logs=keep_job_logs,
+    )

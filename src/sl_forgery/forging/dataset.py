@@ -387,7 +387,7 @@ class ProjectData:
             # Additional filtering: excludes sessions not ready for dataset integration:
 
             # These processing tasks must be carried out for all session types
-            readiness_conditions = [pl.col("prepared") == 1, pl.col("behavior") == 1]
+            readiness_conditions = [pl.col("integrity") == 1, pl.col("behavior") == 1]
 
             # Mesoscope experiment also requires the 'suite2p' processing
             if self._manifest.session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
@@ -406,8 +406,8 @@ class ProjectData:
                     session_name = row["session"]
                     missing_steps = []
 
-                    if row["prepared"] == 0:
-                        missing_steps.append("prepared")
+                    if row["integrity"] == 0:
+                        missing_steps.append("integrity")
                     if row["behavior"] == 0:
                         missing_steps.append("behavior")
                     if self._manifest.session_type == SessionTypes.MESOSCOPE_EXPERIMENT and row["suite2p"] == 0:

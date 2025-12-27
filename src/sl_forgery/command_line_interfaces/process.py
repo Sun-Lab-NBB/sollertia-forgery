@@ -39,10 +39,14 @@ def process_cli() -> None:
     "-id",
     "--job-id",
     type=str,
-    required=True,
-    help="The unique identifier of this processing job.",
+    default=None,
+    help=(
+        "The unique hexadecimal identifier for the processing job to execute. If provided, the job is executed "
+        "using the specified ID. If not provided, the job ID is generated internally and the tracker is "
+        "initialized automatically."
+    ),
 )
-def generate_manifest(project_path: Path, job_id: str) -> None:
+def generate_manifest(project_path: Path, job_id: str | None) -> None:
     """Generates the manifest .feather file that captures the snapshot of the target project's state."""
     generate_project_manifest(
         project_directory=project_path,
@@ -62,8 +66,12 @@ def generate_manifest(project_path: Path, job_id: str) -> None:
     "-id",
     "--job-id",
     type=str,
-    required=True,
-    help="The unique identifier of this processing job.",
+    default=None,
+    help=(
+        "The unique hexadecimal identifier for the processing job to execute. If provided, the job is executed "
+        "using the specified ID. If not provided, the job ID is generated internally and the tracker is "
+        "initialized automatically."
+    ),
 )
 @click.option(
     "-rc",
@@ -74,7 +82,7 @@ def generate_manifest(project_path: Path, job_id: str) -> None:
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
     ),
 )
-def resolve_session_checksum(session_path: Path, job_id: str, regenerate_checksum: bool) -> None:
+def resolve_session_checksum(session_path: Path, job_id: str | None, *, regenerate_checksum: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
@@ -111,7 +119,7 @@ def resolve_session_checksum(session_path: Path, job_id: str, regenerate_checksu
         "path is not provided, this command deletes the source session directory without transferring."
     ),
 )
-def transfer_session_data(source_path: Path, destination_path: Path | None, remove_source: bool) -> None:
+def transfer_session_data(source_path: Path, destination_path: Path | None, *, remove_source: bool) -> None:
     """Transfers the session's data from source to destination or deletes the source session.
 
     This command can be used to move session's data between storage locations or to delete the session data that is no

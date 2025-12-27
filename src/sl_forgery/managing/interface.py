@@ -5,12 +5,13 @@ Sun lab's remote compute servers.
 from typing import TYPE_CHECKING
 
 from tqdm import tqdm
-from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sl_shared_assets import (
     SessionTypes,
+    ManagingTrackers,
     ProcessingStatus,
     ProcessingTracker,
     AcquisitionSystems,
+    ProcessingPipelines,
     delete_directory,
     get_working_directory,
     get_server_configuration,
@@ -21,8 +22,6 @@ from ..server import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_
 from ..shared_assets import (
     ProjectManifest,
     SessionMetadata,
-    ManagingTrackers,
-    ProcessingPipelines,
     delay_timer,
     delay_terminal,
     execute_pipelines,
@@ -156,7 +155,6 @@ def _generate_remote_manifest(
     job = server.submit_job(job=job, verbose=False)
 
     # Waits for the server to complete the job.
-    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
     message = f"Waiting for the manifest generation job with ID {job.job_id} to complete..."
     console.echo(message=message, level=LogLevel.INFO)
     while server.get_job_status(slurm_job_id=int(job.job_id)) in (JobStatus.PENDING, JobStatus.RUNNING):
@@ -251,7 +249,7 @@ def _execute_adoption_jobs(
     """
     results: list[tuple[SessionMetadata, JobStatus]] = []
 
-    with tqdm(total=len(sessions), desc="Executing adoption jobs", unit="session") as pbar:
+    with tqdm(total=len(sessions), desc="Executing session adoption jobs", unit="session") as pbar:
         for session_metadata in sessions:
             # Resolves the source and destination paths. Limits the adoption process to the raw_data directory.
             source_path = server.shared_storage_root.joinpath(
@@ -279,6 +277,154 @@ def _execute_adoption_jobs(
                 time=60,
             )
             job.add_command(f"sl-process transfer -sp {source_path} -dp {destination_path}")
+
+            # Submits the job to the server.
+            job = server.submit_job(job=job, verbose=False)
+
+            # Waits for the job to complete.
+            while True:
+                job_status = server.get_job_status(slurm_job_id=int(job.job_id))
+                if job_status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                    break
+                delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+
+            # Records the outcome for this session.
+            results.append((session_metadata, job_status))
+
+            # Removes job logs if configured to do so and the job completed successfully.
+            if job_status == JobStatus.COMPLETED and not keep_job_logs:
+                server.remove(remote_path=working_directory, recursive=True, is_dir=True)
+
+            pbar.update()
+
+    return tuple(results)
+
+
+def _delete_remote_session_data(
+    manifest: ProjectManifest,
+    sessions: list[SessionMetadata],
+    project: str,
+    server: Server,
+    *,
+    keep_job_logs: bool = False,
+    poll_delay: int = 10,
+) -> tuple[tuple[SessionMetadata, JobStatus], ...]:
+    """Deletes the specified sessions from the user's working directory.
+
+    This function generates and submits the session data deletion jobs using SLURM and verifies that they successfully
+    delete the target sessions.
+
+    Args:
+        manifest: The ProjectManifest instance that stores the processed project's metadata.
+        sessions: The list of SessionMetadata instances that define the sessions to delete.
+        project: The name of the project containing the sessions.
+        server: The Server instance used to communicate with the remote compute server.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job fails, its logs are kept regardless of this argument's value.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of (SessionMetadata, JobStatus) pairs representing the outcome of each deletion job.
+    """
+    results: list[tuple[SessionMetadata, JobStatus]] = []
+
+    with tqdm(total=len(sessions), desc="Executing session deletion jobs", unit="session") as pbar:
+        for session_metadata in sessions:
+            # Resolves the path to the session directory using the manifest.
+            animal = manifest.get_animal_for_session(session=session_metadata.session)
+            session_path = server.user_working_root.joinpath(project, animal, session_metadata.session)
+
+            # Resolves the job's name and working directory.
+            job_name = f"{session_metadata.session}_deletion"
+            working_directory = get_remote_job_work_directory(
+                server=server, job_name=job_name, pipeline_name=ProcessingPipelines.ADOPTION
+            )
+
+            # Creates and configures the deletion job.
+            job = Job(
+                job_name=job_name,
+                output_log=working_directory.joinpath("output.txt"),
+                error_log=working_directory.joinpath("errors.txt"),
+                working_directory=working_directory,
+                conda_environment="forge",
+                cpu_threads=1,
+                ram=4,
+                time=30,
+            )
+            job.add_command(f"sl-process transfer -sp {session_path} -rm")
+
+            # Submits the job to the server.
+            job = server.submit_job(job=job, verbose=False)
+
+            # Waits for the job to complete.
+            while True:
+                job_status = server.get_job_status(slurm_job_id=int(job.job_id))
+                if job_status not in (JobStatus.PENDING, JobStatus.RUNNING):
+                    break
+                delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+
+            # Records the outcome for this session.
+            results.append((session_metadata, job_status))
+
+            # Removes job logs if configured to do so and the job completed successfully.
+            if job_status == JobStatus.COMPLETED and not keep_job_logs:
+                server.remove(remote_path=working_directory, recursive=True, is_dir=True)
+
+            pbar.update()
+
+    return tuple(results)
+
+
+def _delete_sessions_for_readoption(
+    sessions: list[SessionMetadata],
+    project: str,
+    server: Server,
+    *,
+    keep_job_logs: bool = False,
+    poll_delay: int = 10,
+) -> tuple[tuple[SessionMetadata, JobStatus], ...]:
+    """Deletes existing session data to prepare for clean re-adoption.
+
+    This function is similar to _delete_remote_session_data but does not require a manifest, as the animal IDs are
+    already available from the discovery phase. It is used during the adoption process when re-adopting sessions that
+    were previously adopted.
+
+    Args:
+        sessions: The list of SessionMetadata instances that define the sessions to delete before re-adoption.
+        project: The name of the project containing the sessions.
+        server: The Server instance used to communicate with the remote compute server.
+        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
+            runtime. If any job fails, its logs are kept regardless of this argument's value.
+        poll_delay: The delay (in seconds) between polling the server for job status updates.
+
+    Returns:
+        A tuple of (SessionMetadata, JobStatus) pairs representing the outcome of each deletion job.
+    """
+    results: list[tuple[SessionMetadata, JobStatus]] = []
+
+    with tqdm(total=len(sessions), desc="Executing pre-adoption deletion jobs", unit="session") as pbar:
+        for session_metadata in sessions:
+            # Resolves the path to the session directory using the session metadata directly.
+            session_path = server.user_working_root.joinpath(project, session_metadata.animal, session_metadata.session)
+
+            # Resolves the job's name and working directory.
+            job_name = f"{session_metadata.session}_preadopt_deletion"
+            working_directory = get_remote_job_work_directory(
+                server=server, job_name=job_name, pipeline_name=ProcessingPipelines.ADOPTION
+            )
+
+            # Creates and configures the deletion job.
+            job = Job(
+                job_name=job_name,
+                output_log=working_directory.joinpath("output.txt"),
+                error_log=working_directory.joinpath("errors.txt"),
+                working_directory=working_directory,
+                conda_environment="forge",
+                cpu_threads=1,
+                ram=4,
+                time=30,
+            )
+            job.add_command(f"sl-process transfer -sp {session_path} -rm")
 
             # Submits the job to the server.
             job = server.submit_job(job=job, verbose=False)
@@ -406,7 +552,7 @@ def adopt_project(
 ) -> None:
     """Discovers and adopts all unadopted project's sessions from the remote compute server's shared storage directory.
 
-    This function acts as the entry point for adopting project data for further processing and analysis. It scans the
+    This function serves as the entry point for adopting project data for further processing and analysis. It scans the
     project's directory on the shared server's volume, identifies sessions that have not yet been adopted (copied to the
     user's working directory), and executes the adoption pipeline followed by the data integrity verification
     pipeline for each session.
@@ -434,8 +580,10 @@ def adopt_project(
     discovered_sessions = _discover_adoption_candidates(project=project, server=server)
 
     # Builds the list of sessions that need to be adopted by filtering out already-adopted sessions. If session
-    # discovery did not yield any sessions, this loop is skipped, producing an empty list.
+    # discovery did not yield any sessions, this loop is skipped, producing an empty list. Sessions that are being
+    # re-adopted are tracked separately to allow for pre-adoption deletion.
     sessions_to_adopt: list[SessionMetadata] = []
+    sessions_to_readopt: list[SessionMetadata] = []
     skipped_sessions: list[SessionMetadata] = []
     for session_metadata in tqdm(discovered_sessions, desc="Resolving adoption tasks", unit="task"):
         # Checks if the session has already been adopted by verifying the presence of the session's data and the
@@ -444,17 +592,22 @@ def adopt_project(
         checksum_file_path = server.user_working_root.joinpath(
             project, session_metadata.animal, session_metadata.session, "raw_data", "ax_checksum.txt"
         )
+        is_already_adopted = server.exists(remote_path=checksum_file_path)
 
         # Unless the function is instructed to repeat the adoption process, skips reprocessing already adopted sessions.
-        if server.exists(remote_path=checksum_file_path) and not repeat_adoption:
+        if is_already_adopted and not repeat_adoption:
             skipped_sessions.append(session_metadata)
             continue
 
-        sessions_to_adopt.append(session_metadata)
+        # Tracks sessions requiring re-adoption separately - they will need pre-adoption deletion.
+        if is_already_adopted and repeat_adoption:
+            sessions_to_readopt.append(session_metadata)
+        else:
+            sessions_to_adopt.append(session_metadata)
 
-    # If all sessions are already adopted, ends the runtime early.
+    # If all sessions are already adopted and re-adoption is not requested, ends the runtime early.
     delay_terminal()
-    if not sessions_to_adopt:
+    if not sessions_to_adopt and not sessions_to_readopt:
         console.echo(
             message=(
                 f"All {len(discovered_sessions)} '{project}' project's sessions are already adopted. Processing: "
@@ -464,8 +617,32 @@ def adopt_project(
         )
         return
 
-    # STAGE 1: ADOPTION
-    console.echo(message="Stage 1: Adoption.", level=LogLevel.INFO)
+    # STAGE 1: PRE-ADOPTION CLEANUP (only for sessions being re-adopted)
+    # Deletes existing session data before re-adoption to ensure a clean slate.
+    deletion_failed_sessions: list[SessionMetadata] = []
+    if sessions_to_readopt:
+        console.echo(message="Stage 1: Pre-Adoption Cleanup...", level=LogLevel.INFO)
+        delay_terminal()
+
+        deletion_results = _delete_sessions_for_readoption(
+            sessions=sessions_to_readopt,
+            project=project,
+            server=server,
+            keep_job_logs=keep_job_logs,
+            poll_delay=10,
+        )
+
+        # Only proceed with adoption for sessions where deletion succeeded.
+        for session_metadata, job_status in deletion_results:
+            if job_status == JobStatus.COMPLETED:
+                sessions_to_adopt.append(session_metadata)
+            else:
+                deletion_failed_sessions.append(session_metadata)
+
+        delay_terminal()
+
+    # STAGE 2: ADOPTION
+    console.echo(message="Stage 2: Adoption...", level=LogLevel.INFO)
     delay_terminal()
 
     # Executes adoption jobs sequentially (batch size of 1)
@@ -478,8 +655,8 @@ def adopt_project(
     )
     delay_terminal()
 
-    # STAGE 2: INTEGRITY VERIFICATION
-    console.echo(message="Stage 2: Integrity Verification", level=LogLevel.INFO)
+    # STAGE 3: INTEGRITY VERIFICATION
+    console.echo(message="Stage 3: Integrity Verification...", level=LogLevel.INFO)
     delay_terminal()
 
     # Refreshes the user-specific project manifest file and pulls it to the local machine. Following the adoption
@@ -534,13 +711,15 @@ def adopt_project(
     # Determines the runtime's outcome
     total_adoption_successful = sum(1 for _, status in adoption_results if status == JobStatus.COMPLETED)
     total_adoption_failed = len(adoption_results) - total_adoption_successful
+    total_deletion_failed = len(deletion_failed_sessions)
     total_skipped = len(skipped_sessions)
 
     # Displays the overall processing summary message
     delay_terminal()
     message = (
         f"Project '{project}': Adopted. Successfully completed {total_checksum_successful} pipelines, "
-        f"failed {total_adoption_failed + total_checksum_failed} pipelines, skipped {total_skipped} sessions. "
+        f"failed {total_adoption_failed + total_checksum_failed + total_deletion_failed} pipelines, "
+        f"skipped {total_skipped} sessions. "
         f"The details about the processing outcome for each session are available below:"
     )
     console.echo(message=message, level=LogLevel.INFO)
@@ -586,6 +765,14 @@ def adopt_project(
         )
         console.echo(message=message, level=LogLevel.INFO)
 
+    # Prints sessions where pre-adoption deletion failed (blocked from re-adoption)
+    for session_metadata in deletion_failed_sessions:
+        message = (
+            f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
+            f"Pre-adoption deletion failed, re-adoption aborted."
+        )
+        console.echo(message=message, level=LogLevel.ERROR)
+
     console.echo(message="Adoption: Complete.", level=LogLevel.SUCCESS)
 
 
@@ -599,11 +786,11 @@ def manage_project_data(
     delete_sessions: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
-    """Manages adopted session data by verifying/recomputing checksums or deleting sessions.
+    """Resolves and executes the necessary data management pipelines for the target project.
 
-    This function provides management operations for sessions that have already been adopted to the user's working
-    directory. It operates on a pre-filtered tuple of sessions and allows the user to either verify/recompute the
-    data integrity checksum or delete the target sessions.
+    This function allows managing the sessions adopted by the user for further processing. Specifically, it can be used
+    to either verify or recompute the session's data integrity checksum or to delete the adopted session's data from the
+    user's working directory.
 
     Notes:
         The verify_checksum/recompute_checksum operations and delete_sessions operation are mutually exclusive.
@@ -611,113 +798,96 @@ def manage_project_data(
 
     Args:
         manifest_path: The path to the project's manifest .feather file.
-        project: The name of the project to manage.
-        sessions: A tuple of SessionMetadata instances representing the pre-filtered sessions to manage.
+        project: The name of the project whose data to manage.
+        sessions: A tuple of SessionMetadata instances defining the project's sessions to manage.
         verify_checksum: Determines whether to verify the data integrity checksum for the target sessions.
         recompute_checksum: Determines whether to recompute (regenerate) the data integrity checksum for the target
-            sessions. This overwrites the existing checksum stored in ax_checksum.txt.
+            sessions. This overwrites the existing checksum stored in the ax_checksum.txt file for each session.
         delete_sessions: Determines whether to delete the target sessions from the user's working directory.
             If True, checksum operations are skipped.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             each pipeline completes successfully. If the pipeline fails, the job logs are kept regardless of this
             argument's value.
     """
-    if not sessions:
-        console.echo(
-            message=f"No sessions provided for project '{project}'. Management: Aborted.",
-            level=LogLevel.WARNING,
-        )
-        return
-
-    # Validates that at least one operation is requested
+    # Ensures that the caller has specified the processing pipeline to execute.
     if not verify_checksum and not recompute_checksum and not delete_sessions:
-        console.echo(
+        console.error(
             message=(
-                f"No management operation specified for project '{project}'. "
-                f"Use --verify-checksum, --recompute-checksum, or --delete-sessions."
+                f"Unable to manage the '{project}' project's data, as no management pipeline was selected. "
+                f"Call the data management CLI command with --verify-checksum (-vc), --recompute-checksum (-rc), or "
+                f"--delete (-d) flag to execute the desired management pipeline."
             ),
-            level=LogLevel.WARNING,
+            error=RuntimeError,
         )
-        return
 
-    console.echo(message=f"Initializing project '{project}' data management...", level=LogLevel.INFO)
+    console.echo(message=f"Initializing '{project}' project data management...", level=LogLevel.INFO)
 
     # Establishes SSH connection to the processing server.
     configuration = get_server_configuration()
     server = Server(configuration=configuration)
 
-    # Initializes a delay timer to support better visual separation of terminal printouts
-    delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
-
-    # Loads the manifest data
+    # Loads the project's manifest data.
     manifest = ProjectManifest(manifest_file=manifest_path)
 
-    # DELETE SESSIONS OPERATION
+    # SESSION DELETION PIPELINE
     if delete_sessions:
-        console.echo(message="Operation: Session Deletion", level=LogLevel.INFO)
-        delay_timer.delay(delay=1, allow_sleep=True, block=False)
+        console.echo(message="Pipeline: Deletion...", level=LogLevel.INFO)
+        delay_terminal()
 
-        deleted_count = 0
-        failed_count = 0
+        # Executes the deletion jobs.
+        deletion_results = _delete_remote_session_data(
+            manifest=manifest,
+            sessions=list(sessions),
+            project=project,
+            server=server,
+            keep_job_logs=keep_job_logs,
+            poll_delay=10,
+        )
+        delay_terminal()
 
-        for session_metadata in tqdm(sessions, desc="Deleting sessions", unit="session"):
-            # Resolves the path to the session directory in the user's working directory
-            session_path = server.user_working_root.joinpath(project, session_metadata.animal, session_metadata.session)
-
-            # Checks if the session exists before attempting deletion
-            if not server.exists(remote_path=session_path):
-                console.echo(
-                    message=(
-                        f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}' "
-                        f"does not exist in the user's working directory. Skipping."
-                    ),
-                    level=LogLevel.WARNING,
-                )
-                continue
-
-            try:
-                # Deletes the session directory using the server's remove method
-                server.remove(remote_path=session_path, recursive=True, is_dir=True)
-                console.echo(
-                    message=(
-                        f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
-                        f"Deleted."
-                    ),
-                    level=LogLevel.SUCCESS,
-                )
-                deleted_count += 1
-            except Exception as e:
-                console.echo(
-                    message=(
-                        f"Failed to delete session '{session_metadata.session}' performed by animal "
-                        f"'{session_metadata.animal}': {e}"
-                    ),
-                    level=LogLevel.ERROR,
-                )
-                failed_count += 1
-
-        delay_timer.delay(delay=1, allow_sleep=True, block=False)
-
-        # Refreshes the manifest to reflect deletions
+        # Refreshes the locally stored manifest file to reflect the processing outcome.
         resolve_project_manifest(project=project, server=server, generate=True)
 
-        # Displays the deletion summary
-        message = f"Project '{project}' session deletion: Complete. Deleted: {deleted_count}, Failed: {failed_count}."
+        # Calculates the deletion outcome statistics.
+        total_deleted = sum(1 for _, status in deletion_results if status == JobStatus.COMPLETED)
+        total_failed = len(deletion_results) - total_deleted
+
+        # Displays the overall deletion summary message.
+        delay_terminal()
+        message = (
+            f"Project '{project}' session deletion: Complete. Deleted: {total_deleted}, Failed: {total_failed}. "
+            f"The details about the processing outcome for each session are available below:"
+        )
         console.echo(message=message, level=LogLevel.INFO)
+
+        # Prints detailed results for each deletion job.
+        for session_metadata, job_status in deletion_results:
+            if job_status == JobStatus.COMPLETED:
+                message = (
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': Deleted."
+                )
+                console.echo(message=message, level=LogLevel.SUCCESS)
+            else:
+                message = (
+                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
+                    f"Failed to be deleted (SLURM status: {job_status})."
+                )
+                console.echo(message=message, level=LogLevel.ERROR)
+
         console.echo(message="Management: Complete.", level=LogLevel.SUCCESS)
         return
 
-    # CHECKSUM VERIFICATION/RECOMPUTATION OPERATION
+    # CHECKSUM VERIFICATION/RECOMPUTATION PIPELINE
     console.echo(
-        message=f"Operation: Checksum {'Recomputation' if recompute_checksum else 'Verification'}",
+        message=f"Pipeline: Integrity {'Recomputation' if recompute_checksum else 'Verification'}...",
         level=LogLevel.INFO,
     )
-    delay_timer.delay(delay=1, allow_sleep=True, block=False)
+    delay_terminal()
 
-    # Constructs checksum pipelines for all input sessions (sessions are pre-filtered and come from the manifest).
-    # Tracks both successfully constructed pipelines and exclusion reasons for sessions that couldn't be processed.
+    # Constructs checksum processing pipelines for all processed sessions. Tracks both successfully constructed
+    # pipelines and exclusion reasons for sessions that couldn't be processed.
     checksum_pipelines: list[ProcessingPipeline] = []
-    checksum_exclusions: dict[str, tuple[SessionMetadata, str]] = {}  # Maps session name to (metadata, reason)
+    checksum_exclusions: dict[str, tuple[SessionMetadata, str]] = {}  # Maps session names to (metadata, reason)
 
     for session_metadata in tqdm(sessions, desc="Resolving the checksum processing graph", unit="session"):
         result = _construct_checksum_resolution_pipeline(
@@ -734,15 +904,7 @@ def manage_project_data(
         else:
             checksum_pipelines.append(result)
 
-    if not checksum_pipelines and not checksum_exclusions:
-        message = (
-            f"All target sessions for project '{project}' have been excluded from checksum processing. "
-            f"Management: Aborted."
-        )
-        console.echo(message=message, level=LogLevel.WARNING)
-        return
-
-    # Executes checksum pipelines sequentially (batch size of 1)
+    # Executes checksum pipelines sequentially.
     total_successful = 0
     total_failed = 0
     if checksum_pipelines:
@@ -751,24 +913,25 @@ def manage_project_data(
             stage_name="checksum",
             poll_delay=5,
         )
-        delay_timer.delay(delay=1, allow_sleep=True, block=False)
+        delay_terminal()
 
-        # Refreshes the manifest to include verification results
+        # Refreshes the manifest to include the processing results.
         resolve_project_manifest(project=project, server=server, generate=True)
 
-    # Creates a visual separation before the final summary
-    delay_timer.delay(delay=1, allow_sleep=True, block=False)
+    # Creates a visual separation before the final summary.
+    delay_terminal()
 
-    # Displays the overall processing summary message
+    # Displays the overall processing summary message.
     operation_name = "recomputation" if recompute_checksum else "verification"
     total_excluded = len(checksum_exclusions)
     message = (
         f"Project '{project}' checksum {operation_name}: Complete. "
-        f"Succeeded: {total_successful}, Failed: {total_failed}, Excluded: {total_excluded}."
+        f"Processed: {total_successful}, Failed: {total_failed}, Excluded: {total_excluded}. "
+        f"The details about the processing outcome for each session are available below:"
     )
     console.echo(message=message, level=LogLevel.INFO)
 
-    # Prints detailed results for checksum pipelines
+    # Prints detailed results for checksum pipelines.
     for pipeline in checksum_pipelines:
         if pipeline.pipeline_status == ProcessingStatus.FAILED:
             message = (

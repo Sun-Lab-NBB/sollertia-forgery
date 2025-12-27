@@ -1,6 +1,7 @@
 """This module provides the assets for managing Sun lab session data stored on remote compute servers and
 generating snapshots of the lab's research project's states. Assets from this module form the foundation for all
-other data processing and analysis pipelines available from this library.
+other data processing and analysis pipelines available from this library. The pipeline supports both local and remote
+processing modes.
 """
 
 from typing import TYPE_CHECKING
@@ -12,7 +13,10 @@ from filelock import FileLock
 from sl_shared_assets import (
     SessionData,
     SessionTypes,
+    ManagingTrackers,
     ProcessingTracker,
+    ProcessingTrackers,
+    ProcessingPipelines,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
@@ -23,10 +27,92 @@ from sl_shared_assets import (
 )
 from ataraxis_base_utilities import LogLevel, console
 
-from ..shared_assets import ManagingTrackers, ProcessingTrackers
-
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _generate_checksum_job_id(session_path: Path, session_name: str) -> str:
+    """Generates a unique processing job identifier for the checksum resolution job.
+
+    Args:
+        session_path: The path to the session's data directory.
+        session_name: The unique identifier of the session being processed.
+
+    Returns:
+        The generated job ID for the checksum job.
+    """
+    job_name = f"{session_name}_{ProcessingPipelines.CHECKSUM}"
+    return ProcessingTracker.generate_job_id(session_path=session_path, job_name=job_name)
+
+
+def _initialize_checksum_tracker(session_path: Path, session_name: str) -> str:
+    """Initializes the processing tracker file for the checksum resolution job.
+
+    Notes:
+        This function is used to process the data in the 'local' processing mode. During remote data processing, the
+        tracker file is pre-generated before submitting the processing job to the remote compute server.
+
+    Args:
+        session_path: The path to the session's data directory.
+        session_name: The unique identifier of the session being processed.
+
+    Returns:
+        The generated job ID for the checksum job.
+    """
+    session_data = SessionData.load(session_path=session_path)
+
+    # Initializes the processing tracker for this job.
+    tracker = ProcessingTracker(
+        file_path=session_data.tracking_data.tracking_data_path.joinpath(ManagingTrackers.CHECKSUM)
+    )
+
+    # Generates the job ID.
+    job_id = _generate_checksum_job_id(session_path=session_path, session_name=session_name)
+
+    # Initializes the job in the tracker file.
+    tracker.initialize_jobs(job_ids=[job_id])
+
+    return job_id
+
+
+def _generate_manifest_job_id(project_directory: Path, project_name: str) -> str:
+    """Generates a unique processing job identifier for the manifest generation job.
+
+    Args:
+        project_directory: The path to the project's root directory.
+        project_name: The name of the project being processed.
+
+    Returns:
+        The generated job ID for the manifest job.
+    """
+    job_name = f"{project_name}_{ProcessingPipelines.MANIFEST}"
+    return ProcessingTracker.generate_job_id(session_path=project_directory, job_name=job_name)
+
+
+def _initialize_manifest_tracker(project_directory: Path, project_name: str) -> str:
+    """Initializes the processing tracker file for the manifest generation job.
+
+    Notes:
+        This function is used to process the data in the 'local' processing mode. During remote data processing, the
+        tracker file is pre-generated before submitting the processing job to the remote compute server.
+
+    Args:
+        project_directory: The path to the project's root directory.
+        project_name: The name of the project being processed.
+
+    Returns:
+        The generated job ID for the manifest job.
+    """
+    # Initializes the processing tracker for this job.
+    tracker = ProcessingTracker(file_path=project_directory.joinpath(ManagingTrackers.MANIFEST))
+
+    # Generates the job ID.
+    job_id = _generate_manifest_job_id(project_directory=project_directory, project_name=project_name)
+
+    # Initializes the job in the tracker file.
+    tracker.initialize_jobs(job_ids=[job_id])
+
+    return job_id
 
 
 def transfer_session(
@@ -83,20 +169,18 @@ def transfer_session(
 
 def resolve_checksum(
     session_path: Path,
-    job_id: str,
+    job_id: str | None = None,
     *,
     regenerate_checksum: bool = False,
 ) -> None:
     """Generates the checksum of the session's raw_data directory and either compares it against the checksum stored in
     the ax_checksum.txt file or overwrites the checksum stored in the file.
 
-    Notes:
-        Primarily, this function is used to verify the integrity of the session's data before running unsupervised data
-        processing pipelines.
-
     Args:
         session_path: The path to the root data directory of the session to be processed.
-        job_id: The unique identifier of this processing job.
+        job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the job
+            matching this ID is executed. If not provided, the job ID is generated internally and the tracker is
+            initialized automatically.
         regenerate_checksum: Determines whether to update the checksum stored in the ax_checksum.txt file instead of
             verifying its integrity.
     """
@@ -107,6 +191,12 @@ def resolve_checksum(
     tracker = ProcessingTracker(
         file_path=session_data.tracking_data.tracking_data_path.joinpath(ManagingTrackers.CHECKSUM)
     )
+
+    # Determines the execution mode based on whether job_id is provided.
+    if job_id is None:
+        # LOCAL mode: Generate job ID and initialize tracker.
+        console.echo(message="Initializing the checksum processing tracker...")
+        job_id = _initialize_checksum_tracker(session_path=session_path, session_name=session_data.session_name)
 
     # Marks the job as running.
     tracker.start_job(job_id=job_id)
@@ -149,17 +239,15 @@ def resolve_checksum(
 
 def generate_project_manifest(
     project_directory: Path,
-    job_id: str,
+    job_id: str | None = None,
 ) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
-    Notes:
-        The manifest file is primarily used to capture and move project's state information between machines, typically
-        in the context of working with data stored on a remote compute server or cluster.
-
     Args:
         project_directory: The path to the processed project's root directory.
-        job_id: The unique identifier of this processing job.
+        job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the job
+            matching this ID is executed. If not provided, the job ID is generated internally and the tracker is
+            initialized automatically.
     """
     if not project_directory.exists():
         message = (
@@ -207,11 +295,18 @@ def generate_project_manifest(
     # Also instantiates the processing tracker for the manifest file in the same directory.
     runtime_tracker = ProcessingTracker(file_path=project_directory.joinpath(ManagingTrackers.MANIFEST))
 
+    # Determines the execution mode based on whether job_id is provided.
+    if job_id is None:
+        # LOCAL mode: Generate job ID and initialize tracker.
+        console.echo(message="Initializing the manifest processing tracker...")
+        job_id = _initialize_manifest_tracker(
+            project_directory=project_directory, project_name=project_directory.stem
+        )
+
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
-        # Initializes the tracker with the job and marks it as running.
-        runtime_tracker.initialize_jobs(job_ids=[job_id])
+        # Marks the job as running.
         runtime_tracker.start_job(job_id=job_id)
         try:
             # Loops over each session of every animal in the project and extracts session ID information and
