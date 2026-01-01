@@ -41,9 +41,8 @@ def process_cli() -> None:
     type=str,
     default=None,
     help=(
-        "The unique hexadecimal identifier for the processing job to execute. If provided, the job is executed "
-        "using the specified ID. If not provided, the job ID is generated internally and the tracker is "
-        "initialized automatically."
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
+        "(remote mode)."
     ),
 )
 def generate_manifest(project_path: Path, job_id: str | None) -> None:
@@ -68,9 +67,8 @@ def generate_manifest(project_path: Path, job_id: str | None) -> None:
     type=str,
     default=None,
     help=(
-        "The unique hexadecimal identifier for the processing job to execute. If provided, the job is executed "
-        "using the specified ID. If not provided, the job ID is generated internally and the tracker is "
-        "initialized automatically."
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
+        "(remote mode)."
     ),
 )
 @click.option(

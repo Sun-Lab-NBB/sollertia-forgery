@@ -3,12 +3,14 @@ remote compute server. These interfaces allow fetching and displaying the projec
 and 'adopting' the shared project's data for further processing by the calling user.
 """
 
+from pathlib import Path
+
 import click
 from sl_shared_assets import get_server_configuration
 from ataraxis_base_utilities import console
 
 from ..server import Server
-from ..managing import adopt_project, resolve_project_manifest
+from ..managing import adopt_project, resolve_project_manifest, generate_project_manifest
 from ..shared_assets import ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
@@ -21,18 +23,33 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     "-p",
     "--project",
     type=str,
-    required=True,
-    help="The name of the project to work with.",
+    required=False,
+    help="The name of the server-stored project to work with (remote mode).",
 )
-def project_cli(ctx: click.Context, project: str) -> None:
-    """This Command-Line Interface (CLI) group allows working with Sun lab projects stored on the remote compute server.
+@click.option(
+    "-pp",
+    "--project-path",
+    type=click.Path(exists=True, path_type=Path),
+    required=False,
+    help="The path to the locally stored project directory to work with (local mode).",
+)
+def project_cli(ctx: click.Context, project: str | None, project_path: Path | None) -> None:
+    """This Command-Line Interface (CLI) group allows working with Sun lab projects.
 
     This CLI group is intended to be called on user machines as part of the shared Sun lab data workflow interface.
     Primarily, commands from this CLI group are intended to be used as entry-points for all further interactions with
-    the target project's data.
+    the target project's data stored on the lab's remote compute server. Some commands also allow working with the data
+    stored locally on the user's host-machine.
     """
+    # Validates mutual exclusivity of project and project_path options.
+    if project and project_path:
+        console.error(message="Cannot specify both --project and --project-path.", error=ValueError)
+    if not project and not project_path:
+        console.error(message="Must specify either --project or --project-path.", error=ValueError)
+
     ctx.ensure_object(dict)
     ctx.obj["project"] = project
+    ctx.obj["project_path"] = project_path
 
 
 @project_cli.command("print")
@@ -91,29 +108,40 @@ def print_project_manifest_data(
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
     # Retrieves shared context data.
     project = ctx.obj["project"]
+    project_path = ctx.obj["project_path"]
 
     if not summary and not notes:
         message = (
             "No data display options were selected when calling the command. Pass either the 'notes' (-n), "
-            "'summary' (-s), or both flags when calling the command to display the data using the target format."
+            "'summary' (-s), or both flags when calling the command."
         )
         console.error(message=message, error=ValueError)
 
-    # Establishes SSH connection to the processing server.
-    configuration = get_server_configuration()
-    server = Server(configuration=configuration)
+    # Determines the execution mode based on whether project_path is provided.
+    if project_path is not None:
+        # LOCAL MODE: Loads manifest directly from the local project directory.
+        manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
 
-    # Always fetches the manifest from the server. Regenerates if requested or if manifest doesn't exist.
-    manifest_path = resolve_project_manifest(project=project, server=server, generate=regenerate)
+        # Regenerates the manifest locally if requested or if it doesn't exist.
+        if regenerate or not manifest_path.exists():
+            generate_project_manifest(project_directory=project_path)
 
-    # Loads the manifest file data into memory.
-    manifest = ProjectManifest(manifest_file=manifest_path)
+        manifest = ProjectManifest(manifest_file=manifest_path)
+    else:
+        # REMOTE MODE: Fetches the manifest from the server.
+        configuration = get_server_configuration()
+        server = Server(configuration=configuration)
+
+        # Fetches the manifest from the server. Regenerates if requested or if manifest doesn't exist.
+        manifest_path = resolve_project_manifest(project=project, server=server, generate=regenerate)
+        manifest = ProjectManifest(manifest_file=manifest_path)
 
     # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
+        project_name = project if project else project_path.stem
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
-            f"target project '{project}'."
+            f"target project '{project_name}'."
         )
         console.error(message=message, error=ValueError)
 
@@ -156,10 +184,22 @@ def adopt_project_data(ctx: click.Context, *, repeat_adoption: bool, keep_job_lo
     This command scans the project's directory on the shared server's volume, identifies sessions that have not yet
     been adopted (copied to the user's working directory), and executes the adoption pipeline followed by the data
     integrity verification pipeline. Adopting the project's session data in this way is the prerequisite for running
-    all further processing and analysis workflows.
+    all further processing and analysis workflows on the remote compute server. This command is not necessary to
+    run the processing in the local processing mode.
     """
     # Retrieves shared context data.
     project = ctx.obj["project"]
+    project_path = ctx.obj["project_path"]
+
+    # Blocks local mode for the adopt command.
+    if project_path is not None:
+        message = (
+            "The 'adopt' command is only available in the 'remote' mode. Local processing mode does not require "
+            "adopting the data to support the full range of processing offered by the Sun lab's data workflow."
+            "To runt he command in the remote processing mode, use the '--project' argument instead of the "
+            "'--project-path' argument to specify the target project."
+        )
+        console.error(message=message, error=ValueError)
 
     # Executes the adoption process.
     adopt_project(
