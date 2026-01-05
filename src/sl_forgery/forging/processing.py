@@ -7,33 +7,67 @@ from typing import TYPE_CHECKING
 
 from sl_shared_assets import (
     DatasetData,
+    SessionData,
     SessionTypes,
     DatasetTrackers,
     SessionMetadata,
     ProcessingTracker,
-    AcquisitionSystems,
     ProcessingPipelines,
 )
 from ataraxis_base_utilities import LogLevel, console
 
 from .data_assembly import DatasetTypes, assemble_session_dataset
-from ..shared_assets import filter_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _generate_forging_job_id(dataset_path: Path, job_name: str) -> str:
-    """Generates a unique processing job identifier for the dataset forging pipeline job.
+def define_dataset(
+    name: str,
+    sessions: tuple[SessionMetadata, ...],
+    project_root: Path,
+) -> DatasetData:
+    """Creates a new analysis dataset and initializes it's data hierarchy.
+
+    Notes:
+        The dataset is created under the project's root directory, at the same level as animal directories. Sessions
+        should be pre-filtered before being passed to this function. The project name, session type, and acquisition
+        system are derived from the project root path and the first session's metadata.
 
     Args:
-        dataset_path: The path to the dataset's root directory.
-        job_name: The name of the job for which to generate the ID.
+        name: The unique name for the dataset.
+        sessions: The SessionMetadata instances representing the sessions to include in the dataset.
+        project_root: The path to the project's root directory where the dataset hierarchy should be created.
 
     Returns:
-        The generated job ID for the forging job.
+        An initialized DatasetData instance that stores the structure and metadata of the created dataset.
     """
-    return ProcessingTracker.generate_job_id(session_path=dataset_path, job_name=job_name)
+    # Derives the project name from the project's root directory path.
+    project = project_root.name
+
+    # Derives session type and acquisition system from the first session's metadata.
+    first_session_path = project_root.joinpath(sessions[0].animal, sessions[0].session)
+    first_session_data = SessionData.load(session_path=first_session_path)
+
+    # Creates the dataset using the DatasetData class from sl-shared-assets.
+    dataset = DatasetData.create(
+        name=name,
+        project=project,
+        session_type=first_session_data.session_type,
+        acquisition_system=first_session_data.acquisition_system,
+        sessions=sessions,
+        datasets_root=project_root,
+    )
+
+    console.echo(
+        message=(
+            f"Dataset's '{name}' data hierarchy: Defined with {len(sessions)} sessions from {len(dataset.animals)} "
+            f"animals."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+
+    return dataset
 
 
 def _initialize_forging_tracker(dataset_path: Path, dataset_name: str, session_names: list[str]) -> dict[str, str]:
@@ -58,7 +92,7 @@ def _initialize_forging_tracker(dataset_path: Path, dataset_name: str, session_n
     job_ids: dict[str, str] = {}
     for session in session_names:
         job_name = f"{dataset_name}_{ProcessingPipelines.FORGING}_session_{session}"
-        job_ids[job_name] = _generate_forging_job_id(dataset_path=dataset_path, job_name=job_name)
+        job_ids[job_name] = ProcessingTracker.generate_job_id(session_path=dataset_path, job_name=job_name)
 
     # Initializes all jobs in the tracker file.
     tracker.initialize_jobs(job_ids=list(job_ids.values()))
@@ -66,45 +100,42 @@ def _initialize_forging_tracker(dataset_path: Path, dataset_name: str, session_n
     return job_ids
 
 
-def _execute_session_assembly(
+def _execute_session_data_assembly(
     dataset: DatasetData,
     session_name: str,
-    session_data_root: Path,
+    project_root: Path,
     job_id: str,
     tracker: ProcessingTracker,
     *,
     progress: bool,
 ) -> None:
-    """Executes the data assembly for a single session.
+    """Assembles the target session's processed data into the session-specific dataset .feather file.
 
     Args:
-        dataset: The initialized DatasetData instance that stores the dataset's metadata.
-        session_name: The name of the session to assemble.
-        session_data_root: The path to the root directory that stores the session data directories.
+        dataset: The initialized DatasetData instance that stores the assembled dataset's metadata.
+        session_name: The name of the session whose data to assemble.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
         job_id: The unique hexadecimal identifier for this processing job.
         tracker: The ProcessingTracker instance used to track the pipeline's runtime status.
         progress: Determines whether to display the assembly progress via a terminal progress bar.
 
     Raises:
-        ValueError: If the session is not found in the dataset or the session type is not supported.
+        ValueError: If the session type is not supported.
     """
-    console.echo(message=f"Running assembly job for session '{session_name}' with ID {job_id}...")
+    console.echo(message=f"Running the data assembly job with ID {job_id} for the session '{session_name}'...")
     tracker.start_job(job_id=job_id)
 
     try:
-        # Finds the session metadata.
-        session_meta = next((s for s in dataset.sessions if s.session == session_name), None)
-        if session_meta is None:
-            message = f"Session '{session_name}' not found in the dataset."
-            console.error(message=message, error=ValueError)
+        # Finds the session's metadata.
+        session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
 
-        # Resolves paths.
+        # Resolves the paths to all filesystem components used in the data assembly process.
         dataset_path = dataset.dataset_data_path.parent
-        session_data_path = session_data_root.joinpath(session_meta.animal, session_name)
-        multiday_path = dataset_path.joinpath(session_meta.animal, session_name)
-        output_path = dataset.get_session_data(animal=session_meta.animal, session=session_name).data_path
+        session_data_path = project_root.joinpath(session_metadata.animal, session_name)
+        multiday_path = dataset_path.joinpath(session_metadata.animal, session_name)
+        output_path = dataset.get_session_data(animal=session_metadata.animal, session=session_name).data_path
 
-        # Determines the dataset type based on the session type.
+        # Determines the dataset type based on the processed session type.
         if dataset.session_type == SessionTypes.MESOSCOPE_EXPERIMENT:
             dataset_type = DatasetTypes.MESOSCOPE_VR_EXPERIMENT
         elif dataset.session_type == SessionTypes.RUN_TRAINING:
@@ -112,10 +143,15 @@ def _execute_session_assembly(
         elif dataset.session_type == SessionTypes.LICK_TRAINING:
             dataset_type = DatasetTypes.MESOSCOPE_VR_LICK_TRAINING
         else:
-            message = f"Unsupported session type '{dataset.session_type}' for dataset assembly."
+            message = (
+                f"Unable to assemble the '{dataset.name}' dataset, as it uses an unsupported type of data acquisition "
+                f"sessions '{dataset.session_type}'."
+            )
             console.error(message=message, error=ValueError)
+            # Fallback to appease mypy, should not be reachable
+            raise ValueError(message)  # pragma: no cover
 
-        # Runs the assembly.
+        # Runs the session's data assembly pipeline.
         assemble_session_dataset(
             session_data_path=session_data_path,
             session_multiday_path=multiday_path,
@@ -125,96 +161,16 @@ def _execute_session_assembly(
         )
 
         tracker.complete_job(job_id=job_id)
-        console.echo(message=f"Session '{session_name}' assembly completed.", level=LogLevel.SUCCESS)
+        console.echo(message=f"Session '{session_name}' data assembly: Complete.", level=LogLevel.SUCCESS)
 
     except Exception:
         tracker.fail_job(job_id=job_id)
         raise
 
 
-def define_dataset(
-    name: str,
-    project: str,
-    session_type: SessionTypes,
-    acquisition_system: AcquisitionSystems,
-    sessions: set[SessionMetadata],
-    datasets_root: Path,
-    *,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    include_sessions: set[str] | None = None,
-    exclude_sessions: set[str] | None = None,
-    include_animals: set[str] | None = None,
-    exclude_animals: set[str] | None = None,
-) -> DatasetData:
-    """Creates a new analysis dataset by filtering the provided sessions and initializing the dataset hierarchy.
-
-    This function applies the filtering rules to the provided sessions using the filter_sessions utility from
-    shared_assets, then creates a new DatasetData instance with the filtered sessions. The dataset's directory
-    structure is created on disk.
-
-    Args:
-        name: The unique name for the dataset.
-        project: The name of the project from which the dataset's sessions originate.
-        session_type: The type of data acquisition sessions included in the dataset.
-        acquisition_system: The name of the data acquisition system used to acquire all sessions included in the
-            dataset.
-        sessions: The set of SessionMetadata instances representing the sessions to be filtered and included.
-        datasets_root: The path to the root directory where the dataset hierarchy should be created.
-        start_date: The start date for the date range filter. Sessions recorded on or after this date are included.
-        end_date: The end date for the date range filter. Sessions recorded on or before this date are included.
-        include_sessions: A set of session names to include regardless of the date range.
-        exclude_sessions: A set of session names to exclude from the results.
-        include_animals: A set of animal names to include. If specified, only sessions from these animals are
-            considered.
-        exclude_animals: A set of animal names to exclude. Sessions from these animals are removed from the results.
-
-    Returns:
-        An initialized DatasetData instance that stores the structure and metadata of the created dataset.
-
-    Raises:
-        ValueError: If no sessions pass the filtering criteria.
-    """
-    # Applies the filtering rules using the shared_assets filter_sessions utility.
-    filtered_sessions = filter_sessions(
-        sessions=sessions,
-        start_date=start_date,
-        end_date=end_date,
-        include_sessions=include_sessions,
-        exclude_sessions=exclude_sessions,
-        include_animals=include_animals,
-        exclude_animals=exclude_animals,
-        utc_timezone=True,
-    )
-
-    # Ensures at least one session passed the filtering.
-    if not filtered_sessions:
-        message = f"Unable to create the '{name}' dataset. No sessions passed the filtering criteria."
-        console.error(message=message, error=ValueError)
-
-    # Creates the dataset using the DatasetData class from sl-shared-assets.
-    dataset = DatasetData.create(
-        name=name,
-        project=project,
-        session_type=session_type,
-        acquisition_system=acquisition_system,
-        sessions=filtered_sessions,
-        datasets_root=datasets_root,
-    )
-
-    console.echo(
-        message=(
-            f"Created dataset '{name}' with {len(filtered_sessions)} sessions from {len(dataset.animals)} animals."
-        ),
-        level=LogLevel.SUCCESS,
-    )
-
-    return dataset
-
-
 def assemble_dataset(
     dataset: DatasetData,
-    session_data_root: Path,
+    project_root: Path,
     job_id: str | None = None,
     *,
     target_session: str | None = None,
@@ -227,7 +183,7 @@ def assemble_dataset(
 
     Args:
         dataset: The initialized DatasetData instance that stores the dataset's metadata.
-        session_data_root: The path to the root directory that stores the session data directories.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
         job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the job
             matching this ID is executed. If not provided, all requested jobs are run sequentially with automatic
             tracker management.
@@ -278,10 +234,10 @@ def assemble_dataset(
         session_name = job_name.split("_session_")[-1]
 
         # Runs the assembly for the single session.
-        _execute_session_assembly(
+        _execute_session_data_assembly(
             dataset=dataset,
             session_name=session_name,
-            session_data_root=session_data_root,
+            project_root=project_root,
             job_id=job_id,
             tracker=tracker,
             progress=progress,
@@ -297,10 +253,10 @@ def assemble_dataset(
             job_name = f"{dataset.name}_{ProcessingPipelines.FORGING}_session_{session_name}"
             session_job_id = job_ids[job_name]
 
-            _execute_session_assembly(
+            _execute_session_data_assembly(
                 dataset=dataset,
                 session_name=session_name,
-                session_data_root=session_data_root,
+                project_root=project_root,
                 job_id=session_job_id,
                 tracker=tracker,
                 progress=progress,

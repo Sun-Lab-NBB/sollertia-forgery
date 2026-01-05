@@ -416,7 +416,7 @@ def process_project_data(
             pipeline. Note; for mesoscope recordings this number is equal to the number of ROI(s) (stripes) * the number
             of z-planes. This argument is only used if the 'process_suite2p' argument is set to True.
         processing_batch_size: The number of processing pipelines that can be submitted to the remote compute server at
-            a time. These pipelines are primarily limited by the available RAM / CPU resources.
+            the same time.
     """
     # Ensures that the caller has specified the processing pipeline to execute.
     if not process_behavior and not process_suite2p:

@@ -2,6 +2,7 @@
 tools from the 'processing' package.
 """
 
+from .interface import forge_dataset
 from .processing import define_dataset, assemble_dataset
 from .data_assembly import DatasetTypes, assemble_session_dataset
 
@@ -10,4 +11,5 @@ __all__ = [
     "assemble_dataset",
     "assemble_session_dataset",
     "define_dataset",
+    "forge_dataset",
 ]

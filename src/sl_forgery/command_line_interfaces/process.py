@@ -6,12 +6,12 @@ library components and should not be called directly by the end-users.
 from pathlib import Path
 
 import click
+from sl_shared_assets import DatasetData
+from ataraxis_base_utilities import console
 
-from ..managing.processing import (
-    resolve_checksum,
-    transfer_session,
-    generate_project_manifest,
-)
+from ..shared_assets import SessionMetadata
+from ..forging.processing import define_dataset, assemble_dataset
+from ..managing.processing import resolve_checksum, transfer_session, generate_project_manifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -127,4 +127,114 @@ def transfer_session_data(source_path: Path, destination_path: Path | None, *, r
         source_path=source_path,
         destination_path=destination_path,
         remove_source=remove_source,
+    )
+
+
+@process_cli.command("define")
+@click.option(
+    "-dn",
+    "--dataset-name",
+    type=str,
+    required=True,
+    help="The unique name for the dataset to create.",
+)
+@click.option(
+    "-pr",
+    "--project-root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The path to the root directory of the project for which to create the dataset.",
+)
+@click.option(
+    "-s",
+    "--session",
+    type=str,
+    multiple=True,
+    required=True,
+    help=(
+        "The session to include in the dataset specified using the 'session_name:animal_name' format. This argument "
+        "can be specified multiple times to include multiple sessions."
+    ),
+)
+def define_dataset_command(
+    dataset_name: str,
+    project_root: Path,
+    session: tuple[str, ...],
+) -> None:
+    """Defines a new analysis dataset by creating its data hierarchy and metadata files."""
+    # Parses the session specifications into SessionMetadata instances.
+    sessions: list[SessionMetadata] = []
+    expected_parts = 2
+    for session_spec in session:
+        parts = session_spec.split(":")
+        if len(parts) != expected_parts:
+            message = (
+                f"Invalid session specification '{session_spec}' encountered when defining the '{dataset_name}' "
+                f"analysis dataset's data hierarchy. All session entries must follow the 'session_name:animal_name' "
+                f"format."
+            )
+            console.error(message=message, error=ValueError)
+        sessions.append(SessionMetadata(session=parts[0], animal=parts[1]))
+
+    # Creates the dataset hierarchy and metadata files.
+    define_dataset(
+        name=dataset_name,
+        sessions=tuple(sessions),
+        project_root=project_root,
+    )
+
+
+@process_cli.command("assemble")
+@click.option(
+    "-dp",
+    "--dataset-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The path to the dataset's root directory (containing dataset_data.yaml).",
+)
+@click.option(
+    "-pr",
+    "--project-root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The path to the project's root directory that stores the animal and session data directories.",
+)
+@click.option(
+    "-id",
+    "--job-id",
+    type=str,
+    default=None,
+    help=(
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
+        "(remote mode)."
+    ),
+)
+@click.option(
+    "-t",
+    "--target-session",
+    type=str,
+    default=None,
+    help="If provided, limits the assembly to the specified session only.",
+)
+def assemble_dataset_command(
+    dataset_path: Path,
+    project_root: Path,
+    job_id: str | None,
+    target_session: str | None,
+) -> None:
+    """Assembles forged data for the target dataset's sessions.
+
+    This command reads the dataset metadata and assembles each session's data into a unified data.feather file
+    within the dataset hierarchy.
+    """
+    # Loads the dataset's metadata.
+    dataset = DatasetData.load(dataset_path=dataset_path)
+
+    # Runs the assembly.
+    assemble_dataset(
+        dataset=dataset,
+        project_root=project_root,
+        job_id=job_id,
+        target_session=target_session,
+        progress=True,
     )
