@@ -69,6 +69,7 @@ def check_session_eligibility(
     requires_configuration = False
     requires_integrity = True
     requires_suite2p = False
+    requires_behavior = False
     if pipeline == ProcessingPipelines.CHECKSUM:
         processed = integrity
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
@@ -88,6 +89,10 @@ def check_session_eligibility(
     elif pipeline == ProcessingPipelines.FORGING:
         # Forging pipeline performs internal checks for available data and adjusts its runtime accordingly
         processed = False  # Determined by the tracker check below
+    elif pipeline == ProcessingPipelines.REPORT:
+        # Report pipeline requires behavior processing to be completed first
+        processed = False  # Report can always be regenerated
+        requires_behavior = True
     else:
         return (
             f"The pipeline '{pipeline}' is not supported. "
@@ -122,6 +127,13 @@ def check_session_eligibility(
         return (
             "The session has not been processed with the single-day suite2p pipeline. "
             "Run the SUITE2P pipeline first to extract calcium fluorescence data."
+        )
+
+    # For the REPORT pipeline, the session must have been processed with the BEHAVIOR pipeline first.
+    if requires_behavior and not bool(session_data["behavior"][0]):
+        return (
+            "The session has not been processed with the behavior pipeline. "
+            "Run the BEHAVIOR pipeline first to process behavior data."
         )
 
     # If the session has already been processed and reprocessing is not allowed, skips processing the session.

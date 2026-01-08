@@ -18,7 +18,7 @@ from sl_shared_assets import (
 )
 from ataraxis_base_utilities import LogLevel, console
 
-from .data_assembly import DatasetTypes, assemble_session_dataset
+from .data_assembly import DatasetTypes, assemble_report_dataset, assemble_session_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -262,3 +262,82 @@ def assemble_dataset(
                 tracker=tracker,
                 progress=progress,
             )
+
+
+def _initialize_report_tracker(session_path: Path, session_name: str) -> str:
+    """Initializes the processing tracker for the report assembly job.
+
+    Notes:
+        This function is used in LOCAL processing mode. During remote data processing, the tracker file is pre-generated
+        before submitting the processing jobs to the remote compute server.
+
+    Args:
+        session_path: The path to the session's data directory.
+        session_name: The name of the session being processed.
+
+    Returns:
+        The generated job ID for the report assembly job.
+    """
+    # Resolves the tracker path within the session's tracking_data directory.
+    tracker_path = session_path.joinpath("tracking_data", "report_tracker.yaml")
+
+    # Initializes the processing tracker for this pipeline.
+    tracker = ProcessingTracker(file_path=tracker_path)
+
+    # Generates the job ID for the report assembly job.
+    job_name = f"{session_name}_report_assembly"
+    job_id = ProcessingTracker.generate_job_id(session_path=session_path, job_name=job_name)
+
+    # Initializes the job in the tracker file.
+    tracker.initialize_jobs(job_ids=[job_id])
+
+    return job_id
+
+
+def assemble_report_data(
+    session_path: Path,
+    job_id: str | None = None,
+    *,
+    progress: bool = False,
+) -> None:
+    """Assembles a report dataset for the target session.
+
+    This function generates a behavior report dataset containing synchronized camera timestamps, behavior data, and
+    experiment data for the target session. The function supports both local and remote processing modes.
+
+    Args:
+        session_path: The path to the session's data directory.
+        job_id: The unique hexadecimal identifier for the processing job. If provided (REMOTE mode), uses the
+            pre-generated tracker. If None (LOCAL mode), initializes the tracker internally.
+        progress: Determines whether to display the assembly progress via a terminal progress bar.
+    """
+    session_name = session_path.name
+    tracker_path = session_path.joinpath("tracking_data", "report_tracker.yaml")
+
+    # LOCAL mode: Initializes the tracker internally.
+    if job_id is None:
+        console.echo(message=f"Initializing report tracker for session '{session_name}'...")
+        job_id = _initialize_report_tracker(session_path=session_path, session_name=session_name)
+
+    # Loads the tracker and starts the job.
+    tracker = ProcessingTracker(file_path=tracker_path)
+    console.echo(message=f"Running the report assembly job with ID {job_id} for session '{session_name}'...")
+    tracker.start_job(job_id=job_id)
+
+    try:
+        # Resolves the output path for the report dataset.
+        output_path = session_path.joinpath("processed_data", "report_data", "report.feather")
+
+        # Runs the report assembly.
+        assemble_report_dataset(
+            session_data_path=session_path,
+            output_path=output_path,
+            progress=progress,
+        )
+
+        tracker.complete_job(job_id=job_id)
+        console.echo(message=f"Session '{session_name}' report assembly: Complete.", level=LogLevel.SUCCESS)
+
+    except Exception:
+        tracker.fail_job(job_id=job_id)
+        raise
