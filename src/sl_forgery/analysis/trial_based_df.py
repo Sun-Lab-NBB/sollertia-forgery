@@ -45,121 +45,37 @@ DEFAULT_TRIAL_COLUMNS = [
     ('guided', 'first'),
 ]
 
+#get the experiment_config.yaml file to confirm track lengths for trial types and for reward zone boundaries
 
-@dataclass
-class SessionConfig:
-    """
-    Session configuration from YAML and metadata from filename.
+def load_experiment_config(yaml_path: Path) -> dict:
+    """Load experiment configuration from YAML file."""
+    with open(yaml_path, 'r') as f:
+        return yaml.safe_load(f)
 
-    Tracks stored as dicts:
-        tracks['ABC'] = {
-            'length_cm': 180,
-            'cue_sequence': [1, 0, 2, 0, 3, 0],
-            'reward_zone': (128, 142),
-        }
-    """
-    # From YAML
-    task_type: str = 'unknown'
-    tracks: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    cue_offset_cm: float = 10.0
-    experiment_states: Dict[str, Dict] = field(default_factory=dict)
 
-    # From filename
-    animal_id: str = 'unknown'
-    date: Optional[datetime] = None
-    session_timestamp: str = ''
-    source_file: Optional[Path] = None
-
-    # Processing defaults
-    bin_size_cm: int = 5
-    frame_rate: float = 30.0
-
-    # Visual defaults
-    cue_colors: Dict[int, str] = field(default_factory=lambda: DEFAULT_CUE_COLORS.copy())
-    cue_labels: Dict[int, str] = field(default_factory=lambda: DEFAULT_CUE_LABELS.copy())
-
-    @classmethod
-    def load(
-            cls,
-            yaml_path: Optional[Path] = None,
-            data_path: Optional[Path] = None
-    ) -> 'SessionConfig':
-        """
-        Load config from YAML and/or extract metadata from data filename.
-
-        Parameters
-        ----------
-        yaml_path : Path, optional
-            Path to experiment YAML config file
-        data_path : Path, optional
-            Path to data file (for extracting animal_id, date from filename)
-        """
-        config = cls()
-
-        # Extract metadata from filename
-        if data_path is not None:
-            config.source_file = Path(data_path)
-            filename = config.source_file.stem
-
-            # Try to parse animal ID from parent directory
-            parent_name = config.source_file.parent.name
-            if parent_name and not parent_name.startswith('.'):
-                config.animal_id = parent_name
-
-            # Try to parse timestamp from filename
-            timestamp_pattern = r'(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})'
-            match = re.search(timestamp_pattern, filename)
-            if match:
-                config.session_timestamp = match.group(1)
-                try:
-                    config.date = datetime.strptime(match.group(1), '%Y-%m-%d-%H-%M-%S')
-                except ValueError:
-                    pass
-
-        # Load YAML config
-        if yaml_path is not None and Path(yaml_path).exists():
-            config._load_yaml(yaml_path)
-
-        return config
-
-    def _load_yaml(self, yaml_path: Path):
-        """Parse YAML config file."""
-        with open(yaml_path, 'r') as f:
-            data = yaml.safe_load(f)
-
-        if data is None:
-            return
-
-        self.cue_offset_cm = data.get('cue_offset_cm', 10.0)
-
-        # Parse experiment states
-        if 'experiment_states' in data:
-            self.experiment_states = data['experiment_states']
-
-        # Parse trial structures into tracks
-        if 'trial_structures' in data:
-            for track_name, track_data in data['trial_structures'].items():
-                self.tracks[track_name] = {
-                    'length_cm': track_data.get('trial_length_cm', 180),
-                    'cue_sequence': track_data.get('cue_sequence', []),
-                    'reward_zone': (
-                        track_data.get('reward_zone_start_cm'),
-                        track_data.get('reward_zone_end_cm')
-                    ) if 'reward_zone_start_cm' in track_data else None,
-                    'guidance_trigger_cm': track_data.get('guidance_trigger_location_cm'),
-                    'reward_size_ul': track_data.get('trial_reward_size_ul', 5.0),
-                }
-
-    def get_track_length(self, trial_type: str) -> Optional[float]:
-        """Get nominal track length for a trial type."""
-        if trial_type in self.tracks:
-            return self.tracks[trial_type].get('length_cm')
+def get_track_length_from_config(config: dict, trial_type: str) -> Optional[float]:
+    """Get nominal track length for a trial type from config dict."""
+    if config is None:
         return None
+    trial_structures = config.get('trial_structures', {})
+    if trial_type in trial_structures:
+        return trial_structures[trial_type].get('trial_length_cm')
+    return None
 
 
-# =============================================================================
+def get_reward_zone_from_config(config: dict, trial_type: str) -> Optional[Tuple[float, float]]:
+    """Get reward zone boundaries for a trial type from config dict."""
+    if config is None:
+        return None
+    trial_structures = config.get('trial_structures', {})
+    if trial_type in trial_structures:
+        ts = trial_structures[trial_type]
+        if 'reward_zone_start_cm' in ts and 'reward_zone_end_cm' in ts:
+            return ts['reward_zone_start_cm'], ts['reward_zone_end_cm']
+    return None
+
+
 # DATA CONTAINER
-# =============================================================================
 
 @dataclass
 class TrialData:
@@ -188,7 +104,7 @@ class TrialData:
     session_stats: dict = None
     original_df: pl.DataFrame = None
     raw_df: pl.DataFrame = None
-    config: SessionConfig = None
+    experiment_config: dict = None
     metadata: dict = field(default_factory=dict)
 
 
@@ -199,7 +115,7 @@ def create_trial_indexed_dataframe(
         system_state: Optional[str] = 'run',
         signal_col: str = 'single_day_f',
         bin_size_cm: int = 5,
-        config: Optional[SessionConfig] = None,
+        experiment_config: dict = None,
         additional_trial_columns: Optional[List[Tuple[str, str]]] = None,
         keep_original: bool = True,
         keep_raw: bool = False,
@@ -217,7 +133,7 @@ def create_trial_indexed_dataframe(
         Column containing neural signals
     bin_size_cm : int
         Bin size for spatial binning
-    config : SessionConfig, optional
+    experiment_config : dict  ##############################################
         If provided, use config track lengths instead of inferring
     additional_trial_columns : list of (str, str), optional
         Extra columns to aggregate per-trial as (column, agg_method)
@@ -252,6 +168,12 @@ def create_trial_indexed_dataframe(
 
     # Sort by frame for proper ordering
     active_df = active_df.sort('frame')
+
+    # Drop first trial if cue offset correction is needed
+    if experiment_config is not None and experiment_config.get('cue_offset_cm', 0) > 0:
+        first_trial = active_df['trial'].min()
+        print(f"Dropping first trial ({first_trial}) due to cue offset")
+        active_df = active_df.filter(pl.col('trial') != first_trial)
 
     # Build aggregation list
     agg_list = [
@@ -326,27 +248,16 @@ def create_trial_indexed_dataframe(
         pl.Series('signals', signals_per_trial, dtype=pl.Object)
     ])
 
-    # Reset distances within each trial (create new column)
+    #normalize the distance in each trial to be length of track (logged as cumulative distance)
     print("Computing per-trial distances...")
     distance_in_trial_list = []
 
     for row in trial_df.iter_rows(named=True):
         cumulative_dists = np.array(row['distance_cm'])
-
         if len(cumulative_dists) > 0:
             trial_distances = cumulative_dists - cumulative_dists[0]
-
-            # Check for distance decreases (wrong trial boundary)
-            distance_diffs = np.diff(trial_distances)
-            if np.any(distance_diffs < -1):
-                problem_idx = np.where(distance_diffs < -1)[0]
-                print(f"  Warning: Trial {row['trial']} has distance decrease at {problem_idx}")
-                first_problem = problem_idx[0] + 1
-                trial_distances = trial_distances[:first_problem]
-                print(f"    Truncating from {len(cumulative_dists)} to {first_problem} frames")
         else:
             trial_distances = cumulative_dists
-
         distance_in_trial_list.append(trial_distances)
 
     trial_df = trial_df.with_columns([
@@ -356,6 +267,38 @@ def create_trial_indexed_dataframe(
     # Get all array columns that need truncation
     array_cols = [col for col in trial_df.columns
                   if trial_df[col].dtype == pl.Object and col != 'distance_in_trial']
+
+
+    # Apply cue offset correction if config provides it
+    cue_offset_cm = 0.0
+    if experiment_config is not None:
+        cue_offset_cm = experiment_config.get('cue_offset_cm', 0.0)
+
+    if cue_offset_cm > 0:
+        print(f"Applying cue offset correction: {cue_offset_cm} cm")
+        corrected_distance_list = []
+        offset_masks = []  # Store masks for truncating other arrays
+
+        for distances in distance_in_trial_list:
+            # Keep only frames at or beyond the offset, then shift
+            mask = distances >= cue_offset_cm
+            corrected = distances[mask] - cue_offset_cm
+            corrected_distance_list.append(corrected)
+            offset_masks.append(mask)
+
+        distance_in_trial_list = corrected_distance_list
+
+        # Apply same mask to signals
+        signals_per_trial = [
+            sig[mask] if len(sig) > 0 else sig
+            for sig, mask in zip(signals_per_trial, offset_masks)
+        ]
+
+        # Update signals column
+        trial_df = trial_df.with_columns([
+            pl.Series('signals', signals_per_trial, dtype=pl.Object)
+        ])
+
 
     # Synchronize all array columns to match truncated distances
     print("Synchronizing array lengths...")
@@ -397,12 +340,11 @@ def create_trial_indexed_dataframe(
 
     for trial_type in trial_df['trial_type'].unique().sort():
         # First check if config provides ground truth
-        if config is not None:
-            config_length = config.get_track_length(trial_type)
-            if config_length is not None:
-                nominal_track_lengths[trial_type] = float(config_length)
-                print(f"  {trial_type}: {config_length} cm (from config)")
-                continue
+        config_length = get_track_length_from_config(experiment_config, trial_type)
+        if config_length is not None:
+            nominal_track_lengths[trial_type] = float(config_length)
+            print(f"  {trial_type}: {config_length} cm (from config)")
+            continue
 
         # Fall back to inference from data
         type_trials = trial_df.filter(pl.col('trial_type') == trial_type)
@@ -539,15 +481,14 @@ def compute_session_averages(
 
 
 # MAIN PIPELINE
-
+#TODO automatic import of the config file
 def full_pipeline(
         df: pl.DataFrame,
         system_state: Optional[str] = 'run',
         signal_col: str = 'single_day_f',
         bin_size_cm: int = 5,
-        config: Optional[SessionConfig] = None,
+        experiment_config: Optional[dict] = None,
         config_path: Optional[Path] = None,
-        data_path: Optional[Path] = None,
         additional_trial_columns: Optional[List[Tuple[str, str]]] = None,
         keep_original: bool = True,
         keep_raw: bool = False,
@@ -565,12 +506,10 @@ def full_pipeline(
         Column containing neural signals
     bin_size_cm : int
         Spatial bin size
-    config : SessionConfig, optional
+    experiment_config : dict
         Pre-loaded configuration object
     config_path : Path, optional
         Path to YAML config file (loads if config not provided)
-    data_path : Path, optional
-        Path to data file (for metadata extraction)
     additional_trial_columns : list of (str, str), optional
         Extra per-trial aggregated columns
     keep_original : bool
@@ -584,10 +523,8 @@ def full_pipeline(
         Container with trial_df, track_lengths, session_stats, and references
     """
     # Load config if path provided but config not given
-    if config is None and config_path is not None:
-        config = SessionConfig.load(yaml_path=config_path, data_path=data_path)
-    elif config is None and data_path is not None:
-        config = SessionConfig.load(data_path=data_path)
+    if experiment_config is None and config_path is not None:
+        experiment_config = load_experiment_config(config_path)
 
     print("Step 1: Creating trial-indexed dataframe...")
     trial_df, track_lengths, original_df, raw_df = create_trial_indexed_dataframe(
@@ -595,7 +532,7 @@ def full_pipeline(
         system_state=system_state,
         signal_col=signal_col,
         bin_size_cm=bin_size_cm,
-        config=config,
+        experiment_config=experiment_config,
         additional_trial_columns=additional_trial_columns,
         keep_original=keep_original,
         keep_raw=keep_raw,
@@ -623,7 +560,7 @@ def full_pipeline(
         session_stats=session_stats,
         original_df=original_df,
         raw_df=raw_df,
-        config=config,
+        experiment_config=experiment_config,
         metadata={
             'system_state_filter': system_state,
             'signal_col': signal_col,
@@ -775,7 +712,7 @@ def diagnose_data(data: TrialData):
         print(f"  {trial_type}: {data.track_lengths[trial_type]:.1f} cm")
 
     print("\nTrials by type:")
-    for trial_type in data.trial_df['trial_type'].unique().sort():
+    for trial_type in data.trial_df['trial_type'].unique().to_list():
         n_trials = len(data.trial_df.filter(pl.col('trial_type') == trial_type))
         n_rewarded = len(data.trial_df.filter(
             (pl.col('trial_type') == trial_type) & (pl.col('rewarded') == 1)
@@ -912,7 +849,7 @@ def plot_single_cell_all_trials(
         show_cues: bool = True,
 ) -> plt.Figure:
     """Plot all individual trials for a single cell plus session average."""
-    cue_colors = data.config.cue_colors if data.config else DEFAULT_CUE_COLORS
+    cue_colors = DEFAULT_CUE_COLORS
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -958,7 +895,7 @@ def plot_single_cell_comparison(
         show_cues: bool = True
 ) -> plt.Figure:
     """Compare trial types for a single cell with all trials + averages."""
-    cue_colors = data.config.cue_colors if data.config else DEFAULT_CUE_COLORS
+    cue_colors = DEFAULT_CUE_COLORS
 
     available_types = sorted(list(data.session_stats.keys()))
     if len(available_types) == 0:
@@ -1035,8 +972,8 @@ def plot_split_view(
 
     Requires both ABC and ABDC trial types.
     """
-    cue_colors = data.config.cue_colors if data.config else DEFAULT_CUE_COLORS
-    cue_labels = data.config.cue_labels if data.config else DEFAULT_CUE_LABELS
+    cue_colors = DEFAULT_CUE_COLORS
+    cue_labels = DEFAULT_CUE_LABELS
 
     available_types = list(data.session_stats.keys())
     if 'ABC' not in available_types or 'ABDC' not in available_types:
@@ -1174,15 +1111,20 @@ def quick_plot_cell(
 
 
 if __name__ == "__main__":
-    session_root = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    behavior_df = pl.read_ipc(session_root / '2025-09-03-17-02-46-836208.feather')
-
+    session_root = Path('/Volumes/workdir/sun_data/StateSpaceOdyssey/26/')
+    behavior_df = pl.read_ipc('/Volumes/workdir/sun_data/Datasets/SSOData/26/2025-09-16-18-44-32-476061.feather')
+    #have to hard code this rn, will be differnet later
+    experiment_config = load_experiment_config(
+        session_root / '2025-09-16-18-44-32-476061/source_data/experiment_configuration.yaml')
     # Run pipeline - returns TrialData container
     data = full_pipeline(
         behavior_df,
         signal_col='single_day_f',
-        bin_size_cm=5
+        bin_size_cm=5,
+        experiment_config= experiment_config,
     )
+
+    get_cue_regions(data.trial_df, 'ABC', verbose=True)
 
     # Access components
     # data.trial_df        - the processed dataframe
@@ -1192,10 +1134,10 @@ if __name__ == "__main__":
     # data.config          - session metadata
 
     # Diagnostics
-    diagnose_data(data)
-
-    for trial_type in data.track_lengths.keys():
-        diagnose_cues(data, trial_type)
+    # diagnose_data(data)
+    #
+    # for trial_type in data.track_lengths.keys():
+    #     diagnose_cues(data, trial_type)
 
     # Example plots
     print("\nGenerating example plots...")
