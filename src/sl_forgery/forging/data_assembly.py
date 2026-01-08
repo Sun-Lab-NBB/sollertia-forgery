@@ -857,10 +857,13 @@ def assemble_session_dataset(
 
 
 def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
-    """Sets the reference time for aligning session data to the source with the lowest fps.
+    """Returns the reference time for aligning session data to the source with the lowest frame rate.
 
     Args:
         session_data_path: The path to the session's processed data directory.
+
+    Returns:
+        A NumPy array containing the reference timestamps in microseconds.
     """
     processed_data = session_data_path.joinpath("processed_data")
 
@@ -880,19 +883,20 @@ def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
             return df[column].to_numpy()
 
     message = (
-        f"No valid timestamp source found for session {session_data_path.stem}. Valid camera files are "
-        f"left_camera_timestamps.feather, right_camera_timestamps.feather, face_camera_timestamps.feather, "
-        f"or mesoscope_frame_data.feather"
+        f"No valid timestamp source found for session {session_data_path.stem}. Currently, the following timestamp "
+        f"sources are supported: {','.join(source[0].name for source in timestamp_sources)}."
     )
     console.error(message=message, error=FileNotFoundError)
+    raise FileNotFoundError(message)  # Fallback to appease static analysis, should not be reachable
 
 
 def assemble_report_dataset(
     session_data_path: Path,
     output_path: Path,
+    *,
     progress: bool = False,
 ) -> None:
-    """Assembles the dataset for report generation by combining behavior and experiment data.
+    """Assembles the behavior report dataset for the target session.
 
     Args:
         session_data_path: The path to the session's processed data directory.
@@ -906,7 +910,7 @@ def assemble_report_dataset(
     camera_data_path = session_data_path.joinpath("processed_data", "camera_data")
 
     with tqdm(
-        total=2, desc=f"Assembling session {session_data_path.stem} report dataset", disable=not progress
+        total=2, desc=f"Assembling session {session_data_path.stem} report datasets", disable=not progress
     ) as pbar:
         # Uses the timestamp source with the lowest FPS as the reference time vector.
         reference_time = _get_reference_time(session_data_path=session_data_path)
