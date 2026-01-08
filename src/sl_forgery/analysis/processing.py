@@ -81,7 +81,7 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
 
     num_cells = df['single_day_f'].arr.len()[0]
 
-    # Step 1: Filter for active trials only <-- this could be an arg in the function, for Ivan's rest
+    # filter for active trials only <-- this could be an arg in the function, for Ivan's rest periods
     active_df = df.filter(pl.col('system_state')=="run")
 
     trial_distances = (
@@ -91,28 +91,29 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
         ])
     )
 
-    # Step 2: Check what distances each trial type typically covers
+    # check what distances each trial type typically covers (could also get from yaml file, at least to confirm; rn
+    # this works)
     print("Trial type distance summary:")
     print(
         trial_distances.group_by('trial_type')
         .agg([
-            pl.col('trial_distance_cm').mean().alias('avg_distance'),  # Changed here
-            pl.col('trial_distance_cm').min().alias('min_distance'),  # Changed here
-            pl.col('trial_distance_cm').max().alias('max_distance'),  # Changed here
-            pl.col('trial_distance_cm').count().alias('n_trials')  # Changed here
+            pl.col('trial_distance_cm').mean().alias('avg_distance'),
+            pl.col('trial_distance_cm').min().alias('min_distance'),
+            pl.col('trial_distance_cm').max().alias('max_distance'),
+            pl.col('trial_distance_cm').count().alias('n_trials')
         ])
     )
 
 
-    # Step 2: Normalize distance within each trial (0 to trial_length)
-    # This is crucial for consistent binning across trials
+    # normalize distance within each trial (0:trial_length)
+    # needed for consistent binning across trials
     normalized_df = active_df.with_columns([
-        # Group by trial and normalize distance to start at 0
+        # group by trial and normalize distance to start at 0
         (pl.col('distance_cm') -
          pl.col('distance_cm').min().over('trial')).alias('trial_distance')
     ])
 
-  #inspect the max and min trial distance.  how can we take care of the discrepancies?
+  #inspect the max and min trial distance.  how can we take care of the discrepancies due to speed/frame rate?
     result = normalized_df.group_by('trial').agg([
         pl.col('trial_distance').first().alias('start_distance'),
         pl.col('trial_distance').last().alias('final_distance'),
@@ -129,9 +130,8 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
 
     #print(normalized_df.head(300))
 
-    # Step 3: Assign bins based on normalized distance; this uses the
-    # For 240cm trials: 48 bins (0-5, 5-10, ..., 235-240)
-    # For 280cm trials: 56 bins (0-5, 5-10, ..., 275-280)
+    # assign bins based on normalized distance; this uses the
+    # for 240cm trials: 48 bins (0-5, 5-10, ..., 235-240)
     # etc
 
     normalized_df = normalized_df.with_columns([
@@ -140,7 +140,7 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
 
     #print(normalized_df.head())
 
-    # Step 4: Expand cell_activity array into separate columns for each cell
+    # expand cell_activity array into separate columns for each cell
     # struct is like a dict; unnest expands struct into the columns
 
     cell_field_names = [f'cell_{i}' for i in range(num_cells)]
@@ -152,6 +152,10 @@ def process_trial_based_activity(df, bin_size_cm=5, include_averages=True, save=
 #TODO save this as a parquet file
 # create simple plotting code that is also able to plot the average using the df (thought might be easier to add that
 # in the original file?
+
+    return normalized_df
+
+
 
 
 process_trial_based_activity(behavior_df)
