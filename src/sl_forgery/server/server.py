@@ -1,6 +1,4 @@
-"""This module provides the API for submitting jobs to the SLURM-managed compute servers and monitoring their
-runtime status, and managing the data stored on the remote compute servers.
-"""
+"""Provides API for submitting jobs to SLURM-managed servers, monitoring job status, and managing remote data."""
 
 from enum import StrEnum
 import stat

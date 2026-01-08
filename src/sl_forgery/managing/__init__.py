@@ -1,4 +1,4 @@
-"""This package provides the assets for managing the session and project data acquired in the Sun lab."""
+"""Provides assets for managing session and project data."""
 
 from .interface import adopt_project, manage_project_data, resolve_project_manifest
 from .processing import resolve_checksum, transfer_session, generate_project_manifest

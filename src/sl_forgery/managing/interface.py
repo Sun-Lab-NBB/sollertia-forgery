@@ -1,5 +1,8 @@
-"""This module provides the interface functions for using the assets from this package while working with the
-Sun lab's remote compute servers.
+"""Provides interface functions for data management pipelines and tasks.
+
+Notes:
+    The assets from this module process data stored on the remote compute server and assume the server is properly
+    configured to execute all data management tasks.
 """
 
 from typing import TYPE_CHECKING
@@ -186,6 +189,10 @@ def _discover_adoption_candidates(project: str, server: Server) -> tuple[Session
     """Discovers the sessions potentially available for adoption by scanning the project's directory on the remote
     server for session_data.yaml files.
 
+    Notes:
+        This function explicitly skips dataset directories (those containing dataset_data.yaml) to avoid confusing
+        dataset session hierarchies with actual animal/session directories.
+
     Args:
         project: The name of the project for which to discover sessions.
         server: The Server instance used to communicate with the remote compute server.
@@ -208,6 +215,11 @@ def _discover_adoption_candidates(project: str, server: Server) -> tuple[Session
 
         # Skips non-directory entries (like manifest files)
         if not server.is_directory(remote_path=animal_path):
+            continue
+
+        # Skips dataset directories (those containing dataset_data.yaml) to avoid confusing dataset session
+        # hierarchies with actual animal/session directories.
+        if server.exists(remote_path=animal_path.joinpath("dataset_data.yaml")):
             continue
 
         # Finds valid sessions (those containing session_data.yaml files)
@@ -473,7 +485,7 @@ def _construct_checksum_resolution_pipeline(
             runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
             value.
         recreate_checksum: Determines whether to recalculate and overwrite the data integrity checksum stored in the
-            session's 'raw data' directory instead of verifying its' integrity. This flag allows updating the checksum
+            session's 'raw data' directory instead of verifying its integrity. This flag allows updating the checksum
             following expected changes to the session's raw data.
 
     Returns:

@@ -1,6 +1,8 @@
-"""This module provides the assets for running complex data processing pipelines on remote compute servers. A processing
-pipeline represents a higher unit of abstraction relative to the processing job, often leveraging multiple sequential or
-parallel jobs to process the data.
+"""Provides assets for running complex data processing pipelines on remote compute servers.
+
+Notes:
+    A processing pipeline represents a higher unit of abstraction relative to the processing job, often leveraging
+    multiple sequential or parallel jobs to process the data.
 """
 
 import shutil as sh

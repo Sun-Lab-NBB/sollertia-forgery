@@ -1,11 +1,8 @@
-"""This module provides the metadata assets that allow other library modules to work with the project data stored on
-remote compute servers.
-"""
+"""Provides metadata assets for working with project data stored on remote compute servers."""
 
 from typing import TYPE_CHECKING
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from dataclasses import dataclass
 
 import polars as pl
 from dateutil import parser
@@ -14,21 +11,7 @@ from ataraxis_base_utilities import console
 if TYPE_CHECKING:
     from pathlib import Path
 
-
-@dataclass(frozen=True)
-class SessionMetadata:
-    """Encapsulates the identity metadata for a single data acquisition session.
-
-    Attributes:
-        session: The unique identifier of the session. Session names follow the format
-            'YYYY-MM-DD-HH-MM-SS-microseconds' and encode the session's acquisition timestamp.
-        animal: The unique identifier of the animal that participated in the session.
-    """
-
-    session: str
-    """The unique identifier of the session."""
-    animal: str
-    """The unique identifier of the animal that participated in the session."""
+    from sl_shared_assets import SessionMetadata
 
 
 def filter_sessions(

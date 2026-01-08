@@ -1,6 +1,8 @@
-"""This module provides the interface functions for all Sun lab data processing pipelines. The assets from this module
-are designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
-configured to execute all data processing tasks.
+"""Provides interface functions for data processing pipelines.
+
+Notes:
+    The assets from this module process data stored on the remote compute server and assume the server is properly
+    configured to execute all data processing tasks.
 """
 
 from typing import TYPE_CHECKING
@@ -416,7 +418,7 @@ def process_project_data(
             pipeline. Note; for mesoscope recordings this number is equal to the number of ROI(s) (stripes) * the number
             of z-planes. This argument is only used if the 'process_suite2p' argument is set to True.
         processing_batch_size: The number of processing pipelines that can be submitted to the remote compute server at
-            a time. These pipelines are primarily limited by the available RAM / CPU resources.
+            the same time.
     """
     # Ensures that the caller has specified the processing pipeline to execute.
     if not process_behavior and not process_suite2p:

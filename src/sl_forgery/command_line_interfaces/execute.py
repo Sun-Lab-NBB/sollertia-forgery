@@ -1,13 +1,13 @@
-"""This module provides the Command Line Interfaces (CLIs) for executing the management, processing, and analysis
-data workflows on adopted project sessions stored on the remote compute server.
-"""
+"""Provides CLIs for executing management, processing, and analysis workflows on adopted project sessions."""
 
 import click
 from sl_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
 
 from ..server import Server
+from ..forging import forge_dataset
 from ..managing import manage_project_data, resolve_project_manifest
+from ..processing import process_project_data
 from ..shared_assets import ProjectManifest, SessionMetadata, filter_sessions
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
@@ -24,16 +24,18 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     help="The name of the project whose sessions to work with.",
 )
 @click.option(
-    "-sd--start-date",
+    "-sd",
+    "--start-date",
     type=str,
     required=False,
     help=(
         "The start date for selecting the sessions to work with (format: YYYY-MM-DD). Sessions recorded on or after "
-        "this date are included ."
+        "this date are included."
     ),
 )
 @click.option(
-    "-ed--end-date",
+    "-ed",
+    "--end-date",
     type=str,
     required=False,
     help=(
@@ -105,8 +107,7 @@ def execute_cli(
     exclude_animal: tuple[str, ...],
     keep_job_logs: bool,
 ) -> None:
-    """This Command-Line Interface (CLI) group allows executing all management, processing, and analysis data workflows
-    on the adopted project's sessions.
+    """Executes management, processing, and analysis data workflows on the adopted project's sessions.
 
     This CLI group functions as the entry-point for all data processing pipelines supported by the Sun lab's data
     workflows. See the documentation for each of the workflow subgroups ('managing', 'processing', 'forging', or
@@ -221,4 +222,177 @@ def delete_command(ctx: click.Context) -> None:
         recompute_checksum=False,
         delete_sessions=True,
         keep_job_logs=keep_job_logs,
+    )
+
+
+# noinspection PyUnresolvedReferences
+@execute_cli.command("process")
+@click.option(
+    "-b",
+    "--behavior",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to execute the behavior data processing pipeline.",
+)
+@click.option(
+    "-s",
+    "--suite2p",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to execute the single-day suite2p data processing pipeline.",
+)
+@click.option(
+    "-r",
+    "--reprocess",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to reprocess sessions that have already been processed.",
+)
+@click.option(
+    "-sc",
+    "--suite2p-config",
+    type=str,
+    default="GCaMP6f_CA1_SD.yaml",
+    show_default=True,
+    help="The name of the configuration file for the single-day suite2p processing pipeline.",
+)
+@click.option(
+    "-pc",
+    "--plane-count",
+    type=int,
+    default=3,
+    show_default=True,
+    help="The number of planes in the session's data to be processed with the single-day suite2p pipeline.",
+)
+@click.option(
+    "-bs",
+    "--batch-size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="The number of processing pipelines that can be submitted to the remote compute server at a time.",
+)
+@click.pass_context
+def process_command(
+    ctx: click.Context,
+    *,
+    behavior: bool,
+    suite2p: bool,
+    reprocess: bool,
+    suite2p_config: str,
+    plane_count: int,
+    batch_size: int,
+) -> None:
+    """Executes data processing pipelines for the selected sessions.
+
+    This command runs the behavior and/or single-day suite2p processing pipelines on the selected sessions.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+    manifest_path = ctx.obj["manifest_path"]
+    sessions = ctx.obj["sessions"]
+    keep_job_logs = ctx.obj["keep_job_logs"]
+
+    # Executes the processing operation.
+    process_project_data(
+        manifest_path=manifest_path,
+        project=project,
+        sessions=sessions,
+        process_behavior=behavior,
+        process_suite2p=suite2p,
+        reprocess=reprocess,
+        keep_job_logs=keep_job_logs,
+        suite2p_configuration_file=suite2p_config,
+        plane_count=plane_count,
+        processing_batch_size=batch_size,
+    )
+
+
+# noinspection PyUnresolvedReferences
+@execute_cli.command("forge")
+@click.option(
+    "-dn",
+    "--dataset-name",
+    type=str,
+    required=True,
+    help="The unique name for the dataset to create.",
+)
+@click.option(
+    "-m",
+    "--multiday",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to execute the multi-day suite2p processing pipeline.",
+)
+@click.option(
+    "-a",
+    "--assemble",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to execute the data assembly pipeline.",
+)
+@click.option(
+    "-r",
+    "--reprocess",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to reprocess sessions that have already been processed.",
+)
+@click.option(
+    "-sc",
+    "--suite2p-config",
+    type=str,
+    default="GCaMP6f_CA1_MD.yaml",
+    show_default=True,
+    help="The name of the configuration file for the multi-day suite2p processing pipeline.",
+)
+@click.option(
+    "-bs",
+    "--batch-size",
+    type=int,
+    default=4,
+    show_default=True,
+    help="The number of processing pipelines that can be submitted to the remote compute server at a time.",
+)
+@click.pass_context
+def forge_command(
+    ctx: click.Context,
+    *,
+    dataset_name: str,
+    multiday: bool,
+    assemble: bool,
+    reprocess: bool,
+    suite2p_config: str,
+    batch_size: int,
+) -> None:
+    """Forges an analysis dataset from the selected sessions.
+
+    This command creates a new dataset from the selected sessions, optionally runs the multi-day processing
+    pipeline, and/or assembles the processed data into unified data.feather files. The session type and acquisition
+    system are derived automatically from the first session's metadata.
+    """
+    # Retrieves shared context data.
+    project = ctx.obj["project"]
+    manifest_path = ctx.obj["manifest_path"]
+    sessions = ctx.obj["sessions"]
+    keep_job_logs = ctx.obj["keep_job_logs"]
+
+    # Executes the forging operation.
+    forge_dataset(
+        manifest_path=manifest_path,
+        project=project,
+        sessions=sessions,
+        dataset_name=dataset_name,
+        process_multiday=multiday,
+        assemble_data=assemble,
+        reprocess=reprocess,
+        keep_job_logs=keep_job_logs,
+        suite2p_configuration_file=suite2p_config,
+        processing_batch_size=batch_size,
     )
