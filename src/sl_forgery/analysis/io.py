@@ -81,7 +81,7 @@ def extract_data(filepath, day=None):
 
 
 def behavior_from_feather(source_dir):
-q
+
     """Temp function for testing new data with old plotting code"
     """
     source_dir = Path(source_dir.joinpath("behavior_data"))
