@@ -1,6 +1,4 @@
-"""This module provides the Job and JupyterJob classes that serve as the starting point for all SLURM-managed jobs
-executed on remote compute server(s).
-"""
+"""Provides Job and JupyterJob classes for SLURM-managed jobs on remote compute servers."""
 
 import re
 from typing import TYPE_CHECKING

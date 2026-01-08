@@ -1,13 +1,13 @@
-"""This package provides the assets for interfacing with remote compute servers to manage the stored data and run
-data processing tasks and pipelines.
-"""
+"""Provides assets for interfacing with remote compute servers to manage data and run processing pipelines."""
+
+from sl_shared_assets import DatasetTrackers, ManagingTrackers, ProcessingTrackers
 
 from .job import Job, JupyterJob
-from .server import Server, JobStatus, get_remote_job_work_directory
+from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
 from .pipeline import ProcessingPipeline
-from ..shared_assets import DatasetTrackers, ManagingTrackers, ProcessingTrackers
 
 __all__ = [
+    "CommandResult",
     "DatasetTrackers",
     "Job",
     "JobStatus",

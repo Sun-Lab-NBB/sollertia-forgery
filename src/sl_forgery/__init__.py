@@ -1,3 +1,5 @@
+"""Provides assets for forging analysis datasets from processed experimental data."""
+
 from ataraxis_base_utilities import console
 
 # Ensures console is enabled when this library is used

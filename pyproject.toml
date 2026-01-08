@@ -30,7 +30,7 @@ classifiers = [
     # License
     "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
     # Supported Python Versions
-    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     # Supported OS systems
     "Operating System :: OS Independent",
     # Typing
@@ -42,11 +42,11 @@ dependencies = [
     "ataraxis-time>=5,<6",
     "ataraxis-base-utilities>=5,<6",
     "ataraxis-data-structures>=5,<6",
-    "sl-shared-assets>=6.0.1rc9,<7",
+    "sl-shared-assets>=6.1.1,<7",
     "polars>=1,<2",
     "pyarrow>=22,<23",
     "numpy>=2,<3",
-    "numba>=0.63.0rc1,<1",
+    "numba>=0.63,<1",
     "scipy>=1,<2",
     "matplotlib>=3,<4",
     "PyQt6>=6,<7",
@@ -60,6 +60,7 @@ dependencies = [
     "simple-slurm>=0,<1",
     "natsort-rs>=0,<1",
     "xxhash>=3,<4",
+    "tabulate>=0,<1",
 ]
 
 [project.urls]
@@ -84,12 +85,15 @@ dev = [
     "types-tqdm>=4,<5",
     "types-filelock>=3,<4",
     "types-pytz>=2025,<2026",
+    "types-tabulate>=0,<1",
 ]
 
 # Exports CLIs upon library installation into an environment
 [project.scripts]
 sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
 sl-process = "sl_forgery.command_line_interfaces.process:process_cli"
+sl-execute = "sl_forgery.command_line_interfaces.execute:execute_cli"
+sl-server = "sl_forgery.command_line_interfaces.server:server_cli"
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]

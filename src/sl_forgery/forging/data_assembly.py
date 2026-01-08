@@ -1,9 +1,9 @@
-"""This module provides the assets used to aggregate the processed data from multiple sources into a unified Polars
-dataframe that forms the basis of the Sun lab's analysis dataset hierarchy.
-"""
+"""Provides assets for aggregating processed data from multiple sources into unified Polars dataframes."""
 
-from typing import Any
-from pathlib import Path
+from __future__ import annotations
+
+from enum import IntEnum
+from typing import TYPE_CHECKING, Any
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -11,16 +11,34 @@ from tqdm import tqdm
 from numba import njit
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
 from sl_shared_assets import MesoscopeHardwareState, MesoscopeExperimentConfiguration
 from ataraxis_base_utilities import console, ensure_directory_exists
 
-from .dataset import DatasetTypes
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from numpy.typing import NDArray
+
 from ..shared_assets import interpolate_data
 
 
+class DatasetTypes(IntEnum):
+    """Stores the types of datasets currently supported by the Sun lab's data processing workflow."""
+
+    MESOSCOPE_VR_LICK_TRAINING = 1
+    """Mesoscope-VR acquisition system + Lick training session type."""
+    MESOSCOPE_VR_RUN_TRAINING = 2
+    """Mesoscope-VR acquisition system + Run training session type."""
+    MESOSCOPE_VR_EXPERIMENT = 3
+    """Mesoscope-VR acquisition system + Mesoscope Experiment session type."""
+
+
 def _add_sls2p_fluorescence_column(
-    df: pl.DataFrame, data_path: Path, filename: str, column_name: str, cell_mask: None | bool | NDArray[np.bool] = None
+    df: pl.DataFrame,
+    data_path: Path,
+    filename: str,
+    column_name: str,
+    cell_mask: None | bool | NDArray[np.bool] = None,  # noqa: FBT001 - Union type accepts bool, array, or None for mask filtering.
 ) -> pl.DataFrame:
     """Updates the input dataframe to include a column storing the fluorescence data loaded from the specified
     sl-suite2p .npy file.
@@ -103,15 +121,15 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
     # Sorts by time to ensure the correct order
     mesoscope_frame_data = mesoscope_frame_data.sort("time_us")
 
-    # Creates pulse groups and find edges in one pass
+    # Creates pulse groups and find edges in one pass.
     mesoscope_frame_data = mesoscope_frame_data.with_columns(
         [
-            # Creates pulse ID by counting rising edges
-            (pl.col("ttl_state").diff() == 1).fill_null(False).cum_sum().alias("pulse_id"),
-            # Marks if this row is a rising edge
-            (pl.col("ttl_state").diff() == 1).fill_null(False).alias("is_rising_edge"),
-            # Marks if this row is a falling edge
-            (pl.col("ttl_state").diff() == -1).fill_null(False).alias("is_falling_edge"),
+            # Creates pulse ID by counting rising edges.
+            (pl.col("ttl_state").diff() == 1).fill_null(value=False).cum_sum().alias("pulse_id"),
+            # Marks if this row is a rising edge.
+            (pl.col("ttl_state").diff() == 1).fill_null(value=False).alias("is_rising_edge"),
+            # Marks if this row is a falling edge.
+            (pl.col("ttl_state").diff() == -1).fill_null(value=False).alias("is_falling_edge"),
         ]
     )
 
@@ -249,7 +267,7 @@ def _check_reward_zones(
     traversed_distance: NDArray[np.float64],
     reward_zone_starts: NDArray[np.float64],
     reward_zone_ends: NDArray[np.float64],
-):
+) -> NDArray[np.uint8]:
     """Uses the provided reward zone boundary data to determine which portion of the processed runtime data corresponds
     to the animal traversing the reward zone.
 
@@ -358,8 +376,8 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
 
     # Uses the experiment configuration file to map the integer trial type codes and experiment state codes to
     # descriptive names. Adds "undefined" as a special value for masking non-run experiment states.
-    trial_type_mapping = {i: name for i, name in enumerate(experiment_config.trial_structures.keys())}
-    trial_type_categories = list(trial_type_mapping.values()) + ["undefined"]
+    trial_type_mapping = dict(enumerate(experiment_config.trial_structures.keys()))
+    trial_type_categories = [*list(trial_type_mapping.values()), "undefined"]
     trial_enum_dtype = pl.Enum(trial_type_categories)
     experiment_state_mapping = {
         state_config.experiment_state_code: state_name
@@ -465,7 +483,10 @@ def _calculate_running_speed(
         time: The sampling time, in microseconds elapsed since UTC epoch onset, for each cumulative traveled distance
             value.
         distance: The cumulative distance, in centimeters, traveled by the animal at each time-point.
-        window_size_us: The size of the sliding window, microseconds.
+        window_size_us: The size of the sliding window, in microseconds.
+
+    Returns:
+        A NumPy array containing the calculated running speed in centimeters per second for each time-point.
     """
     # Preallocates the output running speed array based on the requested number of time-points for which to compute
     # the running speed.
@@ -664,7 +685,7 @@ def _assemble_behavior_dataset(
         # Uses the tone column to discover reward events.
         .with_columns(
             (pl.col("_tone_active") != pl.col("_tone_active").shift(1))
-            .fill_null(False)
+            .fill_null(value=False)
             .cum_sum()
             .alias("_reward_event_id")
         )
@@ -742,6 +763,7 @@ def assemble_session_dataset(
     session_multiday_path: Path,
     output_path: Path,
     dataset_type: DatasetTypes | int,
+    *,
     progress: bool = False,
 ) -> None:
     """Assembles the requested analysis dataset for the target session.
@@ -810,7 +832,7 @@ def assemble_session_dataset(
         result.write_ipc(file=output_path)
 
     # Behavior-only training dataset.
-    elif DatasetTypes.MESOSCOPE_VR_LICK_TRAINING | DatasetTypes.MESOSCOPE_VR_RUN_TRAINING:
+    elif dataset_type in (DatasetTypes.MESOSCOPE_VR_LICK_TRAINING, DatasetTypes.MESOSCOPE_VR_RUN_TRAINING):
         # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
         # timepoints from the face camera timestamp data.
         face_camera_path = session_data_path.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
