@@ -1,4 +1,4 @@
-"""This package provides the assets that support the runtime of multiple other library packages and modules."""
+"""Provides shared assets that support multiple library packages and modules."""
 
 from sl_shared_assets import (
     DatasetTrackers,

@@ -1,6 +1,4 @@
-"""This module provides the assets that jointly support the runtime of all data management, processing, and analysis
-pipelines available from this library.
-"""
+"""Provides assets that support the runtime of data management, processing, and analysis pipelines."""
 
 from typing import TYPE_CHECKING
 

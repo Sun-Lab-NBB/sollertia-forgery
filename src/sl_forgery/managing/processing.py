@@ -1,7 +1,8 @@
-"""This module provides the assets for managing Sun lab session data stored on remote compute servers and
-generating snapshots of the lab's research project's states. Assets from this module form the foundation for all
-other data processing and analysis pipelines available from this library. The pipeline supports both local and remote
-processing modes.
+"""Provides assets for managing session data on remote servers and generating project state snapshots.
+
+Notes:
+    Assets from this module form the foundation for all other data processing and analysis pipelines. The pipeline
+    supports both local and remote processing modes.
 """
 
 from typing import TYPE_CHECKING

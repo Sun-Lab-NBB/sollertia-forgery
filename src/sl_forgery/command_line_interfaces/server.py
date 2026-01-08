@@ -1,6 +1,4 @@
-"""This module provides the Command Line Interfaces (CLIs) used to directly interact with the remote Sun lab compute
-server.
-"""
+"""Provides CLIs for directly interacting with the remote compute server."""
 
 import click
 from tabulate import tabulate
@@ -19,6 +17,12 @@ SACCT_HEADERS = ["JobID", "JobName", "ReqMem", "MaxRSS", "AveRSS", "MaxVMSize", 
 """The headers corresponding to SACCT_FORMAT, used for display after merging rows."""
 SQUEUE_FORMAT = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.12L"
 """The format for the slurm queue 'squeue' command used to display running and pending jobs."""
+
+# Minimum number of rows required for valid sacct output (header + at least one data row).
+_MINIMUM_SACCT_ROWS: int = 2
+
+# Number of columns expected in sacct output based on SACCT_FORMAT.
+_SACCT_COLUMN_COUNT: int = 10
 
 
 def _format_slurm_output(raw_output: str) -> str:
@@ -70,9 +74,9 @@ def _format_sacct_output(raw_output: str) -> str:
     if not lines:
         return "No data available."
 
-    # Parses pipe-delimited rows
+    # Parses pipe-delimited rows.
     rows = [line.split("|") for line in lines if line.strip()]
-    if len(rows) < 2:
+    if len(rows) < _MINIMUM_SACCT_ROWS:
         return "No data available."
 
     # Skips the header row from sacct, uses predefined headers
@@ -83,7 +87,7 @@ def _format_sacct_output(raw_output: str) -> str:
     parent_jobs: dict[str, list[str]] = {}
 
     for row in data:
-        if len(row) < 10:
+        if len(row) < _SACCT_COLUMN_COUNT:
             continue
 
         job_id = row[0]
@@ -98,12 +102,12 @@ def _format_sacct_output(raw_output: str) -> str:
         if base_job_id in parent_jobs:
             # Merges this row's non-empty fields into the existing parent row
             parent_row = parent_jobs[base_job_id]
-            for i in range(len(row[:10])):
+            for i in range(len(row[:_SACCT_COLUMN_COUNT])):
                 if row[i] and not parent_row[i]:
                     parent_row[i] = row[i]
         else:
             # First occurrence of this job ID - creates a new entry
-            merged_row = list(row[:10])
+            merged_row = list(row[:_SACCT_COLUMN_COUNT])
             parent_jobs[base_job_id] = merged_row
             merged_data.append(merged_row)
 
@@ -115,12 +119,11 @@ def _format_sacct_output(raw_output: str) -> str:
 
 @click.group("server", context_settings=CONTEXT_SETTINGS)
 def server_cli() -> None:
-    """This Command-Line Interface (CLI) group allows interacting with the remote Sun lab compute server.
+    """Provides commands for interacting with the remote Sun lab compute server.
 
     This CLI group provides commands for managing non-standardized server interactions, including starting interactive
-    Jupyter sessions and viewing SLURM job information. Note; all data workflow interactions available through
-    sl-project and sl-execute command groups must be carried out through these groups, rather than the commands
-    exposed by this CLI.
+    Jupyter sessions and viewing SLURM job information. All data workflow interactions available through sl-project and
+    sl-execute command groups must be carried out through those groups, rather than the commands exposed by this CLI.
     """
 
 

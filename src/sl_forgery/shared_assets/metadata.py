@@ -1,6 +1,4 @@
-"""This module provides the metadata assets that allow other library modules to work with the project data stored on
-remote compute servers.
-"""
+"""Provides metadata assets for working with project data stored on remote compute servers."""
 
 from typing import TYPE_CHECKING
 from datetime import datetime

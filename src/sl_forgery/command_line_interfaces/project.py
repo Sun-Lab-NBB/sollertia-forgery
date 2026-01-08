@@ -1,6 +1,8 @@
-"""This module provides the Command Line Interfaces (CLIs) used to interact with the project's stored on the Sun lab's
-remote compute server. These interfaces allow fetching and displaying the project's data and processing state snapshots
-and 'adopting' the shared project's data for further processing by the calling user.
+"""Provides CLIs for interacting with projects stored on the remote compute server.
+
+Notes:
+    These interfaces allow fetching and displaying project data and processing state snapshots, and adopting shared
+    project data for further processing.
 """
 
 from pathlib import Path
@@ -34,7 +36,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     help="The path to the locally stored project directory to work with (local mode).",
 )
 def project_cli(ctx: click.Context, project: str | None, project_path: Path | None) -> None:
-    """This Command-Line Interface (CLI) group allows working with Sun lab projects.
+    """Provides commands for working with Sun lab projects.
 
     This CLI group is intended to be called on user machines as part of the shared Sun lab data workflow interface.
     Primarily, commands from this CLI group are intended to be used as entry-points for all further interactions with
@@ -195,8 +197,8 @@ def adopt_project_data(ctx: click.Context, *, repeat_adoption: bool, keep_job_lo
     if project_path is not None:
         message = (
             "The 'adopt' command is only available in the 'remote' mode. Local processing mode does not require "
-            "adopting the data to support the full range of processing offered by the Sun lab's data workflow."
-            "To runt he command in the remote processing mode, use the '--project' argument instead of the "
+            "adopting the data to support the full range of processing offered by the Sun lab's data workflow. "
+            "To run the command in the remote processing mode, use the '--project' argument instead of the "
             "'--project-path' argument to specify the target project."
         )
         console.error(message=message, error=ValueError)

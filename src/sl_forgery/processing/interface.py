@@ -1,6 +1,8 @@
-"""This module provides the interface functions for all Sun lab data processing pipelines. The assets from this module
-are designed to process the data stored on the remote Sun lab compute server and assume that the server is properly
-configured to execute all data processing tasks.
+"""Provides interface functions for data processing pipelines.
+
+Notes:
+    The assets from this module process data stored on the remote compute server and assume the server is properly
+    configured to execute all data processing tasks.
 """
 
 from typing import TYPE_CHECKING

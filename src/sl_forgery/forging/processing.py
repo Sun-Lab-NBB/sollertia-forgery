@@ -1,6 +1,8 @@
-"""This module provides the assets for defining and assembling Sun lab analysis datasets from the raw and processed
-session data. Assets from this module form the foundation for all dataset forging pipelines available from this
-library. The pipeline supports both local and remote processing modes.
+"""Provides assets for defining and assembling analysis datasets from raw and processed session data.
+
+Notes:
+    Assets from this module form the foundation for all dataset forging pipelines. The pipeline supports both local
+    and remote processing modes.
 """
 
 from typing import TYPE_CHECKING
@@ -27,7 +29,7 @@ def define_dataset(
     sessions: tuple[SessionMetadata, ...],
     project_root: Path,
 ) -> DatasetData:
-    """Creates a new analysis dataset and initializes it's data hierarchy.
+    """Creates a new analysis dataset and initializes its data hierarchy.
 
     Notes:
         The dataset is created under the project's root directory, at the same level as animal directories. Sessions
@@ -130,9 +132,8 @@ def _execute_session_data_assembly(
         session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
 
         # Resolves the paths to all filesystem components used in the data assembly process.
-        dataset_path = dataset.dataset_data_path.parent
         session_data_path = project_root.joinpath(session_metadata.animal, session_name)
-        multiday_path = dataset_path.joinpath(session_metadata.animal, session_name)
+        multiday_path = session_data_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset.name)
         output_path = dataset.get_session_data(animal=session_metadata.animal, session=session_name).data_path
 
         # Determines the dataset type based on the processed session type.
@@ -148,8 +149,8 @@ def _execute_session_data_assembly(
                 f"sessions '{dataset.session_type}'."
             )
             console.error(message=message, error=ValueError)
-            # Fallback to appease mypy, should not be reachable
-            raise ValueError(message)  # pragma: no cover
+            # Fallback to appease mypy, should not be reachable.
+            raise ValueError(message)  # pragma: no cover  # noqa: TRY301
 
         # Runs the session's data assembly pipeline.
         assemble_session_dataset(

@@ -1,6 +1,4 @@
-"""This module provides the Command Line Interfaces (CLIs) for executing the management, processing, and analysis
-data workflows on adopted project sessions stored on the remote compute server.
-"""
+"""Provides CLIs for executing management, processing, and analysis workflows on adopted project sessions."""
 
 import click
 from sl_shared_assets import get_working_directory, get_server_configuration
@@ -26,16 +24,18 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     help="The name of the project whose sessions to work with.",
 )
 @click.option(
-    "-sd--start-date",
+    "-sd",
+    "--start-date",
     type=str,
     required=False,
     help=(
         "The start date for selecting the sessions to work with (format: YYYY-MM-DD). Sessions recorded on or after "
-        "this date are included ."
+        "this date are included."
     ),
 )
 @click.option(
-    "-ed--end-date",
+    "-ed",
+    "--end-date",
     type=str,
     required=False,
     help=(
@@ -107,8 +107,7 @@ def execute_cli(
     exclude_animal: tuple[str, ...],
     keep_job_logs: bool,
 ) -> None:
-    """This Command-Line Interface (CLI) group allows executing all management, processing, and analysis data workflows
-    on the adopted project's sessions.
+    """Executes management, processing, and analysis data workflows on the adopted project's sessions.
 
     This CLI group functions as the entry-point for all data processing pipelines supported by the Sun lab's data
     workflows. See the documentation for each of the workflow subgroups ('managing', 'processing', 'forging', or

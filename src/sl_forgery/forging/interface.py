@@ -1,11 +1,14 @@
-"""This module provides the interface functions for the Sun lab dataset forging pipelines. The assets from this module
-are designed to forge (assemble) and post-process analysis datasets from the processed data stored on the Sun lab's
-remote compute server and assume that the server is properly configured to execute all forging tasks.
+"""Provides interface functions for dataset forging pipelines.
+
+Notes:
+    The assets from this module forge (assemble) and post-process analysis datasets from processed data stored on the
+    remote compute server and assume the server is properly configured to execute all forging tasks.
 """
 
 from typing import TYPE_CHECKING
 
 from tqdm import tqdm
+from natsort_rs import natsort
 from sl_shared_assets import (
     DatasetData,
     SessionTypes,
@@ -114,7 +117,7 @@ def _define_dataset_remote(
     server.pull(local_path=local_dataset_data_path, remote_path=remote_dataset_data_path)
 
     # Loads and returns the DatasetData instance.
-    dataset = DatasetData(dataset_data_path=local_dataset_data_path)
+    dataset = DatasetData.load(dataset_path=local_dataset_data_path)
     console.echo(
         message=f"Created dataset '{dataset_name}' with {len(filtered_sessions)} sessions.",
         level=LogLevel.SUCCESS,
@@ -162,6 +165,19 @@ def _construct_suite2p_multiday_pipeline(
     # Resolves the configuration path on the remote server.
     configuration_path = server.suite2p_configurations_directory.joinpath(configuration_file)
 
+    # Resolves full session paths using the project structure.
+    project_root = server.user_working_root.joinpath(project)
+    session_paths = [project_root.joinpath(animal, session) for session in sessions]
+
+    # Builds CLI session path arguments for the new sl-suite2p interface.
+    session_path_args = " ".join(f"-sp {path}" for path in session_paths)
+
+    # Determines the main session (first after natural sort) for tracker storage.
+    sorted_sessions = natsort(sessions)
+    main_session = sorted_sessions[0]
+    main_session_path = project_root.joinpath(animal, main_session)
+    main_session_multiday = main_session_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset_name)
+
     # Validates each session for eligibility with the multiday pipeline.
     for session in sessions:
         exclusion_reason = check_session_eligibility(
@@ -177,16 +193,13 @@ def _construct_suite2p_multiday_pipeline(
         if exclusion_reason is not None:
             return f"Session '{session}': {exclusion_reason}"
 
-    # Resolves the dataset path for the processed set of sessions.
-    remote_dataset_path = server.user_working_root.joinpath(project, dataset_name)
-
     # Precreates the iterables to store stage jobs.
     stage_1 = []
     stage_2 = []
 
     # Stage 1: Multi-day cell tracking (discovery).
     job_name = f"{dataset_name}_ss2p_discovery"
-    job_id = ProcessingTracker.generate_job_id(session_path=remote_dataset_path, job_name=job_name)
+    job_id = ProcessingTracker.generate_job_id(session_path=main_session_multiday, job_name=job_name)
     working_directory = get_remote_job_work_directory(
         server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
     )
@@ -200,15 +213,13 @@ def _construct_suite2p_multiday_pipeline(
         ram=80,
         time=180,
     )
-    job.add_command(
-        f"ss2p run -i {configuration_path} -w -1 multi-day -dp {remote_dataset_path} -id {job_id} -a {animal} -d"
-    )
+    job.add_command(f"ss2p run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -d")
     stage_1.append((job, working_directory))
 
     # Stage 2: Across-day-tracked cell fluorescence extraction.
     for session in sessions:
         job_name = f"{dataset_name}_ss2p_extraction_session_{session}"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_dataset_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(session_path=main_session_multiday, job_name=job_name)
         working_directory = get_remote_job_work_directory(
             server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
         )
@@ -224,20 +235,28 @@ def _construct_suite2p_multiday_pipeline(
             time=180,
         )
         job.add_command(
-            f"ss2p run -i {configuration_path} -w -1 multi-day -dp {remote_dataset_path} "
-            f"-id {job_id} -a {animal} -e -t {session}"
+            f"ss2p run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -e -t {session}"
         )
         stage_2.append((job, working_directory))
 
-    # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = remote_dataset_path.joinpath(DatasetTrackers.MULTIDAY)
-    local_tracker_path = local_working_directory.joinpath(project, dataset_name, DatasetTrackers.MULTIDAY)
+    # Resolves the paths to the local and remote job tracker files (now in main session's multiday folder).
+    remote_tracker_path = main_session_multiday.joinpath("multiday_tracker.json")
+    local_tracker_path = local_working_directory.joinpath(
+        project,
+        animal,
+        main_session,
+        "processed_data",
+        "mesoscope_data",
+        "multiday",
+        dataset_name,
+        "multiday_tracker.json",
+    )
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
         pipeline=ProcessingPipelines.MULTIDAY,
         server=server,
-        data_path=remote_dataset_path,
+        data_path=main_session_multiday,
         jobs={1: tuple(stage_1), 2: tuple(stage_2)},
         remote_tracker_path=remote_tracker_path,
         local_tracker_path=local_tracker_path,
@@ -406,10 +425,6 @@ def forge_dataset(
     # Tracks all pipelines executed across all processing phases for final outcome reporting.
     all_pipelines: list[ProcessingPipeline] = []
 
-    # PHASE 1: DEFINE DATASET
-    console.echo(message="Phase 1: Dataset Definition...", level=LogLevel.INFO)
-    delay_terminal()
-
     # Applies the filtering rules to the provided sessions.
     filtered_sessions = filter_sessions(
         sessions=set(sessions),
@@ -429,18 +444,8 @@ def forge_dataset(
             error=ValueError,
         )
 
-    # Creates the dataset on the remote server.
-    dataset = _define_dataset_remote(
-        project=project,
-        dataset_name=dataset_name,
-        filtered_sessions=filtered_sessions,
-        server=server,
-        keep_job_logs=keep_job_logs,
-    )
-    delay_terminal()
-
-    # PHASE 2: MULTI-DAY PROCESSING
-    console.echo(message="Phase 2: Multi-Day Processing...", level=LogLevel.INFO)
+    # PHASE 1: MULTI-DAY PROCESSING
+    console.echo(message="Phase 1: Multi-Day Processing...", level=LogLevel.INFO)
     delay_terminal()
 
     multiday_pipelines: list[ProcessingPipeline] = []
@@ -449,7 +454,7 @@ def forge_dataset(
     if process_multiday:
         # Groups sessions by animal for multi-day processing.
         animal_sessions: dict[str, list[str]] = {}
-        for session_meta in dataset.sessions:
+        for session_meta in filtered_sessions:
             animal_sessions.setdefault(session_meta.animal, []).append(session_meta.session)
 
         # For each animal, constructs the multi-day pipeline.
@@ -486,14 +491,24 @@ def forge_dataset(
             # Refreshes the manifest to include the processing results.
             resolve_project_manifest(project=project, server=server, generate=True)
 
-    # PHASE 3: ASSEMBLE DATASET
-    console.echo(message="Phase 3: Data Assembly...", level=LogLevel.INFO)
+    # PHASE 2: DATASET DEFINITION AND DATA ASSEMBLY
+    console.echo(message="Phase 2: Dataset Definition and Data Assembly...", level=LogLevel.INFO)
     delay_terminal()
 
     assembly_pipelines: list[ProcessingPipeline] = []
     assembly_exclusions: dict[str, str] = {}  # Maps session name to exclusion reason
 
     if assemble_data:
+        # Creates the dataset on the remote server (only needed for assembly).
+        dataset = _define_dataset_remote(
+            project=project,
+            dataset_name=dataset_name,
+            filtered_sessions=filtered_sessions,
+            server=server,
+            keep_job_logs=keep_job_logs,
+        )
+        delay_terminal()
+
         # Constructs the data assembly pipeline for the dataset.
         assembly_pipeline = _construct_data_assembly_pipeline(
             dataset=dataset,

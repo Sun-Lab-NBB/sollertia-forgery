@@ -1,4 +1,4 @@
-"""This module provides the miscellaneous utility assets used across multiple other library modules."""
+"""Provides miscellaneous utility assets used across multiple library modules."""
 
 from typing import TYPE_CHECKING, Any
 

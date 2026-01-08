@@ -1,6 +1,8 @@
-"""This module provides the interface functions for all Sun lab data management pipelines and tasks. The assets from
-this module are designed to process the data stored on the remote Sun lab compute server and assume that the server is
-properly configured to execute all data management tasks.
+"""Provides interface functions for data management pipelines and tasks.
+
+Notes:
+    The assets from this module process data stored on the remote compute server and assume the server is properly
+    configured to execute all data management tasks.
 """
 
 from typing import TYPE_CHECKING
@@ -483,7 +485,7 @@ def _construct_checksum_resolution_pipeline(
             runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
             value.
         recreate_checksum: Determines whether to recalculate and overwrite the data integrity checksum stored in the
-            session's 'raw data' directory instead of verifying its' integrity. This flag allows updating the checksum
+            session's 'raw data' directory instead of verifying its integrity. This flag allows updating the checksum
             following expected changes to the session's raw data.
 
     Returns:

@@ -1,6 +1,8 @@
-"""This module provides the Command-Line Interfaces (CLIs) for executing all data management, processing, and analysis
-pipelines intended to run on the remote compute server. These CLIs are intended to be used exclusively by other
-library components and should not be called directly by the end-users.
+"""Provides CLIs for executing data management, processing, and analysis pipelines on the remote compute server.
+
+Notes:
+    These CLIs are intended to be used exclusively by other library components and should not be called directly by
+    end-users.
 """
 
 from pathlib import Path
@@ -19,7 +21,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
 
 @click.group("process", context_settings=CONTEXT_SETTINGS)
 def process_cli() -> None:
-    """This Command-Line Interface (CLI) allows executing local data management, processing, and analysis pipelines.
+    """Executes local data management, processing, and analysis pipelines.
 
     This CLI is intended to run on the Sun lab remote compute server(s) and should not be called by the end-user
     directly. Instead, these commands are called by other library components to execute the requested data processing
