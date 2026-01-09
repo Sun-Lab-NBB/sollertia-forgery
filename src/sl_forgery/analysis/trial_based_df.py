@@ -160,20 +160,123 @@ def create_trial_indexed_dataframe(
     else:
         active_df = df.filter(pl.col('system_state') == system_state)
 
-    original_df = active_df if keep_original else None
+    #original_df = active_df if keep_original else None
 
     print(f"Signal column dtype: {active_df[signal_col].dtype}")
     print(f"First signal shape: {len(active_df[signal_col][0])}")
     print(f"Total frames after filtering: {len(active_df)}")
 
-    # Sort by frame for proper ordering
+    # Sort by frame for proper ordering, as a precaution
     active_df = active_df.sort('frame')
 
-    # Drop first trial if cue offset correction is needed
-    if experiment_config is not None and experiment_config.get('cue_offset_cm', 0) > 0:
-        first_trial = active_df['trial'].min()
-        print(f"Dropping first trial ({first_trial}) due to cue offset")
-        active_df = active_df.filter(pl.col('trial') != first_trial)
+    # Apply cue offset correction - realigns frames across trial boundaries. The first trial starts 10 cm into the
+    # track, which means at the end of the 1st trial we are back at cue A.  Each trial then starts and ends with Cue
+    # A, which may be true visually but isn't good for plotting/etc
+    cue_offset_cm = 0.0
+    if experiment_config is not None:
+        cue_offset_cm = experiment_config.get('cue_offset_cm', 0.0)
+
+    if cue_offset_cm > 0:
+        print(f"Realigning trials for cue offset: {cue_offset_cm} cm")
+
+        # Compute distance within each recorded trial
+        active_df = active_df.with_columns([
+            (pl.col('distance_cm') - pl.col('distance_cm').first().over('trial'))
+            .alias('_dist_in_trial')
+        ])
+
+        # Get track lengths per trial type using measured distance and config file
+        track_lengths_temp = {}  #dict w types and lengths
+        for trial_type in active_df['trial_type'].unique().to_list():
+            config_length = get_track_length_from_config(experiment_config, trial_type)
+            if config_length is not None:
+                track_lengths_temp[trial_type] = config_length
+            else:
+                type_data = active_df.filter(pl.col('trial_type') == trial_type)
+                max_per_trial = type_data.group_by('trial').agg(pl.col('_dist_in_trial').max())
+                track_lengths_temp[trial_type] = round(max_per_trial['_dist_in_trial'].median() / 20) * 20
+
+        # Add track length and compute physical position
+        track_length_df = pl.DataFrame({
+            'trial_type': list(track_lengths_temp.keys()),
+            '_track_length': list(track_lengths_temp.values())
+        })
+        active_df = active_df.join(track_length_df, on='trial_type', how='left')
+
+        active_df = active_df.with_columns([
+            ((pl.col('_dist_in_trial') + cue_offset_cm) % pl.col('_track_length'))
+            .alias('_physical_position')
+        ])
+
+        # Identify early vs main portion using offset
+        # Early portion: physical position < cue_offset (0 to 10cm)
+        # Main portion: physical position >= cue_offset (10 to 180cm)
+        active_df = active_df.with_columns([
+            (pl.col('_physical_position') < cue_offset_cm).alias('_is_early_portion')
+        ])
+
+        # Reassign frames across trial boundaries to get cue A in correct position
+        trials = active_df['trial'].unique().sort().to_list()
+
+        # Early portion of trial N should join main portion of trial N+1
+        # So: early portion gets reassigned to next trial number
+        next_trial = {trials[i]: trials[i + 1] for i in range(len(trials) - 1)}
+        next_trial[trials[-1]] = None  # Last trial's early portion has nowhere to go
+
+        active_df = active_df.with_columns([
+            pl.when(pl.col('_is_early_portion'))
+            .then(pl.col('trial').replace(next_trial))
+            .otherwise(pl.col('trial'))
+            .alias('trial')
+        ])
+
+        # Drop incomplete trials:
+        # - First trial (only has main portion, no early from previous)
+        # - Null trials (early portion of last trial that couldn't be reassigned)
+        active_df = active_df.filter(
+            (pl.col('trial') != trials[0]) & pl.col('trial').is_not_null()
+        )
+
+        n_aligned = active_df['trial'].n_unique()
+        print(f"  Result: {n_recorded} recorded trials -> {n_aligned} complete aligned trials")
+
+        # Step 9: Verify trial_type consistency within each aligned trial
+        type_check = (active_df.group_by('trial')
+                      .agg(pl.col('trial_type').n_unique().alias('n_types')))
+        mixed_trials = type_check.filter(pl.col('n_types') > 1)['trial'].to_list()
+        if len(mixed_trials) > 0:
+            print(f"  Warning: {len(mixed_trials)} aligned trials have mixed trial_types: {mixed_trials}")
+            print(f"  Dropping these trials.")
+            active_df = active_df.filter(~pl.col('trial').is_in(mixed_trials))
+
+        # Step 10: Sort by aligned trial and physical position
+        active_df = active_df.sort(['trial', '_physical_position'])
+
+        # Step 11: Update distance_cm for downstream processing
+        # Downstream computes: distance_in_trial = distance_cm - first(distance_cm) per trial
+        # We want: distance_in_trial = physical_position
+        # So: distance_cm = physical_position + (large offset per trial to maintain cumulative structure)
+        aligned_trials = active_df['trial'].unique().sort().to_list()
+        trial_offsets = {t: i * 10000 for i, t in enumerate(aligned_trials)}
+
+        active_df = active_df.with_columns([
+            (pl.col('_physical_position') + pl.col('trial').replace(trial_offsets))
+            .alias('distance_cm')
+        ])
+
+        # Step 12: Clean up temporary columns
+        active_df = active_df.drop([
+            '_dist_in_trial', '_track_length', '_physical_position',
+            '_is_early_portion', '_rec_idx', '_aligned_idx'
+        ])
+
+        n_aligned = active_df['trial'].n_unique()
+        print(f"  Result: {n_recorded} recorded trials -> {n_aligned} complete aligned trials")
+        print(f"  Dropped: first trial (incomplete start), last trial (incomplete end)")
+
+        # Update original_df reference if keeping
+        if keep_original:
+            original_df = active_df
 
     # Build aggregation list
     agg_list = [
