@@ -240,7 +240,7 @@ def create_trial_indexed_dataframe(
         n_aligned = active_df['trial'].n_unique()
         print(f"  Result: {n_recorded} recorded trials -> {n_aligned} complete aligned trials")
 
-        # Step 9: Verify trial_type consistency within each aligned trial
+        # Verify trial_type consistency within each aligned trial
         type_check = (active_df.group_by('trial')
                       .agg(pl.col('trial_type').n_unique().alias('n_types')))
         mixed_trials = type_check.filter(pl.col('n_types') > 1)['trial'].to_list()
@@ -249,10 +249,10 @@ def create_trial_indexed_dataframe(
             print(f"  Dropping these trials.")
             active_df = active_df.filter(~pl.col('trial').is_in(mixed_trials))
 
-        # Step 10: Sort by aligned trial and physical position
+        # Sort by aligned trial and physical position
         active_df = active_df.sort(['trial', '_physical_position'])
 
-        # Step 11: Update distance_cm for downstream processing
+        # Update distance_cm for downstream processing
         # Downstream computes: distance_in_trial = distance_cm - first(distance_cm) per trial
         # We want: distance_in_trial = physical_position
         # So: distance_cm = physical_position + (large offset per trial to maintain cumulative structure)
@@ -264,19 +264,16 @@ def create_trial_indexed_dataframe(
             .alias('distance_cm')
         ])
 
-        # Step 12: Clean up temporary columns
+        # Clean up temporary columns
         active_df = active_df.drop([
             '_dist_in_trial', '_track_length', '_physical_position',
             '_is_early_portion', '_rec_idx', '_aligned_idx'
         ])
 
         n_aligned = active_df['trial'].n_unique()
-        print(f"  Result: {n_recorded} recorded trials -> {n_aligned} complete aligned trials")
-        print(f"  Dropped: first trial (incomplete start), last trial (incomplete end)")
 
-        # Update original_df reference if keeping
-        if keep_original:
-            original_df = active_df
+    # Store original_df reference after cue offset correction
+    original_df = active_df if keep_original else None
 
     # Build aggregation list
     agg_list = [
