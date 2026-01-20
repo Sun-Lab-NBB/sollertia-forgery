@@ -1,6 +1,6 @@
 '''The purpose of this module is to organize the combined behavior and imaging data into a single usable format for
 place field plotting, umap plotting, and other analyses.  The original data uses cumulative distance over the session.
-This handles distance normalization, spatial binning, and session statistics.
+This handles distance normalization, spatial binning, and session statistics.  It organizees sessions into trials.
 Supports saving processed dataframe for faster subsequent loads.'''
 
 """
@@ -13,8 +13,7 @@ for spatial analysis of place cells and neural manifolds.
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple, Any
-from datetime import datetime
-import re
+
 
 import numpy as np
 import polars as pl
@@ -23,20 +22,61 @@ from scipy import stats
 from matplotlib import pyplot as plt
 
 # CONFIGURATION
+#TODO all of the below need to be updated to work with more tasks, for Ivan's project and others
 
-DEFAULT_CUE_COLORS = {
-    0: '#CCCCCC',  # Gray
-    1: '#FFD93D',  # A - Yellow
-    2: '#6BCB77',  # B - Green
-    3: '#4D96FF',  # C - Blue
-    4: '#FF6B9D',  # D - Pink
-    5: '#A23BFF',  # E - Purple
-    255: '#333333'  # Dark
+# Custom palette - can add more cues if needed.  This is actually Tableau 10 which is colorblind friendly and looks nice
+CUE_COLOR_PALETTE = [
+    '#4E79A7',  # Muted blue
+    '#F28E2B',  # Warm orange
+    '#59A14F',  # Forest green
+    '#E15759',  # Soft red
+    '#B07AA1',  # Dusty purple
+    '#9C755F',  # Warm brown
+    '#EDC948',  # Golden yellow
+    '#76B7B2',  # Dusty teal
+    '#FF9DA7',  # Soft pink
+    '#BAB0AC',  # Warm gray
+]
+
+SPECIAL_CUE_COLORS = {
+    0: '#D3D3D3',  # Light gray (inter-cue)
+    255: '#2D2D2D',  # Charcoal (dark)
 }
 
-DEFAULT_CUE_LABELS = {
-    0: 'Gray', 1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E', 255: 'Dark'
+SPECIAL_CUE_LABELS = {
+    0: 'Gray',
+    255: 'Dark',
 }
+
+
+def get_cue_colors(experiment_config: dict = None, max_cue_id: int = 20) -> dict:
+    """Get cue colors, allowing config override."""
+    colors = SPECIAL_CUE_COLORS.copy()
+
+    for cue_id in range(1, max_cue_id + 1):
+        idx = (cue_id - 1) % len(CUE_COLOR_PALETTE)
+        colors[cue_id] = CUE_COLOR_PALETTE[idx]
+
+    if experiment_config and 'cue_colors' in experiment_config:
+        colors.update(experiment_config['cue_colors'])
+
+    return colors
+
+
+def get_cue_labels(experiment_config: dict = None, max_cue_id: int = 20) -> dict:
+    """Get cue labels, allowing config override."""
+    labels = SPECIAL_CUE_LABELS.copy()
+
+    for cue_id in range(1, max_cue_id + 1):
+        if cue_id <= 26:
+            labels[cue_id] = chr(ord('A') + cue_id - 1)
+        else:
+            labels[cue_id] = 'A' + chr(ord('A') + (cue_id - 27) % 26)
+
+    if experiment_config and 'cue_labels' in experiment_config:
+        labels.update(experiment_config['cue_labels'])
+
+    return labels
 
 # Columns constant within a trial - aggregate to single value
 DEFAULT_TRIAL_COLUMNS = [
@@ -94,7 +134,7 @@ class TrialData:
         Filtered frame-based dataframe (by system_state)
     raw_df : pl.DataFrame, optional
         Completely unfiltered original dataframe
-    config : SessionConfig, optional
+    experiment_config : exp config
         Session configuration and metadata
     metadata : dict
         Processing parameters used
@@ -232,7 +272,7 @@ def create_trial_indexed_dataframe(
 
         # Drop incomplete trials:
         # - First trial (only has main portion, no early from previous)
-        # - Null trials (early portion of last trial that couldn't be reassigned)
+        # - Last trial
         active_df = active_df.filter(
             (pl.col('trial') != trials[0]) & pl.col('trial').is_not_null()
         )
@@ -670,7 +710,7 @@ def full_pipeline(
 
 
 # SAVE / LOAD
-
+#TODO test with parquet file
 def save_trial_data(data: TrialData, output_path: Path):
     """
     Save processed trial data to feather file.
@@ -733,7 +773,8 @@ def get_cue_regions(
         verbose: bool = False
 ) -> dict:
     """
-    Extract cue region boundaries from trial data.  Converts frame-level labeling into spatial regions
+    Extract cue region boundaries from trial data. Utility function for plotting/analysis.  Converts frame-level
+    labeling into spatial regions
 
     Returns
     -------
@@ -894,8 +935,7 @@ def diagnose_cues(data: TrialData, trial_type: str = 'ABC'):
 def plot_cue_regions_on_axis(
         ax: plt.Axes,
         cue_regions: dict,
-        cue_colors: dict = None,
-        cue_labels: dict = None,
+        experiment_config: dict = None,
         show_labels: bool = True,
         alpha: float = 0.15
 ):
@@ -904,10 +944,8 @@ def plot_cue_regions_on_axis(
 
     Handles both single regions (tuple) and multiple regions (list of tuples).
     """
-    if cue_colors is None:
-        cue_colors = DEFAULT_CUE_COLORS
-    if cue_labels is None:
-        cue_labels = DEFAULT_CUE_LABELS
+    cue_colors = get_cue_colors(experiment_config)
+    cue_labels = get_cue_labels(experiment_config)
 
     for cue_id, regions in cue_regions.items():
         color = cue_colors.get(cue_id, '#CCCCCC')
@@ -949,7 +987,7 @@ def plot_single_cell_all_trials(
         show_cues: bool = True,
 ) -> plt.Figure:
     """Plot all individual trials for a single cell plus session average."""
-    cue_colors = DEFAULT_CUE_COLORS
+    cue_colors = get_cue_colors(data.experiment_config)
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -957,7 +995,7 @@ def plot_single_cell_all_trials(
 
     if show_cues:
         cue_regions = get_cue_regions(data.trial_df, trial_type)
-        plot_cue_regions_on_axis(ax, cue_regions, cue_colors, show_labels=True)
+        plot_cue_regions_on_axis(ax, cue_regions, data.experiment_config, show_labels=True)
 
     # Plot individual trials
     for row in trials.iter_rows(named=True):
@@ -995,7 +1033,7 @@ def plot_single_cell_comparison(
         show_cues: bool = True
 ) -> plt.Figure:
     """Compare trial types for a single cell with all trials + averages."""
-    cue_colors = DEFAULT_CUE_COLORS
+    cue_colors = get_cue_colors(data.experiment_config)
 
     available_types = sorted(list(data.session_stats.keys()))
     if len(available_types) == 0:
@@ -1020,10 +1058,7 @@ def plot_single_cell_comparison(
 
         if show_cues:
             cue_regions = get_cue_regions(data.trial_df, trial_type)
-            for cue_id, region in cue_regions.items():
-                if isinstance(region, tuple):
-                    start, end = region
-                    ax.axvspan(start, end, alpha=0.15, color=cue_colors.get(cue_id, '#CCC'))
+            plot_cue_regions_on_axis(ax, cue_regions, data.experiment_config, show_labels=False, alpha=0.15)
 
         # Individual trials
         trial_color = trial_colors.get(trial_type, '#2E86AB')
@@ -1072,8 +1107,8 @@ def plot_split_view(
 
     Requires both ABC and ABDC trial types.
     """
-    cue_colors = DEFAULT_CUE_COLORS
-    cue_labels = DEFAULT_CUE_LABELS
+    cue_colors = get_cue_colors(data.experiment_config)
+    cue_labels = get_cue_labels(data.experiment_config)
 
     available_types = list(data.session_stats.keys())
     if 'ABC' not in available_types or 'ABDC' not in available_types:
