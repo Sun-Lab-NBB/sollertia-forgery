@@ -147,6 +147,25 @@ class TrialData:
     experiment_config: dict = None
     metadata: dict = field(default_factory=dict)
 
+#properties below helpful for looping over cells, intializing arrays, checking data
+    @property
+    def n_cells(self) -> int:
+        """Number of cells in the dataset."""
+        first_row = self.trial_df.row(0, named=True)
+        signals = first_row.get('signals')
+        if signals is not None and len(signals) > 0:
+            return signals.shape[1] if len(signals.shape) > 1 else 1
+        return 0
+
+    @property
+    def trial_types(self) -> List[str]:
+        """Available trial types."""
+        return sorted(self.trial_df['trial_type'].unique().to_list())
+
+    def get_trials_by_type(self, trial_type: str) -> pl.DataFrame:
+        """Get trials of a specific type."""
+        return self.trial_df.filter(pl.col('trial_type') == trial_type)
+
 
 # CORE PROCESSING FUNCTIONS
 
@@ -713,7 +732,7 @@ def full_pipeline(
 #TODO test with parquet file
 def save_trial_data(data: TrialData, output_path: Path):
     """
-    Save processed trial data to feather file.
+    Save processed trial data to feather file with metadata sidecar.
 
     Note: Config should be reloaded from original YAML when loading.
     """
@@ -721,11 +740,24 @@ def save_trial_data(data: TrialData, output_path: Path):
     data.trial_df.write_ipc(output_path)
     print(f"Saved: {output_path}")
 
+    # Save metadata as YAML sidecar with track_lengths, processing_params, n_trials, and trial_types for
+    # future-proofing. Can also use to check batch processing params by scanning all yamls -- did they all use the
+    # same bin sizes, etc
+    meta_path = output_path.with_suffix('.meta.yaml')
+    meta_dict = {
+        'track_lengths': data.track_lengths,
+        'processing_params': data.metadata,
+        'n_trials': len(data.trial_df),
+        'trial_types': data.trial_df['trial_type'].unique().to_list(),
+    }
+    with open(meta_path, 'w') as f:
+        yaml.dump(meta_dict, f)
+    print(f"Saved: {meta_path}")
+
 
 def load_trial_data(
         feather_path: Path,
         config_path: Optional[Path] = None,
-        data_path: Optional[Path] = None,
 ) -> TrialData:
     """
     Load processed trial data.
@@ -735,22 +767,31 @@ def load_trial_data(
     feather_path : Path
         Path to saved .feather file
     config_path : Path, optional
-        Path to original YAML config
-    data_path : Path, optional
-        Original data path for metadata extraction
+        Path to original YAML config (for experiment_config)
     """
+    feather_path = Path(feather_path)
     trial_df = pl.read_ipc(feather_path)
 
-    # Reload config if paths provided
-    config = None
-    if config_path is not None or data_path is not None:
-        config = SessionConfig.load(yaml_path=config_path, data_path=data_path)
+    # Load experiment config if path provided
+    experiment_config = None
+    if config_path is not None:
+        experiment_config = load_experiment_config(config_path)
 
-    # Infer track lengths from saved trial_df
+    # Try to load metadata sidecar
+    meta_path = feather_path.with_suffix('.meta.yaml')
     track_lengths = {}
-    for tt in trial_df['trial_type'].unique():
-        lengths = trial_df.filter(pl.col('trial_type') == tt)['track_length_cm']
-        track_lengths[tt] = float(lengths[0])
+    metadata = {}
+
+    if meta_path.exists():
+        with open(meta_path, 'r') as f:
+            meta = yaml.safe_load(f)
+        track_lengths = meta.get('track_lengths', {})
+        metadata = meta.get('processing_params', {})
+    else:
+        # Fall back to inferring from trial_df
+        for tt in trial_df['trial_type'].unique():
+            lengths = trial_df.filter(pl.col('trial_type') == tt)['track_length_cm']
+            track_lengths[tt] = float(lengths[0])
 
     # Recompute stats if binned signals exist
     session_stats = None
@@ -761,9 +802,9 @@ def load_trial_data(
         trial_df=trial_df,
         track_lengths=track_lengths,
         session_stats=session_stats,
-        config=config,
+        experiment_config=experiment_config,
+        metadata=metadata,
     )
-
 
 # CUE REGION EXTRACTION
 
