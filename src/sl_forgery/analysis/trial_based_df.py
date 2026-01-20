@@ -733,7 +733,7 @@ def get_cue_regions(
         verbose: bool = False
 ) -> dict:
     """
-    Extract cue region boundaries from trial data.
+    Extract cue region boundaries from trial data.  Converts frame-level labeling into spatial regions
 
     Returns
     -------
