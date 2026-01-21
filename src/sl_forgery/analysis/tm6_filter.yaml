@@ -1,0 +1,5 @@
+animals:
+  - 6
+
+exclude_lick_training: true
+exclude_run_training: true
