@@ -53,10 +53,11 @@ state to prevent integration errors.
 
 ## Available Skills
 
-| Skill               | Description                                                      |
-|---------------------|------------------------------------------------------------------|
-| `/explore-codebase` | Perform in-depth codebase exploration at session start           |
-| `/sun-lab-style`    | Apply Sun Lab coding conventions (REQUIRED for all code changes) |
+| Skill                  | Description                                                      |
+|------------------------|------------------------------------------------------------------|
+| `/explore-codebase`    | Perform in-depth codebase exploration at session start           |
+| `/sun-lab-style`       | Apply Sun Lab coding conventions (REQUIRED for all code changes) |
+| `/behavior-processing` | Guide behavior data processing workflows using the MCP server    |
 
 ## Project Context
 
