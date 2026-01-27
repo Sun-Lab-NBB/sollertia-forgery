@@ -7,16 +7,184 @@ from copy import deepcopy
 from typing import Any
 
 import dask
-import vr2p
 import numpy as np
+import pandas as pd
 import colorcet as cc
 import dask.array as da
 from scipy.signal import convolve2d
-from scipy.ndimage import label
+from scipy.ndimage import label, filters
 import dask.dataframe
 from skimage.measure import regionprops
 import matplotlib.pyplot as plt
-import vr2p.signal_processing
+
+
+# -------------------------------------------------------------------------------------
+# Signal Processing Functions
+# -------------------------------------------------------------------------------------
+
+
+def _baseline(
+    F: np.ndarray,
+    method: str = "maximin",
+    sigma_baseline: float = 20.0,
+    window_size: int = 600,
+) -> np.ndarray:
+    """Calculate the baseline of fluorescence data.
+
+    Supported methods:
+      - 'maximin': Applies Gaussian filter, followed by min and max filtering.
+      - 'average': Computes mean for each row of F.
+
+    Args:
+        F: Fluorescence data (num_cells, num_frames).
+        method: Baseline calculation method. Defaults to "maximin".
+        sigma_baseline: Sigma of the Gaussian filter for 'maximin'. Defaults to 20.0.
+        window_size: Window size for min/max filtering in 'maximin'. Defaults to 600.
+
+    Returns:
+        Baseline array of the same shape as F.
+
+    Raises:
+        ValueError: If an unknown method is provided.
+    """
+    if method == "maximin":
+        if F.ndim == 2:
+            Flow = filters.gaussian_filter(F, [0.0, sigma_baseline])
+        elif F.ndim == 1:
+            Flow = filters.gaussian_filter(F, [sigma_baseline])
+        else:
+            raise ValueError("Expected F to be 1D or 2D.")
+
+        Flow = filters.minimum_filter1d(Flow, window_size)
+        Flow = filters.maximum_filter1d(Flow, window_size)
+
+    elif method == "average":
+        Flow = np.tile(np.mean(F, axis=1), (F.shape[1], 1)).T
+    else:
+        raise ValueError(f"Unknown baseline method: '{method}'")
+
+    return Flow
+
+
+def _df_over_f0(
+    F: np.ndarray,
+    method_baseline: str = "maximin",
+    subtract_min: bool = False,
+    **kwargs: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate dF/F0 (delta F over F zero) for given fluorescence data.
+
+    Args:
+        F: Fluorescence data (num_cells, num_frames).
+        method_baseline: Baseline calculation method. See _baseline() for valid methods.
+            Defaults to "maximin".
+        subtract_min: Whether to subtract the minimum fluorescence from each row in F
+            before baseline calculation. Defaults to False.
+        **kwargs: Additional keyword arguments passed to the _baseline() function.
+
+    Returns:
+        A tuple containing:
+          - dF_over_f0: Resulting (F - f0)/f0, same shape as F.
+          - f0: Baseline values of shape (num_cells, num_frames).
+    """
+    if subtract_min:
+        F = F - np.min(F, axis=1)[..., np.newaxis]
+    f0 = _baseline(F, method=method_baseline, **kwargs)
+    dF = F - f0
+    dF = np.divide(dF, f0)
+    return dF, f0
+
+
+def _bin_fluorescence_data(
+    F: np.ndarray,
+    data: pd.Series,
+    edges: np.ndarray,
+    method: str = "mean",
+    threshold: float = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bin fluorescence data according to a reference data array (or Series).
+
+    Args:
+        F: Fluorescence data, shape (num_cells, num_frames).
+        data: Values used to bin the data, length must match num_frames in F.
+        edges: Bin edges passed to pandas.cut.
+        method: Aggregation method for each bin. Valid options: 'mean', 'sum',
+            'threshold sum'. Defaults to 'mean'.
+        threshold: Threshold value for the 'threshold sum' method. Defaults to 0.
+
+    Returns:
+        A tuple containing:
+          - Binned fluorescence array of shape (num_cells, num_bins).
+          - Array with the count of samples in each bin (num_bins,).
+
+    Raises:
+        ValueError: If an unsupported method is provided.
+    """
+    bins = pd.cut(data, edges, include_lowest=True, labels=False).to_numpy()
+    uni_bin_ids = np.arange(0, edges.size - 1)
+    count = np.array([sum(bins == cbin) for cbin in uni_bin_ids])
+
+    if method == "mean":
+        f_binned = np.array(
+            [
+                (
+                    F[:, bins == cbin].mean(axis=1)
+                    if sum(bins == cbin) != 0
+                    else np.full((F.shape[0]), np.nan)
+                )
+                for cbin in uni_bin_ids
+            ]
+        ).T
+
+    elif method == "sum" or method == "threshold sum":
+        f_binned = np.array(
+            [
+                (
+                    F[:, bins == cbin].sum(axis=1)
+                    if sum(bins == cbin) != 0
+                    else np.full((F.shape[0]), np.nan)
+                )
+                for cbin in uni_bin_ids
+            ]
+        ).T
+
+    else:
+        raise ValueError(f"Unsupported method: {method}")
+
+    return f_binned, count
+
+
+def _quantile_max_threshold(
+    F: np.ndarray,
+    base_quantile: float = 0.25,
+    threshold_factor: float = 0.25
+) -> np.ndarray:
+    """Threshold fluorescence data using a fractional difference between a baseline quantile
+    and the maximum value.
+
+    threshold = base_val + (max_val - base_val) * threshold_factor
+
+    Args:
+        F: Fluorescence data (num_cells, num_frames).
+        base_quantile: Quantile used as baseline. Defaults to 0.25.
+        threshold_factor: Fraction of (max_val - base_val). Defaults to 0.25.
+
+    Returns:
+        Boolean mask of the same shape as F, True where F is above the computed threshold.
+    """
+    F = F.copy()
+    max_val = np.nanmax(F, axis=1)
+    quantile_val = np.nanquantile(F, base_quantile, axis=1)
+
+    base_val = []
+    for i in range(F.shape[0]):
+        valid_samples = F[i, ~np.isnan(F[i, :])]
+        base_val.append(np.nanmean(valid_samples[valid_samples <= quantile_val[i]]))
+
+    threshold = (base_val + ((max_val - base_val) * threshold_factor))[:, np.newaxis]
+    threshold = np.tile(threshold, [1, F.shape[1]])
+    F[np.isnan(F)] = -np.inf
+    return threshold < F
 
 
 class PlaceFields1d:
@@ -341,7 +509,7 @@ class Tank1dProtocol(PlaceFields1dProtocol):
         """
         # Calculate Delta F over F zero
         if calc_df:
-            F = vr2p.signal_processing.df_over_f0(F)
+            F, _ = _df_over_f0(F)
 
         # Filter for speed
         ind = speed > self.params.min_speed
@@ -350,7 +518,7 @@ class Tank1dProtocol(PlaceFields1dProtocol):
 
         # Average bin fluorescent data
         edges = np.arange(0, track_length + bin_size, bin_size)
-        binF, _ = vr2p.signal_processing.bin_fluorescence_data(F, pos, edges)
+        binF, _ = _bin_fluorescence_data(F, pos, edges)
 
         # Smooth with a moving average filter
         binF = convolve2d(
@@ -358,7 +526,7 @@ class Tank1dProtocol(PlaceFields1dProtocol):
         )
 
         # Threshold based on quantile
-        thres_binF = vr2p.signal_processing.quantile_max_treshold(
+        thres_binF = _quantile_max_threshold(
             binF, self.params.base_quantile, self.params.signal_threshold
         )
 
@@ -402,7 +570,7 @@ class Tank1dProtocol(PlaceFields1dProtocol):
             Tuple[np.ndarray, np.ndarray]: A tuple containing (significant_cell_indices, p_values).
         """
         # Calculate Delta F over F zero
-        F = vr2p.signal_processing.df_over_f0(F)
+        F, _ = _df_over_f0(F)
 
         # Convert to Dask array for parallel processing
         F = da.from_array(F)
