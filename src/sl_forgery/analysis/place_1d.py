@@ -100,18 +100,18 @@ class PlaceFields1d:
         return np.any(self.label_image > 0, axis=1)
 
     @property
-    def order(self) -> NDArray[np.int64]:
+    def order(self) -> NDArray[np.int32]:
         """Returns cell ordering indices based on place field centers.
 
         For cells with multiple place fields, the field with the highest mean intensity is used for ordering.
         """
         cell_count = self.binned_fluorescence.shape[0]
-        sort_order = np.full(cell_count, np.inf, dtype=np.float64)
+        sort_order = np.full(cell_count, np.inf, dtype=np.float32)
         intensity = self.mean_intensity
         field_centers = self.centers
 
         if not field_centers.any():
-            return sort_order.astype(np.int64)
+            return sort_order.astype(np.int32)
 
         field_cell_id = field_centers[:, 0].astype(np.int32)
 
@@ -122,9 +122,9 @@ class PlaceFields1d:
                 max_intensity_index = np.argmax(intensity[field_cell_id == cell_index])
                 sort_order[cell_index] = field_centers[cell_field_indices[max_intensity_index], 1]
 
-        return np.argsort(sort_order)
+        return np.argsort(sort_order).astype(np.int32)
 
-    def remove_fields(self, indices: NDArray[np.int64]) -> PlaceFields1d:
+    def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields1d:
         """Removes specified place fields and returns a new PlaceFields1d object.
 
         Args:
@@ -144,7 +144,7 @@ class PlaceFields1d:
 
         return place_fields
 
-    def filter_cells(self, indices: NDArray[np.int64]) -> PlaceFields1d:
+    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields1d:
         """Filters to keep only specified cells and returns a new PlaceFields1d object.
 
         Args:
@@ -572,7 +572,7 @@ class PlaceFieldDetector1d:
 
         return place_fields
 
-    def validate_shuffle(self, repeat_count: int) -> tuple[NDArray[np.int64], NDArray[np.float64]]:
+    def validate_shuffle(self, repeat_count: int) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
         """Validates place fields using a shuffle test by comparing observed fields with shuffled data to compute
         p-values.
 
@@ -613,11 +613,11 @@ class PlaceFieldDetector1d:
         observed = results[:, 0]
         shuffled_results = results[:, 1:]
 
-        p_values = np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]
+        p_values = (np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]).astype(np.float32)
 
         significant_cells = np.argwhere(
             (observed) & (p_values < self.detection_params.significance_threshold)
-        ).flatten()
+        ).flatten().astype(np.int32)
 
         return significant_cells, p_values
 
