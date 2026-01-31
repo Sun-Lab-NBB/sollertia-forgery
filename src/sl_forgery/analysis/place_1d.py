@@ -18,32 +18,26 @@ from ataraxis_base_utilities import console
 
 @dataclass
 class PlaceFieldDetectionParams:
-    """Defines configuration parameters for place field detection.
-
-    Notes:
-        This dataclass contains all tunable parameters for the Tank lab place field detection
-        algorithm. Parameters control speed filtering, smoothing, thresholding, and statistical
-        validation.
-    """
+    """Defines configuration parameters for Tank lab place field detection algorithm."""
 
     minimum_speed: float = 5.0
-    """The minimum speed threshold in cm/s for including timepoints in analysis."""
+    """Minimum speed threshold in cm/s for including timepoints in analysis."""
     smooth_size: int = 3
-    """The size of the smoothing kernel in bins for the moving average filter."""
+    """Size of the smoothing kernel in bins for the moving average filter."""
     base_quantile: float = 0.25
-    """The quantile used as baseline for computing the activity threshold."""
+    """Quantile used as baseline for computing the activity threshold."""
     signal_threshold: float = 0.25
-    """The signal threshold factor applied to the difference between max and baseline."""
+    """Signal threshold factor applied to the difference between max and baseline."""
     minimum_bins: int = 3
-    """The minimum number of contiguous bins required for a valid place field."""
+    """Minimum number of contiguous bins required for a valid place field."""
     outside_threshold: float = 3.0
-    """The factor by which in-field activity must exceed out-of-field activity."""
+    """Factor by which in-field activity must exceed out-of-field activity."""
     maximum_intensity_threshold: float = 0.1
-    """The minimum peak intensity required for a valid place field."""
+    """Minimum peak intensity required for a valid place field."""
     chunk_count: int = 100
-    """The number of temporal chunks used for shuffle-based validation."""
+    """Number of temporal chunks used for shuffle-based validation."""
     significance_threshold: float = 0.05
-    """The p-value threshold for determining statistically significant place fields."""
+    """P-value threshold for determining statistically significant place fields."""
 
 
 @dataclass
@@ -299,7 +293,7 @@ def _bin_fluorescence_by_position(
     fluorescence: NDArray[np.float32],
     position: NDArray[np.float32],
     bin_edges: NDArray[np.float32],
-    aggregation_method: str = "mean",
+    compute_mean: bool = True,
 ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
     """Bins fluorescence data according to position values.
 
@@ -307,22 +301,12 @@ def _bin_fluorescence_by_position(
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
         position: Position values used for binning with length matching frame_count.
         bin_edges: Bin edges for spatial binning.
-        aggregation_method: Aggregation method for each bin. Valid options are 'mean' and 'sum'.
+        compute_mean: Determines whether to compute mean or sum for each bin.
 
     Returns:
         A tuple containing the binned fluorescence array with dimensions (cell_count, bin_count)
         and the sample count per bin with length bin_count.
-
-    Raises:
-        ValueError: If an unsupported aggregation method is provided.
     """
-    if aggregation_method not in ("mean", "sum"):
-        message = (
-            f"Unable to bin fluorescence data. The aggregation_method must be 'mean' or 'sum', "
-            f"but got '{aggregation_method}'."
-        )
-        console.error(message=message, error=ValueError)
-
     bin_indices = np.searchsorted(bin_edges, position, side="right") - 1
     bin_indices = np.clip(bin_indices, 0, len(bin_edges) - 2).astype(np.int32)
 
@@ -331,14 +315,13 @@ def _bin_fluorescence_by_position(
     sample_counts = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
 
     output = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
-    use_mean = aggregation_method == "mean"
 
     _bin_fluorescence_worker(
         fluorescence=fluorescence,
         bin_indices=bin_indices,
         bin_count=bin_count,
         sample_counts=sample_counts,
-        use_mean=use_mean,
+        use_mean=compute_mean,
         output=output,
     )
 
