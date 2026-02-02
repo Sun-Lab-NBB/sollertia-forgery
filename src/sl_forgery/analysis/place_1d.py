@@ -4,11 +4,9 @@ track."""
 from copy import deepcopy
 from dataclasses import field, dataclass
 
-import dask
 from numba import njit, prange
 import numpy as np
 import colorcet as cc
-import dask.array as da
 from numpy.typing import NDArray
 from scipy.signal import convolve2d
 from scipy.ndimage import label, filters
@@ -18,7 +16,7 @@ from ataraxis_base_utilities import console
 
 
 @dataclass
-class PlaceFieldDetectionParams:
+class PlaceFieldDetectionConfiguration:
     """Defines configuration parameters for Tank lab place field detection algorithm."""
 
     minimum_speed: float = 5.0
@@ -43,7 +41,7 @@ class PlaceFieldDetectionParams:
 
 
 @dataclass
-class PlaceFields1d:
+class PlaceFields:
     """Stores detected place fields in one-dimensional space.
 
     Attributes:
@@ -134,14 +132,14 @@ class PlaceFields1d:
         # Returns indices that would sort cells by their place field position along the track.
         return np.argsort(sort_order).astype(np.int32)
 
-    def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields1d:
-        """Removes specified place fields and returns a new PlaceFields1d object.
+    def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields:
+        """Removes specified place fields and returns a new PlaceFields object.
 
         Args:
             indices: Indices of place fields to remove.
 
         Returns:
-            A new PlaceFields1d object with the specified fields removed.
+            A new PlaceFields object with the specified fields removed.
         """
         place_fields = deepcopy(self)
 
@@ -157,14 +155,14 @@ class PlaceFields1d:
 
         return place_fields
 
-    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields1d:
-        """Filters to keep only specified cells and returns a new PlaceFields1d object.
+    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields:
+        """Filters to keep only specified cells and returns a new PlaceFields object.
 
         Args:
             indices: Indices of cells to keep.
 
         Returns:
-            A new PlaceFields1d object containing only the specified cells.
+            A new PlaceFields object containing only the specified cells.
         """
         place_fields = deepcopy(self)
 
@@ -465,7 +463,7 @@ def circular_connected_placefields(
     thresholded_image: NDArray[np.bool_],
     binned_fluorescence: NDArray[np.float32],
     minimum_bins: int = 3,
-) -> PlaceFields1d:
+) -> PlaceFields:
     """Creates a labeled image of circularly connected regions within each cell row.
 
     Args:
@@ -508,14 +506,14 @@ def circular_connected_placefields(
         center[1] -= bin_count
         adjusted_centers.append(center)
 
-    return PlaceFields1d(
+    return PlaceFields(
         label_image=result_label_image,
         binned_fluorescence=binned_fluorescence,
         centers=np.vstack(adjusted_centers).astype(np.float32),
     )
 
 
-def outside_field_threshold(place_fields: PlaceFields1d, threshold_factor: float = 3) -> PlaceFields1d:
+def outside_field_threshold(place_fields: PlaceFields, threshold_factor: float = 3) -> PlaceFields:
     """Filters place fields based on the signal-to-baseline ratio.
 
     Removes false positives by requiring that detected place fields have significantly higher activity than the
@@ -523,11 +521,11 @@ def outside_field_threshold(place_fields: PlaceFields1d, threshold_factor: float
     outside field calculation.
 
     Args:
-        place_fields: PlaceFields1d object with previously detected place fields.
+        place_fields: PlaceFields object with previously detected place fields.
         threshold_factor: Scalar factor of the outside field signal to set the threshold.
 
     Returns:
-        The filtered PlaceFields1d object.
+        The filtered PlaceFields object.
     """
     # Creates a mask to exclude place field pixels and compute mean fluorescence outside the fields.
     outside_image = place_fields.binned_fluorescence.copy()
@@ -542,7 +540,7 @@ def outside_field_threshold(place_fields: PlaceFields1d, threshold_factor: float
 
 
 @dataclass
-class PlaceFieldDetector1d:
+class PlaceFieldDetector:
     """Detects, validates, and visualizes 1D place fields using thresholding and connected component analysis."""
 
     fluorescence: NDArray[np.float32]
@@ -555,17 +553,17 @@ class PlaceFieldDetector1d:
     """Length of the track in centimeters."""
     bin_size: float
     """Size of spatial bins in centimeters."""
-    detection_params: PlaceFieldDetectionParams = field(default_factory=PlaceFieldDetectionParams)
+    detection_params: PlaceFieldDetectionConfiguration = field(default_factory=PlaceFieldDetectionConfiguration)
     """Configuration parameters for place field detection."""
 
-    def detect(self, calculate_df: bool = True) -> PlaceFields1d:
+    def detect(self, calculate_df: bool = True) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
 
         Args:
             calculate_df: Determines whether to calculate dF/F0.
 
         Returns:
-            A PlaceFields1d instance containing the labeled regions, binned fluorescence, and centers of detected place
+            A PlaceFields instance containing the labeled regions, binned fluorescence, and centers of detected place
             fields.
         """
         return self._run_detection(
@@ -586,39 +584,31 @@ class PlaceFieldDetector1d:
             A tuple containing the significant cell indices and p-values arrays.
         """
         fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
-        fluorescence = da.from_array(fluorescence)
 
         speed = self.speed.copy()
         speed[np.isnan(speed)] = 0
 
-        # Stores boolean arrays indicating whether each cell has a detected place field. The first element represents 
-        # place field existence in the original dataset while remaining elements represent place field existence in 
-        # each of the shuffled datasets.
-        results = [
-            dask.delayed(self._run_detection)(
-                fluorescence=fluorescence,
-                position=self.position,
-                speed=speed,
-                calculate_df=False,
-            ).has_place_field
-        ]
+        # Detects place fields in the original dataset.
+        observed = self._run_detection(
+            fluorescence=fluorescence,
+            position=self.position,
+            speed=speed,
+            calculate_df=False,
+        ).has_place_field
 
         # Detects place fields in shuffled data to determine how often fields appear by chance.
+        shuffled_results = []
         for iteration in range(repeat_count):
             shuffled = self._shuffle(data=fluorescence, iteration=iteration)
-            result = dask.delayed(self._run_detection)(
+            result = self._run_detection(
                 fluorescence=shuffled,
                 position=self.position,
                 speed=speed,
                 calculate_df=False,
             ).has_place_field
-            results.append(result)
+            shuffled_results.append(result)
 
-        results = dask.compute(results)
-        results = np.vstack(results).T
-
-        observed = results[:, 0]
-        shuffled_results = results[:, 1:]
+        shuffled_results = np.vstack(shuffled_results).T
 
         # Computes p-values as the proportion of shuffles where a place field was detected by chance.
         p_values = (np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]).astype(np.float32)
@@ -632,7 +622,7 @@ class PlaceFieldDetector1d:
 
     def plot(
         self,
-        place_fields: PlaceFields1d,
+        place_fields: PlaceFields,
         show_color_bar: bool = True,
         title: str | None = None,
         sort_by_position: bool = True,
@@ -645,7 +635,7 @@ class PlaceFieldDetector1d:
         """Plots place field activity as a heatmap.
 
         Args:
-            place_fields: A PlaceFields1d instance containing the binned fluorescence data to visualize.
+            place_fields: A PlaceFields instance containing the binned fluorescence data to visualize.
             show_color_bar: Whether to display a color bar alongside the heatmap.
             title: Optional title displayed at the top of the figure.
             sort_by_position: Whether to order cells by their place field center location along the track.
@@ -704,7 +694,7 @@ class PlaceFieldDetector1d:
         position: NDArray[np.float32],
         speed: NDArray[np.float32],
         calculate_df: bool = True,
-    ) -> PlaceFields1d:
+    ) -> PlaceFields:
         """Internal method that runs the place field detection pipeline on provided data arrays.
 
         Notes:
@@ -718,7 +708,7 @@ class PlaceFieldDetector1d:
             calculate_df: Determines whether to calculate dF/F0.
 
         Returns:
-            A PlaceFields1d instance containing the labeled regions, binned fluorescence, and centers of detected place
+            A PlaceFields instance containing the labeled regions, binned fluorescence, and centers of detected place
             fields.
         """
         # Computes dF/F0 to normalize fluorescence relative to baseline.
@@ -774,7 +764,6 @@ class PlaceFieldDetector1d:
 
         return place_fields
 
-    @dask.delayed
     def _shuffle(self, data: NDArray[np.float32], iteration: int) -> NDArray[np.float32]:
         """Shuffles fluorescence data for validation by splitting into chunks and reordering.
 
