@@ -1,12 +1,12 @@
 """Provides functionality for detecting and analyzing spatial tuning and place fields in neural recordings on a linear
-track."""
+track.
+"""
 
 from copy import deepcopy
 from dataclasses import field, dataclass
 
 from numba import njit, prange
 import numpy as np
-import colorcet as cc
 from numpy.typing import NDArray
 from scipy.signal import convolve2d
 from scipy.ndimage import label, filters
@@ -73,7 +73,7 @@ class PlaceFields:
             )
             # Scales position coordinates by the bin_size to convert from bin index to centimeters.
             self.centers = np.array(
-                [prop["weighted_centroid"] * np.array([1, self.bin_size]) for prop in properties],
+                [prop["centroid_weighted"] * np.array([1, self.bin_size]) for prop in properties],
                 dtype=np.float32,
             )
 
@@ -84,7 +84,7 @@ class PlaceFields:
     def mean_intensity(self) -> NDArray[np.float32]:
         """Returns the mean intensity for each detected place field."""
         properties = regionprops(label_image=self.label_image, intensity_image=self.binned_fluorescence, cache=False)
-        return np.array([prop["mean_intensity"] for prop in properties], dtype=np.float32)
+        return np.array([prop["intensity_mean"] for prop in properties], dtype=np.float32)
 
     @property
     def max_intensity(self) -> NDArray[np.float32]:
@@ -219,7 +219,7 @@ def _compute_baseline_fluorescence(
             )
             console.error(message=message, error=ValueError)
 
-        # Applies minimum then maximum filtering to extract the slow-varying baseline fluorescence (F0) used for 
+        # Applies minimum then maximum filtering to extract the slow-varying baseline fluorescence (F0) used for
         # computing dF/F0.
         baseline = filters.minimum_filter1d(input=baseline, size=filter_window_size)
         baseline = filters.maximum_filter1d(input=baseline, size=filter_window_size)
@@ -419,7 +419,7 @@ def _apply_threshold(
     for cell_index in prange(cell_count):
         cell_threshold = threshold[cell_index]
 
-         # Marks bins with fluorescence above the cell-specific threshold as True. 
+        # Marks bins with fluorescence above the cell-specific threshold as True.
         for frame_index in range(frame_count):
             value = fluorescence[cell_index, frame_index]
             if np.isnan(value):
@@ -430,7 +430,7 @@ def _apply_threshold(
     return output
 
 
-def _quantile_max_threshold(
+def _compute_quantile_max_threshold(
     fluorescence: NDArray[np.float32],
     base_quantile: float = 0.25,
     threshold_factor: float = 0.25,
@@ -459,7 +459,7 @@ def _quantile_max_threshold(
     return _apply_threshold(fluorescence=fluorescence, threshold=threshold, output=output)
 
 
-def circular_connected_placefields(
+def compute_circular_connected_place_fields(
     thresholded_image: NDArray[np.bool_],
     binned_fluorescence: NDArray[np.float32],
     minimum_bins: int = 3,
@@ -486,7 +486,7 @@ def circular_connected_placefields(
     label_image, _ = label(input=padded_threshold, structure=[[0, 0, 0], [1, 1, 1], [0, 0, 0]])
     properties = np.array(regionprops(label_image=label_image, intensity_image=padded_fluorescence, cache=False))
 
-    field_centers = np.array([prop["weighted_centroid"] for prop in properties])
+    field_centers = np.array([prop["centroid_weighted"] for prop in properties])
     area = np.array([prop["area"] for prop in properties], dtype=np.uint32)
 
     # Selects components with center within the middle (non-padded) region and sufficient area size.
@@ -502,7 +502,7 @@ def circular_connected_placefields(
         result_label_image[coordinates[:, 0], wrapped_indices] = counter + 1
 
         # Adjusts center position coordinate by subtracting the left padding width.
-        center = np.array(prop["weighted_centroid"])
+        center = np.array(prop["centroid_weighted"])
         center[1] -= bin_count
         adjusted_centers.append(center)
 
@@ -614,9 +614,11 @@ class PlaceFieldDetector:
         p_values = (np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]).astype(np.float32)
 
         # Selects cells with an observed place field and a p-value below the significance threshold.
-        significant_cells = np.argwhere(
-            (observed) & (p_values < self.detection_params.significance_threshold)
-        ).flatten().astype(np.int32)
+        significant_cells = (
+            np.argwhere((observed) & (p_values < self.detection_params.significance_threshold))
+            .flatten()
+            .astype(np.int32)
+        )
 
         return significant_cells, p_values
 
@@ -626,11 +628,12 @@ class PlaceFieldDetector:
         show_color_bar: bool = True,
         title: str | None = None,
         sort_by_position: bool = True,
+        show_only_place_cells: bool = True,
         cell_mask: NDArray[np.bool_] | None = None,
         figure_dpi: int = 150,
         minimum_percentile: float = 0.5,
         maximum_percentile: float = 0.9,
-        **kwargs,
+        cmap: str = "gray_r",
     ) -> plt.Figure:
         """Plots place field activity as a heatmap.
 
@@ -639,10 +642,13 @@ class PlaceFieldDetector:
             show_color_bar: Whether to display a color bar alongside the heatmap.
             title: Optional title displayed at the top of the figure.
             sort_by_position: Whether to order cells by their place field center location along the track.
-            cell_mask: Boolean mask with length cell_count specifying which cells to include in the plot.
+            show_only_place_cells: Whether to display only cells that have detected place fields.
+            cell_mask: Boolean mask with length cell_count specifying which cells to include in the plot. If provided,
+                       this overrides show_only_place_cells.
             figure_dpi: Resolution of the figure in dots per inch.
             minimum_percentile: Percentile of the data used to set the lower bound of the color scale.
             maximum_percentile: Percentile of the data used to set the upper bound of the color scale.
+            cmap: Matplotlib colormap name for the heatmap. Defaults to grayscale.
 
         Returns:
             The matplotlib Figure object containing the heatmap.
@@ -652,9 +658,11 @@ class PlaceFieldDetector:
         # Determines cell ordering based on place field position or original order.
         sort_order = place_fields.order if sort_by_position else np.arange(0, data.shape[0])
 
-        # Filters to include only cells specified in the mask.
+        # Filters to include only cells with place fields or those specified in the mask.
         if cell_mask is not None:
             sort_order = sort_order[np.isin(sort_order, np.argwhere(cell_mask))]
+        elif show_only_place_cells:
+            sort_order = sort_order[np.isin(sort_order, np.argwhere(place_fields.has_place_field))]
 
         data = data[sort_order, :]
 
@@ -668,23 +676,35 @@ class PlaceFieldDetector:
             plt.title(title, fontsize=8)
 
         # Sets axis extent where x-axis shows the position in centimeters and y-axis shows the cell number.
-        extent = [0, place_fields.bin_size * data.shape[1], 1, data.shape[0] + 1]
+        extent = [0, place_fields.bin_size * data.shape[1], data.shape[0], 0]
         plt.imshow(
             data,
-            cmap=cc.cm.CET_CBL2,
+            cmap=cmap,
             extent=extent,
             interpolation="none",
             vmin=minimum_value,
             vmax=maximum_value,
-            **kwargs,
+            origin="upper",
         )
 
         axes.set_aspect("auto")
         plt.xlabel("Position (cm)")
-        plt.ylabel("Cell #")
+        plt.ylabel("Cell number")
+
+        # Sets x-axis ticks at 25 cm intervals for consistent position labeling.
+        track_length = place_fields.bin_size * data.shape[1]
+        x_ticks = np.arange(0, track_length + 1, 25)
+        axes.set_xticks(x_ticks)
 
         if show_color_bar:
-            plt.colorbar()
+            cbar = plt.colorbar()
+            cbar.set_label("ΔF/F₀")
+            
+            # Sets colorbar ticks at 0.5 ΔF/F₀ intervals for consistent fluorescence labeling.
+            cbar_min = np.floor(minimum_value / 0.5) * 0.5
+            cbar_max = np.ceil(maximum_value / 0.5) * 0.5
+            cbar_ticks = np.arange(cbar_min, cbar_max + 1, 0.5)
+            cbar.set_ticks(cbar_ticks)
 
         return figure
 
@@ -698,7 +718,7 @@ class PlaceFieldDetector:
         """Internal method that runs the place field detection pipeline on provided data arrays.
 
         Notes:
-            This method is shared by both the public detect() method for original data and 
+            This method is shared by both the public detect() method for original data and
             compute_shuffle_significance() for shuffled data.
 
         Args:
@@ -737,14 +757,14 @@ class PlaceFieldDetector:
         )
 
         # Creates a binary mask by thresholding bins that exceed the baseline-to-max activity level.
-        thresholded_fluorescence = _quantile_max_threshold(
+        thresholded_fluorescence = _compute_quantile_max_threshold(
             fluorescence=binned_fluorescence.astype(np.float32),
             base_quantile=self.detection_params.base_quantile,
             threshold_factor=self.detection_params.signal_threshold,
         )
 
         # Detects place fields as horizontally connected regions in the thresholded binary mask.
-        place_fields = circular_connected_placefields(
+        place_fields = compute_circular_connected_place_fields(
             thresholded_image=thresholded_fluorescence,
             binned_fluorescence=binned_fluorescence.astype(np.float32),
             minimum_bins=self.detection_params.minimum_bins,
@@ -778,8 +798,8 @@ class PlaceFieldDetector:
         data_chunks = np.array_split(data, self.detection_params.chunk_count, axis=1)
 
         # Randomly reorders chunks to disrupt the relationship between fluorescence and position.
-        rng = np.random.default_rng(iteration)
-        shuffle_indices = rng.choice(
+        random_generator = np.random.default_rng(iteration)
+        shuffle_indices = random_generator.choice(
             np.arange(self.detection_params.chunk_count),
             self.detection_params.chunk_count,
             replace=False,
