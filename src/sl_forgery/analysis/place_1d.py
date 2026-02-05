@@ -2,15 +2,15 @@
 track.
 """
 
+import os
 from copy import deepcopy
 from dataclasses import field, dataclass
+from concurrent.futures import ThreadPoolExecutor
 
 from numba import njit, prange
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import convolve2d
-from scipy.ndimage import label, filters
-from skimage.measure import regionprops
+from scipy.ndimage import filters
 import matplotlib.pyplot as plt
 from ataraxis_base_utilities import console
 
@@ -24,7 +24,7 @@ class PlaceFieldDetectionConfiguration:
     smooth_size: int = 3
     """Size of the smoothing kernel in bins for the moving average filter."""
     base_quantile: float = 0.25
-    """Quantile (0-1) of the binned fluorescence distribution. Values at or below this quantile are averaged to compute 
+    """Quantile (0-1) of the binned fluorescence distribution. Values at or below this quantile are averaged to compute
     the baseline activity level used in place field thresholding."""
     signal_threshold: float = 0.25
     """Signal threshold factor applied to the difference between max and baseline."""
@@ -38,6 +38,306 @@ class PlaceFieldDetectionConfiguration:
     """Number of temporal chunks used for shuffle-based validation."""
     significance_threshold: float = 0.05
     """P-value threshold for determining statistically significant place fields."""
+
+
+@njit(cache=True)
+def _compute_label_centers(
+    label_image: NDArray[np.int32],
+    intensity_image: NDArray[np.float32],
+) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
+    """Computes cell index and intensity-weighted centroid for each labeled place field region.
+
+    Args:
+        label_image: Labeled image with dimensions (cell_count, bin_count).
+        intensity_image: Intensity image with same dimensions.
+
+    Returns:
+        A tuple of (cell_indices, weighted_centroids) arrays.
+    """
+    region_count = int(np.max(label_image))
+    if region_count == 0:
+        return np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.float32)
+
+    cell_indices = np.zeros(region_count, dtype=np.int32)
+    intensity_sums = np.zeros(region_count, dtype=np.float32)
+    weighted_sums = np.zeros(region_count, dtype=np.float32)
+
+    # Accumulates intensity and position-weighted intensity for each labeled region.
+    for cell_index in range(label_image.shape[0]):
+        for bin_index in range(label_image.shape[1]):
+            label_value = label_image[cell_index, bin_index]
+            if label_value > 0:
+                region_index = label_value - 1
+                intensity = intensity_image[cell_index, bin_index]
+                cell_indices[region_index] = cell_index
+                intensity_sums[region_index] += intensity
+                weighted_sums[region_index] += bin_index * intensity
+
+    # Computes intensity-weighted centroid by dividing position-weighted sum by total intensity.
+    weighted_centroids = np.zeros(region_count, dtype=np.float32)
+    for region_index in range(region_count):
+        if intensity_sums[region_index] > 0:
+            weighted_centroids[region_index] = weighted_sums[region_index] / intensity_sums[region_index]
+
+    return cell_indices, weighted_centroids
+
+
+@njit(cache=True)
+def _compute_mean_intensity(
+    label_image: NDArray[np.int32],
+    intensity_image: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Computes the mean fluorescence intensity for each labeled place field region.
+
+    Args:
+        label_image: Labeled image with dimensions (cell_count, bin_count).
+        intensity_image: Intensity image with same dimensions.
+
+    Returns:
+        Array of mean intensities with length equal to the number of labeled regions.
+    """
+    region_count = int(np.max(label_image))
+    if region_count == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    intensity_sums = np.zeros(region_count, dtype=np.float32)
+    pixel_counts = np.zeros(region_count, dtype=np.int32)
+
+    # Accumulates intensity and pixel count for each labeled region.
+    for cell_index in range(label_image.shape[0]):
+        for bin_index in range(label_image.shape[1]):
+            label_value = label_image[cell_index, bin_index]
+            if label_value > 0:
+                region_index = label_value - 1
+                intensity_sums[region_index] += intensity_image[cell_index, bin_index]
+                pixel_counts[region_index] += 1
+
+    # Computes mean intensity by dividing total intensity by pixel count.
+    mean_intensities = np.zeros(region_count, dtype=np.float32)
+    for region_index in range(region_count):
+        if pixel_counts[region_index] > 0:
+            mean_intensities[region_index] = intensity_sums[region_index] / pixel_counts[region_index]
+
+    return mean_intensities
+
+
+@njit(cache=True)
+def _compute_max_intensity(
+    label_image: NDArray[np.int32],
+    intensity_image: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Computes the maximum fluorescence intensity for each labeled place field region.
+
+    Args:
+        label_image: Labeled image with dimensions (cell_count, bin_count).
+        intensity_image: Intensity image with same dimensions.
+
+    Returns:
+        Array of maximum intensities with length equal to the number of labeled regions.
+    """
+    region_count = int(np.max(label_image))
+    if region_count == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    max_intensities = np.zeros(region_count, dtype=np.float32)
+
+    # Tracks the maximum intensity value encountered for each labeled region.
+    for cell_index in range(label_image.shape[0]):
+        for bin_index in range(label_image.shape[1]):
+            label_value = label_image[cell_index, bin_index]
+            if label_value > 0:
+                region_index = label_value - 1
+                intensity = intensity_image[cell_index, bin_index]
+                max_intensities[region_index] = max(max_intensities[region_index], intensity)
+
+    return max_intensities
+
+
+@njit(cache=True, parallel=True)
+def _accumulate_binned_fluorescence(
+    fluorescence: NDArray[np.float32],
+    bin_indices: NDArray[np.int32],
+    bin_count: int,
+    sample_counts: NDArray[np.int32],
+    use_mean: bool,
+    output: NDArray[np.float32],
+) -> NDArray[np.float32]:
+    """Accumulates neural fluorescence values into spatial position bins for each cell.
+
+    Args:
+        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
+        bin_indices: Bin index for each frame with length frame_count.
+        bin_count: Total number of bins.
+        sample_counts: Number of samples per bin with length bin_count.
+        use_mean: If True, computes the mean fluorescence per bin by dividing the accumulated fluorescence sum by
+                  sample count; otherwise returns the raw sum of fluorescence values per bin.
+        output: Pre-allocated output array with dimensions (cell_count, bin_count).
+
+    Returns:
+        The output array filled with binned fluorescence values.
+    """
+    cell_count = fluorescence.shape[0]
+    frame_count = fluorescence.shape[1]
+
+    for cell_index in prange(cell_count):
+        # Initializes a temporary array to accumulate fluorescence values for each spatial bin.
+        bin_sums = np.zeros(bin_count, dtype=np.float32)
+
+        # Adds each fluorescence value to its corresponding spatial bin based on the animal's position at that frame.
+        for frame_index in range(frame_count):
+            bin_idx = bin_indices[frame_index]
+            bin_sums[bin_idx] += fluorescence[cell_index, frame_index]
+
+        # Converts accumulated sums to mean values (if requested) by dividing by the number of samples in each bin.
+        for bin_index in range(bin_count):
+            if sample_counts[bin_index] > 0:
+                if use_mean:
+                    output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
+                else:
+                    output[cell_index, bin_index] = bin_sums[bin_index]
+            else:
+                output[cell_index, bin_index] = np.nan
+
+    return output
+
+
+@njit(cache=True, parallel=True)
+def _apply_place_field_threshold(
+    fluorescence: NDArray[np.float32],
+    quantile_values: NDArray[np.float32],
+    max_values: NDArray[np.float32],
+    threshold_factor: float,
+    output: NDArray[np.bool_],
+) -> NDArray[np.bool_]:
+    """Applies activity threshold to binned fluorescence data for place field candidate detection.
+
+    Args:
+        fluorescence: Binned dF/F0 fluorescence data with dimensions (cell_count, bin_count).
+        quantile_values: The fluorescence value at the specified quantile for each cell.
+        max_values: The maximum fluorescence value for each cell.
+        threshold_factor: Fraction of (max - baseline) to add to baseline for threshold.
+        output: Pre-allocated output boolean array with dimensions (cell_count, bin_count).
+
+    Returns:
+        The output array with True where fluorescence exceeds the computed threshold.
+    """
+    cell_count = fluorescence.shape[0]
+    bin_count = fluorescence.shape[1]
+
+    for cell_index in prange(cell_count):
+        quantile_threshold = quantile_values[cell_index]
+
+        # Computes the baseline fluorescence for the current cell as the mean of bins at or below the quantile 
+        # threshold.
+        total = 0.0
+        count = 0
+        for bin_index in range(bin_count):
+            value = fluorescence[cell_index, bin_index]
+            if not np.isnan(value) and value <= quantile_threshold:
+                total += value
+                count += 1
+
+        baseline = total / count if count > 0 else 0.0
+        cell_threshold = baseline + (max_values[cell_index] - baseline) * threshold_factor
+
+        # Marks spatial bins with fluorescence exceeding the cell-specific activity threshold as candidate place fields.
+        for bin_index in range(bin_count):
+            value = fluorescence[cell_index, bin_index]
+            output[cell_index, bin_index] = not np.isnan(value) and value > cell_threshold
+
+    return output
+
+
+@njit(cache=True, parallel=True)
+def _label_place_field_regions(
+    thresholded: NDArray[np.bool_],
+    intensity_image: NDArray[np.float32],
+    labels: NDArray[np.int32],
+    cell_indices: NDArray[np.int32],
+    areas: NDArray[np.int32],
+    centroids: NDArray[np.float32],
+    region_counts: NDArray[np.int32],
+) -> None:
+    """Labels contiguous above-threshold bins as place field regions and extracts their area and centroid.
+
+    Args:
+        thresholded: Binary image with dimensions (cell_count, bin_count).
+        intensity_image: Intensity image for weighted centroid calculation.
+        labels: Pre-allocated output array for component labels with dimensions (cell_count, bin_count).
+        cell_indices: Pre-allocated output for cell indices with dimensions (cell_count, max_regions_per_row).
+        areas: Pre-allocated output for region areas with dimensions (cell_count, max_regions_per_row).
+        centroids: Pre-allocated output for centroids with dimensions (cell_count, max_regions_per_row).
+        region_counts: Pre-allocated output for region count per cell with length cell_count.
+    """
+    cell_count = thresholded.shape[0]
+    bin_count = thresholded.shape[1]
+
+    for cell_index in prange(cell_count):
+        current_label = 0
+        local_count = 0
+        bin_index = 0
+
+        # Scans each bin to detect contiguous place field regions.
+        while bin_index < bin_count:
+            if thresholded[cell_index, bin_index]:
+                current_label += 1
+                start_bin = bin_index
+                weighted_sum = 0.0
+                intensity_sum = 0.0
+
+                # Accumulates bin count and intensity-weighted position for each place field region.
+                while bin_index < bin_count and thresholded[cell_index, bin_index]:
+                    labels[cell_index, bin_index] = current_label
+                    weighted_sum += bin_index * intensity_image[cell_index, bin_index]
+                    intensity_sum += intensity_image[cell_index, bin_index]
+                    bin_index += 1
+
+                # Stores region properties once the contiguous region ends.
+                cell_indices[cell_index, local_count] = cell_index
+                areas[cell_index, local_count] = bin_index - start_bin
+                centroids[cell_index, local_count] = weighted_sum / intensity_sum if intensity_sum > 0 else 0.0
+                local_count += 1
+
+            else:
+                bin_index += 1
+
+        region_counts[cell_index] = local_count
+
+
+@njit(cache=True)
+def _flatten_region_properties(
+    cell_indices: NDArray[np.int32],
+    areas: NDArray[np.int32],
+    centroids: NDArray[np.float32],
+    region_counts: NDArray[np.int32],
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
+    """Flattens per-cell place field region property arrays into contiguous 1D arrays.
+
+    Args:
+        cell_indices: Cell indices with dimensions (cell_count, max_regions_per_row).
+        areas: Region areas with dimensions (cell_count, max_regions_per_row).
+        centroids: Region centroids with dimensions (cell_count, max_regions_per_row).
+        region_counts: Number of regions per cell with length cell_count.
+
+    Returns:
+        A tuple containing flattened cell indices, areas, and centroids arrays.
+    """
+    # Pre-allocates 1D output arrays with total region count across all cells.
+    total_regions = np.sum(region_counts)
+    flat_cell_indices = np.zeros(total_regions, dtype=np.int32)
+    flat_areas = np.zeros(total_regions, dtype=np.int32)
+    flat_centroids = np.zeros(total_regions, dtype=np.float32)
+
+    # Copies valid regions from each cell row into contiguous 1D arrays.
+    index = 0
+    for cell_index in range(len(region_counts)):
+        for region_index in range(region_counts[cell_index]):
+            flat_cell_indices[index] = cell_indices[cell_index, region_index]
+            flat_areas[index] = areas[cell_index, region_index]
+            flat_centroids[index] = centroids[cell_index, region_index]
+            index += 1
+
+    return flat_cell_indices, flat_areas, flat_centroids
 
 
 @dataclass
@@ -61,42 +361,25 @@ class PlaceFields:
     """Size of spatial bins in centimeters."""
 
     def __post_init__(self) -> None:
-        """Validates and normalizes field data types, computing centers if not provided."""
-        # Ensures label image and fluorescence arrays are stored in a consistent datatype.
+        """Validates and normalizes field data types."""
         self.label_image = self.label_image.astype(np.int32)
         self.binned_fluorescence = self.binned_fluorescence.astype(np.float32)
-
-        # Computes intensity-weighted centroids for each labeled region if centers are not provided.
-        if self.centers is None or len(self.centers) == 0:
-            properties = regionprops(
-                label_image=self.label_image, intensity_image=self.binned_fluorescence, cache=False
-            )
-            # Scales position coordinates by the bin_size to convert from bin index to centimeters.
-            self.centers = np.array(
-                [prop["centroid_weighted"] * np.array([1, self.bin_size]) for prop in properties],
-                dtype=np.float32,
-            )
-
-        else:
-            self.centers = self.centers.astype(np.float32)
+        self.centers = self.centers.astype(np.float32)
 
     @property
     def mean_intensity(self) -> NDArray[np.float32]:
         """Returns the mean intensity for each detected place field."""
-        properties = regionprops(label_image=self.label_image, intensity_image=self.binned_fluorescence, cache=False)
-        return np.array([prop["intensity_mean"] for prop in properties], dtype=np.float32)
+        return _compute_mean_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
 
     @property
     def max_intensity(self) -> NDArray[np.float32]:
         """Returns the maximum intensity for each detected place field."""
-        properties = regionprops(label_image=self.label_image, intensity_image=self.binned_fluorescence, cache=False)
-        return np.array([prop["max_intensity"] for prop in properties], dtype=np.float32)
+        return _compute_max_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
 
     @property
     def cell_id(self) -> NDArray[np.int32]:
         """Returns the cell ID for each detected place field."""
-        properties = regionprops(label_image=self.label_image, intensity_image=self.binned_fluorescence, cache=False)
-        return np.array([region["coords"][0, 0] for region in properties], dtype=np.int32)
+        return self.centers[:, 0].astype(np.int32)
 
     @property
     def has_place_field(self) -> NDArray[np.bool_]:
@@ -132,6 +415,28 @@ class PlaceFields:
         # Returns indices that would sort cells by their place field position along the track.
         return np.argsort(sort_order).astype(np.int32)
 
+    def _realign_field_centers(self) -> None:
+        """Recomputes centers array to align with label_image after modifications in remove_fields and filter_cells."""
+        # Extracts cell indices and intensity-weighted centroids from the current label_image.
+        cell_indices, weighted_centroids = _compute_label_centers(
+            label_image=self.label_image, intensity_image=self.binned_fluorescence
+        )
+
+        # Converts bin indices to centimeters and combines with cell indices into a (field_count, 2) array.
+        self.centers = (
+            np.column_stack((cell_indices.astype(np.float32), weighted_centroids * self.bin_size))
+            if len(cell_indices) > 0
+            else np.array([], dtype=np.float32).reshape(0, 2)
+        )
+
+    def _renumber_labels(self) -> None:
+        """Renumbers label_image values sequentially starting from 1 after removing or filtering fields."""
+        new_label = 1
+        for value in np.unique(self.label_image):
+            if value != 0:
+                self.label_image[self.label_image == value] = new_label
+                new_label += 1
+
     def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields:
         """Removes specified place fields and returns a new PlaceFields object.
 
@@ -143,15 +448,11 @@ class PlaceFields:
         """
         place_fields = deepcopy(self)
 
-        # Zeros out the labels for the cells to be removed.
+        # Zeros out the labels for the fields to be removed.
         place_fields.label_image[np.isin(place_fields.label_image, indices + 1)] = 0
 
-        # Renumbers remaining labels in sequential order starting from 1.
-        for counter, value in enumerate(np.unique(place_fields.label_image)):
-            if value != 0:
-                place_fields.label_image[place_fields.label_image == value] = counter
-
-        place_fields.centers = np.delete(place_fields.centers, indices, axis=0)
+        place_fields._renumber_labels()
+        place_fields._realign_field_centers()
 
         return place_fields
 
@@ -168,16 +469,10 @@ class PlaceFields:
 
         # Zeros out labels for cells that are not in the list of cells to keep.
         all_indices = np.arange(0, place_fields.label_image.shape[0])
-        field_cell_id = place_fields.cell_id
         place_fields.label_image[~np.isin(all_indices, indices), :] = 0
 
-        # Renumbers remaining labels in sequential order starting from 1.
-        for counter, value in enumerate(np.unique(place_fields.label_image)):
-            if value != 0:
-                place_fields.label_image[place_fields.label_image == value] = counter
-
-        # Keeps only the centers for fields belonging to cells that are retained.
-        place_fields.centers = place_fields.centers[np.isin(field_cell_id, indices), :]
+        place_fields._renumber_labels()
+        place_fields._realign_field_centers()
 
         return place_fields
 
@@ -188,16 +483,13 @@ def _compute_baseline_fluorescence(
     gaussian_sigma: float = 20.0,
     filter_window_size: int = 600,
 ) -> NDArray[np.float32]:
-    """Computes the baseline of fluorescence data.
-
-    Supported methods:
-      - 'maximin': Applies Gaussian filter, followed by min and max filtering.
-      - 'average': Computes mean for each row of fluorescence.
+    """Computes the baseline (F0) of neural fluorescence traces for dF/F0 normalization.
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        method: The baseline calculation method.
-        gaussian_sigma: Sigma of the Gaussian filter for 'maximin' method.
+        method: The baseline calculation method. Uses either 'maximin' for Gaussian smoothing followed by min and max
+            filtering, or 'average' for computing the mean of each row.
+        gaussian_sigma: Standard deviation of the Gaussian filter for 'maximin' method.
         filter_window_size: Window size for min/max filtering in 'maximin' method.
 
     Returns:
@@ -241,7 +533,8 @@ def _compute_delta_fluorescence(
     fluorescence: NDArray[np.float32],
     baseline_method: str = "maximin",
     subtract_minimum: bool = False,
-    **kwargs,
+    gaussian_sigma: float = 20.0,
+    filter_window_size: int = 600,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Computes the relative fluorescence change (ΔF/F0) normalized to baseline fluorescence.
 
@@ -249,6 +542,8 @@ def _compute_delta_fluorescence(
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
         baseline_method: Baseline calculation method. See _compute_baseline_fluorescence() for valid methods.
         subtract_minimum: Whether to subtract the minimum fluorescence from each row before baseline calculation.
+        gaussian_sigma: Standard deviation of the Gaussian filter for 'maximin' baseline method.
+        filter_window_size: Window size for min/max filtering in 'maximin' baseline method.
 
     Returns:
         A tuple containing the delta fluorescence array (F - F0) / F0 and the baseline F0 array,
@@ -259,60 +554,17 @@ def _compute_delta_fluorescence(
         fluorescence = fluorescence - np.min(fluorescence, axis=1)[..., np.newaxis]
 
     # Estimates the baseline fluorescence (F0) representing the resting or non-active state of each cell.
-    baseline = _compute_baseline_fluorescence(fluorescence=fluorescence, method=baseline_method, **kwargs)
+    baseline = _compute_baseline_fluorescence(
+        fluorescence=fluorescence,
+        method=baseline_method,
+        gaussian_sigma=gaussian_sigma,
+        filter_window_size=filter_window_size,
+    )
 
     # Computes the relative fluorescence change.
     delta_fluorescence = (fluorescence - baseline) / baseline
 
     return delta_fluorescence, baseline
-
-
-@njit(cache=True, parallel=True)
-def _bin_fluorescence_worker(
-    fluorescence: NDArray[np.float32],
-    bin_indices: NDArray[np.int32],
-    bin_count: int,
-    sample_counts: NDArray[np.int32],
-    use_mean: bool,
-    output: NDArray[np.float32],
-) -> NDArray[np.float32]:
-    """Worker function which accumulates fluorescence values into spatial bins across cells.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        bin_indices: Bin index for each frame with length frame_count.
-        bin_count: Total number of bins.
-        sample_counts: Number of samples per bin with length bin_count.
-        use_mean: If True, computes the mean fluorescence per bin by dividing the accumulated fluorescence sum by
-            sample count; otherwise returns the raw sum of fluorescence values per bin.
-        output: Pre-allocated output array with dimensions (cell_count, bin_count).
-
-    Returns:
-        The output array filled with binned fluorescence values.
-    """
-    cell_count = fluorescence.shape[0]
-    frame_count = fluorescence.shape[1]
-
-    for cell_index in prange(cell_count):
-        # Initializes a temporary array to accumulate fluorescence values for each spatial bin.
-        bin_sums = np.zeros(bin_count, dtype=np.float32)
-
-        # Adds each fluorescence value to its corresponding spatial bin based on the animal's position at that frame.
-        for frame_index in range(frame_count):
-            bin_idx = bin_indices[frame_index]
-            bin_sums[bin_idx] += fluorescence[cell_index, frame_index]
-
-        # Converts accumulated sums to mean values (if requested) by dividing by the number of samples in each bin.
-        for bin_index in range(bin_count):
-            if sample_counts[bin_index] > 0:
-                if use_mean:
-                    output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
-                else:
-                    output[cell_index, bin_index] = bin_sums[bin_index]
-            else:
-                output[cell_index, bin_index] = np.nan
-
-    return output
 
 
 def _bin_fluorescence_by_position(
@@ -321,7 +573,7 @@ def _bin_fluorescence_by_position(
     bin_edges: NDArray[np.float32],
     compute_mean: bool = True,
 ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
-    """Bins fluorescence data according to position values.
+    """Bins neural fluorescence data by animal position along the linear track.
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
@@ -344,7 +596,7 @@ def _bin_fluorescence_by_position(
     output = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
 
     # Accumulates fluorescence values into spatial bins for each cell.
-    _bin_fluorescence_worker(
+    _accumulate_binned_fluorescence(
         fluorescence=fluorescence,
         bin_indices=bin_indices,
         bin_count=bin_count,
@@ -356,86 +608,12 @@ def _bin_fluorescence_by_position(
     return output, sample_counts
 
 
-@njit(cache=True, parallel=True)
-def _compute_base_values(
-    fluorescence: NDArray[np.float32],
-    quantile_values: NDArray[np.float32],
-    base_values: NDArray[np.float32],
-) -> NDArray[np.float32]:
-    """Worker function which computes the mean of values below the quantile threshold for each cell.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        quantile_values: The fluorescence value at the specified quantile for each cell.
-        base_values: Pre-allocated output array for base values.
-
-    Returns:
-        The base_values array updated with the mean of values below each cell's quantile threshold.
-    """
-    cell_count = fluorescence.shape[0]
-
-    for cell_index in prange(cell_count):
-        row = fluorescence[cell_index, :]
-        quantile_threshold = quantile_values[cell_index]
-
-        # Accumulates fluorescence values at or below the quantile threshold.
-        total = 0.0
-        count = 0
-
-        for frame_index in range(row.shape[0]):
-            value = row[frame_index]
-            if not np.isnan(value) and value <= quantile_threshold:
-                total += value
-                count += 1
-
-        # Computes mean of accumulated values as the baseline for this cell.
-        if count > 0:
-            base_values[cell_index] = total / count
-        else:
-            base_values[cell_index] = np.nan
-
-    return base_values
-
-
-@njit(cache=True, parallel=True)
-def _apply_threshold(
-    fluorescence: NDArray[np.float32],
-    threshold: NDArray[np.float32],
-    output: NDArray[np.bool_],
-) -> NDArray[np.bool_]:
-    """Worker function which applies per-cell thresholds to fluorescence data.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        threshold: Threshold values with length cell_count.
-        output: Pre-allocated output boolean array with dimensions (cell_count, frame_count).
-
-    Returns:
-        The output array updated with True where fluorescence exceeds the threshold.
-    """
-    cell_count = fluorescence.shape[0]
-    frame_count = fluorescence.shape[1]
-
-    for cell_index in prange(cell_count):
-        cell_threshold = threshold[cell_index]
-
-        # Marks bins with fluorescence above the cell-specific threshold as True.
-        for frame_index in range(frame_count):
-            value = fluorescence[cell_index, frame_index]
-            if np.isnan(value):
-                output[cell_index, frame_index] = False
-            else:
-                output[cell_index, frame_index] = value > cell_threshold
-
-    return output
-
-
 def _compute_quantile_max_threshold(
     fluorescence: NDArray[np.float32],
     base_quantile: float = 0.25,
     threshold_factor: float = 0.25,
 ) -> NDArray[np.bool_]:
-    """Thresholds fluorescence data using a fractional difference between a baseline quantile and the maximum value.
+    """Thresholds binned fluorescence using a fractional difference between baseline quantile and peak activity.
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
@@ -443,20 +621,19 @@ def _compute_quantile_max_threshold(
         threshold_factor: Fraction of (max_val - base_val).
 
     Returns:
-        Boolean mask of the same shape as fluorescence, True where values exceed the computed threshold.
+        Boolean mask of the same shape as fluorescence. Returns True if values exceed the computed threshold.
     """
     max_values = np.nanmax(fluorescence, axis=1).astype(np.float32)
     quantile_values = np.nanquantile(fluorescence, base_quantile, axis=1).astype(np.float32)
-
-    base_values = np.empty(fluorescence.shape[0], dtype=np.float32)
-    base_values = _compute_base_values(
-        fluorescence=fluorescence, quantile_values=quantile_values, base_values=base_values
-    )
-
-    threshold = (base_values + (max_values - base_values) * threshold_factor).astype(np.float32)
-
     output = np.empty(fluorescence.shape, dtype=np.bool_)
-    return _apply_threshold(fluorescence=fluorescence, threshold=threshold, output=output)
+
+    return _apply_place_field_threshold(
+        fluorescence=fluorescence,
+        quantile_values=quantile_values,
+        max_values=max_values,
+        threshold_factor=threshold_factor,
+        output=output,
+    )
 
 
 def compute_circular_connected_place_fields(
@@ -464,57 +641,93 @@ def compute_circular_connected_place_fields(
     binned_fluorescence: NDArray[np.float32],
     minimum_bins: int = 3,
 ) -> PlaceFields:
-    """Creates a labeled image of circularly connected regions within each cell row.
+    """Detects place fields as circularly connected above-threshold regions along the linear track.
 
     Args:
         thresholded_image: Thresholded binary image of binned place field activity with dimensions
-                           (cell_count, bin_count).
+            (cell_count, bin_count).
         binned_fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
         minimum_bins: Minimal required size of a connected region in bins.
 
     Returns:
         The detected one-dimensional place fields.
     """
-    bin_count = thresholded_image.shape[1]
+    cell_count, bin_count = thresholded_image.shape
+    padded_bin_count = bin_count * 3
+    max_regions_per_row = padded_bin_count // 2 + 1
 
-    # Pads the thresholded binary image and binned fluorescence by wrapping bins from both track edges so that activity
-    # spanning the track boundaries is treated as a single place field.
+    # Pads the arrays by wrapping bins from both track edges to treat activity spanning track boundaries as a single
+    # place field.
     padded_threshold = np.pad(thresholded_image, ((0, 0), (bin_count, bin_count)), mode="wrap")
     padded_fluorescence = np.pad(binned_fluorescence, ((0, 0), (bin_count, bin_count)), mode="wrap")
 
-    # Labels connected components using horizontal adjacency connectivity only.
-    label_image, _ = label(input=padded_threshold, structure=[[0, 0, 0], [1, 1, 1], [0, 0, 0]])
-    properties = np.array(regionprops(label_image=label_image, intensity_image=padded_fluorescence, cache=False))
+    # Pre-allocates output arrays for labeling and property computation.
+    padded_labels = np.zeros(padded_threshold.shape, dtype=np.int32)
+    cell_indices = np.zeros((cell_count, max_regions_per_row), dtype=np.int32)
+    areas = np.zeros((cell_count, max_regions_per_row), dtype=np.int32)
+    centroids = np.zeros((cell_count, max_regions_per_row), dtype=np.float32)
+    region_counts = np.zeros(cell_count, dtype=np.int32)
 
-    field_centers = np.array([prop["centroid_weighted"] for prop in properties])
-    area = np.array([prop["area"] for prop in properties], dtype=np.uint32)
+    # Labels connected components and extracts properties in a single pass.
+    _label_place_field_regions(
+        thresholded=padded_threshold,
+        intensity_image=padded_fluorescence,
+        labels=padded_labels,
+        cell_indices=cell_indices,
+        areas=areas,
+        centroids=centroids,
+        region_counts=region_counts,
+    )
 
-    # Selects components with center within the middle (non-padded) region and sufficient area size.
-    valid_indices = (field_centers[:, 1] >= bin_count) & (field_centers[:, 1] < bin_count * 2) & (area >= minimum_bins)
+    # Flattens per-cell 2D arrays into 1D arrays for centroid and area filtering.
+    cell_indices, areas, centroids = _flatten_region_properties(
+        cell_indices=cell_indices,
+        areas=areas,
+        centroids=centroids,
+        region_counts=region_counts,
+    )
+
+    # Filters to components whose centroids fall within the original track region and that span at least the minimum
+    #  number of contiguous bins.
+    valid_mask = (centroids >= bin_count) & (centroids < bin_count * 2) & (areas >= minimum_bins)
+    valid_indices = np.where(valid_mask)[0]
 
     result_label_image = np.zeros(thresholded_image.shape, dtype=np.int32)
     adjusted_centers = []
 
     # Maps valid components back to original coordinate space.
-    for counter, prop in enumerate(properties[valid_indices]):
-        coordinates = prop["coords"]
-        wrapped_indices = np.take(np.arange(0, bin_count), coordinates[:, 1], mode="wrap")
-        result_label_image[coordinates[:, 0], wrapped_indices] = counter + 1
+    for counter, region_index in enumerate(valid_indices):
+        cell_index = cell_indices[region_index]
+        target_centroid = centroids[region_index]
 
-        # Adjusts center position coordinate by subtracting the left padding width.
-        center = np.array(prop["centroid_weighted"])
-        center[1] -= bin_count
-        adjusted_centers.append(center)
+        # Retrieves the label value at the centroid position.
+        centroid_bin = int(target_centroid)
+        target_label = padded_labels[cell_index, centroid_bin]
+
+        # Copies the labeled region to the result image with wrapped coordinates.
+        for bin_index in range(padded_bin_count):
+            if padded_labels[cell_index, bin_index] == target_label:
+                wrapped_bin = bin_index % bin_count
+                result_label_image[cell_index, wrapped_bin] = counter + 1
+
+        adjusted_centers.append([float(cell_index), target_centroid - bin_count])
+
+    # Converts adjusted centers list to a 2D array, or creates an empty array if no valid regions were found.
+    centers = (
+        np.array(adjusted_centers, dtype=np.float32)
+        if adjusted_centers
+        else np.array([], dtype=np.float32).reshape(0, 2)
+    )
 
     return PlaceFields(
         label_image=result_label_image,
         binned_fluorescence=binned_fluorescence,
-        centers=np.vstack(adjusted_centers).astype(np.float32),
+        centers=centers,
     )
 
 
 def outside_field_threshold(place_fields: PlaceFields, threshold_factor: float = 3) -> PlaceFields:
-    """Filters place fields based on the signal-to-baseline ratio.
+    """Filters place fields by requiring in-field activity to exceed out-of-field baseline by a threshold factor.
 
     Removes false positives by requiring that detected place fields have significantly higher activity than the
     baseline outside the field. In cases where a cell has multiple fields, both fields are excluded from the
@@ -551,34 +764,50 @@ class PlaceFieldDetector:
     """Speed data with length timepoint_count."""
     track_length: float
     """Length of the track in centimeters."""
-    bin_size: float
+    bin_size: float = 5.0
     """Size of spatial bins in centimeters."""
     detection_params: PlaceFieldDetectionConfiguration = field(default_factory=PlaceFieldDetectionConfiguration)
     """Configuration parameters for place field detection."""
 
-    def detect(self, calculate_df: bool = True) -> PlaceFields:
+    def detect(self, run_shuffle: bool = False) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
 
         Args:
-            calculate_df: Determines whether to calculate dF/F0.
+            run_shuffle: Determines whether to run shuffle significance testing and filter results to only include
+                cells with statistically significant place fields.
 
         Returns:
             A PlaceFields instance containing the labeled regions, binned fluorescence, and centers of detected place
-            fields.
+            fields. If run_shuffle is True, only significant cells are included.
         """
-        return self._run_detection(
-            fluorescence=self.fluorescence,
+        # Computes dF/F0 to normalize fluorescence relative to baseline.
+        fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
+
+        # Bins fluorescence by spatial position, applies thresholding, and detects connected regions as place fields.
+        place_fields = self._run_detection(
+            fluorescence=fluorescence,
             position=self.position,
             speed=self.speed,
-            calculate_df=calculate_df,
         )
 
-    def compute_shuffle_significance(self, repeat_count: int) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
+        # Filters to only include cells with statistically significant place fields based on shuffle testing.
+        if run_shuffle:
+            significant_cells, _ = self.compute_shuffle_significance(repeat_count=self.detection_params.chunk_count)
+            place_fields = place_fields.filter_cells(indices=significant_cells)
+
+        return place_fields
+
+    def compute_shuffle_significance(
+        self,
+        repeat_count: int = 100,
+        worker_count: int = -1,
+    ) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
         """Validates place fields using a shuffle test by comparing observed fields with shuffled data to compute
         p-values.
 
         Args:
             repeat_count: Number of shuffles to perform.
+            worker_count: Number of parallel workers for shuffle iterations. If -1, uses all CPU cores minus 4.
 
         Returns:
             A tuple containing the significant cell indices and p-values arrays.
@@ -593,20 +822,23 @@ class PlaceFieldDetector:
             fluorescence=fluorescence,
             position=self.position,
             speed=speed,
-            calculate_df=False,
         ).has_place_field
 
-        # Detects place fields in shuffled data to determine how often fields appear by chance.
-        shuffled_results = []
-        for iteration in range(repeat_count):
-            shuffled = self._shuffle(data=fluorescence, iteration=iteration)
-            result = self._run_detection(
-                fluorescence=shuffled,
-                position=self.position,
-                speed=speed,
-                calculate_df=False,
-            ).has_place_field
-            shuffled_results.append(result)
+        # Spawns a thread for each shuffle iteration to parallelize detection.
+        if worker_count == -1:
+            worker_count = max(1, os.cpu_count() - 4)
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            shuffled_results = list(
+                executor.map(
+                    lambda i: self._run_detection(
+                        fluorescence=self._shuffle(data=fluorescence, iteration=i),
+                        position=self.position,
+                        speed=speed,
+                    ).has_place_field,
+                    range(repeat_count),
+                )
+            )
 
         shuffled_results = np.vstack(shuffled_results).T
 
@@ -635,7 +867,7 @@ class PlaceFieldDetector:
         maximum_percentile: float = 0.9,
         cmap: str = "gray_r",
     ) -> plt.Figure:
-        """Plots place field activity as a heatmap.
+        """Plots binned fluorescence activity across cells as a position-ordered heatmap.
 
         Args:
             place_fields: A PlaceFields instance containing the binned fluorescence data to visualize.
@@ -699,11 +931,11 @@ class PlaceFieldDetector:
         if show_color_bar:
             cbar = plt.colorbar()
             cbar.set_label("ΔF/F₀")
-            
+
             # Sets colorbar ticks at 0.5 ΔF/F₀ intervals for consistent fluorescence labeling.
             cbar_min = np.floor(minimum_value / 0.5) * 0.5
             cbar_max = np.ceil(maximum_value / 0.5) * 0.5
-            cbar_ticks = np.arange(cbar_min, cbar_max + 1, 0.5)
+            cbar_ticks = np.arange(cbar_min, cbar_max, 0.5)
             cbar.set_ticks(cbar_ticks)
 
         return figure
@@ -713,28 +945,22 @@ class PlaceFieldDetector:
         fluorescence: NDArray[np.float32],
         position: NDArray[np.float32],
         speed: NDArray[np.float32],
-        calculate_df: bool = True,
     ) -> PlaceFields:
-        """Internal method that runs the place field detection pipeline on provided data arrays.
+        """Runs the place field detection pipeline on dF/F0 normalized fluorescence data.
 
         Notes:
-            This method is shared by both the public detect() method for original data and
-            compute_shuffle_significance() for shuffled data.
+            Expects fluorescence data that has already been converted to dF/F0. This method is shared by both the
+            public detect() method for original data and compute_shuffle_significance() for shuffled data.
 
         Args:
-            fluorescence: Fluorescence data with dimensions (cell_count, timepoint_count).
+            fluorescence: Pre-normalized dF/F0 fluorescence data with dimensions (cell_count, timepoint_count).
             position: Position data with length timepoint_count.
             speed: Speed data with length timepoint_count.
-            calculate_df: Determines whether to calculate dF/F0.
 
         Returns:
             A PlaceFields instance containing the labeled regions, binned fluorescence, and centers of detected place
             fields.
         """
-        # Computes dF/F0 to normalize fluorescence relative to baseline.
-        if calculate_df:
-            fluorescence, _ = _compute_delta_fluorescence(fluorescence=fluorescence)
-
         # Excludes timepoints where the animal is moving below the minimum speed threshold.
         speed_indices = speed > self.detection_params.minimum_speed
         position = position[speed_indices]
@@ -749,11 +975,8 @@ class PlaceFieldDetector:
         )
 
         # Applies a moving average filter to smooth binned fluorescence across spatial bins.
-        binned_fluorescence = convolve2d(
-            binned_fluorescence,
-            np.ones((1, self.detection_params.smooth_size)) / self.detection_params.smooth_size,
-            mode="same",
-            boundary="wrap",
+        binned_fluorescence = filters.uniform_filter1d(
+            input=binned_fluorescence, size=self.detection_params.smooth_size, axis=1, mode="wrap"
         )
 
         # Creates a binary mask by thresholding bins that exceed the baseline-to-max activity level.
@@ -785,7 +1008,7 @@ class PlaceFieldDetector:
         return place_fields
 
     def _shuffle(self, data: NDArray[np.float32], iteration: int) -> NDArray[np.float32]:
-        """Shuffles fluorescence data for validation by splitting into chunks and reordering.
+        """Shuffles fluorescence traces by circular time-shifting to disrupt spatial tuning for significance testing.
 
         Args:
             data: Fluorescence data to be shuffled with dimensions (cell_count, timepoint_count).
@@ -794,16 +1017,16 @@ class PlaceFieldDetector:
         Returns:
             The shuffled fluorescence data with the same dimensions as input.
         """
-        # Splits fluorescence into temporal chunks to preserve local structure within each chunk.
-        data_chunks = np.array_split(data, self.detection_params.chunk_count, axis=1)
-
-        # Randomly reorders chunks to disrupt the relationship between fluorescence and position.
         random_generator = np.random.default_rng(iteration)
-        shuffle_indices = random_generator.choice(
-            np.arange(self.detection_params.chunk_count),
-            self.detection_params.chunk_count,
-            replace=False,
-        )
-        shuffled_data = np.concatenate([data_chunks[index] for index in shuffle_indices], axis=1)
+
+        # Computes the minimum shift as a fraction of total frames based on chunk_count configuration.
+        total_frames = data.shape[1]
+        minimum_shift = total_frames // self.detection_params.chunk_count
+
+        # Generates a random shift amount that ensures at least minimum_shift displacement in either direction.
+        shift_amount = random_generator.integers(minimum_shift, total_frames - minimum_shift)
+
+        # Applies circular shift along the time axis to disrupt position-fluorescence correlations.
+        shuffled_data = np.roll(data, shift=shift_amount, axis=1)
 
         return shuffled_data
