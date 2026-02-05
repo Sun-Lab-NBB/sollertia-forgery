@@ -7,6 +7,10 @@ from matplotlib.widgets import Slider
 from scipy.ndimage import zoom
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Union
+import polars as pl
+import itertools
+import cv2
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 
 # TODO we would like this to be callable from the command line, plus functionality in the batch processing function.
@@ -787,3 +791,270 @@ if __name__ == "__main__":
 
 # TODO it;s also important to make composites of the original corrupted files and visualize those to make sure A)
 #  they need to be cropped and B) that the cropping is working
+
+
+def iter_composite_frames(
+    folder_path: Union[str, Path],
+    metadata: List[Dict],
+    *,
+    flyback_pixels: int = 122,
+    convert_to_uint8: bool = True,
+    vmin_percentile: float = 1.0,
+    vmax_percentile: float = 99.5,
+    max_files: Optional[int] = None,
+    verbose: bool = False,
+):
+    """
+    Just-in-time composite creation.
+
+    Processes ONE mesoscope TIFF at a time, yields composite frames one-by-one,
+    and never saves NPZ/TIFF output to disk.
+
+    Yields:
+        np.ndarray: single composite frame, shape (H, W), dtype uint16/float or uint8 (if convert_to_uint8=True)
+    """
+    folder_path = Path(folder_path)
+
+    # Only the actual frame-chunk TIFFs (avoids zstack.tiff, MotionEstimator, etc.)
+    tiff_files = sorted(folder_path.glob("mesoscope_*.tif*"))
+    if not tiff_files:
+        raise ValueError(f"No mesoscope_*.tif* files found in {folder_path}")
+
+    if max_files is not None:
+        tiff_files = tiff_files[:max_files]
+
+    for idx, tiff_path in enumerate(tiff_files, 1):
+        if verbose:
+            print(f"\n[{idx}/{len(tiff_files)}] JIT processing: {tiff_path.name}")
+
+        # Process this TIFF into (n_frames, H, W)
+        composites = process_single_tiff(
+            tiff_path=tiff_path,
+            roi_metadata=copy.deepcopy(metadata),
+            flyback_pixels=flyback_pixels,
+            max_frames=None,
+            verbose=verbose,
+        )
+
+        # Optional: same uint8 conversion logic as batch_process
+        if convert_to_uint8:
+            vmin = np.percentile(composites, vmin_percentile)
+            vmax = np.percentile(composites, vmax_percentile)
+
+            # guard against divide-by-zero if vmax==vmin
+            denom = (vmax - vmin) if (vmax > vmin) else 1.0
+            composites = np.clip((composites - vmin) / denom * 255, 0, 255).astype(np.uint8)
+
+        # Yield one frame at a time, then composites is discarded when loop continues
+        for frame in composites:
+            yield frame
+
+# Paths
+project = "MaalstroomicFlow"
+mouse_id = "15"
+session = "2025-07-23-12-19-00-225677"
+
+workdir_path = Path(__file__).resolve().parents[2]
+session_path = workdir_path / "sun_data" / project / mouse_id / session
+
+def generate_aligned_video(
+    session_path, 
+    out_path="meso_behavior_aligned.mp4", 
+    window_pre=int(3e6), window_post=int(.5e6), 
+    camera="left"
+):
+    """
+    Generate a side-by-side video aligning mesoscope imaging frames, behavior camera frames,
+    and a time-locked torque trace plot.
+
+    This function synchronizes multiple data streams recorded during an experiment:
+    mesoscope cell movie frames, behavior video, and torque measurements. Each output
+    video frame contains:
+
+        • Left: Mesoscope composite frame (grayscale converted to BGR)
+        • Right (top): Behavior camera frame
+        • Right (bottom): Torque trace centered on the current frame time
+
+    Alignment is performed using shared timestamps (in microseconds). Torque and
+    behavior frame indices are upsampled to match mesoscope frame times.
+
+    Parameters
+    ----------
+    session_path : pathlib.Path
+        Root directory of the session containing processed and source data folders.
+
+    out_path : str, optional
+        Output video filename. Saved in the same directory as the calling script.
+        Default is "meso_behavior_aligned.mp4".
+
+    window_pre : int, optional
+        Time window (µs) shown before the current frame in the torque plot.
+        Default = 3e6 (3 seconds).
+
+    window_post : int, optional
+        Time window (µs) shown after the current frame in the torque plot.
+        Default = 0.5e6 (0.5 seconds).
+
+    camera : {"left", "right", "face"}, optional
+        Behavior camera to associate with timestamps. Used for validation only.
+        Default = "left".
+
+    Output Video Layout
+    -------------------
+    ┌───────────────────────┬──────────────────────────┐
+    │ Mesoscope Frame       │ Behavior Frame           │
+    │                       ├──────────────────────────┤
+    │                       │ Torque vs Time Plot      │
+    └───────────────────────┴──────────────────────────┘
+
+    Notes
+    -----
+    - Requires matching timestamp files for mesoscope frames, torque data, and
+      behavior camera frames.
+    - Frame rate is inferred from the mean mesoscope frame interval.
+    - Raises an exception if frame counts or dimensions are inconsistent.
+    - Uses OpenCV for video I/O and Matplotlib (Agg backend) for plot rendering.
+
+    Raises
+    ------
+    Exception
+        If camera value is invalid, video cannot be opened, frame counts mismatch,
+        or frame dimensions do not allow plot placement.
+
+    Dependencies
+    ------------
+    polars, numpy, matplotlib, OpenCV (cv2), itertools, pathlib
+    """
+
+    if camera not in ["left", "right", "face"]:
+        raise Exception(f'camera must be "left", "right", or "face", not "{camera}"')
+
+    # paths
+    video_path = session_path / f"source_data/camera_data/{session}_{camera}_camera.mp4"
+    camera_timestamps_path = session_path / f"processed_data/camera_data/{camera}_camera_timestamps.feather"
+    torque_path = session_path / "processed_data/behavior_data/torque_data.feather"
+
+    # Dataframe used to align different data on the same timescale
+    cell_movie_times = pl.read_ipc(session_path / "processed_data" / "behavior_data" / "mesoscope_frame_data.feather")
+    cell_movie_times = cell_movie_times.filter(pl.col("ttl_state") == 1)
+
+
+    torque_df = pl.read_ipc(torque_path)
+
+    # Upscale the torque measurements so there is a value for every cell-movie frame time
+    i = 0
+    torque_upscaled = []
+    for t in cell_movie_times["time_us"]:
+        while i + 1 < len(torque_df) and t >= torque_df["time_us"][i+1]:
+            i += 1
+        torque_upscaled.append(torque_df["torque_N_cm"][i])
+
+    cell_movie_times = cell_movie_times.with_columns(
+        pl.Series("torque_N_cm", torque_upscaled)
+    )
+
+
+    camera_timestamps_df = pl.read_ipc(camera_timestamps_path)
+
+    # Upscale behavior, the new column has the index of the behavior camera frame corresponding to the cell movie frame for that timestep
+    i = 0
+    behavior_indices = []
+    for t in cell_movie_times["time_us"]:
+        while i + 1 < len(camera_timestamps_df) and t >= camera_timestamps_df["frame_time_us"][i+1]:
+            i += 1
+        behavior_indices.append(i)
+
+    cell_movie_times = cell_movie_times.with_columns(
+        pl.Series("behavior_index", behavior_indices)
+    )
+
+
+    metadata = load_metadata_from_json(
+        workdir_path / session_path / "source_data" / "mesoscope_data" / "frame_invariant_metadata.json"
+    )
+
+    # Set up cell movie frame reader
+    cell_frames = iter_composite_frames(
+        session_path / "source_data" / "mesoscope_data",
+        metadata,
+        flyback_pixels=122,
+        convert_to_uint8=True,
+        verbose=False,
+    )
+
+
+    # pull out the first frame to get the width and height then chain it back in
+    first_frame = next(cell_frames)
+    cell_frame_height, cell_frame_width = first_frame.shape
+    cell_frames = itertools.chain([first_frame], cell_frames)
+
+
+    # set up behavior frame reader
+    reader = cv2.VideoCapture(str(video_path))
+    if not reader.isOpened():
+        raise Exception(f"video file couldn't be accessed at {video_path}")
+    if int(reader.get(cv2.CAP_PROP_FRAME_COUNT)) != len(camera_timestamps_df):
+        raise Exception(f"Frame length mismatch: video file has {int(reader.get(cv2.CAP_PROP_FRAME_COUNT))} frames while dataframe has {len(camera_timestamps_df)} frames.")
+    behavior_frame_width, behavior_frame_height = int(reader.get(cv2.CAP_PROP_FRAME_WIDTH)), int(reader.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Set up the plot
+    if cell_frame_height < behavior_frame_height:
+        raise Exception("The height of the cell movie frame is less than the height of the behavior frame, thus there is no space to put the plot under the behavior frame.")
+    else:
+        plot_frame_width, plot_frame_height = behavior_frame_width, cell_frame_height - behavior_frame_height
+    dpi = 100  # dots per inch
+    fig, ax = plt.subplots(figsize=(plot_frame_width / dpi, plot_frame_height / dpi), dpi=dpi)
+    canvas = FigureCanvas(fig)  
+    line, = ax.plot([], [], linestyle='-', linewidth=1, markersize=3, label="Torque")
+    line_now = ax.axvline(
+        x=0,
+        linestyle="--",
+        linewidth=1,
+        color="black",
+        alpha=0.7,
+        label="Current frame"
+    )
+    ax.set_title("Torque")
+    ax.set_xlabel("Time (µs)")
+    ax.set_ylabel("Torque (N·cm)")
+    torque_min = float(cell_movie_times["torque_N_cm"].min())
+    torque_max = float(cell_movie_times["torque_N_cm"].max())
+    ax.set_ylim(torque_min, torque_max)
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
+    ax.set_xlim(-window_pre, window_post)
+
+
+    # Set up the frame writer
+    fps = 1e6 / cell_movie_times["time_us"].diff().drop_nulls().mean()
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")   # codec
+    frame_size = (cell_frame_width + behavior_frame_width, cell_frame_height) 
+    writer = cv2.VideoWriter(str(out_path), fourcc, fps, frame_size)
+
+
+    i = -1
+    for (t, _, torque, behavior_index), cell_frame in zip(cell_movie_times.iter_rows(), cell_frames):
+        # Make the plot for the current frame
+        filtered = cell_movie_times.filter(
+            (pl.col("time_us") >= t-window_pre) & (pl.col("time_us") <= t+window_post)
+        ).with_columns(pl.col("time_us").cast(pl.Int64) - t)        
+        line.set_data(filtered["time_us"].to_numpy(), filtered["torque_N_cm"].to_numpy())
+        canvas.draw()
+        buf = np.asarray(canvas.buffer_rgba()) # Use the Agg backend’s RGBA buffer
+        frame_rgb = buf[:, :, :3]  # drop alpha channel if present
+        plot_frame = frame_rgb[:, :, ::-1] # Convert RGB → BGR for OpenCV
+        
+        # Get the behavior frame
+        while i < behavior_index:
+            ret, vid_frame = reader.read()
+            i += 1
+
+        cell_frame = cv2.cvtColor(cell_frame, cv2.COLOR_GRAY2BGR)
+
+        writer.write(np.hstack((cell_frame, np.vstack((vid_frame, plot_frame)))))
+
+        if i > 490:
+            break
+
+    reader.release()
+    writer.release()
