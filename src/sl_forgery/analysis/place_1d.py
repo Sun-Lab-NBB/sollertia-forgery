@@ -227,7 +227,7 @@ def _apply_place_field_threshold(
     for cell_index in prange(cell_count):
         quantile_threshold = quantile_values[cell_index]
 
-        # Computes the baseline fluorescence for the current cell as the mean of bins at or below the quantile 
+        # Computes the baseline fluorescence for the current cell as the mean of bins at or below the quantile
         # threshold.
         total = 0.0
         count = 0
@@ -357,7 +357,7 @@ class PlaceFields:
     """Binned fluorescence data with dimensions (cell_count, bin_count)."""
     centers: NDArray[np.float32] = field(default_factory=lambda: np.array([], dtype=np.float32))
     """Centers of detected place fields with dimensions (field_count, 2)."""
-    bin_size: float = 1.0
+    bin_size: float = 5.0
     """Size of spatial bins in centimeters."""
 
     def __post_init__(self) -> None:
@@ -902,7 +902,7 @@ class PlaceFieldDetector:
         minimum_value = np.nanquantile(data, minimum_percentile)
         maximum_value = np.nanquantile(data, maximum_percentile)
 
-        figure, axes = plt.subplots(1, 1, figsize=(2, 3), facecolor="white", dpi=figure_dpi)
+        figure, axes = plt.subplots(1, 1, figsize=(8, 4), facecolor="white", dpi=figure_dpi)
 
         if title:
             plt.title(title, fontsize=8)
