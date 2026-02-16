@@ -39,8 +39,8 @@ CUE_COLOR_PALETTE = [
 ]
 
 SPECIAL_CUE_COLORS = {
-    0: '#D3D3D3',  # Light gray (inter-cue)
-    255: '#2D2D2D',  # Charcoal (dark)
+    0: '#D3D3D3',  # Light gray (gray zones)
+    255: '#2D2D2D',  # Charcoal (dark periods)
 }
 
 SPECIAL_CUE_LABELS = {
@@ -259,7 +259,8 @@ def create_trial_indexed_dataframe(
         track_length_df = pl.DataFrame({
             'trial_type': list(track_lengths_temp.keys()),
             '_track_length': list(track_lengths_temp.values())
-        })
+        }).cast({'trial_type': active_df['trial_type'].dtype})
+
         active_df = active_df.join(track_length_df, on='trial_type', how='left')
 
         active_df = active_df.with_columns([
@@ -276,6 +277,7 @@ def create_trial_indexed_dataframe(
 
         # Reassign frames across trial boundaries to get cue A in correct position
         trials = active_df['trial'].unique().sort().to_list()
+        n_recorded = len(trials)
 
         # Early portion of trial N should join main portion of trial N+1
         # So: early portion gets reassigned to next trial number
@@ -290,8 +292,8 @@ def create_trial_indexed_dataframe(
         ])
 
         # Drop incomplete trials:
-        # - First trial (only has main portion, no early from previous)
-        # - Last trial
+        # - First trial (is truncated during the cue offset adjustment, so missing start and end 10 cm)
+        # - Last trial (always incomplete)
         active_df = active_df.filter(
             (pl.col('trial') != trials[0]) & pl.col('trial').is_not_null()
         )
@@ -299,37 +301,31 @@ def create_trial_indexed_dataframe(
         n_aligned = active_df['trial'].n_unique()
         print(f"  Result: {n_recorded} recorded trials -> {n_aligned} complete aligned trials")
 
-        # Verify trial_type consistency within each aligned trial
-        type_check = (active_df.group_by('trial')
-                      .agg(pl.col('trial_type').n_unique().alias('n_types')))
-        mixed_trials = type_check.filter(pl.col('n_types') > 1)['trial'].to_list()
-        if len(mixed_trials) > 0:
-            print(f"  Warning: {len(mixed_trials)} aligned trials have mixed trial_types: {mixed_trials}")
-            print(f"  Dropping these trials.")
-            active_df = active_df.filter(~pl.col('trial').is_in(mixed_trials))
+        # For aligned trials with mixed trial_types, use the most common type (mode); this avoids dropping trials and
+        # makes sure each trial is assigned the correct type after the cue offset shift
+        trial_type_mode = (active_df.group_by('trial')
+                           .agg(pl.col('trial_type').mode().first().alias('trial_type_mode')))
+
+        active_df = active_df.join(trial_type_mode, on='trial', how='left')
+        active_df = active_df.with_columns([
+            pl.col('trial_type_mode').alias('trial_type')
+        ]).drop('trial_type_mode')
+
+        print(f"  Assigned trial_type by mode for all aligned trials")
 
         # Sort by aligned trial and physical position
         active_df = active_df.sort(['trial', '_physical_position'])
 
-        # Update distance_cm for downstream processing
-        # Downstream computes: distance_in_trial = distance_cm - first(distance_cm) per trial
-        # We want: distance_in_trial = physical_position
-        # So: distance_cm = physical_position + (large offset per trial to maintain cumulative structure)
-        aligned_trials = active_df['trial'].unique().sort().to_list()
-        trial_offsets = {t: i * 10000 for i, t in enumerate(aligned_trials)}
-
+        # Use physical position directly as distance_cm
+        # Downstream subtracts first value per trial, which will be ~0
         active_df = active_df.with_columns([
-            (pl.col('_physical_position') + pl.col('trial').replace(trial_offsets))
-            .alias('distance_cm')
+            pl.col('_physical_position').alias('distance_cm')
         ])
 
         # Clean up temporary columns
-        active_df = active_df.drop([
-            '_dist_in_trial', '_track_length', '_physical_position',
-            '_is_early_portion', '_rec_idx', '_aligned_idx'
-        ])
-
-        n_aligned = active_df['trial'].n_unique()
+        temp_cols = ['_dist_in_trial', '_track_length', '_physical_position', '_is_early_portion']
+        existing_temp_cols = [c for c in temp_cols if c in active_df.columns]
+        active_df = active_df.drop(existing_temp_cols)
 
     # Store original_df reference after cue offset correction
     original_df = active_df if keep_original else None
@@ -407,7 +403,7 @@ def create_trial_indexed_dataframe(
         pl.Series('signals', signals_per_trial, dtype=pl.Object)
     ])
 
-    #normalize the distance in each trial to be length of track (logged as cumulative distance)
+    # Convert cumulative distance to per-trial distance (reset to 0 at trial start)
     print("Computing per-trial distances...")
     distance_in_trial_list = []
 
@@ -423,65 +419,6 @@ def create_trial_indexed_dataframe(
         pl.Series('distance_in_trial', distance_in_trial_list, dtype=pl.Object)
     ])
 
-    # Get all array columns that need truncation
-    array_cols = [col for col in trial_df.columns
-                  if trial_df[col].dtype == pl.Object and col != 'distance_in_trial']
-
-
-    # Apply cue offset correction if config provides it
-    cue_offset_cm = 0.0
-    if experiment_config is not None:
-        cue_offset_cm = experiment_config.get('cue_offset_cm', 0.0)
-
-    if cue_offset_cm > 0:
-        print(f"Applying cue offset correction: {cue_offset_cm} cm")
-        corrected_distance_list = []
-        offset_masks = []  # Store masks for truncating other arrays
-
-        for distances in distance_in_trial_list:
-            # Keep only frames at or beyond the offset, then shift
-            mask = distances >= cue_offset_cm
-            corrected = distances[mask] - cue_offset_cm
-            corrected_distance_list.append(corrected)
-            offset_masks.append(mask)
-
-        distance_in_trial_list = corrected_distance_list
-
-        # Apply same mask to signals
-        signals_per_trial = [
-            sig[mask] if len(sig) > 0 else sig
-            for sig, mask in zip(signals_per_trial, offset_masks)
-        ]
-
-        # Update signals column
-        trial_df = trial_df.with_columns([
-            pl.Series('signals', signals_per_trial, dtype=pl.Object)
-        ])
-
-
-    # Synchronize all array columns to match truncated distances
-    print("Synchronizing array lengths...")
-
-    for col in array_cols:
-        truncated_arrays = []
-        for i, row in enumerate(trial_df.iter_rows(named=True)):
-            target_length = len(distance_in_trial_list[i])
-            original_array = np.array(row[col]) if row[col] is not None else np.array([])
-
-            if len(original_array) > target_length:
-                truncated_arrays.append(original_array[:target_length])
-            else:
-                truncated_arrays.append(original_array)
-
-        trial_df = trial_df.with_columns([
-            pl.Series(col, truncated_arrays, dtype=pl.Object)
-        ])
-
-    # Update n_frames
-    trial_df = trial_df.with_columns([
-        pl.Series('n_frames', [len(d) for d in distance_in_trial_list])
-    ])
-
     # Get measured track lengths
     print("Extracting track lengths from data...")
     measured_track_lengths = [
@@ -494,43 +431,23 @@ def create_trial_indexed_dataframe(
     ])
 
     # Determine nominal track lengths per trial type
+    # we're using this because the encoder rate doesn't match frame rate adn some distance is lost at the end of
+    # trials; so a short trial (180 cm) might actually end at 178 before the next trial starts
     print("\nDetermining nominal track lengths by trial type...")
     nominal_track_lengths = {}
 
     for trial_type in trial_df['trial_type'].unique().sort():
-        # First check if config provides ground truth
         config_length = get_track_length_from_config(experiment_config, trial_type)
         if config_length is not None:
             nominal_track_lengths[trial_type] = float(config_length)
             print(f"  {trial_type}: {config_length} cm (from config)")
             continue
 
-        # Fall back to inference from data
         type_trials = trial_df.filter(pl.col('trial_type') == trial_type)
         median_length = type_trials['measured_track_length'].median()
         nominal_length = round(median_length / 20) * 20
         nominal_track_lengths[trial_type] = float(nominal_length)
         print(f"  {trial_type}: measured {median_length:.1f} cm → nominal {nominal_length} cm")
-
-    # Normalize distances
-    print("Normalizing distances to nominal track lengths...")
-    normalized_distance_list = []
-
-    for i, row in enumerate(trial_df.iter_rows(named=True)):
-        distances = distance_in_trial_list[i]
-        measured_max = measured_track_lengths[i]
-        nominal_length = nominal_track_lengths[row['trial_type']]
-
-        if measured_max > 0:
-            normalized = distances * (nominal_length / measured_max)
-        else:
-            normalized = distances
-
-        normalized_distance_list.append(normalized)
-
-    trial_df = trial_df.with_columns([
-        pl.Series('distance_normalized', normalized_distance_list, dtype=pl.Object)
-    ])
 
     # Add nominal track length column
     trial_df = trial_df.with_columns([
@@ -538,14 +455,14 @@ def create_trial_indexed_dataframe(
                   [nominal_track_lengths[tt] for tt in trial_df['trial_type']])
     ])
 
-    # Compute distance bins
+    # Compute distance bins (using raw distances, no scaling)
     print("Computing distance bins...")
     distance_bins_list = []
 
     for i, row in enumerate(trial_df.iter_rows(named=True)):
-        normalized = normalized_distance_list[i]
+        distances = distance_in_trial_list[i]
         n_bins = int(row['track_length_cm'] / bin_size_cm)
-        bins = np.clip(np.floor(normalized / bin_size_cm).astype(np.int32), 0, n_bins - 1)
+        bins = np.clip(np.floor(distances / bin_size_cm).astype(np.int32), 0, n_bins - 1)
         distance_bins_list.append(bins)
 
     trial_df = trial_df.with_columns([
@@ -608,7 +525,7 @@ def compute_session_averages(
         by_trial_type: bool = True
 ) -> dict:
     """
-    Compute session-level averages from trial dataframe.
+    Compute session-level averages from trial dataframe. Spatially average the signals in each bin for place fields.
 
     Returns
     -------
@@ -806,7 +723,6 @@ def load_trial_data(
         metadata=metadata,
     )
 
-# CUE REGION EXTRACTION
 
 def get_cue_regions(
         trial_df: pl.DataFrame,
@@ -829,7 +745,7 @@ def get_cue_regions(
 
     first_trial = trials.row(0, named=True)
     cues = np.array(first_trial['cue'])
-    distances = np.array(first_trial['distance_normalized'])
+    distances = np.array(first_trial['distance_in_trial'])
 
     if verbose:
         print(f"\nExtracting cue regions for {trial_type} from data")
@@ -873,6 +789,80 @@ def get_cue_regions(
     return final_regions
 
 
+def get_cue_regions_aggregated(
+        trial_df: pl.DataFrame,
+        trial_type: str = 'ABC',
+        n_samples: int = None,  # None = use all trials
+        verbose: bool = False
+) -> dict:
+    """
+    Extract cue region boundaries aggregated across multiple trials.
+
+    Returns dict with mean and std for each cue's start/end positions.
+    """
+    trials = trial_df.filter(pl.col('trial_type') == trial_type)
+
+    if len(trials) == 0:
+        print(f"Warning: No trials found for trial type '{trial_type}'")
+        return {}
+
+    # Sample trials if requested
+    if n_samples is not None and n_samples < len(trials):
+        trials = trials.sample(n_samples)
+
+    n_trials = len(trials)
+
+    # Collect cue boundaries from each trial
+    all_cue_bounds = {}  # {cue_id: {'starts': [], 'ends': []}}
+
+    for row in trials.iter_rows(named=True):
+        cues = np.array(row['cue'])
+        distances = np.array(row['distance_in_trial'])
+
+        # Detect cue transitions
+        cue_changes = np.concatenate([[0], np.where(np.diff(cues) != 0)[0] + 1, [len(cues)]])
+
+        for i in range(len(cue_changes) - 1):
+            start_idx = cue_changes[i]
+            end_idx = cue_changes[i + 1] - 1
+            cue_id = int(cues[start_idx])
+
+            if cue_id == 0:  # Skip gray
+                continue
+
+            if cue_id not in all_cue_bounds:
+                all_cue_bounds[cue_id] = {'starts': [], 'ends': []}
+
+            all_cue_bounds[cue_id]['starts'].append(distances[start_idx])
+            all_cue_bounds[cue_id]['ends'].append(distances[end_idx])
+
+    # Compute stats
+    results = {}
+    if verbose:
+        print(f"\nCue regions for {trial_type} (n={n_trials} trials)")
+        print("-" * 50)
+
+    for cue_id in sorted(all_cue_bounds.keys()):
+        starts = np.array(all_cue_bounds[cue_id]['starts'])
+        ends = np.array(all_cue_bounds[cue_id]['ends'])
+
+        results[cue_id] = {
+            'start_mean': np.mean(starts),
+            'start_std': np.std(starts),
+            'end_mean': np.mean(ends),
+            'end_std': np.std(ends),
+            'width_mean': np.mean(ends - starts),
+            'width_std': np.std(ends - starts),
+            'n_observations': len(starts),
+        }
+
+        if verbose:
+            r = results[cue_id]
+            print(f"  Cue {cue_id}: {r['start_mean']:.1f}±{r['start_std']:.1f} to "
+                  f"{r['end_mean']:.1f}±{r['end_std']:.1f} cm "
+                  f"(width: {r['width_mean']:.1f}±{r['width_std']:.1f} cm, n={r['n_observations']})")
+
+    return results
 
 # DIAGNOSTIC FUNCTIONS
 
@@ -928,7 +918,7 @@ def diagnose_cues(data: TrialData, trial_type: str = 'ABC'):
 
     first_trial = trials.row(0, named=True)
     cues = np.array(first_trial['cue'])
-    distances = np.array(first_trial['distance_normalized'])
+    distances = np.array(first_trial['distance_in_trial'])
 
     print(f"\nTrial {first_trial['trial']}:")
     print(f"  Frames: {len(cues)}")
@@ -1287,11 +1277,13 @@ def quick_plot_cell(
 
 
 if __name__ == "__main__":
-    session_root = Path('/Volumes/workdir/sun_data/StateSpaceOdyssey/26/')
-    behavior_df = pl.read_ipc('/Volumes/workdir/sun_data/Datasets/SSOData/26/2025-09-16-18-44-32-476061.feather')
+    session_root = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    behavior_df = pl.read_ipc('/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061.feather')
     #have to hard code this rn, will be differnet later
+    # experiment_config = load_experiment_config(
+    #     session_root / '2025-09-16-18-44-32-476061/source_data/experiment_configuration.yaml')
     experiment_config = load_experiment_config(
-        session_root / '2025-09-16-18-44-32-476061/source_data/experiment_configuration.yaml')
+        '/Users/cs963/Desktop/sun_lab_projects/26_explore/experiment_configuration.yaml') #for working at home
     # Run pipeline - returns TrialData container
     data = full_pipeline(
         behavior_df,
@@ -1299,8 +1291,9 @@ if __name__ == "__main__":
         bin_size_cm=5,
         experiment_config= experiment_config,
     )
-
-    get_cue_regions(data.trial_df, 'ABC', verbose=True)
+    save_trial_data(data, session_root)
+    #get_cue_regions(data.trial_df, 'ABC', verbose=True)
+    get_cue_regions_aggregated(data.trial_df, 'ABC', verbose=True)
 
     # Access components
     # data.trial_df        - the processed dataframe
