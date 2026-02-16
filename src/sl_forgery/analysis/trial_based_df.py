@@ -154,6 +154,7 @@ class TrialData:
         first_row = self.trial_df.row(0, named=True)
         signals = first_row.get('signals')
         if signals is not None and len(signals) > 0:
+            signals = np.array(signals)
             return signals.shape[1] if len(signals.shape) > 1 else 1
         return 0
 
@@ -234,6 +235,8 @@ def create_trial_indexed_dataframe(
     cue_offset_cm = 0.0
     if experiment_config is not None:
         cue_offset_cm = experiment_config.get('cue_offset_cm', 0.0)
+
+    _cached_track_lengths = None
 
     if cue_offset_cm > 0:
         print(f"Realigning trials for cue offset: {cue_offset_cm} cm")
@@ -327,6 +330,8 @@ def create_trial_indexed_dataframe(
         existing_temp_cols = [c for c in temp_cols if c in active_df.columns]
         active_df = active_df.drop(existing_temp_cols)
 
+    _cached_track_lengths = track_lengths_temp
+
     # Store original_df reference after cue offset correction
     original_df = active_df if keep_original else None
 
@@ -363,7 +368,7 @@ def create_trial_indexed_dataframe(
 
     # Add rewarded flag (1 if any reward delivered, 0 otherwise)
     if 'reward' in active_df.columns:
-        agg_list.append(pl.col('reward').max().alias('rewarded'))
+        agg_list.append((pl.col('reward') == 'yes').any().cast(pl.Int8).alias('rewarded'))
 
     # Everything else becomes an array (except grouping, trial-level, signal, frame)
     grouping_cols = {'trial', 'trial_type'}
@@ -385,27 +390,35 @@ def create_trial_indexed_dataframe(
     ])
 
     # Process signals separately (handle 2D arrays)
-    print("Processing signals per trial...")
-    signals_per_trial = []
+    # Group signals by trial in one pass
+    signals_grouped = (
+        active_df
+        .sort('frame')
+        .group_by('trial', maintain_order=True)
+        .agg(pl.col(signal_col).alias('_signals_list'))
+        .sort('trial')
+    )
 
-    for trial_num in trial_df['trial']:
-        trial_data = active_df.filter(pl.col('trial') == trial_num).sort('frame')
-        signals_list = trial_data[signal_col].to_list()
+    # Build lookup dict
+    signals_dict = {
+        row['trial']: np.vstack([np.array(s) for s in row['_signals_list']])
+        for row in signals_grouped.iter_rows(named=True)
+        if len(row['_signals_list']) > 0
+    }
 
-        if len(signals_list) > 0:
-            signals_array = np.vstack([np.array(s) for s in signals_list])
-        else:
-            signals_array = np.array([])
-
-        signals_per_trial.append(signals_array)
+    # Extract in trial_df order
+    signals_per_trial = [
+        signals_dict.get(t, np.array([])).tolist()
+        for t in trial_df['trial']
+    ]
 
     trial_df = trial_df.with_columns([
-        pl.Series('signals', signals_per_trial, dtype=pl.Object)
+        pl.Series('signals', signals_per_trial)
     ])
 
     # Convert cumulative distance to per-trial distance (reset to 0 at trial start)
     print("Computing per-trial distances...")
-    distance_in_trial_list = []
+    distance_in_trial = []
 
     for row in trial_df.iter_rows(named=True):
         cumulative_dists = np.array(row['distance_cm'])
@@ -413,17 +426,17 @@ def create_trial_indexed_dataframe(
             trial_distances = cumulative_dists - cumulative_dists[0]
         else:
             trial_distances = cumulative_dists
-        distance_in_trial_list.append(trial_distances)
+        distance_in_trial.append(trial_distances)
 
     trial_df = trial_df.with_columns([
-        pl.Series('distance_in_trial', distance_in_trial_list, dtype=pl.Object)
+        pl.Series('distance_in_trial', [d.tolist() for d in distance_in_trial])
     ])
 
     # Get measured track lengths
     print("Extracting track lengths from data...")
     measured_track_lengths = [
         np.array(d).max() if len(d) > 0 else 0
-        for d in distance_in_trial_list
+        for d in distance_in_trial
     ]
 
     trial_df = trial_df.with_columns([
@@ -434,20 +447,26 @@ def create_trial_indexed_dataframe(
     # we're using this because the encoder rate doesn't match frame rate adn some distance is lost at the end of
     # trials; so a short trial (180 cm) might actually end at 178 before the next trial starts
     print("\nDetermining nominal track lengths by trial type...")
-    nominal_track_lengths = {}
+    if _cached_track_lengths is not None:
+        nominal_track_lengths = {k: float(v) for k, v in _cached_track_lengths.items()}
+        for tt, length in nominal_track_lengths.items():
+            print(f"  {tt}: {length} cm (from cue offset pass)")
 
-    for trial_type in trial_df['trial_type'].unique().sort():
-        config_length = get_track_length_from_config(experiment_config, trial_type)
-        if config_length is not None:
-            nominal_track_lengths[trial_type] = float(config_length)
-            print(f"  {trial_type}: {config_length} cm (from config)")
-            continue
+    else:
+        nominal_track_lengths = {}
 
-        type_trials = trial_df.filter(pl.col('trial_type') == trial_type)
-        median_length = type_trials['measured_track_length'].median()
-        nominal_length = round(median_length / 20) * 20
-        nominal_track_lengths[trial_type] = float(nominal_length)
-        print(f"  {trial_type}: measured {median_length:.1f} cm → nominal {nominal_length} cm")
+        for trial_type in trial_df['trial_type'].unique().sort():
+            config_length = get_track_length_from_config(experiment_config, trial_type)
+            if config_length is not None:
+                nominal_track_lengths[trial_type] = float(config_length)
+                print(f"  {trial_type}: {config_length} cm (from config)")
+                continue
+
+            type_trials = trial_df.filter(pl.col('trial_type') == trial_type)
+            median_length = type_trials['measured_track_length'].median()
+            nominal_length = round(median_length / 20) * 20
+            nominal_track_lengths[trial_type] = float(nominal_length)
+            print(f"  {trial_type}: measured {median_length:.1f} cm → nominal {nominal_length} cm")
 
     # Add nominal track length column
     trial_df = trial_df.with_columns([
@@ -460,13 +479,13 @@ def create_trial_indexed_dataframe(
     distance_bins_list = []
 
     for i, row in enumerate(trial_df.iter_rows(named=True)):
-        distances = distance_in_trial_list[i]
+        distances = distance_in_trial[i]
         n_bins = int(row['track_length_cm'] / bin_size_cm)
         bins = np.clip(np.floor(distances / bin_size_cm).astype(np.int32), 0, n_bins - 1)
         distance_bins_list.append(bins)
 
     trial_df = trial_df.with_columns([
-        pl.Series('distance_bins', distance_bins_list, dtype=pl.Object)
+        pl.Series('distance_bins', [b.tolist() for b in distance_bins_list])
     ])
 
     print(f"\nOutput columns: {trial_df.columns}")
@@ -485,8 +504,8 @@ def compute_binned_activity(
         - binned_signals: (n_bins, n_cells) averaged activity
         - bin_counts: frames per bin
     """
-    binned_signals_list = []
-    bin_counts_list = []
+    binned_signals = []
+    bin_counts = []
 
     for row in trial_df.iter_rows(named=True):
         signals = np.array(row['signals'])
@@ -495,28 +514,27 @@ def compute_binned_activity(
 
         if signals.shape[0] == 0 or len(bin_indices) == 0:
             num_cells = signals.shape[1] if len(signals.shape) > 1 else 0
-            binned_signals = np.full((n_bins, num_cells), np.nan, dtype=np.float32)
-            bin_counts = np.zeros(n_bins, dtype=np.int32)
+            trial_binned_signals = np.full((n_bins, num_cells), np.nan, dtype=np.float32)
+            trial_bin_counts = np.zeros(n_bins, dtype=np.int32)
         else:
             if len(signals.shape) == 1:
                 signals = signals.reshape(-1, 1)
 
             num_cells = signals.shape[1]
-            binned_signals = np.full((n_bins, num_cells), np.nan, dtype=np.float32)
-            bin_counts = np.zeros(n_bins, dtype=np.int32)
+            trial_binned_signals = np.full((n_bins, num_cells), np.nan, dtype=np.float32)
+            trial_bin_counts = np.bincount(bin_indices, minlength=n_bins)[:n_bins]
 
-            for bin_idx in range(n_bins):
-                mask = bin_indices == bin_idx
-                if mask.any():
-                    binned_signals[bin_idx] = signals[mask].mean(axis=0)
-                    bin_counts[bin_idx] = mask.sum()
+            for cell_idx in range(num_cells):
+                sums = np.bincount(bin_indices, weights=signals[:, cell_idx], minlength=n_bins)[:n_bins]
+                with np.errstate(invalid='ignore'):
+                    trial_binned_signals[:, cell_idx] = np.where(trial_bin_counts > 0, sums / trial_bin_counts, np.nan)
 
-        binned_signals_list.append(binned_signals)
-        bin_counts_list.append(bin_counts)
+        binned_signals.append(trial_binned_signals)  #appending numpy array; convert to list below
+        bin_counts.append(trial_bin_counts)
 
     return trial_df.with_columns([
-        pl.Series('binned_signals', binned_signals_list, dtype=pl.Object),
-        pl.Series('bin_counts', bin_counts_list, dtype=pl.Object)
+        pl.Series('binned_signals', [b.tolist() for b in binned_signals]),
+        pl.Series('bin_counts', [c.tolist() for c in bin_counts])
     ])
 
 
@@ -535,7 +553,7 @@ def compute_session_averages(
         - 'n_trials': int
     """
     if not by_trial_type:
-        all_binned = np.stack([row['binned_signals'] for row in trial_df.iter_rows(named=True)])
+        all_binned = np.stack([np.array(row['binned_signals']) for row in trial_df.iter_rows(named=True)])
         return {
             'session_avg': np.nanmean(all_binned, axis=0),
             'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
@@ -792,13 +810,13 @@ def get_cue_regions(
 def get_cue_regions_aggregated(
         trial_df: pl.DataFrame,
         trial_type: str = 'ABC',
-        n_samples: int = None,  # None = use all trials
+        n_samples: int = None,
         verbose: bool = False
 ) -> dict:
     """
-    Extract cue region boundaries aggregated across multiple trials.
+    Extract cue region boundaries averaged across all trials of a type.
 
-    Returns dict with mean and std for each cue's start/end positions.
+    For each cue, reports mean and std of start position, end position, and width.
     """
     trials = trial_df.filter(pl.col('trial_type') == trial_type)
 
@@ -806,63 +824,75 @@ def get_cue_regions_aggregated(
         print(f"Warning: No trials found for trial type '{trial_type}'")
         return {}
 
-    # Sample trials if requested
     if n_samples is not None and n_samples < len(trials):
         trials = trials.sample(n_samples)
 
     n_trials = len(trials)
 
-    # Collect cue boundaries from each trial
-    all_cue_bounds = {}  # {cue_id: {'starts': [], 'ends': []}}
+    # For each cue, collect all start/end positions across trials
+    cue_starts = {}  # {cue_id: [list of start positions]}
+    cue_ends = {}  # {cue_id: [list of end positions]}
 
     for row in trials.iter_rows(named=True):
         cues = np.array(row['cue'])
         distances = np.array(row['distance_in_trial'])
 
-        # Detect cue transitions
-        cue_changes = np.concatenate([[0], np.where(np.diff(cues) != 0)[0] + 1, [len(cues)]])
+        if len(cues) == 0:
+            continue
 
-        for i in range(len(cue_changes) - 1):
-            start_idx = cue_changes[i]
-            end_idx = cue_changes[i + 1] - 1
+        # Find where cue changes
+        change_idx = np.where(np.diff(cues) != 0)[0] + 1
+        boundaries = np.concatenate([[0], change_idx, [len(cues)]])
+
+        for i in range(len(boundaries) - 1):
+            start_idx = boundaries[i]
+            end_idx = boundaries[i + 1] - 1
             cue_id = int(cues[start_idx])
 
-            if cue_id == 0:  # Skip gray
+            if cue_id == 0:  # Skip gray zones
                 continue
 
-            if cue_id not in all_cue_bounds:
-                all_cue_bounds[cue_id] = {'starts': [], 'ends': []}
+            start_pos = distances[start_idx]
+            end_pos = distances[end_idx]
 
-            all_cue_bounds[cue_id]['starts'].append(distances[start_idx])
-            all_cue_bounds[cue_id]['ends'].append(distances[end_idx])
+            if cue_id not in cue_starts:
+                cue_starts[cue_id] = []
+                cue_ends[cue_id] = []
 
-    # Compute stats
+            cue_starts[cue_id].append(start_pos)
+            cue_ends[cue_id].append(end_pos)
+
+    # Compute statistics
     results = {}
+
     if verbose:
         print(f"\nCue regions for {trial_type} (n={n_trials} trials)")
         print("-" * 50)
 
-    for cue_id in sorted(all_cue_bounds.keys()):
-        starts = np.array(all_cue_bounds[cue_id]['starts'])
-        ends = np.array(all_cue_bounds[cue_id]['ends'])
+    for cue_id in sorted(cue_starts.keys()):
+        starts = np.array(cue_starts[cue_id])
+        ends = np.array(cue_ends[cue_id])
+        widths = ends - starts
 
         results[cue_id] = {
-            'start_mean': np.mean(starts),
-            'start_std': np.std(starts),
-            'end_mean': np.mean(ends),
-            'end_std': np.std(ends),
-            'width_mean': np.mean(ends - starts),
-            'width_std': np.std(ends - starts),
-            'n_observations': len(starts),
+            'start_mean': float(np.mean(starts)),
+            'start_std': float(np.std(starts)),
+            'end_mean': float(np.mean(ends)),
+            'end_std': float(np.std(ends)),
+            'width_mean': float(np.mean(widths)),
+            'width_std': float(np.std(widths)),
+            'n': len(starts),
         }
 
         if verbose:
             r = results[cue_id]
-            print(f"  Cue {cue_id}: {r['start_mean']:.1f}±{r['start_std']:.1f} to "
-                  f"{r['end_mean']:.1f}±{r['end_std']:.1f} cm "
-                  f"(width: {r['width_mean']:.1f}±{r['width_std']:.1f} cm, n={r['n_observations']})")
+            print(f"  Cue {cue_id}: {r['start_mean']:.1f}:{r['end_mean']:.1f} cm "
+                  f"(width: {r['width_mean']:.1f} ± {r['width_std']:.1f}, "
+                  f"start ± {r['start_std']:.1f}, end ± {r['end_std']:.1f}, n={r['n']})")
 
     return results
+
+
 
 # DIAGNOSTIC FUNCTIONS
 
@@ -875,9 +905,9 @@ def diagnose_data(data: TrialData):
 
     print(f"\nTotal trials: {len(data.trial_df)}")
 
-    if data.config is not None:
-        print(f"Animal: {data.config.animal_id}")
-        print(f"Date: {data.config.date}")
+    if data.experiment_config is not None:
+        print(f"Animal: {data.experiment_config.get('animal_id', 'N/A')}")
+        print(f"Date: {data.experiment_config.get('date', 'N/A')}")
 
     print("\nTrack lengths by trial type:")
     for trial_type in sorted(data.track_lengths.keys()):
@@ -1291,6 +1321,19 @@ if __name__ == "__main__":
         bin_size_cm=5,
         experiment_config= experiment_config,
     )
+
+    trial = data.trial_df.filter(pl.col('trial_type') == 'ABC').row(0, named=True)
+    cues = np.array(trial['cue'])
+    distances = np.array(trial['distance_in_trial'])
+
+    print(f"Distance range: {distances.min():.1f} to {distances.max():.1f}")
+    print(f"Unique cues: {np.unique(cues)}")
+    print(f"\nAll frames: cue={cues[:100]}, dist={distances[:100].round(1)}")
+    print(f"\nFirst 10 frames: cue={cues[:10]}, dist={distances[:10].round(1)}")
+    print(f"Last 10 frames: cue={cues[-10:]}, dist={distances[-10:].round(1)}")
+    print(np.unique(trial['cue'], return_counts=True))
+
+
     save_trial_data(data, session_root)
     #get_cue_regions(data.trial_df, 'ABC', verbose=True)
     get_cue_regions_aggregated(data.trial_df, 'ABC', verbose=True)
