@@ -19,9 +19,7 @@ import polars as pl
 import yaml
 
 
-# =============================================================================
 # CONFIGURATION
-# =============================================================================
 
 def load_experiment_config(yaml_path: Path) -> dict:
     """Load experiment configuration from YAML file."""
@@ -37,22 +35,20 @@ def get_track_length(config: dict, trial_type: str) -> Optional[float]:
     return None
 
 
-# =============================================================================
 # CORE PIPELINE
-# =============================================================================
 
 def fix_cue_offset(
     df: pl.DataFrame,
     config: dict,
     system_state: str = 'run',
-    cue_offset_cm: float = None,
 ) -> pl.DataFrame:
     """
-    Reassign frames across trial boundaries to correct for cue offset.
+    Reassign frames across trial boundaries to correct for cue offset. Realigns to cue values instead, location is
+    preserved
     
     The VR starts 10cm into the track, so trial boundaries in the data
     don't align with visual cue positions. This function:
-    1. Identifies frames in the 0-10cm physical zone (end of recorded trial)
+    1. Identifies frames in the 0-10cm physical zone (end of recorded trial) using the cue col information
     2. Reassigns them to the next trial
     3. Drops first trial (incomplete) and last trial (incomplete)
     
@@ -61,108 +57,82 @@ def fix_cue_offset(
     df : pl.DataFrame
         Frame-based dataframe with cumulative distance
     config : dict
-        Experiment configuration with trial_structures
+        Experiment configuration with trial_structures and cue offset information
     system_state : str
         Filter to this system state (default 'run')
-    cue_offset_cm : float, optional
-        Override offset from config (default: config['cue_offset_cm'])
     
     Returns
     -------
     pl.DataFrame
-        Frame-based dataframe with corrected trial assignments
+        Frame-based dataframe with corrected trial #, trial type, and guided values
     """
     # Get offset
-    if cue_offset_cm is None:
-        cue_offset_cm = config.get('cue_offset_cm', 10.0)
-    
-    if cue_offset_cm == 0:
-        return df.filter(pl.col('system_state') == system_state)
-    
+    cue_offset_cm = config.get('cue_offset_cm', 0.0)
+
     # Filter to active running
     active_df = df.filter(pl.col('system_state') == system_state).sort('frame')
-    
-    # Build track length lookup from config
-    track_lengths = {}
-    for trial_type in active_df['trial_type'].unique().to_list():
-        length = get_track_length(config, trial_type)
-        if length is None:
-            # Infer from data if not in config
-            type_data = active_df.filter(pl.col('trial_type') == trial_type)
-            per_trial = type_data.group_by('trial').agg(
-                (pl.col('distance_cm').max() - pl.col('distance_cm').min()).alias('length')
-            )
-            length = round(per_trial['length'].median() / 20) * 20
-        track_lengths[trial_type] = float(length)
-    
-    # Add track length column via join
-    track_length_df = pl.DataFrame({
-        'trial_type': list(track_lengths.keys()),
-        '_track_length': list(track_lengths.values()),
-    }).cast({'trial_type': active_df['trial_type'].dtype})
-    active_df = active_df.join(track_length_df, on='trial_type', how='left')
-    
-    # Compute distance within each recorded trial
-    active_df = active_df.with_columns(
-        (pl.col('distance_cm') - pl.col('distance_cm').first().over('trial'))
-        .alias('_dist_in_trial')
-    )
-    
-    # Compute physical position and identify early portion (0 to offset)
-    active_df = active_df.with_columns(
-        ((pl.col('_dist_in_trial') + cue_offset_cm) % pl.col('_track_length'))
-        .alias('_physical_position')
-    )
-    active_df = active_df.with_columns(
-        (pl.col('_physical_position') < cue_offset_cm).alias('_is_early_portion')
-    )
-    
-    # Get trial list for reassignment mapping
-    trials = active_df['trial'].unique().sort().to_list()
-    
-    # Map: early portion frames get assigned to next trial
-    next_trial_map = {trials[i]: trials[i + 1] for i in range(len(trials) - 1)}
-    next_trial_map[trials[-1]] = None  # Last trial's early portion has nowhere to go
-    
-    # Reassign trials
-    active_df = active_df.with_columns(
-        pl.when(pl.col('_is_early_portion'))
-        .then(pl.col('trial').replace(next_trial_map))
-        .otherwise(pl.col('trial'))
-        .alias('trial')
-    )
-    
-    # Drop incomplete trials:
-    # - First trial (missing 0-10cm at start)
-    # - Orphaned frames from last trial (assigned to None)
-    active_df = active_df.filter(
-        (pl.col('trial') != trials[0]) & (pl.col('trial').is_not_null())
-    )
-    
-    # Also drop last trial if incomplete (didn't reach near track length)
-    remaining_trials = active_df['trial'].unique().sort().to_list()
-    if remaining_trials:
-        last_trial = remaining_trials[-1]
-        last_trial_df = active_df.filter(pl.col('trial') == last_trial)
-        last_dist = last_trial_df['distance_cm']
-        last_dist_range = last_dist.max() - last_dist.min()
-        last_type = last_trial_df['trial_type'][0]
-        expected_length = track_lengths.get(last_type, 180)
-        
-        # If less than 90% complete, drop it
-        if last_dist_range < expected_length * 0.9:
-            active_df = active_df.filter(pl.col('trial') != last_trial)
-    
-    # Clean up temp columns
-    active_df = active_df.drop([
-        '_track_length', '_dist_in_trial', '_physical_position', '_is_early_portion'
+
+    if cue_offset_cm == 0:
+        return active_df
+    # Get the first cue ID from config (should be the same for all trial types)
+    first_cues = set()
+    for structure in config.get('trial_structures', {}).values():
+        seq = structure.get('cue_sequence', [])
+        if seq:
+            first_cues.add(seq[0])
+
+    if len(first_cues) != 1:
+        raise ValueError(f"Expected all trial types to start with same cue, got: {first_cues}")
+    first_cue = first_cues.pop()
+
+    # Detect trial starts: cue == first_cue AND previous frame was != first_cue
+    active_df = active_df.with_columns([
+        (pl.col('cue') == first_cue).alias('_is_first_cue'),
+        (pl.col('cue').shift(1) != first_cue).fill_null(True).alias('_prev_not_first_cue'),
     ])
-    
-    n_original = len(trials)
+
+    active_df = active_df.with_columns(
+        (pl.col('_is_first_cue') & pl.col('_prev_not_first_cue'))
+        .cum_sum()
+        .alias('_new_trial')
+    )
+
+    # Sanity check: compare distance per new trial to expected track lengths
+    trial_distances = (
+        active_df.group_by('_new_trial')
+        .agg((pl.col('distance_cm').max() - pl.col('distance_cm').min()).alias('distance'))
+    )
+    median_dist = trial_distances['distance'].median()
+    print(f"  Median trial distance: {median_dist:.1f}cm")
+
+    # Get trial_type and guided from original labels (mode per new trial)
+    active_df = active_df.with_columns([
+        pl.col('trial_type').mode().first().over('_new_trial').alias('_new_trial_type'),
+        pl.col('guided').mode().first().over('_new_trial').alias('_new_guided'),
+    ])
+
+    # Replace old columns
+    active_df = active_df.with_columns([
+        pl.col('_new_trial').alias('trial'),
+        pl.col('_new_trial_type').alias('trial_type'),
+        pl.col('_new_guided').alias('guided'),
+    ])
+
+    # Drop first and last trials (incomplete)
+    trials = active_df['trial'].unique().sort().to_list()
+    active_df = active_df.filter(
+        (pl.col('trial') != trials[0]) & (pl.col('trial') != trials[-1])
+    )
+
+    # Clean up temp columns
+    temp_cols = [c for c in active_df.columns if c.startswith('_')]
+    active_df = active_df.drop(temp_cols)
+
     n_final = active_df['trial'].n_unique()
-    print(f"Cue offset correction: {n_original} recorded → {n_final} complete trials")
-    
+    print(f"Cue offset correction: {len(trials)} recorded → {n_final} complete trials")
+
     return active_df
+
 
 
 def group_into_trials(
@@ -357,9 +327,8 @@ def add_binned_signals(
     ])
 
 
-# =============================================================================
+
 # DATA CONTAINER
-# =============================================================================
 
 @dataclass
 class TrialData:
@@ -406,9 +375,8 @@ class TrialData:
         return self.trial_df.filter(pl.col('trial_type') == trial_type)
 
 
-# =============================================================================
+
 # MAIN PIPELINE
-# =============================================================================
 
 def process_session(
     df: pl.DataFrame,
@@ -460,9 +428,8 @@ def process_session(
     )
 
 
-# =============================================================================
 # SAVE / LOAD
-# =============================================================================
+
 def save_trial_data(data: TrialData, output_path: Path):
     """Save trial data: parquet for dataframe, npz for numpy arrays."""
     output_path = Path(output_path)
@@ -497,7 +464,8 @@ def save_trial_data(data: TrialData, output_path: Path):
 
 
 def load_trial_data(path: Path, config_path: Path = None) -> TrialData:
-    """Load trial data from parquet + npz."""
+    """Load trial data from parquet + npz, and metadata from yaml
+    This was the easiest way to avoid object errors from nested arrays in the df """
     path = Path(path).with_suffix('')  # Strip any extension
 
     trial_df = pl.read_parquet(path.with_suffix('.parquet'))
@@ -527,9 +495,9 @@ def load_trial_data(path: Path, config_path: Path = None) -> TrialData:
     return TrialData(trial_df=trial_df, config=config, metadata=metadata)
 
 
-# =============================================================================
+
 # UTILITIES
-# =============================================================================
+
 
 def compute_session_averages(
     trial_df: pl.DataFrame,
@@ -572,42 +540,39 @@ def compute_session_averages(
 
 
 def get_cue_regions(
-    trial_df: pl.DataFrame,
+    config: dict,
     trial_type: str,
 ) -> dict:
     """
-    Extract cue region boundaries from trial data.
+    Extract cue region boundaries from the experiment config file; boundaries are not accurate from data given the
+    encoder/meso frame rate mismatch.
     
     Returns
     -------
     dict
         {cue_id: (start_cm, end_cm)}
     """
-    trials = trial_df.filter(pl.col('trial_type') == trial_type)
-    if len(trials) == 0:
+    trial_structure = config.get('trial_structures', {}).get(trial_type)
+    if not trial_structure:
         return {}
-    
-    first = trials.row(0, named=True)
-    cues = np.array(first['cue'])
-    positions = np.array(first['position'])
-    
-    # Find cue transitions
-    changes = np.concatenate([[0], np.where(np.diff(cues) != 0)[0] + 1, [len(cues)]])
-    
+
+    cue_sequence = trial_structure['cue_sequence']
+    cue_widths = config.get('cue_map', {})
+
     regions = {}
-    for i in range(len(changes) - 1):
-        start_idx = changes[i]
-        end_idx = changes[i + 1] - 1
-        cue_id = int(cues[start_idx])
-        
-        if cue_id == 0:  # Skip gray zones
-            continue
-        
-        start_pos = positions[start_idx]
-        end_pos = positions[end_idx]
-        
+    position = 0.0  # Account for recording starting mid-track
+
+    for cue_id in cue_sequence:
+        if cue_id not in cue_widths:
+            raise KeyError(f"Cue ID {cue_id} not found in cue_map config")
+        width = cue_widths.get(cue_id, 30.0)
+
         if cue_id not in regions:
-            regions[cue_id] = (start_pos, end_pos)
+            regions[cue_id] = [(position, position + width)]
+        else:
+            regions[cue_id].append((position, position + width))
+
+        position += width
     
     return regions
 
