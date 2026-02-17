@@ -17,9 +17,7 @@ import polars as pl
 from create_trial_based_df import load_trial_data
 
 
-# =============================================================================
 # COLOR CONFIGURATION
-# =============================================================================
 
 # Tableau 10 - colorblind friendly
 CUE_COLOR_PALETTE = [
@@ -89,9 +87,9 @@ def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> Dict[int, str]:
     return labels
 
 
-# =============================================================================
+
 # CUE REGION PLOTTING
-# =============================================================================
+
 
 def plot_cue_regions(
     ax: Axes,
@@ -134,10 +132,13 @@ def plot_cue_regions(
             continue
         
         for i, (start, end) in enumerate(regions):
+            start = max(start, 0)  # Clip to track start
+            if end <= 0:
+                continue
             ax.axvspan(start, end, alpha=alpha, color=color, zorder=1)
             
             # Label only first occurrence
-            if show_labels and i == 0:
+            if show_labels:
                 mid = (start + end) / 2
                 label = labels.get(cue_id, f'Cue {cue_id}')
                 ax.text(
@@ -152,9 +153,8 @@ def plot_cue_regions(
                 )
 
 
-# =============================================================================
+
 # PLACE FIELD PLOTS
-# =============================================================================
 
 def plot_single_cell(
     data,  # TrialData or pl.DataFrame
@@ -220,8 +220,8 @@ def plot_single_cell(
     # Cue regions
     if show_cues:
         if cue_regions is None:
-            from trial_based_df import get_cue_regions
-            cue_regions = get_cue_regions(trial_df, trial_type)
+            from create_trial_based_df import get_cue_regions
+            cue_regions = get_cue_regions(config, trial_type)
         plot_cue_regions(ax, cue_regions, config)
     
     # Individual trials
@@ -235,7 +235,7 @@ def plot_single_cell(
     
     # Session average
     if session_stats is None:
-        from trial_based_df import compute_session_averages
+        from create_trial_based_df import compute_session_averages
         session_stats = compute_session_averages(trial_df, by_trial_type=True)
     
     if trial_type in session_stats:
@@ -303,7 +303,7 @@ def plot_cell_comparison(
     Figure
     """
     import polars as pl
-    from trial_based_df import get_cue_regions, compute_session_averages
+    from create_trial_based_df import get_cue_regions, compute_session_averages
     
     # Handle TrialData or DataFrame input
     if hasattr(data, 'trial_df'):
@@ -333,7 +333,7 @@ def plot_cell_comparison(
         
         # Cue regions with labels
         if show_cues:
-            cue_regions = get_cue_regions(trial_df, trial_type)
+            cue_regions = get_cue_regions(config, trial_type)
             plot_cue_regions(ax, cue_regions, config, show_labels=True, alpha=0.15)
             
             # Set x-ticks at nominal cue boundaries (from config)
@@ -364,7 +364,8 @@ def plot_cell_comparison(
             if binned is None or len(binned) == 0:
                 continue
             cell_activity = binned[:, cell_idx]
-            x = np.arange(len(cell_activity)) * bin_size_cm
+            x = np.arange(len(cell_activity)) * bin_size_cm + (bin_size_cm/2)  #to plot the average activity at the
+            # center of the bins, not the edges
             ax.plot(x, cell_activity, color=trial_color, linewidth=1,
                     alpha=alpha_trials, zorder=2)
         
@@ -372,7 +373,7 @@ def plot_cell_comparison(
         if trial_type in session_stats:
             avg = session_stats[trial_type]['session_avg'][:, cell_idx]
             sem = session_stats[trial_type]['session_sem'][:, cell_idx]
-            x_avg = np.arange(len(avg)) * bin_size_cm
+            x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm/2)
             n_trials = session_stats[trial_type]['n_trials']
             
             avg_color = TRIAL_TYPE_COLORS_DARK.get(trial_type, '#0A4D68')
@@ -399,9 +400,8 @@ def plot_cell_comparison(
     return fig
 
 
-# =============================================================================
+
 # QUICK PLOTTING
-# =============================================================================
 
 def quick_plot(
     data,  # TrialData
@@ -429,7 +429,7 @@ def quick_plot(
     -------
     Figure
     """
-    from trial_based_df import compute_session_averages
+    from create_trial_based_df import compute_session_averages
     
     trial_types = data.trial_types
     print(f"Available trial types: {trial_types}")
@@ -466,9 +466,8 @@ def quick_plot(
     return fig
 
 
-# =============================================================================
-# SAVE UTILITIES
-# =============================================================================
+
+# SAVE
 
 def save_figure(fig: Figure, path: Path, dpi: int = 150):
     """Save figure to file (supports .png, .pdf, .svg)."""
@@ -481,21 +480,76 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 if __name__ == "__main__":
     session_root = Path('/Users/cs963/Desktop/sun_lab_projects')
 
-    experiment_config_path = Path(session + '/26_explore.meta.yaml')
+    experiment_config_path = session_root / '26_explore/experiment_configuration.yaml'
 
-    data = load_trial_data('/Users/cs963/Desktop/sun_lab_projects/26_explore/26_explore',
+    data = load_trial_data(session_root / '26_explore',
                            config_path=experiment_config_path)  #the trial data class, includes the metadata (config)
 
-    # Re-bin with config for consistent sizes
-    from trial_based_df import add_binned_signals, load_experiment_config, get_cue_regions
+    for i in range(11, 15):
+        quick_plot(data, cell_idx=i)
 
-    config = load_experiment_config(experiment_config_path)
 
-    print(data.trial_df.columns)
-    with pl.Config(tbl_cols=100, tbl_rows=50):
-        print(data.trial_df.head())
 
-    cue_regions = get_cue_regions(data.trial_df, 'ABC', verbose=True)
 
-    #quick_plot(data, cell_idx=0)
-    #plot_single_cell(data, cell_idx=0, trial_type='ABC')
+
+
+    #sanity check for offset correction
+    cell_idx = 0
+    colors = {'ABC': '#2E86AB', 'ABDC': '#A23B72'}
+
+    # Load original frame-level data
+    original_df = pl.read_ipc('/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061.feather')
+    original_df = original_df.filter(pl.col('system_state') == 'run').sort('frame')
+
+
+
+    fig, ax = plt.subplots(figsize=(20, 6))
+
+    # Original: raw distance_cm vs signal
+    for trial_num in original_df['trial'].unique().sort():
+        trial_data = original_df.filter(pl.col('trial') == trial_num).sort('frame')
+        distance = trial_data['distance_cm'].to_numpy()
+        signals = np.vstack(trial_data['single_day_f'].to_list())
+        ax.plot(distance, signals[:, cell_idx], color='black', linewidth=0.5, alpha=0.5)
+
+    # Corrected: also use distance_cm (from the frame-level corrected_df, not trial_df)
+    # Run just step 1 to get the corrected frame-level data:
+    from create_trial_based_df import fix_cue_offset, load_experiment_config
+
+    corrected_df = fix_cue_offset(original_df, data.config, system_state='run')
+
+    original_count = original_df.shape[0]
+    corrected_count = corrected_df.shape[0]
+    expected_loss = original_df.filter(
+        (pl.col('trial') == original_df['trial'].unique().sort()[0]) |
+        (pl.col('trial') == original_df['trial'].unique().sort()[-1])
+    ).shape[0]
+
+    print(f"Original frames: {original_count}")
+    print(f"Corrected frames: {corrected_count}")
+    print(f"Expected loss (first+last trial): {expected_loss}")
+    print(f"Actual loss: {original_count - corrected_count}")
+    print(f"Unaccounted missing: {(original_count - corrected_count) - expected_loss}")
+    for trial_num in corrected_df['trial'].unique().sort():
+        trial_data = corrected_df.filter(pl.col('trial') == trial_num).sort('frame')
+        distance = trial_data['distance_cm'].to_numpy()
+        signals = np.vstack(trial_data['single_day_f'].to_list())
+        trial_type = trial_data['trial_type'][0]
+        ax.plot(distance, signals[:, cell_idx], color=colors.get(trial_type, 'gray'),
+                linewidth=0.5)
+        # Mark corrected trial boundaries
+        ax.axvline(distance[0], color='red', linewidth=0.5, alpha=0.5, linestyle='--')
+
+    # Mark original trial boundaries
+    for trial_num in original_df['trial'].unique().sort():
+        trial_data = original_df.filter(pl.col('trial') == trial_num).sort('frame')
+        ax.axvline(trial_data['distance_cm'][0], color='black', linewidth=0.5, alpha=0.3)
+
+    ax.set_xlabel('Cumulative distance (cm)')
+    ax.set_ylabel('ΔF/F')
+    ax.set_title(f'Cell {cell_idx} - Black lines: original boundaries, Red dashed: corrected boundaries')
+    plt.tight_layout()
+    plt.show()
+
+    #
+    # plot_single_cell(data, cell_idx=0, trial_type='ABC')
