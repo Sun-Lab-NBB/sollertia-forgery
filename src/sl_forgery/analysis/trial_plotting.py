@@ -86,6 +86,60 @@ def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> Dict[int, str]:
     
     return labels
 
+#Helper function for plotting
+
+def shared_params(
+        ax: Axes,
+        trial_type: str,
+        config: dict = None,
+        show_cues: bool = True,
+        show_reward_zone: bool = True,
+        show_labels: bool = True,
+        alpha: float = 0.15,
+        label_y: float = 0.98,
+):
+    """Add cue regions, reward zone, and x-ticks to a track axis."""
+    from create_trial_based_df import get_cue_regions
+
+    if config is None:
+        return
+
+    # Cue shading
+    if show_cues:
+        cue_regions = get_cue_regions(config, trial_type)
+        plot_cue_regions(ax, cue_regions, config, show_labels=show_labels,
+                         alpha=alpha, label_y=label_y)
+
+    # Reward zone
+    if show_reward_zone:
+        ts = config.get('trial_structures', {}).get(trial_type, {})
+        if 'reward_zone_start_cm' in ts:
+            rz_start = ts['reward_zone_start_cm']
+            rz_end = ts['reward_zone_end_cm']
+            ax.axvline(rz_start, color='#1B9AAA', linestyle='--',
+                       linewidth=1.5, alpha=0.7, zorder=5)
+            ax.axvline(rz_end, color='#1B9AAA', linestyle='--',
+                       linewidth=1.5, alpha=0.7, zorder=5)
+            ax.text((rz_start + rz_end) / 2, label_y - 0.08, 'reward',
+                    ha='center', va='top', fontsize=8, fontstyle='italic',
+                    color='#1B9AAA',
+                    transform=ax.get_xaxis_transform())
+
+    # X-ticks at cue boundaries
+    cue_width = 30
+    if 'cue_map' in config:
+        cue_width = list(config['cue_map'].values())[0]
+    track_length = ts.get('trial_length_cm', 180) if config else 180
+    ticks = list(range(0, int(track_length) + 1, int(cue_width)))
+    if ticks[-1] != int(track_length):
+        ticks.append(int(track_length))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([str(t) for t in ticks], fontsize=9)
+
+    # Common styling
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(alpha=0.3, axis='y', zorder=0)
 
 
 # CUE REGION PLOTTING
@@ -217,46 +271,13 @@ def plot_single_cell(
     
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Cue regions
-    if show_cues:
-        if cue_regions is None:
-            from create_trial_based_df import get_cue_regions
-            cue_regions = get_cue_regions(config, trial_type)
-        plot_cue_regions(ax, cue_regions, config)
-    
-    # Individual trials
-    for row in trials.iter_rows(named=True):
-        binned = row['binned_signals']
-        if binned is None or len(binned) == 0:
-            continue
-        cell_activity = binned[:, cell_idx]
-        x = np.arange(len(cell_activity)) * bin_size_cm
-        ax.plot(x, cell_activity, color='gray', linewidth=1, alpha=alpha_trials, zorder=2)
-    
-    # Session average
-    if session_stats is None:
-        from create_trial_based_df import compute_session_averages
-        session_stats = compute_session_averages(trial_df, by_trial_type=True)
-    
-    if trial_type in session_stats:
-        avg = session_stats[trial_type]['session_avg'][:, cell_idx]
-        sem = session_stats[trial_type]['session_sem'][:, cell_idx]
-        x_avg = np.arange(len(avg)) * bin_size_cm
-        n_trials = session_stats[trial_type]['n_trials']
-        
-        ax.plot(x_avg, avg, color='#E63946', linewidth=3,
-                label=f'Session average (n={n_trials})', zorder=4)
-        ax.fill_between(x_avg, avg - sem, avg + sem,
-                        color='#E63946', alpha=0.3, zorder=3)
-    
+    shared_params(ax, trial_type, config, show_cues)
+
     ax.set_xlabel('Position (cm)', fontsize=12)
     ax.set_ylabel('ΔF/F', fontsize=12)
     ax.set_title(f'Cell {cell_idx} - {trial_type}', fontsize=13, fontweight='bold')
     ax.legend(frameon=False, fontsize=11)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.grid(alpha=0.3, axis='y', zorder=0)
-    
+
     plt.tight_layout()
 
     if show and fig is not None:
@@ -303,7 +324,7 @@ def plot_cell_comparison(
     Figure
     """
     import polars as pl
-    from create_trial_based_df import get_cue_regions, compute_session_averages
+    from create_trial_based_df import compute_session_averages
     
     # Handle TrialData or DataFrame input
     if hasattr(data, 'trial_df'):
@@ -331,31 +352,7 @@ def plot_cell_comparison(
     for ax, trial_type in zip(axes, trial_types):
         trials = trial_df.filter(pl.col('trial_type') == trial_type)
         
-        # Cue regions with labels
-        if show_cues:
-            cue_regions = get_cue_regions(config, trial_type)
-            plot_cue_regions(ax, cue_regions, config, show_labels=True, alpha=0.15)
-            
-            # Set x-ticks at nominal cue boundaries (from config)
-            cue_width = 30  # default
-            if config and 'cue_map' in config:
-                # All cues have same width in current config
-                cue_width = list(config['cue_map'].values())[0]
-            
-            # Get track length
-            track_length = 180  # default
-            if config and trial_type in config.get('trial_structures', {}):
-                track_length = config['trial_structures'][trial_type]['trial_length_cm']
-            elif trial_type in session_stats:
-                track_length = session_stats[trial_type]['session_avg'].shape[0] * bin_size_cm
-            
-            # Generate nominal ticks: 0, 30, 60, 90, ... up to track length
-            tick_positions = list(range(0, int(track_length) + 1, int(cue_width)))
-            if tick_positions[-1] != track_length:
-                tick_positions.append(int(track_length))
-            
-            ax.set_xticks(tick_positions)
-            ax.set_xticklabels([str(t) for t in tick_positions], fontsize=9)
+        shared_params(ax, trial_type, config, show_cues)
         
         # Individual trials
         trial_color = TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
@@ -381,13 +378,13 @@ def plot_cell_comparison(
                     label=f'Average (n={n_trials})', zorder=4)
             ax.fill_between(x_avg, avg - sem, avg + sem,
                             color=avg_color, alpha=0.3, zorder=3)
-        
+
+
         ax.set_ylabel('ΔF/F', fontsize=12)
         ax.set_title(f'{trial_type}', fontsize=12, fontweight='bold', loc='left')
-        ax.legend(frameon=False, fontsize=10)
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.grid(alpha=0.3, axis='y', zorder=0)
+        ax.legend(frameon=False, fontsize=10, loc='upper right',
+                  bbox_to_anchor=(1.0, 1.1))
+
     
     axes[-1].set_xlabel('Position (cm)', fontsize=12)
     
@@ -485,7 +482,7 @@ if __name__ == "__main__":
     data = load_trial_data(session_root / '26_explore',
                            config_path=experiment_config_path)  #the trial data class, includes the metadata (config)
 
-    for i in range(11, 15):
+    for i in range(10):
         quick_plot(data, cell_idx=i)
 
 
