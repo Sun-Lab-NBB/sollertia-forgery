@@ -1,18 +1,21 @@
 """
-Trial-Based DataFrame Processing Module
+DataFrame Processing Module
 
-Converts frame-based calcium imaging data into trial-indexed structure
-for spatial analysis of place cells and neural manifolds.
+Converts frame-based calcium imaging data into a cue-corrected, binned frame-level DataFrame for spatial analysis of
+place cells and neural manifolds.
 
 Core pipeline:
-    1. fix_cue_offset() - Reassign frames to correct trials, drop incomplete
-    2. group_into_trials() - Frame df → trial-indexed df with arrays
-    3. add_binned_signals() - Add spatially binned neural activity
+    1. fix_cue_offset() - Reassign frames to correct trials to fix Unity mismatch, drop incomplete
+    2. add_position_and_bin() - Add within-trial position + spatial bin index
+
+Output is a flat frame-level df (one row per frame) that can write_parquet / read_parquet.
+
+Analysis helpers:
+    - compute_binned_average() - Single-cell spatial tuning via Polars (fast)
+    - compute_session_averages() - All-cells averages via numpy (vectorized)
 """
 
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
 
 import numpy as np
 import polars as pl
@@ -27,7 +30,7 @@ def load_experiment_config(yaml_path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def get_track_length(config: dict, trial_type: str) -> Optional[float]:
+def get_track_length(config: dict, trial_type: str) -> float | None:
     """Get track length for a trial type from config."""
     trial_structures = config.get('trial_structures', {})
     if trial_type in trial_structures:
@@ -74,6 +77,7 @@ def fix_cue_offset(
 
     if cue_offset_cm == 0:
         return active_df
+
     # Get the first cue ID from config (should be the same for all trial types)
     first_cues = set()
     for structure in config.get('trial_structures', {}).values():
@@ -134,119 +138,18 @@ def fix_cue_offset(
     return active_df
 
 
-
-def group_into_trials(
+def add_position_and_bins(
     df: pl.DataFrame,
-    signal_col: str = 'single_day_f',
-) -> pl.DataFrame:
-    """
-    Convert frame-based dataframe to trial-indexed structure.
-    
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Frame-based dataframe (after fix_cue_offset)
-    signal_col : str
-        Column containing neural signals (2D arrays)
-    
-    Returns
-    -------
-    pl.DataFrame
-        Trial-indexed dataframe with:
-        - Scalars: trial, trial_type, system_state, experiment_state, guided,
-                   rewarded, n_frames, track_length_cm
-        - Arrays: position, speed, cue, lick, reward, signals, etc.
-    """
-    # Define scalar columns (use mode for trial_type, first for others)
-    scalar_cols = ['system_state', 'experiment_state', 'guided']
-    
-    # Define columns to skip (handled separately or excluded)
-    skip_cols = {'trial', 'trial_type', 'frame', signal_col, 'distance_cm'} | set(scalar_cols)
-
-    
-    # Identify array columns (everything else)
-    array_cols = [c for c in df.columns if c not in skip_cols]
-    
-    # Build aggregation expressions
-    agg_exprs = [
-        # Trial type: mode (most common after reassignment)
-        pl.col('trial_type').mode().first().alias('trial_type'),
-        
-        # Other scalars: first value
-        *[pl.col(c).first().alias(c) for c in scalar_cols if c in df.columns],
-        
-        # Frame indices (for reference)
-        pl.col('frame').alias('frames'),
-        pl.len().alias('n_frames'),
-        
-        # Array columns: keep as lists
-        *[pl.col(c) for c in array_cols if c in df.columns],
-    ]
-    
-    # Group and aggregate
-    trial_df = (
-        df.sort('frame')
-        .group_by('trial', maintain_order=True)
-        .agg(agg_exprs)
-        .sort('trial')
-    )
-    
-    # Add derived scalar: rewarded (True if any 'yes' in trial)
-    if 'reward' in trial_df.columns:
-        trial_df = trial_df.with_columns(
-            pl.col('reward').list.eval(pl.element() == 'yes').list.any().alias('rewarded')
-        )
-    
-    # Compute normalized position (0 to track_length per trial)
-    positions = []
-    for trial_num in trial_df['trial']:
-        trial_frames = df.filter(pl.col('trial') == trial_num).sort('frame')
-        cum_dist = trial_frames['distance_cm'].to_numpy()
-        normalized = cum_dist - cum_dist[0]
-        positions.append(normalized.tolist())
-    
-    trial_df = trial_df.with_columns(
-        pl.Series('position', positions)
-    )
-
-    # Add measured track length from encoder (max position per trial) - byproduct of cue offset issue
-    trial_df = trial_df.with_columns(
-        pl.col('position').list.max().alias('measured_track_length')
-    )
-
-    # Process signals separately (handle 2D arrays)
-    if signal_col in df.columns:
-        print(f"Processing {signal_col}...")
-        signals_per_trial = []
-        
-        for trial_num in trial_df['trial']:
-            trial_frames = df.filter(pl.col('trial') == trial_num).sort('frame')
-            signals_list = trial_frames[signal_col].to_list()
-            
-            if signals_list:
-                signals_array = np.vstack([np.array(s) for s in signals_list])
-            else:
-                signals_array = np.array([])
-            
-            signals_per_trial.append(signals_array)
-        
-        trial_df = trial_df.with_columns(
-            pl.Series('signals', signals_per_trial, dtype=pl.Object)
-        )
-    
-    print(f"Created {len(trial_df)} trials")
-    print(f"Trial types: {trial_df['trial_type'].unique().to_list()}")
-    
-    return trial_df
-
-
-def add_binned_signals(
-    trial_df: pl.DataFrame,
-    bin_size_cm: int = 5,
     config: dict = None,
+    bin_size_cm: int = 5
 ) -> pl.DataFrame:
     """
-    Add spatially binned neural activity to trial dataframe.
+    Add within-trial position and spatial bin index.
+
+    Adds columns:
+        - position: distance_cm normalized to 0 at each trial start
+        - distance_bin: integer bin index (0 to n_bins-1), clipped per trial type
+        - nominal_track_length: from config, per trial type
     
     Parameters
     ----------
@@ -260,71 +163,41 @@ def add_binned_signals(
     Returns
     -------
     pl.DataFrame
-        Trial dataframe with added columns:
-        - binned_signals: (n_bins, n_cells) mean activity per bin
-        - bin_counts: (n_bins,) frames per bin
-        - distance_bins: (n_frames,) bin index per frame
+        Input df with position, distance_bin, and nominal_track_length columns added
     """
-    # Get nominal track lengths for consistent binning
-    nominal_lengths = {}
-    if config:
-        for tt in trial_df['trial_type'].unique().to_list():
-            length = get_track_length(config, tt)
-            if length:
-                nominal_lengths[tt] = int(length)
-    
-    binned_signals_list = []
-    bin_counts_list = []
-    distance_bins_list = []
-    nominal_values_list = []
-    
-    for row in trial_df.iter_rows(named=True):
-        position = np.array(row['position'])
-        signals = row['signals']
-        trial_type = row['trial_type']
-        
-        # Use nominal track length if available, else measured
-        track_length = nominal_lengths.get(trial_type, row['measured_track_length'])
-        nominal_values_list.append(track_length)
-        n_bins = int(track_length / bin_size_cm)
-        
-        # Compute bin indices for each frame
-        bin_indices = np.clip(
-            np.floor(position / bin_size_cm).astype(np.int32),
-            0, n_bins - 1
-        )
-        distance_bins_list.append(bin_indices)
-        
-        # Handle empty or missing signals
-        if signals is None or len(signals) == 0:
-            n_cells = 0
-            binned_signals = np.full((n_bins, n_cells), np.nan)
-            bin_counts = np.zeros(n_bins, dtype=np.int32)
-        else:
-            if len(signals.shape) == 1:
-                signals = signals.reshape(-1, 1)
-            
-            n_cells = signals.shape[1]
-            binned_signals = np.full((n_bins, n_cells), np.nan)
-            bin_counts = np.zeros(n_bins, dtype=np.int32)
-            
-            # Compute mean per bin
-            for bin_idx in range(n_bins):
-                mask = bin_indices == bin_idx
-                if mask.any():
-                    binned_signals[bin_idx] = signals[mask].mean(axis=0)
-                    bin_counts[bin_idx] = mask.sum()
-        
-        binned_signals_list.append(binned_signals)
-        bin_counts_list.append(bin_counts)
+    # Within-trial position: distance relative to first frame in each trial. Takes first distance_cm value for each
+    # trial and subtracts it from all the other frames to normalize to nominal track length
+    df = df.with_columns(
+        (pl.col('distance_cm') - pl.col('distance_cm').first().over('trial'))
+        .alias('position')
+    )
 
+    # Create a dict with the trial types and their lengths from the config file
+    length_map = {
+        tt: get_track_length(config, tt)
+        for tt in df['trial_type'].unique().to_list()
+    }
+    missing = [tt for tt, v in length_map.items() if v is None]
+    if missing:
+        raise ValueError(f"No track length in config for: {missing}")
 
-    return trial_df.with_columns([
-        pl.Series('binned_signals', binned_signals_list, dtype=pl.Object),
-        pl.Series('bin_counts', bin_counts_list, dtype=pl.Object),
-        pl.Series('distance_bins', distance_bins_list, dtype=pl.Object),
-        pl.Series('nominal_track_length', nominal_values_list, dtype=pl.Int32)
-    ])
+    # Map to column
+    df = df.with_columns(
+        pl.col('trial_type')
+        .replace_strict(length_map)
+        .cast(pl.Float64)
+        .alias('nominal_track_length')
+    )
+
+    # Bin index: floor(position / bin_size)
+    df = df.with_columns(
+        (pl.col('position') / bin_size_cm)
+        .floor()
+        .cast(pl.Int32)
+        .alias('distance_bin')
+    )
+
+    return df
 
 
 
@@ -334,7 +207,7 @@ def add_binned_signals(
 class TrialData:
     """
     Container for trial-indexed data.
-    
+
     Attributes
     ----------
     trial_df : pl.DataFrame
@@ -347,7 +220,7 @@ class TrialData:
     trial_df: pl.DataFrame
     config: dict = None
     metadata: dict = field(default_factory=dict)
-    
+
     @property
     def n_cells(self) -> int:
         """Number of cells in dataset."""
@@ -357,17 +230,17 @@ class TrialData:
         if first_signals is None or len(first_signals) == 0:
             return 0
         return first_signals.shape[1] if len(first_signals.shape) > 1 else 1
-    
+
     @property
     def n_trials(self) -> int:
         """Number of trials."""
         return len(self.trial_df)
-    
+
     @property
     def trial_types(self) -> List[str]:
         """Available trial types."""
         return sorted(self.trial_df['trial_type'].unique().to_list())
-    
+
     def get_trials(self, trial_type: str = None) -> pl.DataFrame:
         """Get trials, optionally filtered by type."""
         if trial_type is None:
@@ -584,20 +457,28 @@ def get_cue_regions(
 
 if __name__ == "__main__":
     session_root = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    behavior_df = pl.read_ipc('/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061.feather')
-
+    behavior_df = pl.read_ipc(session_root / '2025-09-16-18-44-32-476061.feather')
 
     experiment_config = load_experiment_config(
-        '/Users/cs963/Desktop/sun_lab_projects/26_explore/experiment_configuration.yaml') #for working at home
+        session_root / 'experiment_configuration.yaml') #for working at home
 
-    # Run pipeline - returns TrialData container
-    data = process_session(
-        behavior_df,
-        config=experiment_config,
-        signal_col='single_day_f',
-        bin_size_cm=5,
-        system_state='run'
-    )
+    frame_df = fix_cue_offset(behavior_df, experiment_config, system_state='run')
+
+    print(frame_df.columns)
+    with pl.Config(tbl_cols=100, tbl_rows=100, set_tbl_hide_dataframe_shape=False):
+        print(frame_df.head(100))
 
 
-    save_trial_data(data, session_root)
+
+    #
+    # # Run pipeline - returns TrialData container
+    # data = process_session(
+    #     behavior_df,
+    #     config=experiment_config,
+    #     signal_col='single_day_f',
+    #     bin_size_cm=5,
+    #     system_state='run'
+    # )
+    #
+    #
+    # save_trial_data(data, session_root)
