@@ -37,8 +37,45 @@ def get_track_length(config: dict, trial_type: str) -> float | None:
         return trial_structures[trial_type].get('trial_length_cm')
     return None
 
+def get_cue_regions(
+    config: dict,
+    trial_type: str,
+) -> dict:
+    """
+    Extract cue region boundaries from the experiment config file.
+    Boundaries are nominal (from config), not measured from encoder data.
 
-# CORE PIPELINE
+    Returns
+    -------
+    dict
+        {cue_id: [(start_cm, end_cm), ...]}
+    """
+    trial_structure = config.get('trial_structures', {}).get(trial_type)
+    if not trial_structure:
+        return {}
+
+    cue_sequence = trial_structure['cue_sequence']
+    cue_widths = config.get('cue_map', {})
+
+    regions = {}
+    position = 0.0
+
+    for cue_id in cue_sequence:
+        if cue_id not in cue_widths:
+            raise KeyError(f"Cue ID {cue_id} not found in cue_map config")
+        width = cue_widths.get(cue_id, 30.0)
+
+        if cue_id not in regions:
+            regions[cue_id] = [(position, position + width)]
+        else:
+            regions[cue_id].append((position, position + width))
+
+        position += width
+
+    return regions
+
+
+# PREPROCESSING
 
 def fix_cue_offset(
     df: pl.DataFrame,
@@ -367,42 +404,7 @@ def compute_session_averages(
     return results
 
 
-def get_cue_regions(
-    config: dict,
-    trial_type: str,
-) -> dict:
-    """
-    Extract cue region boundaries from the experiment config file; boundaries are not accurate from data given the
-    encoder/meso frame rate mismatch.
-    
-    Returns
-    -------
-    dict
-        {cue_id: (start_cm, end_cm)}
-    """
-    trial_structure = config.get('trial_structures', {}).get(trial_type)
-    if not trial_structure:
-        return {}
 
-    cue_sequence = trial_structure['cue_sequence']
-    cue_widths = config.get('cue_map', {})
-
-    regions = {}
-    position = 0.0  # Account for recording starting mid-track
-
-    for cue_id in cue_sequence:
-        if cue_id not in cue_widths:
-            raise KeyError(f"Cue ID {cue_id} not found in cue_map config")
-        width = cue_widths.get(cue_id, 30.0)
-
-        if cue_id not in regions:
-            regions[cue_id] = [(position, position + width)]
-        else:
-            regions[cue_id].append((position, position + width))
-
-        position += width
-    
-    return regions
 
 
 if __name__ == "__main__":
