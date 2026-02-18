@@ -13,6 +13,7 @@ from matplotlib.cm import ScalarMappable
 import plotly.graph_objects as go
 from typing import Optional, Tuple, List, Dict, Any
 from enum import Enum
+from trial_plotting import get_cue_colors, get_cue_labels, TRIAL_TYPE_COLORS
 
 
 class ColoringStrategy(Enum):
@@ -26,15 +27,10 @@ class ColoringStrategy(Enum):
 
 def prepare_umap_data_frame_level(
         df: pl.DataFrame,
-        spike_column: str = "single_day_spikes",
-        distance_column: str = "distance_cm",
-        cue_column: str = "cue",
-        trial_type_column: str = "trial_type",
-        speed_column: str = "speed_cm_s",
-        trial_column: str = "trial",
-        min_speed: Optional[float] = None,
+        signal_column: str = "single_day_spikes",
+        min_speed: Optional[float] = 2.0,
         max_speed: Optional[float] = None,
-        cues_to_include: Optional[List[str]] = None,
+        cues_to_include: Optional[List[int]] = None,
         trial_types_to_include: Optional[List[str]] = None,
         state_filters: Optional[Dict[str, Any]] = None,
         max_frames: Optional[int] = None
@@ -44,18 +40,15 @@ def prepare_umap_data_frame_level(
 
     Args:
         df: Polars DataFrame with frame-level data
-        spike_column: Column containing neural activity arrays
-        distance_column: Column with distance information
-        cue_column: Column with cue labels
-        trial_type_column: Column with trial type labels
-        speed_column: Column with speed values
-        trial_column: Column with trial numbers
-        min_speed: Minimum speed threshold (inclusive)
+        signal_column: Column containing neural activity arrays
+        min_speed: Minimum speed threshold (inclusive); avoid periods where mouse is stationary
         max_speed: Maximum speed threshold (inclusive)
-        cues_to_include: List of cue zones to include (None = all)
+        cues_to_include: List of cue zones to include (None = all); possible uses -- looking at D separately,
+            reward zone, gray zones
         trial_types_to_include: List of trial types to include (None = all)
         state_filters: Dict of {column_name: value} for additional filtering
-        max_frames: Maximum number of frames to use (random sample if exceeded)
+        max_frames: Maximum number of frames to use (use stride if exceeded); None includes the entire session,
+            but you can specify less for speed/quick view of a plot/checking code
 
     Returns:
         neural_data: Array of shape (n_frames, n_cells)
@@ -66,17 +59,17 @@ def prepare_umap_data_frame_level(
 
     # Speed filter
     if min_speed is not None:
-        filtered_df = filtered_df.filter(pl.col(speed_column) >= min_speed)
+        filtered_df = filtered_df.filter(pl.col('speed_cm_s') >= min_speed)
     if max_speed is not None:
-        filtered_df = filtered_df.filter(pl.col(speed_column) <= max_speed)
+        filtered_df = filtered_df.filter(pl.col('speed_cm_s') <= max_speed)
 
     # Cue filter
     if cues_to_include is not None:
-        filtered_df = filtered_df.filter(pl.col(cue_column).is_in(cues_to_include))
+        filtered_df = filtered_df.filter(pl.col('cue').is_in(cues_to_include))
 
     # Trial type filter
     if trial_types_to_include is not None:
-        filtered_df = filtered_df.filter(pl.col(trial_type_column).is_in(trial_types_to_include))
+        filtered_df = filtered_df.filter(pl.col('trial_type').is_in(trial_types_to_include))
 
     # State filters
     if state_filters:
@@ -84,20 +77,21 @@ def prepare_umap_data_frame_level(
             if col in filtered_df.columns:
                 filtered_df = filtered_df.filter(pl.col(col) == value)
 
-    # Subsample if needed
+    # Enforce max_frames by subsampling
     if max_frames is not None and len(filtered_df) > max_frames:
-        filtered_df = filtered_df.sample(n=max_frames, shuffle=True)
+        stride = len(filtered_df) // max_frames     #use stride instead of random sampling, uses every Nth frame
+        filtered_df = filtered_df.gather_every(stride)
 
     # Extract neural data by stacking spike arrays
-    neural_data = np.vstack(filtered_df[spike_column].to_list())
+    neural_data = np.vstack(filtered_df[signal_column].to_list())
 
     # Extract metadata
     metadata = {
-        'distance': filtered_df[distance_column].to_numpy(),
-        'cue': filtered_df[cue_column].to_numpy(),
-        'trial_type': filtered_df[trial_type_column].to_numpy(),
-        'speed': filtered_df[speed_column].to_numpy(),
-        'trial': filtered_df[trial_column].to_numpy()
+        'distance': filtered_df['distance_cm'].to_numpy(),
+        'cue': filtered_df['cue'].to_numpy(),
+        'trial_type': filtered_df['trial_type'].to_numpy(),
+        'speed': filtered_df['speed_cm_s'].to_numpy(),
+        'trial': filtered_df['trial'].to_numpy()
     }
 
     return neural_data, metadata
@@ -122,14 +116,23 @@ def get_colors_for_strategy(
     """
     if strategy == ColoringStrategy.CUE:
         # Categorical coloring by cue
+        cue_color_map = get_cue_colors()
+        cue_label_map = get_cue_labels()
         unique_cues = np.unique(metadata['cue'])
-        cue_colors = plt.cm.tab10(np.linspace(0, 1, len(unique_cues)))
-        cue_to_color = {cue: cue_colors[i] for i, cue in enumerate(unique_cues)}
-        colors = np.array([cue_to_color[cue] for cue in metadata['cue']])
+        legend = {}
+        color_list = []
+        for cue in metadata['cue']:
+            hex_color = cue_color_map.get(int(cue), '#CCCCCC')
+            color_list.append(hex_color)
+        for cue in unique_cues:
+            label = cue_label_map.get(int(cue), f'Cue {cue}')
+            legend[label] = cue_color_map.get(int(cue), '#CCCCCC')
+        colors = np.array(color_list)
         color_info = {
             'type': 'categorical',
-            'legend': cue_to_color,
-            'label': 'Cue Zone'
+            'legend': legend,
+            'label': 'Cue Zone',
+            'raw_cue_map': {int(c): cue_label_map.get(int(c), f'Cue {c}') for c in unique_cues},
         }
 
     elif strategy == ColoringStrategy.POSITION:
@@ -147,12 +150,11 @@ def get_colors_for_strategy(
     elif strategy == ColoringStrategy.TRIAL_TYPE:
         # Categorical coloring by trial type
         unique_types = np.unique(metadata['trial_type'])
-        type_colors = plt.cm.Set1(np.linspace(0, 1, len(unique_types)))
-        type_to_color = {tt: type_colors[i] for i, tt in enumerate(unique_types)}
-        colors = np.array([type_to_color[tt] for tt in metadata['trial_type']])
+        legend = {tt: TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in unique_types}
+        colors = np.array([TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in metadata['trial_type']])
         color_info = {
             'type': 'categorical',
-            'legend': type_to_color,
+            'legend': legend,
             'label': 'Trial Type'
         }
 
@@ -181,6 +183,29 @@ def get_colors_for_strategy(
         }
 
     return colors, color_info
+
+
+def _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha=0.6, s=20):
+    """Scatter plot for categorical coloring strategies (1D, 2D, or 3D)."""
+    n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
+
+    for label, color in color_info['legend'].items():
+        if strategy == ColoringStrategy.CUE:
+            raw_ids = [k for k, v in color_info['raw_cue_map'].items() if v == label]
+            mask = np.isin(metadata['cue'], raw_ids)
+        else:
+            mask = metadata['trial_type'] == label
+
+        if n_dims == 1:
+            y_vals = np.random.normal(0, 0.02, size=mask.sum())
+            ax.scatter(embedding[mask], y_vals, c=color, label=label, alpha=alpha, s=s)
+        elif n_dims == 2:
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], c=color, label=label, alpha=alpha, s=s)
+        elif n_dims == 3:
+            ax.scatter(embedding[mask, 0], embedding[mask, 1], embedding[mask, 2],
+                       c=color, label=label, alpha=alpha, s=s)
+
+    ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
 
 
 def quick_umap(
@@ -248,13 +273,7 @@ def plot_umap_1d(
     y_vals = np.random.normal(0, 0.02, size=len(embedding))
 
     if color_info['type'] == 'categorical':
-        # Plot each category separately for legend
-        for category, color in color_info['legend'].items():
-            mask = (metadata['cue'] if strategy == ColoringStrategy.CUE
-                    else metadata['trial_type']) == category
-            ax.scatter(embedding[mask], y_vals[mask], c=[color],
-                       label=category, alpha=alpha, s=s)
-        ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
+        _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
     else:
         # Continuous coloring
         scatter = ax.scatter(embedding, y_vals, c=colors, alpha=alpha, s=s)
@@ -302,13 +321,7 @@ def plot_umap_2d(
     fig, ax = plt.subplots(figsize=figsize)
 
     if color_info['type'] == 'categorical':
-        # Plot each category separately for legend
-        for category, color in color_info['legend'].items():
-            mask = (metadata['cue'] if strategy == ColoringStrategy.CUE
-                    else metadata['trial_type']) == category
-            ax.scatter(embedding[mask, 0], embedding[mask, 1], c=[color],
-                       label=category, alpha=alpha, s=s)
-        ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
+        _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
     else:
         # Continuous coloring
         scatter = ax.scatter(embedding[:, 0], embedding[:, 1], c=colors, alpha=alpha, s=s)
@@ -354,13 +367,7 @@ def plot_umap_3d(
     ax = fig.add_subplot(111, projection='3d')
 
     if color_info['type'] == 'categorical':
-        # Plot each category separately for legend
-        for category, color in color_info['legend'].items():
-            mask = (metadata['cue'] if strategy == ColoringStrategy.CUE
-                    else metadata['trial_type']) == category
-            ax.scatter(embedding[mask, 0], embedding[mask, 1], embedding[mask, 2],
-                       c=[color], label=category, alpha=alpha, s=s)
-        ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
+        _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
     else:
         # Continuous coloring
         scatter = ax.scatter(embedding[:, 0], embedding[:, 1], embedding[:, 2],
@@ -398,36 +405,36 @@ def plot_umap_interactive_2d(
     fig = go.Figure()
 
     if strategy == ColoringStrategy.CUE:
+        cue_color_map = get_cue_colors()
+        cue_label_map = get_cue_labels()
         unique_cues = np.unique(metadata['cue'])
-        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_cues)))
 
-        for i, cue in enumerate(unique_cues):
+        for cue in unique_cues:
             mask = metadata['cue'] == cue
-            color_rgb = f"rgba({int(colors[i][0] * 255)}, {int(colors[i][1] * 255)}, {int(colors[i][2] * 255)}, 0.6)"
-
+            hex_color = cue_color_map.get(int(cue), '#CCCCCC')
+            label = cue_label_map.get(int(cue), f'Cue {cue}')
             fig.add_trace(go.Scatter(
                 x=embedding[mask, 0],
                 y=embedding[mask, 1],
                 mode='markers',
-                name=str(cue),
-                marker=dict(size=5, color=color_rgb),
-                legendgroup=str(cue)
+                name=label,
+                marker=dict(size=5, color=hex_color, opacity=0.8),
+                legendgroup=label
             ))
 
     elif strategy == ColoringStrategy.TRIAL_TYPE:
         unique_types = np.unique(metadata['trial_type'])
-        colors = plt.cm.Set1(np.linspace(0, 1, len(unique_types)))
 
-        for i, tt in enumerate(unique_types):
+        for tt in unique_types:
             mask = metadata['trial_type'] == tt
-            color_rgb = f"rgba({int(colors[i][0] * 255)}, {int(colors[i][1] * 255)}, {int(colors[i][2] * 255)}, 0.6)"
+            color = TRIAL_TYPE_COLORS.get(tt, '#999999')
 
             fig.add_trace(go.Scatter(
                 x=embedding[mask, 0],
                 y=embedding[mask, 1],
                 mode='markers',
                 name=str(tt),
-                marker=dict(size=5, color=color_rgb),
+                marker=dict(size=5, color=color, opacity=0.8),
                 legendgroup=str(tt)
             ))
 
@@ -494,8 +501,7 @@ def plot_trial_type_comparison(
     embedding = quick_umap(neural_data, n_components=n_components)
 
     unique_types = np.unique(metadata['trial_type'])
-    colors = plt.cm.Set1(np.linspace(0, 1, len(unique_types)))
-    type_to_color = {tt: colors[i] for i, tt in enumerate(unique_types)}
+    type_to_color = {tt: TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in unique_types}
 
     if separate_plots:
         fig, axes = plt.subplots(1, len(unique_types), figsize=(8 * len(unique_types), 6))
@@ -556,9 +562,8 @@ if __name__ == '__main__':
 
     neural_data, metadata = prepare_umap_data_frame_level(
         behavior_df,
-        spike_column="single_day_spikes",
-        min_speed=5.0,
-        max_frames=10000  #large datasets
+        signal_column="single_day_spikes",
+        max_frames=20000  #defaults to all frames (>42k), use less and subsample for speed
     )
 
     embedding = quick_umap(neural_data, n_components=2)
