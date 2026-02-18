@@ -190,12 +190,12 @@ def add_position_and_bins(
     
     Parameters
     ----------
-    trial_df : pl.DataFrame
-        Trial-indexed dataframe with 'signals' and 'position' columns
+    df : pl.DataFrame
+        Frame-based dataframe after fix_cue_offset (must have 'trial', 'trial_type', 'distance_cm')
+    config : dict
+        Experiment config with trial structures and track lengths (for consistent bin counts)
     bin_size_cm : int
         Spatial bin size in cm
-    config : dict, optional
-        Experiment config with track lengths (for consistent bin counts)
     
     Returns
     -------
@@ -235,6 +235,84 @@ def add_position_and_bins(
     )
 
     return df
+
+# AVERAGING
+
+def compute_binned_average(
+    df: pl.DataFrame,
+    signal_col: str,
+    cell_idx: int,
+    group_cols: list[str] | None,
+) -> pl.DataFrame:
+    """
+    Single-cell binned average using Polars. Fast — uses list.get().
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Frame-level df with signal_col and distance_bin columns
+    signal_col : str
+        Column containing neural signals (list of floats per frame)
+    cell_idx : int
+        Which cell to extract
+    group_cols : list of str, optional
+        Columns to group by (default: ['trial', 'distance_bin'])
+
+    Returns
+    -------
+    pl.DataFrame
+        Grouped df with group_cols + 'mean_signal' + 'trial_type' columns
+    """
+    if group_cols is None:
+        group_cols = ['trial', 'distance_bin']
+
+    return (
+        df.group_by(group_cols, maintain_order=True)
+        .agg(
+            pl.col(signal_col).list.get(cell_idx).mean().alias('mean_signal'),
+            pl.col('trial_type').first(),
+        )
+    )
+
+def compute_session_averages(
+        trial_df: pl.DataFrame,
+        by_trial_type: bool = True,
+) -> dict:
+    """
+    Compute session-level spatial averages.
+
+    Returns
+    -------
+    dict
+        Per trial_type: {'session_avg': (n_bins, n_cells),
+                         'session_sem': (n_bins, n_cells),
+                         'n_trials': int}
+    """
+    from scipy import stats
+
+    if not by_trial_type:
+        all_binned = np.stack(trial_df['binned_signals'].to_list())
+        return {
+            'all': {
+                'session_avg': np.nanmean(all_binned, axis=0),
+                'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
+                'n_trials': len(trial_df),
+            }
+        }
+
+    results = {}
+    for trial_type in trial_df['trial_type'].unique().sort().to_list():
+        type_df = trial_df.filter(pl.col('trial_type') == trial_type)
+        all_binned = np.stack(type_df['binned_signals'].to_list())
+
+        results[trial_type] = {
+            'session_avg': np.nanmean(all_binned, axis=0),
+            'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
+            'n_trials': len(type_df),
+        }
+
+    return results
+
 
 # MAIN PIPELINE
 
@@ -358,51 +436,6 @@ def load_trial_data(path: Path, config_path: Path = None) -> TrialData:
             metadata = yaml.safe_load(f).get('processing', {})
 
     return TrialData(trial_df=trial_df, config=config, metadata=metadata)
-
-
-
-# UTILITIES
-
-
-def compute_session_averages(
-    trial_df: pl.DataFrame,
-    by_trial_type: bool = True,
-) -> dict:
-    """
-    Compute session-level spatial averages.
-    
-    Returns
-    -------
-    dict
-        Per trial_type: {'session_avg': (n_bins, n_cells), 
-                         'session_sem': (n_bins, n_cells),
-                         'n_trials': int}
-    """
-    from scipy import stats
-    
-    if not by_trial_type:
-        all_binned = np.stack(trial_df['binned_signals'].to_list())
-        return {
-            'all': {
-                'session_avg': np.nanmean(all_binned, axis=0),
-                'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
-                'n_trials': len(trial_df),
-            }
-        }
-    
-    results = {}
-    for trial_type in trial_df['trial_type'].unique().sort().to_list():
-        type_df = trial_df.filter(pl.col('trial_type') == trial_type)
-        all_binned = np.stack(type_df['binned_signals'].to_list())
-        
-        results[trial_type] = {
-            'session_avg': np.nanmean(all_binned, axis=0),
-            'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
-            'n_trials': len(type_df),
-        }
-    
-    return results
-
 
 
 
