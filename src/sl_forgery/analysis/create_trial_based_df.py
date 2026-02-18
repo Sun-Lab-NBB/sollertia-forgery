@@ -199,56 +199,6 @@ def add_position_and_bins(
 
     return df
 
-
-
-# DATA CONTAINER
-
-@dataclass
-class TrialData:
-    """
-    Container for trial-indexed data.
-
-    Attributes
-    ----------
-    trial_df : pl.DataFrame
-        Trial-indexed dataframe
-    config : dict
-        Experiment configuration
-    metadata : dict
-        Processing parameters
-    """
-    trial_df: pl.DataFrame
-    config: dict = None
-    metadata: dict = field(default_factory=dict)
-
-    @property
-    def n_cells(self) -> int:
-        """Number of cells in dataset."""
-        if 'signals' not in self.trial_df.columns:
-            return 0
-        first_signals = self.trial_df['signals'][0]
-        if first_signals is None or len(first_signals) == 0:
-            return 0
-        return first_signals.shape[1] if len(first_signals.shape) > 1 else 1
-
-    @property
-    def n_trials(self) -> int:
-        """Number of trials."""
-        return len(self.trial_df)
-
-    @property
-    def trial_types(self) -> List[str]:
-        """Available trial types."""
-        return sorted(self.trial_df['trial_type'].unique().to_list())
-
-    def get_trials(self, trial_type: str = None) -> pl.DataFrame:
-        """Get trials, optionally filtered by type."""
-        if trial_type is None:
-            return self.trial_df
-        return self.trial_df.filter(pl.col('trial_type') == trial_type)
-
-
-
 # MAIN PIPELINE
 
 def process_session(
