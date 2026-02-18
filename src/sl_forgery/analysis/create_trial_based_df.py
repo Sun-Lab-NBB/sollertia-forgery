@@ -382,7 +382,7 @@ def process_session(
     df: pl.DataFrame,
     config: dict,
     signal_col: str = 'single_day_f',
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = 5,
     system_state: str = 'run',
 ) -> TrialData:
     """
@@ -397,7 +397,7 @@ def process_session(
     signal_col : str
         Column containing neural signals
     bin_size_cm : int
-        Spatial bin size
+        Spatial bin size if binning is used, default is 5 cm; if None, no binning will be applied
     system_state : str
         Filter to this system state
     
@@ -406,16 +406,20 @@ def process_session(
     TrialData
         Container with processed trial dataframe
     """
-    print("Step 1: Fixing cue offset...")
+    print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
     corrected_df = fix_cue_offset(df, config, system_state=system_state)
     
     print("\nStep 2: Grouping into trials...")
     trial_df = group_into_trials(corrected_df, signal_col=signal_col)
+
+    binning = bin_size_cm is not None
+    if binning:
+        if not isinstance(bin_size_cm, int):
+            raise TypeError("bin_size_cm must be an int")
+        print("\nStep 3: Adding binned signals...")
+        trial_df = add_binned_signals(trial_df, bin_size_cm=bin_size_cm, config=config)
     
-    print("\nStep 3: Adding binned signals...")
-    trial_df = add_binned_signals(trial_df, bin_size_cm=bin_size_cm, config=config)
-    
-    print("\n✓ Pipeline complete!")
+    print("\nPipeline complete!")
     
     return TrialData(
         trial_df=trial_df,
@@ -424,6 +428,7 @@ def process_session(
             'signal_col': signal_col,
             'bin_size_cm': bin_size_cm,
             'system_state': system_state,
+            'binning': binning,
         }
     )
 
