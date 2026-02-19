@@ -82,7 +82,7 @@ TRIAL_TYPE_COLORS = {
 }
 
 
-def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> Dict[int, str]:
+def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
     """Get cue ID to color mapping."""
     colors = SPECIAL_CUE_COLORS.copy()
     
@@ -97,7 +97,7 @@ def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> Dict[int, str]:
     return colors
 
 
-def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> Dict[int, str]:
+def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
     """Get cue ID to label mapping (A, B, C, ...)."""
     labels = SPECIAL_CUE_LABELS.copy()
     
@@ -175,7 +175,7 @@ def shared_params(
 
 def plot_cue_regions(
     ax: Axes,
-    cue_regions: Dict[int, tuple],
+    cue_regions: dict[int, tuple],
     config: dict = None,
     show_labels: bool = True,
     alpha: float = 0.15,
@@ -238,12 +238,48 @@ def plot_cue_regions(
 
 # PLACE FIELD PLOTS
 
-def plot_single_cell(
-    data,  # TrialData or pl.DataFrame
+def _get_trial_traces(
+    df: pl.DataFrame,
+    signal_col: str,
     cell_idx: int,
     trial_type: str,
+    bin_size_cm: int = 5,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+
+    '''
+    Extract per-trial spatial tuning traces for one cell from frame-level data.
+    Calls compute_binned_average() on the frame-level DataFrame, grouping by [trial, distance_bin] to get per-trial binned traces.
+
+    This is good for plotting single cells; if for some reason we wanted to plot 1/2 or all of the cells, this would
+    takes mins to run.  Instead call compute_session_averages() once and pass the result to the plotting function
+
+    Args
+
+    '''
+    type_df = df.filter(pl.col('trial_type') == trial_type)
+    if len(type_df) == 0:
+        return []
+    binned = compute_binned_average(
+        type_df, signal_col=signal_col, cell_idx=cell_idx,
+        group_cols=['trial', 'distance_bin'],
+    )
+    traces = []
+    for trial_num in binned['trial'].unique().sort().to_list():
+        trial_data = binned.filter(pl.col('trial') == trial_num).sort('distance_bin')
+        bins = trial_data['distance_bin'].to_numpy()
+        signal = trial_data['mean_signal'].to_numpy()
+        x = bins * bin_size_cm + (bin_size_cm / 2)
+        traces.append((x, signal))
+
+    return traces
+
+
+def plot_single_cell(
+    data: pl.DataFrame,
+    cell_idx: int,
+    trial_type: str,
+    signal_col: str = 'single_day_f',
     session_stats: dict = None,
-    cue_regions: dict = None,
     config: dict = None,
     bin_size_cm: int = 5,
     figsize: tuple = (12, 6),
@@ -252,54 +288,73 @@ def plot_single_cell(
     show: bool = True
 ) -> Figure:
     """
-    Plot all trials + session average for a single cell.
+    Plot all trials + session average for a single cell for specified signal type (and one trial type).
     
     Parameters
     ----------
-    data : TrialData or pl.DataFrame
-        Trial-indexed data with 'binned_signals'
+    data : pl.DataFrame
+        frame-level df from process_session() with 'binned_signals'
     cell_idx : int
         Cell index to plot
     trial_type : str
         Filter to this trial type ('ABC', 'ABDC', etc.)
+    signal_col : str
+        Name of the signals you want to use in plotting (i.e. "single_day_f", "single_day_spikes", etc)
     session_stats : dict, optional
         From compute_session_averages() - if None, computed here
-    cue_regions : dict, optional
-        From get_cue_regions() - if None and show_cues=True, extracted here
-    config : dict, optional
+    config : dict
         Experiment config
     bin_size_cm : int
-        Bin size for x-axis
+        Bin size for x-axis (in cm, defaults to 5)
     figsize : tuple
         Figure size
     alpha_trials : float
         Transparency for individual trials
     show_cues : bool
         Show cue region shading
+    show: bool
+        call plt.show(), defaults to True
     
     Returns
     -------
-    Figure
+    Matplotlib figure
     """
     import polars as pl
-    
-    # Handle TrialData or DataFrame input
-    if hasattr(data, 'trial_df'):
-        trial_df = data.trial_df
-        if config is None:
-            config = data.config
-    else:
-        trial_df = data
-    
-    trials = trial_df.filter(pl.col('trial_type') == trial_type)
+
+    trials = data.filter(pl.col('trial_type') == trial_type)
     
     if len(trials) == 0:
         print(f"No trials found for type '{trial_type}'")
         return None
-    
+
+    tt_colors, tt_colors_dark = get_trial_type_colors(config) if config else ({}, {})
+
     fig, ax = plt.subplots(figsize=figsize)
-    
     shared_params(ax, trial_type, config, show_cues)
+
+    # Individual trial traces
+    trial_color = tt_colors.get(trial_type, '#2E86AB')
+    traces = _get_trial_traces(df, signal_col, cell_idx, trial_type, bin_size_cm)
+    for x, signal in traces:
+        ax.plot(x, signal, color=trial_color, linewidth=1,
+                alpha=alpha_trials, zorder=2)
+
+    # Session average
+    if session_stats is None and config is not None:
+        session_stats = compute_session_averages(
+            data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
+        )
+    if session_stats and trial_type in session_stats:
+        avg = session_stats[trial_type]['session_avg'][:, cell_idx]
+        sem = session_stats[trial_type]['session_sem'][:, cell_idx]
+        x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm / 2)
+        n_trials = session_stats[trial_type]['n_trials']
+
+        avg_color = tt_colors_dark.get(trial_type, '#0A4D68')
+        ax.plot(x_avg, avg, color=avg_color, linewidth=3.5,
+                label=f'Average (n={n_trials})', zorder=4)
+        ax.fill_between(x_avg, avg - sem, avg + sem,
+                        color=avg_color, alpha=0.3, zorder=3)
 
     ax.set_xlabel('Position (cm)', fontsize=12)
     ax.set_ylabel('ΔF/F', fontsize=12)
@@ -433,7 +488,7 @@ def quick_plot(
     cell_idx: int,
     plot_type: str = 'auto',
     show: bool = True,
-) -> Optional[Figure]:
+) -> Figure:
     """
     Quick plotting function for exploring cells.
     
