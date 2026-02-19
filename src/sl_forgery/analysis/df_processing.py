@@ -22,26 +22,36 @@ import polars as pl
 import yaml
 
 
-# CONFIGURATION
-
+# IMPORTS
 def load_experiment_config(yaml_path: Path) -> dict:
     """Load experiment configuration from YAML file.
-
 
     """
     with open(yaml_path, 'r') as f:
         return yaml.safe_load(f)
 
+#TODO while this is the name of the file the function name might be confusing.  Use session_config?
+def load_session_data(yaml_path: Path) -> dict:
+    """Load session metadata from session_data.yaml.
+
+    """
+    with open('/source'/ yaml_path, 'r') as f:
+        return yaml.safe_load(f)
+
 
 def get_session_prefix(session_data: dict) -> str:
-    """Build filename prefix: {animal_id}_{session_date}."""
+    """Build filename prefix: {animal_id}_{session_date}. Relies on load_session_data.
+
+    """
     animal_id = session_data['animal_id']
     session_date = session_data['session_name'][:10]  # '2025-09-15'
     return f"{animal_id}_{session_date}"
 
 
 def validate_session_date(session_data: dict, behavior_filename: str):
-    """Check that behavior.feather filename date matches session_data.yaml date."""
+    """Check that behavior.feather filename date matches session_data.yaml date.
+
+    """
     expected_date = session_data['session_name'][:10]  # '2025-09-15'
     file_date = Path(behavior_filename).stem[:10]      # '2025-09-15' from feather name
     if expected_date != file_date:
@@ -51,8 +61,63 @@ def validate_session_date(session_data: dict, behavior_filename: str):
         )
 
 
-def get_track_length(config: dict, trial_type: str) -> float | None:
-    """Get track length for a trial type from config."""
+def load_session_dir(mouse_dir: Path, date: str) -> tuple[dict, dict, Path]:
+    """
+    Auto-discover session files from a directory. Current expected layout (not sure):
+       Project/
+        mouse_dir/
+          {session_name}/
+            source_data/
+              session_data.yaml
+              experiment_configuration.yaml
+            *.feather
+
+    Parameters
+    ----------
+    mouse_dir : Path
+        Mouse-level directory (e.g., 26/)
+    date : str
+        Session date (e.g., '2025-09-15')
+
+    Returns (session_data.yaml, experiment_config.yaml, behavior_path)
+    **This assumes that the feather file is in the same folder as the source data, which I dont thikn will be true?
+    """
+    mouse_dir = Path(mouse_dir)
+
+    #find the right session to process
+    matches = sorted([
+        d for d in mouse_dir.iterdir()
+        if d.is_dir() and d.name.startswith(date)
+    ])
+    if len(matches) == 0:
+        raise FileNotFoundError(f"No session folder starting with '{date}' in {mouse_dir}")
+    if len(matches) > 1:
+        raise FileNotFoundError(
+            f"Multiple sessions for '{date}': {[d.name for d in matches]}"
+        )
+    session_dir = matches[0]
+
+    source_dir = session_dir / 'source_data'
+    session_data = load_session_data(source_dir / 'session_data.yaml')
+    experiment_config = load_experiment_config(source_dir / 'experiment_configuration.yaml')
+
+#TODO this will need to change depending on the project structure
+    feather_files = sorted(session_dir.glob('*.feather'))
+    if len(feather_files) != 1:
+        raise FileNotFoundError(
+            f"Expected 1 feather file in {session_dir}, found {len(feather_files)}"
+        )
+    validate_session_date(session_data, feather_files[0].name)
+
+    return session_data, experiment_config, feather_files[0]
+
+
+# CONFIGURATIONS
+def get_track_length(config: dict,
+                     trial_type: str) -> float | None:
+    """Get track length for a trial type from config.
+
+    """
     trial_structures = config.get('trial_structures', {})
     if trial_type in trial_structures:
         return trial_structures[trial_type].get('trial_length_cm')
@@ -96,7 +161,7 @@ def get_cue_regions(
     return regions
 
 
-# PREPROCESSING
+# PROCESSING
 
 def fix_cue_offset(
     df: pl.DataFrame,
@@ -339,10 +404,10 @@ def compute_session_averages(
 
 def process_session(
     df: pl.DataFrame,
-    config: dict,
+    exp_config: dict,
     bin_size_cm: int | None = 5,
     system_state: str = 'run',
-) -> pl.DataFrame:
+) -> tuple[pl.DataFrame, dict]:
     """
     Complete pipeline: raw frame df -> corrected, binned frame df. Use in analysis by filtering signals and binning
     Signal columns are untouched — specify which to use at analysis time. Examples:
@@ -355,7 +420,7 @@ def process_session(
     ----------
     df : pl.DataFrame
         Raw frame-based dataframe
-    config : dict
+    exp_config : dict
         Experiment configuration
     bin_size_cm : int
         Spatial bin size if binning is used, default is 5 cm; if None, no binning will be applied
@@ -364,14 +429,14 @@ def process_session(
     
     Returns
     -------
-    pl.DataFrame
+    Tuple (pl.DataFrame, metadata.yaml)
         Corrected frame-level df with position and distance_bin columns
     """
     print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
-    corrected_df = fix_cue_offset(df, config, system_state=system_state)
+    corrected_df = fix_cue_offset(df, exp_config, system_state=system_state)
     
     print("\nStep 2: Normalizing position and adding bins...")
-    result = add_position_and_bins(corrected_df, config, bin_size_cm=bin_size_cm)
+    result = add_position_and_bins(corrected_df, exp_config, bin_size_cm=bin_size_cm)
 
     n_trials = result['trial'].n_unique()
     trial_types = result['trial_type'].unique().to_list()
@@ -383,7 +448,7 @@ def process_session(
         'n_trials': result['trial'].n_unique(),
         'trial_types': result['trial_type'].unique().sort().to_list(),
         'bin_size_cm': bin_size_cm,
-        'cue_offset_cm': config.get('cue_offset_cm', 0.0),
+        'cue_offset_cm': exp_config.get('cue_offset_cm', 0.0),
         'system_state': system_state,
         'columns': result.columns,
     }
@@ -391,26 +456,46 @@ def process_session(
     return result, metadata
 
 
-# SAVE / LOAD
+# SAVE/LOAD
 
-def save_session(data: pl.DataFrame, output_path: Path, metadata: dict):
-    """Save processed df: parquet for dataframe, yaml for metadata."""
+def save_processed_session(
+        data: pl.DataFrame,
+        output_path: Path,
+        session_data: dict,
+        metadata: dict):
+    """Save processed df as {animal_id}_{date}_processed.parquet + .meta.yaml.
+
+    Parameters
+
+
+    """
     output_path = Path(output_path)
+    prefix = get_session_prefix(session_data)
+    parquet_path = output_path / f'{prefix}_processed.parquet'
 
-    if output_path.suffix != '.parquet':
-        path = output_path.with_suffix('.parquet')
-    data.write_parquet(output_path)
+    data.write_parquet(parquet_path)
+
+    # Merge session info into metadata (so now metadata from the processing adn the actual session are in one file"
+    meta['animal_id'] = session_data['animal_id']
+    meta['session_name'] = session_data['session_name']
+    meta['project_name'] = session_data.get('project_name')
 
     metadata_path = output_path.with_suffix('.yaml')
     with open(metadata_path, 'w') as f:
         yaml.dump(metadata, f, default_flow_style=False)
 
-    print(f"Saved: {output_path.with_suffix('.parquet')}")
-    print(f"Saved: {output_path.with_suffix('.meta.yaml')}")
+    print(f"Saved: {parquet_path}")
+    print(f"Saved:  {metadata_path}")
 
 
-def load_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
-    """Load processed data from parquet, and metadata from yaml"""
+def load_processed_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
+    """Load processed data from parquet, and metadata from yaml
+
+    Parameters
+    session_dir: Path
+
+
+    """
 
     path = Path(path)
     if path.suffix != '.parquet':
@@ -430,16 +515,20 @@ def load_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
 
 
 if __name__ == "__main__":
-    session_root = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    behavior_df = pl.read_ipc(session_root / '2025-09-16-18-44-32-476061.feather')
+    #load all the data
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    date = '2025-09-15'   #the .feather file in this is actually from 9-16, too slow to download at my house
 
-    experiment_config = load_experiment_config(
-        session_root / 'experiment_configuration.yaml') #for working at home
+    session_data, experiment_config, behavior_path = load_session_dir(mouse_dir, date)
+    behavior_df = pl.read_ipc(behavior_path)
 
+    #process and save the offset-corrected df
     processed_df, meta = process_session(behavior_df, experiment_config)
-    save_session(processed_df, session_root / 'processed.parquet', meta)
+    save_processed_session(processed_df, behavior_path.parent, session_data, meta)  #.parent gets session folder
 
-    frame_df, meta = load_session(session_root / 'processed.parquet')
+    #load it back to check
+    prefix = get_session_prefix(session_data)
+    frame_df, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
     #check
     print(frame_df.columns)
