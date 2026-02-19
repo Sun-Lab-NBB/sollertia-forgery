@@ -562,6 +562,76 @@ def load_processed_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
     return df, metadata
 
 
+def load_multiday_sessions(
+    mouse_dir: Path,
+    dates: list[str] | None = None,
+    date_range: tuple[str, str] | None = None,
+) -> dict[str, dict]:
+    '''
+    Load multiple processed sessions for cross-day comparison.
+
+    Args:
+        mouse_dir: Path, mouse-level directory (e.g., 26_explore/)
+        dates: list[str] | None, explicit session dates (e.g., ['2025-09-10', '2025-09-11'])
+        date_range: tuple[str, str] | None, inclusive range (e.g., ('2025-09-15', '2025-09-24')).
+            Auto-discovers all session folders whose date falls within the range.
+            Provide either dates or date_range, not both.
+
+    Returns:
+        sessions: dict[str, dict], keyed by date string (sorted chronologically), each containing:
+            {'data': pl.DataFrame, 'config': dict, 'session_data': dict, 'metadata': dict | None}
+            Skips dates that fail to load (prints warning).
+    '''
+    mouse_dir = Path(mouse_dir)
+
+    if dates is not None and date_range is not None:
+        raise ValueError("Provide either dates or date_range, not both.")
+
+    if date_range is not None:
+        start, end = date_range
+        # Discover session folders whose name starts with a date in range
+        dates = sorted(
+            d.name[:10]
+            for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and start <= d.name[:10] <= end
+        )
+        # Deduplicate (multiple folders same date would be caught by load_session_dir)
+        dates = sorted(set(dates))
+        print(f"Found {len(dates)} sessions in range {start} to {end}: {dates}")
+
+    if dates is None or len(dates) == 0:
+        print("No dates provided or found.")
+        return {}
+
+    sessions = {}
+
+    for date in sorted(dates):
+        try:
+            session_data, config, behavior_path = load_session_dir(mouse_dir, date)
+            prefix = get_session_prefix(session_data)
+            parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
+
+            if not parquet_path.exists():
+                print(f"  WARNING: No processed file for {date}, skipping. "
+                      f"Run process_session() first.")
+                continue
+
+            data, metadata = load_processed_session(parquet_path)
+            sessions[date] = {
+                'data': data,
+                'config': config,
+                'session_data': session_data,
+                'metadata': metadata,
+            }
+            print(f"  Loaded {date}: {len(data)} frames, "
+                  f"{data['trial'].n_unique()} trials, "
+                  f"types={sorted(data['trial_type'].unique().to_list())}")
+
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  WARNING: Could not load {date}: {e}")
+
+    print(f"Loaded {len(sessions)}/{len(dates)} sessions.")
+    return sessions
 
 
 if __name__ == "__main__":
