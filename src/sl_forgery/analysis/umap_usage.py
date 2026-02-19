@@ -5,9 +5,10 @@ Demonstrates various visualization strategies for analyzing neural manifolds.
 
 import polars as pl
 import numpy as np
+from matplotlib import pyplot as plt
 
 from pathlib import Path
-from create_trial_based_df import fix_cue_offset, load_experiment_config
+from df_processing import fix_cue_offset, load_experiment_config
 import umap_plotting as uplot
 
 
@@ -40,12 +41,15 @@ def example_basic_2d_umap(df: pl.DataFrame,
     # Plot with different coloring strategies
     fig_cue = uplot.plot_umap_2d(embedding_2d, metadata, strategy=uplot.ColoringStrategy.CUE)
     _save(fig_cue, save_path, 'umap_2d_by_cue.png')
+    plt.show()
 
     fig_pos = uplot.plot_umap_2d(embedding_2d, metadata, strategy=uplot.ColoringStrategy.POSITION)
     _save(fig_pos, save_path, 'umap_2d_by_position.png')
+    plt.show()
 
     fig_speed = uplot.plot_umap_2d(embedding_2d, metadata, strategy=uplot.ColoringStrategy.SPEED)
     _save(fig_speed, save_path, 'umap_2d_by_speed.png')
+    plt.show()
 
     return embedding_2d, metadata
 
@@ -69,6 +73,7 @@ def example_3d_umap(df: pl.DataFrame,
     # Plot
     fig = uplot.plot_umap_3d(embedding_3d, metadata, strategy=uplot.ColoringStrategy.CUE)
     _save(fig, save_path, 'umap_3d_by_cue.png')
+    plt.show()
 
     return embedding_3d, metadata
 
@@ -94,6 +99,7 @@ def example_1d_umap(df: pl.DataFrame,
 
     fig_pos = uplot.plot_umap_1d(embedding_1d, metadata, strategy=uplot.ColoringStrategy.POSITION)
     _save(fig_pos, save_path, 'umap_2d_by_position.png')
+    plt.show()
 
     return embedding_1d, metadata
 
@@ -123,7 +129,7 @@ def example_interactive_umap(df: pl.DataFrame):
 
     fig_pos = uplot.plot_umap_interactive_2d(
         embedding_2d, metadata,
-        strategy=uplot.uplot.ColoringStrategy.POSITION,
+        strategy=uplot.ColoringStrategy.POSITION,
         title="2D UMAP colored by Position"
     )
     fig_pos.write_html('umap_interactive_position.html')
@@ -155,6 +161,7 @@ def example_trial_type_comparison(df: pl.DataFrame,
         max_frames=20000
     )
     _save(fig_overlay, save_path, 'umap_trial_types_overlay.png')
+    plt.show()
 
     return embedding, metadata
 
@@ -178,6 +185,7 @@ def example_cue_specific_analysis(df: pl.DataFrame,
     fig = uplot.plot_umap_2d(embedding_2d, metadata, strategy=uplot.ColoringStrategy.POSITION)
     fig.suptitle('UMAP for Reward Zones Only', fontsize=14)
     _save(fig, save_path, 'umap_reward_zones.png')
+    plt.show()
 
     return embedding_2d, metadata
 
@@ -203,6 +211,7 @@ def example_session_progress(df: pl.DataFrame,
     )
     fig.suptitle('UMAP colored by Session Progress', fontsize=14)
     _save(fig, save_path, 'umap_session_progress.png')
+    plt.show()
 
     return embedding_2d, metadata
 
@@ -229,6 +238,7 @@ def example_state_filtered_analysis(df: pl.DataFrame,
     fig = uplot.plot_umap_2d(embedding_2d, metadata, strategy=uplot.ColoringStrategy.CUE)
     fig.suptitle('UMAP for Guided Trials Only', fontsize=14)
     _save(fig, save_path, 'umap_guided_trials.png')
+    plt.show()
 
     return embedding_2d, metadata
 
@@ -257,6 +267,7 @@ def example_custom_umap_params(df: pl.DataFrame,
         fig = uplot.plot_umap_2d(embedding, metadata, strategy=uplot.ColoringStrategy.CUE)
         fig.suptitle(f'UMAP with n_neighbors={n_neighbors}', fontsize=14)
         _save(fig, save_path, f'umap_neighbors_{n_neighbors}.png')
+        plt.show()
 
 
 # Speed-filtered comparison
@@ -287,13 +298,13 @@ if __name__ == "__main__":
 
     # Run examples
     print("Running Example 1: Basic 2D UMAP...")
-    embedding_2d, metadata = example_basic_2d_umap(frame_df)
+    #embedding_2d, metadata = example_basic_2d_umap(frame_df)
 
     print("Running Example 2: 3D UMAP...")
     embedding_3d, metadata_3d = example_3d_umap(frame_df)
 
     print("Running Example 3: 1D UMAP...")
-    embedding_1d, metadata_1d = example_1d_umap(frame_df)
+    #embedding_1d, metadata_1d = example_1d_umap(frame_df)
 
     print("Running Example 4: Interactive UMAP...")
     fig_cue, fig_pos = example_interactive_umap(frame_df)
