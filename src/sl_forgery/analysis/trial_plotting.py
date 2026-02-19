@@ -2,11 +2,10 @@
 Trial Plotting Module
 
 Place field and behavioral visualizations for trial-indexed calcium imaging data.
-Works with TrialData from trial_based_df.py.
+Works with frame-level DataFrames from df_processing.py.
 """
 
 from pathlib import Path
-from typing import Optional, List, Dict, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,12 +13,18 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import polars as pl
 
-from create_trial_based_df import load_trial_data
+from df_processing import (
+    get_cue_regions,
+    get_track_length,
+    compute_binned_average,
+    compute_session_averages,
+    load_session,
+)
 
 
 # COLOR CONFIGURATION
 
-# Tableau 10 - colorblind friendly
+# Tableau 10 - colorblind friendly, fixed by cue ID across all experiments
 CUE_COLOR_PALETTE = [
     '#4E79A7',  # Muted blue
     '#F28E2B',  # Warm orange
@@ -43,16 +48,37 @@ SPECIAL_CUE_LABELS = {
     255: 'Dark',
 }
 
-TRIAL_TYPE_COLORS = {
-    'ABC': '#2E86AB',
-    'ABDC': '#A23B72',
-    'ABCD': '#A23B72',
-}
+# Trial type palettes: assigned by sorted order of trial_structures keys. Accommodates up to 5 trial types
+# Light = individual traces, Dark = session average
+TRIAL_TYPE_PALETTE = [
+    '#2E86AB',  # Blue
+    '#A23B72',  # Red/magenta
+    '#59A14F',  # Green
+    '#E15759',  # Coral
+    '#B07AA1',  # Purple
+]
 
-TRIAL_TYPE_COLORS_DARK = {
-    'ABC': '#0A4D68',
-    'ABDC': '#6B0848',
-    'ABCD': '#6B0848',
+TRIAL_TYPE_PALETTE_DARK = [
+    '#0A4D68',  #Dark blue, etc
+    '#6B0848',
+    '#2D6A2E',
+    '#9E2B2D',
+    '#7A4E7A',
+]
+
+def get_trial_type_colors(config: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """Auto-assign trial type colors from config trial_structures keys."""
+    trial_types = sorted(config.get('trial_structures', {}).keys())
+    colors = {}
+    colors_dark = {}
+    for i, tt in enumerate(trial_types):
+        colors[tt] = TRIAL_TYPE_PALETTE[i % len(TRIAL_TYPE_PALETTE)]
+        colors_dark[tt] = TRIAL_TYPE_PALETTE_DARK[i % len(TRIAL_TYPE_PALETTE_DARK)]
+    return colors, colors_dark
+
+TRIAL_TYPE_COLORS = {
+    'ABC': TRIAL_TYPE_PALETTE[0],
+    'ABDC': TRIAL_TYPE_PALETTE[1],
 }
 
 
@@ -99,10 +125,11 @@ def shared_params(
         label_y: float = 0.98,
 ):
     """Add cue regions, reward zone, and x-ticks to a track axis."""
-    from create_trial_based_df import get_cue_regions
 
     if config is None:
         return
+
+    ts = config.get('trial_structures', {}).get(trial_type, {})
 
     # Cue shading
     if show_cues:
@@ -111,9 +138,7 @@ def shared_params(
                          alpha=alpha, label_y=label_y)
 
     # Reward zone
-    if show_reward_zone:
-        ts = config.get('trial_structures', {}).get(trial_type, {})
-        if 'reward_zone_start_cm' in ts:
+    if show_reward_zone and 'reward_zone_start_cm' in ts:
             rz_start = ts['reward_zone_start_cm']
             rz_end = ts['reward_zone_end_cm']
             ax.axvline(rz_start, color='#1B9AAA', linestyle='--',
@@ -126,13 +151,17 @@ def shared_params(
                     transform=ax.get_xaxis_transform())
 
     # X-ticks at cue boundaries
-    cue_width = 30
-    if 'cue_map' in config:
-        cue_width = list(config['cue_map'].values())[0]
-    track_length = ts.get('trial_length_cm', 180) if config else 180
-    ticks = list(range(0, int(track_length) + 1, int(cue_width)))
-    if ticks[-1] != int(track_length):
-        ticks.append(int(track_length))
+    track_length = ts['trial_length_cm']
+    cue_sequence = ts.get('cue_sequence', [])
+    cue_widths = config.get('cue_map', {})
+
+    ticks = [0.0]
+    for cue_id in cue_sequence:
+        ticks.append(ticks[-1] + cue_widths.get(cue_id, 30.0))
+    if ticks[-1] != track_length:
+        ticks.append(track_length)
+    ticks = sorted(set(int(t) for t in ticks))
+
     ax.set_xticks(ticks)
     ax.set_xticklabels([str(t) for t in ticks], fontsize=9)
 
@@ -143,7 +172,6 @@ def shared_params(
 
 
 # CUE REGION PLOTTING
-
 
 def plot_cue_regions(
     ax: Axes,
@@ -324,7 +352,7 @@ def plot_cell_comparison(
     Figure
     """
     import polars as pl
-    from create_trial_based_df import compute_session_averages
+    from df_processing import compute_session_averages
     
     # Handle TrialData or DataFrame input
     if hasattr(data, 'trial_df'):
@@ -426,7 +454,7 @@ def quick_plot(
     -------
     Figure
     """
-    from create_trial_based_df import compute_session_averages
+    from df_processing import compute_session_averages
     
     trial_types = data.trial_types
     print(f"Available trial types: {trial_types}")
@@ -479,7 +507,7 @@ if __name__ == "__main__":
 
     experiment_config_path = session_root / '26_explore/experiment_configuration.yaml'
 
-    data = load_trial_data(session_root / '26_explore',
+    data = load_session(session_root / '26_explore',
                            config_path=experiment_config_path)  #the trial data class, includes the metadata (config)
 
     for i in range(10):
@@ -511,7 +539,7 @@ if __name__ == "__main__":
 
     # Corrected: also use distance_cm (from the frame-level corrected_df, not trial_df)
     # Run just step 1 to get the corrected frame-level data:
-    from create_trial_based_df import fix_cue_offset, load_experiment_config
+    from df_processing import fix_cue_offset, load_experiment_config
 
     corrected_df = fix_cue_offset(original_df, data.config, system_state='run')
 
