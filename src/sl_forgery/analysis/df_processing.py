@@ -355,47 +355,97 @@ def compute_binned_average(
     return (
         df.group_by(group_cols, maintain_order=True)
         .agg(
-            pl.col(signal_col).list.get(cell_idx).mean().alias('mean_signal'),
+            pl.col(signal_col).arr.get(cell_idx).mean().alias('mean_signal'),
             pl.col('trial_type').first(),
         )
     )
 
+
 def compute_session_averages(
-        trial_df: pl.DataFrame,
+        df: pl.DataFrame,
+        signal_col: str,
+        config: dict,
+        bin_size_cm: int = 5,
         by_trial_type: bool = True,
 ) -> dict:
     """
-    Compute session-level spatial averages.
+    Compute session-level spatial averages from frame-level data. For each cell at each spatial bin, averages across trials.
+    Result: one smoothed tuning curve per cell per trial type.
 
-    Returns
-    -------
-    dict
-        Per trial_type: {'session_avg': (n_bins, n_cells),
-                         'session_sem': (n_bins, n_cells),
-                         'n_trials': int}
+    **Extracts all signals into a numpy matrix, accumulates into a
+    (n_trials, n_bins, n_cells) array using scatter-add, then averages.
+
+    Args:
+        df: pl.DataFrame, frame-level df with position and distance_bin columns
+        signal_col: str, column containing neural signals (list per frame)
+        config: dict, experiment config (for track lengths / bin counts)
+        bin_size_cm: int, spatial bin size in cm
+        by_trial_type: bool, if True split by trial type, else average all
+
+    Returns:
+        results: dict, per trial_type (or 'all'):
+            {'session_avg': (n_bins, n_cells),
+             'session_sem': (n_bins, n_cells),
+             'n_trials': int}
     """
     from scipy import stats
 
-    if not by_trial_type:
-        all_binned = np.stack(trial_df['binned_signals'].to_list())
+    all_signals = np.vstack(df[signal_col].to_list())  # (n_frames, n_cells)
+    n_cells = all_signals.shape[1]
+    trials = df['trial'].to_numpy()
+    bins = df['distance_bin'].to_numpy()
+    trial_types = df['trial_type'].to_numpy()
+
+
+    def _avg_for_subset(mask, n_bins):
+        '''
+        Build (n_trials, n_bins, n_cells) from frames using scatter-add (np.add.at()), then average across trials
+
+        Args:
+            mask: np.ndarray (bool), which frames to include
+            n_bins: int, spatial bins for this track type
+
+        Returns:
+            dict with session_avg, session_sem, n_trials
+        '''
+        sub_signals = all_signals[mask]
+        sub_trials = trials[mask]
+        sub_bins = bins[mask]
+
+        unique_trials = np.unique(sub_trials)
+        n_trials = len(unique_trials)
+        trial_idx = np.searchsorted(unique_trials, sub_trials)
+        bin_idx = sub_bins.clip(0, n_bins - 1)
+
+        # Accumulate sums and counts per (trial, bin)
+        sums = np.zeros((n_trials, n_bins, n_cells))
+        counts = np.zeros((n_trials, n_bins, 1))
+        np.add.at(sums, (trial_idx, bin_idx), sub_signals)
+        np.add.at(counts, (trial_idx, bin_idx, 0), 1)
+
+        # Per-trial bin averages: (n_trials, n_bins, n_cells)
+        with np.errstate(invalid='ignore'):
+            per_trial = sums / counts
+
+        # Average across trials: (n_bins, n_cells)
         return {
-            'all': {
-                'session_avg': np.nanmean(all_binned, axis=0),
-                'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
-                'n_trials': len(trial_df),
-            }
+            'session_avg': np.nanmean(per_trial, axis=0),
+            'session_sem': np.nanstd(per_trial, axis=0, ddof=1) / np.sqrt(n_trials),
+            'n_trials': n_trials,
         }
+
+    if not by_trial_type:
+        max_length = max(
+            get_track_length(config, tt)
+            for tt in df['trial_type'].unique().to_list()
+        )
+        return {'all': _avg_for_subset(np.ones(len(df), dtype=bool), int(max_length / bin_size_cm))}
 
     results = {}
-    for trial_type in trial_df['trial_type'].unique().sort().to_list():
-        type_df = trial_df.filter(pl.col('trial_type') == trial_type)
-        all_binned = np.stack(type_df['binned_signals'].to_list())
-
-        results[trial_type] = {
-            'session_avg': np.nanmean(all_binned, axis=0),
-            'session_sem': stats.sem(all_binned, axis=0, nan_policy='omit'),
-            'n_trials': len(type_df),
-        }
+    for tt in sorted(np.unique(trial_types)):
+        mask = trial_types == tt
+        n_bins = int(get_track_length(config, tt) / bin_size_cm)
+        results[tt] = _avg_for_subset(mask, n_bins)
 
     return results
 
@@ -476,9 +526,9 @@ def save_processed_session(
     data.write_parquet(parquet_path)
 
     # Merge session info into metadata (so now metadata from the processing adn the actual session are in one file"
-    meta['animal_id'] = session_data['animal_id']
-    meta['session_name'] = session_data['session_name']
-    meta['project_name'] = session_data.get('project_name')
+    metadata['animal_id'] = session_data['animal_id']
+    metadata['session_name'] = session_data['session_name']
+    metadata['project_name'] = session_data.get('project_name')
 
     metadata_path = output_path.with_suffix('.yaml')
     with open(metadata_path, 'w') as f:
@@ -534,3 +584,4 @@ if __name__ == "__main__":
     print(frame_df.columns)
     with pl.Config(tbl_cols=100, tbl_rows=100, set_tbl_hide_dataframe_shape=False):
         print(frame_df.head(100))
+
