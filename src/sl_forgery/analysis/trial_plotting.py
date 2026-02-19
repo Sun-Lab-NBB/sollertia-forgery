@@ -18,7 +18,6 @@ from df_processing import (
     get_track_length,
     compute_binned_average,
     compute_session_averages,
-    load_session,
 )
 
 
@@ -151,7 +150,7 @@ def shared_params(
                     transform=ax.get_xaxis_transform())
 
     # X-ticks at cue boundaries
-    track_length = ts['trial_length_cm']
+    track_length = get_track_length(config, trial_type)
     cue_sequence = ts.get('cue_sequence', [])
     cue_widths = config.get('cue_map', {})
 
@@ -370,8 +369,9 @@ def plot_single_cell(
 
 
 def plot_cell_comparison(
-    data,  # TrialData or pl.DataFrame
+    data: pl.DataFrame,
     cell_idx: int,
+    signal_col: str = 'single_day_f',
     session_stats: dict = None,
     config: dict = None,
     bin_size_cm: int = 5,
@@ -383,12 +383,13 @@ def plot_cell_comparison(
     """
     Compare all trial types for a single cell (stacked subplots).
     
-    Parameters
-    ----------
-    data : TrialData or pl.DataFrame
-        Trial-indexed data
+    Args
+    data : pl.DataFrame
+        Offset-corrected, distance normalized df from process_session()
     cell_idx : int
         Cell index
+    signal_col : str
+        Which signals to use for plotting
     session_stats : dict, optional
         From compute_session_averages()
     config : dict, optional
@@ -403,60 +404,44 @@ def plot_cell_comparison(
         Show cue regions
     
     Returns
-    -------
-    Figure
+        Matplotlib figure
     """
-    import polars as pl
-    from df_processing import compute_session_averages
-    
-    # Handle TrialData or DataFrame input
-    if hasattr(data, 'trial_df'):
-        trial_df = data.trial_df
-        if config is None:
-            config = data.config
-    else:
-        trial_df = data
-    
-    trial_types = sorted(trial_df['trial_type'].unique().to_list())
-    
+    trial_types = sorted(data['trial_type'].unique().to_list())
     if len(trial_types) == 0:
         print("No trial types found")
         return None
     
     if len(trial_types) == 1:
         figsize = (figsize[0], figsize[1] // 2)
-    
+
+    tt_colors, tt_colors_dark = get_trial_type_colors(config) if config else ({}, {})
+
     fig, axes = plt.subplots(len(trial_types), 1, figsize=figsize, squeeze=False)
     axes = axes.flatten()
     
     if session_stats is None:
-        session_stats = compute_session_averages(trial_df, by_trial_type=True)
+        session_stats = compute_session_averages(
+            data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
+        )
     
     for ax, trial_type in zip(axes, trial_types):
-        trials = trial_df.filter(pl.col('trial_type') == trial_type)
-        
         shared_params(ax, trial_type, config, show_cues)
         
         # Individual trials
-        trial_color = TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
-        for row in trials.iter_rows(named=True):
-            binned = row['binned_signals']
-            if binned is None or len(binned) == 0:
-                continue
-            cell_activity = binned[:, cell_idx]
-            x = np.arange(len(cell_activity)) * bin_size_cm + (bin_size_cm/2)  #to plot the average activity at the
-            # center of the bins, not the edges
-            ax.plot(x, cell_activity, color=trial_color, linewidth=1,
+        trial_color = tt_colors.get(trial_type, '#2E86AB')
+        traces = _get_trial_traces(data, signal_col, cell_idx, trial_type, bin_size_cm) #automatically centers points
+        for x, signal in traces:
+            ax.plot(x, signal, color=trial_color, linewidth=1,
                     alpha=alpha_trials, zorder=2)
         
         # Session average
-        if trial_type in session_stats:
+        if session_stats and trial_type in session_stats:
             avg = session_stats[trial_type]['session_avg'][:, cell_idx]
             sem = session_stats[trial_type]['session_sem'][:, cell_idx]
             x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm/2)
             n_trials = session_stats[trial_type]['n_trials']
             
-            avg_color = TRIAL_TYPE_COLORS_DARK.get(trial_type, '#0A4D68')
+            avg_color = tt_colors_dark.get(trial_type, '#0A4D68')
             ax.plot(x_avg, avg, color=avg_color, linewidth=3.5,
                     label=f'Average (n={n_trials})', zorder=4)
             ax.fill_between(x_avg, avg - sem, avg + sem,
@@ -470,7 +455,6 @@ def plot_cell_comparison(
 
     
     axes[-1].set_xlabel('Position (cm)', fontsize=12)
-    
     plt.suptitle(f'Cell {cell_idx}', fontsize=14, fontweight='bold')
     plt.tight_layout()
 
@@ -484,56 +468,48 @@ def plot_cell_comparison(
 # QUICK PLOTTING
 
 def quick_plot(
-    data,  # TrialData
+    data: pl.DataFrame,
+    config: dict,
     cell_idx: int,
+    signal_col: str = 'single_day_f',
     plot_type: str = 'auto',
+    bin_size_cm: int = 5,
     show: bool = True,
 ) -> Figure:
     """
     Quick plotting function for exploring cells.
     
-    Parameters
-    ----------
-    data : TrialData
-        From process_session() or load_trial_data()
-    cell_idx : int
-        Cell index
-    plot_type : str
-        'auto': Choose based on available trial types
-        'comparison': Stacked subplots for all trial types
-        'abc', 'abdc', etc.: Single trial type
-    show : bool
-        Call plt.show()
+    Args:
+        data: pl.DataFrame, frame-level df from process_session() or load_processed_session()
+        config: dict, experiment config
+        cell_idx: int, cell index
+        signal_col: str, neural signal column
+        plot_type: str, 'auto', 'comparison', or a trial type name ('ABC', 'ABDC', etc.)
+        bin_size_cm: int, spatial bin size in cm
+        show: bool, call plt.show()
     
-    Returns
-    -------
-    Figure
+    Returns:
+        Figure
     """
-    from df_processing import compute_session_averages
-    
-    trial_types = data.trial_types
+    trial_types = sorted(data['trial_type'].unique().to_list())
     print(f"Available trial types: {trial_types}")
     
-    session_stats = compute_session_averages(data.trial_df, by_trial_type=True)
+    session_stats = compute_session_averages(data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm)
     
     if plot_type == 'auto':
-        if len(trial_types) >= 2:
-            plot_type = 'comparison'
-        else:
-            plot_type = trial_types[0].lower()
-    
+        plot_type = 'comparison' if len(trial_types) >= 2 else trial_types[0].lower()
+
     if plot_type == 'comparison':
         fig = plot_cell_comparison(
-            data.trial_df, cell_idx,
-            session_stats=session_stats,
-            config=data.config
+            data, cell_idx, signal_col=signal_col,
+            session_stats=session_stats, config=config,
+            bin_size_cm=bin_size_cm, show=show,
         )
-    elif plot_type.upper() in trial_types:
+    elif plot_type.upper() in trial_types:      #just converts case if incorrectly called
         fig = plot_single_cell(
-            data.trial_df, cell_idx,
-            trial_type=plot_type.upper(),
-            session_stats=session_stats,
-            config=data.config
+            data, cell_idx, trial_type=plot_type.upper(),
+            signal_col=signal_col, session_stats=session_stats,
+            config=config, bin_size_cm=bin_size_cm, show=show,
         )
     else:
         print(f"Unknown plot_type: {plot_type}")
@@ -558,15 +534,29 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 
 
 if __name__ == "__main__":
-    session_root = Path('/Users/cs963/Desktop/sun_lab_projects')
+    from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
+                               process_session)
+    # load all the data
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
+    # ***DO NOT GET MISTAKEN
 
-    experiment_config_path = session_root / '26_explore/experiment_configuration.yaml'
+    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
+    prefix = get_session_prefix(session_data)
+    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
 
-    data = load_session(session_root / '26_explore',
-                           config_path=experiment_config_path)  #the trial data class, includes the metadata (config)
+    if parquet_path.exists():
+        print(f"Loading: {parquet_path}")
+        data, metadata = load_processed_session(parquet_path)
+    else:
+        print("No processed file found, processing from raw...")
+        behavior_df = pl.read_ipc(behavior_path)
+        data, metadata = process_session(behavior_df, config)
+        save_processed_session(data, behavior_path.parent, session_data, metadata)
+
 
     for i in range(10):
-        quick_plot(data, cell_idx=i)
+        quick_plot(data, config, cell_idx=i)
 
 
 
