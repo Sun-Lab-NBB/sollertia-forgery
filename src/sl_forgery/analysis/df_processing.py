@@ -25,9 +25,30 @@ import yaml
 # CONFIGURATION
 
 def load_experiment_config(yaml_path: Path) -> dict:
-    """Load experiment configuration from YAML file."""
+    """Load experiment configuration from YAML file.
+
+
+    """
     with open(yaml_path, 'r') as f:
         return yaml.safe_load(f)
+
+
+def get_session_prefix(session_data: dict) -> str:
+    """Build filename prefix: {animal_id}_{session_date}."""
+    animal_id = session_data['animal_id']
+    session_date = session_data['session_name'][:10]  # '2025-09-15'
+    return f"{animal_id}_{session_date}"
+
+
+def validate_session_date(session_data: dict, behavior_filename: str):
+    """Check that behavior.feather filename date matches session_data.yaml date."""
+    expected_date = session_data['session_name'][:10]  # '2025-09-15'
+    file_date = Path(behavior_filename).stem[:10]      # '2025-09-15' from feather name
+    if expected_date != file_date:
+        raise ValueError(
+            f"Date mismatch: session_data says {expected_date}, "
+            f"behavior file says {file_date}"
+        )
 
 
 def get_track_length(config: dict, trial_type: str) -> float | None:
