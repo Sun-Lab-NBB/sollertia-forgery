@@ -349,81 +349,61 @@ def process_session(
     print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
     corrected_df = fix_cue_offset(df, config, system_state=system_state)
     
-    print("\nStep 2: Grouping into trials...")
+    print("\nStep 2: Normalizing position and adding bins...")
     result = add_position_and_bins(corrected_df, config, bin_size_cm=bin_size_cm)
 
     n_trials = result['trial'].n_unique()
     trial_types = result['trial_type'].unique().to_list()
     print(f"Done. {n_trials} trials ({trial_types}), {len(result)} frames.")
-    
-    return result
+
+    #metadata for the new df, including bin size
+    metadata = {
+        'n_frames': len(result),
+        'n_trials': result['trial'].n_unique(),
+        'trial_types': result['trial_type'].unique().sort().to_list(),
+        'bin_size_cm': bin_size_cm,
+        'cue_offset_cm': config.get('cue_offset_cm', 0.0),
+        'system_state': system_state,
+        'columns': result.columns,
+    }
+
+    return result, metadata
 
 
 # SAVE / LOAD
 
-def save_trial_data(data: TrialData, output_path: Path):
-    """Save trial data: parquet for dataframe, npz for numpy arrays."""
+def save_session(data: pl.DataFrame, output_path: Path, metadata: dict):
+    """Save processed df: parquet for dataframe, yaml for metadata."""
     output_path = Path(output_path)
 
-    df = data.trial_df
-    object_cols = [c for c in df.columns if df[c].dtype == pl.Object]
+    if output_path.suffix != '.parquet':
+        path = output_path.with_suffix('.parquet')
+    data.write_parquet(output_path)
 
-    # Save numpy arrays separately with trial index
-    arrays = {'trial_index': df['trial'].to_numpy()}
-    for col in object_cols:
-        arrays[col] = np.array(df[col].to_list(), dtype=object)
-
-    np.savez(output_path.with_suffix('.npz'), **arrays)
-
-    # Save dataframe without Object columns
-    df_clean = df.drop(object_cols)
-    df_clean.write_parquet(output_path.with_suffix('.parquet'))
-
-    # Save metadata
-    meta = {
-        'n_trials': len(df),
-        'trial_types': data.trial_types,
-        'processing': data.metadata,
-        'object_columns': object_cols,
-    }
-    with open(output_path.with_suffix('.meta.yaml'), 'w') as f:
-        yaml.dump(meta, f)
+    metadata_path = output_path.with_suffix('.yaml')
+    with open(metadata_path, 'w') as f:
+        yaml.dump(metadata, f, default_flow_style=False)
 
     print(f"Saved: {output_path.with_suffix('.parquet')}")
-    print(f"Saved: {output_path.with_suffix('.npz')}")
     print(f"Saved: {output_path.with_suffix('.meta.yaml')}")
 
 
-def load_trial_data(path: Path, config_path: Path = None) -> TrialData:
-    """Load trial data from parquet + npz, and metadata from yaml
-    This was the easiest way to avoid object errors from nested arrays in the df """
-    path = Path(path).with_suffix('')  # Strip any extension
+def load_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
+    """Load processed data from parquet, and metadata from yaml"""
 
-    trial_df = pl.read_parquet(path.with_suffix('.parquet'))
+    path = Path(path)
+    if path.suffix != '.parquet':
+        path = path.with_suffix('.parquet')
 
-    # Load numpy arrays and verify alignment
-    with np.load(path.with_suffix('.npz'), allow_pickle=True) as npz:
-        saved_trials = npz['trial_index']
-        assert np.array_equal(saved_trials, trial_df['trial'].to_numpy()), "Trial index mismatch!"
+    df = pl.read_parquet(path)
 
-        for col in npz.files:
-            if col == 'trial_index':
-                continue
-            trial_df = trial_df.with_columns(
-                pl.Series(col, list(npz[col]), dtype=pl.Object)
-            )
-
-    config = None
-    if config_path:
-        config = load_experiment_config(config_path)
-
-    metadata = {}
     meta_path = path.with_suffix('.meta.yaml')
+    metadata = None
     if meta_path.exists():
         with open(meta_path, 'r') as f:
-            metadata = yaml.safe_load(f).get('processing', {})
+            metadata = yaml.safe_load(f)
 
-    return TrialData(trial_df=trial_df, config=config, metadata=metadata)
+    return df, metadata
 
 
 
@@ -435,23 +415,12 @@ if __name__ == "__main__":
     experiment_config = load_experiment_config(
         session_root / 'experiment_configuration.yaml') #for working at home
 
-    frame_df = fix_cue_offset(behavior_df, experiment_config, system_state='run')
+    processed_df, meta = process_session(behavior_df, experiment_config)
+    save_session(processed_df, session_root / 'processed.parquet', meta)
 
+    frame_df, meta = load_session(session_root / 'processed.parquet')
+
+    #check
     print(frame_df.columns)
     with pl.Config(tbl_cols=100, tbl_rows=100, set_tbl_hide_dataframe_shape=False):
         print(frame_df.head(100))
-
-
-
-    #
-    # # Run pipeline - returns TrialData container
-    # data = process_session(
-    #     behavior_df,
-    #     config=experiment_config,
-    #     signal_col='single_day_f',
-    #     bin_size_cm=5,
-    #     system_state='run'
-    # )
-    #
-    #
-    # save_trial_data(data, session_root)
