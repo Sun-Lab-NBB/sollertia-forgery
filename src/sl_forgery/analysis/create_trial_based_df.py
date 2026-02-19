@@ -319,12 +319,16 @@ def compute_session_averages(
 def process_session(
     df: pl.DataFrame,
     config: dict,
-    signal_col: str = 'single_day_f',
     bin_size_cm: int | None = 5,
     system_state: str = 'run',
-) -> TrialData:
+) -> pl.DataFrame:
     """
-    Complete pipeline: frame data → trial-indexed structure.
+    Complete pipeline: raw frame df -> corrected, binned frame df. Use in analysis by filtering signals and binning
+    Signal columns are untouched — specify which to use at analysis time. Examples:
+        - Single cell:  compute_binned_average(df, signal_col='single_day_f', cell_idx=0)
+        - All cells:    compute_session_averages(df, signal_col='single_day_spikes', config=config)
+        - UMAP:         np.vstack(df['single_day_dff'].to_list())
+
     
     Parameters
     ----------
@@ -332,8 +336,6 @@ def process_session(
         Raw frame-based dataframe
     config : dict
         Experiment configuration
-    signal_col : str
-        Column containing neural signals
     bin_size_cm : int
         Spatial bin size if binning is used, default is 5 cm; if None, no binning will be applied
     system_state : str
@@ -341,34 +343,20 @@ def process_session(
     
     Returns
     -------
-    TrialData
-        Container with processed trial dataframe
+    pl.DataFrame
+        Corrected frame-level df with position and distance_bin columns
     """
     print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
     corrected_df = fix_cue_offset(df, config, system_state=system_state)
     
     print("\nStep 2: Grouping into trials...")
-    trial_df = group_into_trials(corrected_df, signal_col=signal_col)
+    result = add_position_and_bins(corrected_df, config, bin_size_cm=bin_size_cm)
 
-    binning = bin_size_cm is not None
-    if binning:
-        if not isinstance(bin_size_cm, int):
-            raise TypeError("bin_size_cm must be an int")
-        print("\nStep 3: Adding binned signals...")
-        trial_df = add_binned_signals(trial_df, bin_size_cm=bin_size_cm, config=config)
+    n_trials = result['trial'].n_unique()
+    trial_types = result['trial_type'].unique().to_list()
+    print(f"Done. {n_trials} trials ({trial_types}), {len(result)} frames.")
     
-    print("\nPipeline complete!")
-    
-    return TrialData(
-        trial_df=trial_df,
-        config=config,
-        metadata={
-            'signal_col': signal_col,
-            'bin_size_cm': bin_size_cm,
-            'system_state': system_state,
-            'binning': binning,
-        }
-    )
+    return result
 
 
 # SAVE / LOAD
