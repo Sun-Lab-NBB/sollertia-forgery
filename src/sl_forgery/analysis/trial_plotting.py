@@ -339,13 +339,12 @@ def _plot_tuning_on_axis(
 
         avg_color = tt_colors_dark.get(trial_type, '#0A4D68')
         ax.plot(x_avg, avg, color=avg_color, linewidth=3.5,
-                label=f'Average (n={n_trials})', zorder=4)
+                label=f'Avg', zorder=4)
         ax.fill_between(x_avg, avg - sem, avg + sem,
                         color=avg_color, alpha=0.3, zorder=3)
 
     ax.set_ylabel('ΔF/F', fontsize=12)
-    ax.set_title(f'{trial_type}', fontsize=12, fontweight='bold', loc='left')
-    ax.legend(frameon=False, fontsize=10, loc='center right')
+    ax.legend(frameon=False, fontsize=8*font_scale, loc='center right')
 
 
 def plot_single_cell(
@@ -433,6 +432,10 @@ def plot_single_cell(
             show_trials=show_trials, alpha_trials=alpha_trials,
             show_cues=show_cues,
         )
+        n_trials = session_stats[tt]['n_trials'] if tt in session_stats else 0
+        n_cells = session_stats[tt]['session_avg'].shape[1] if tt in session_stats else 0
+        ax.set_title(f'{tt} — {n_trials} trials, {n_cells} cells',
+                     fontsize=12, fontweight='bold', loc='left')
 
         if global_ylim:
             ax.set_ylim(global_ylim)
@@ -648,7 +651,7 @@ def plot_multiday_comparison(
                     sem = gaussian_filter1d(sem, sigma=smooth_sigma)
                 all_maxes.append(np.nanmax(avg + sem))
 
-        ymax = max(all_maxes) * 1.15 if all_maxes else 1.0
+        ymax = max(all_maxes) * 1.3 if all_maxes else 1.0
         ylims[tt] = (-ymax * 0.03, ymax)
 
     # Global ylim: same scale for all trial types
@@ -765,23 +768,25 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 if __name__ == "__main__":
     from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
                                process_session, load_multiday_sessions)
+    from place_field_detection import detect_place_fields, get_place_cell_indices, detect_multiday_place_fields
+
     # load all the data
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
     date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
     # ***DO NOT GET MISTAKEN
 
-    #plot multiday;  Date range — auto-discovers all sessions between these dates
+    #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
     sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
     ###FTR I added a fake file into the 9-12 day bc again the server is slow.  It is really from 9-03
 
-
-    plot_multiday_cell(sessions, cell_idx=7, signal_col='multi_day_dff')
-    for i in range(5,8):
+    #filter for place cells
+    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    for i in multiday.union_indices[:5]:
         plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
-        plot_multiday_cell(sessions, cell_idx=i, signal_col='multi_day_dff')
 
+#______________________________
 
-    # plot single cell
+    # plot single day activity for a single cell
     session_data, config, behavior_path = load_session_dir(mouse_dir, date)
     prefix = get_session_prefix(session_data)
     parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
@@ -795,6 +800,15 @@ if __name__ == "__main__":
         data, metadata = process_session(behavior_df, config)
         save_processed_session(data, behavior_path.parent, session_data, metadata)
 
-    #plot_single_cell(data, cell_idx=8, signal_col='single_day_dff', config=config)
-    plot_single_cell(data, cell_idx=6, signal_col='multi_day_dff', show_trials=False, config=config)
-    plot_single_cell(data, cell_idx=6, signal_col='multi_day_dff', show_trials=False, smooth_sigma=0, config=config)
+    #filter place cells
+    # 1. Run detection (once)
+    result = detect_place_fields(data, config, signal_col='multi_day_dff')
+
+    # 2. Get place cell indices
+    pc_indices = get_place_cell_indices(result)  # any trial type
+    # or: trial_type='ABC'
+    # or: require_all=True --> gives both types
+
+    for i in pc_indices:
+        plot_single_cell(data, cell_idx=i, signal_col='multi_day_dff', show_trials=False, config=config)
+
