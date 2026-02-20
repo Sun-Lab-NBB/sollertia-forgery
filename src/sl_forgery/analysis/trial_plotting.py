@@ -6,6 +6,7 @@ Works with frame-level DataFrames from df_processing.py.
 """
 
 from pathlib import Path
+from scipy.ndimage import gaussian_filter1d
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -280,79 +281,59 @@ def _get_trial_traces(
     return traces
 
 
-def plot_single_cell(
-    data: pl.DataFrame,
+def _plot_tuning_on_axis(
+    ax: Axes,
+    session_stats: dict,
     cell_idx: int,
     trial_type: str,
-    signal_col: str = 'single_day_f',
-    session_stats: dict = None,
-    config: dict = None,
+    config: dict,
+    signal_col: str,
+    data: pl.DataFrame | None = None,
     bin_size_cm: int = 5,
-    figsize: tuple = (12, 6),
+    smooth_sigma: float = 0.0,
+    show_trials: bool = True,
     alpha_trials: float = 0.3,
     show_cues: bool = True,
-    show: bool = True
-) -> Figure:
+):
+    """Plot avg ± SEM (and optional trial traces) for one cell/trial type on an axis.
+    This function removes redundant code blocks
+
+
+    Args:
+        ax: matplotlib axis to plot on.
+        session_stats: from compute_session_averages().
+        cell_idx: cell index.
+        trial_type: trial type string.
+        config: experiment config.
+        signal_col: neural signal column name.
+        data: frame-level df, needed only if show_trials=True.
+        bin_size_cm: spatial bin size in cm.
+        smooth_sigma: Gaussian smoothing sigma (0 to disable).
+        show_trials: plot individual trial traces.
+        alpha_trials: transparency for trial traces.
+        show_cues: show cue region shading.
+
     """
-    Plot all trials + session average for a single cell for specified signal type (and one trial type).
-    
-    Parameters
-    ----------
-    data : pl.DataFrame
-        frame-level df from process_session() with 'binned_signals'
-    cell_idx : int
-        Cell index to plot
-    trial_type : str
-        Filter to this trial type ('ABC', 'ABDC', etc.)
-    signal_col : str
-        Name of the signals you want to use in plotting (i.e. "single_day_f", "single_day_spikes", etc)
-    session_stats : dict, optional
-        From compute_session_averages() - if None, computed here
-    config : dict
-        Experiment config
-    bin_size_cm : int
-        Bin size for x-axis (in cm, defaults to 5)
-    figsize : tuple
-        Figure size
-    alpha_trials : float
-        Transparency for individual trials
-    show_cues : bool
-        Show cue region shading
-    show: bool
-        call plt.show(), defaults to True
-    
-    Returns
-    -------
-    Matplotlib figure
-    """
-    import polars as pl
+    from scipy.ndimage import gaussian_filter1d
 
-    trials = data.filter(pl.col('trial_type') == trial_type)
-    
-    if len(trials) == 0:
-        print(f"No trials found for type '{trial_type}'")
-        return None
-
-    tt_colors, tt_colors_dark = get_trial_type_colors(config) if config else ({}, {})
-
-    fig, ax = plt.subplots(figsize=figsize)
+    tt_colors, tt_colors_dark = get_trial_type_colors(config)
     shared_params(ax, trial_type, config, show_cues)
 
     # Individual trial traces
-    trial_color = tt_colors.get(trial_type, '#2E86AB')
-    traces = _get_trial_traces(df, signal_col, cell_idx, trial_type, bin_size_cm)
-    for x, signal in traces:
-        ax.plot(x, signal, color=trial_color, linewidth=1,
-                alpha=alpha_trials, zorder=2)
+    if show_trials and data is not None:
+        trial_color = tt_colors.get(trial_type, '#2E86AB')
+        traces = _get_trial_traces(data, signal_col, cell_idx, trial_type, bin_size_cm)
+        for x, signal in traces:
+            ax.plot(x, signal, color=trial_color, linewidth=1,
+                    alpha=alpha_trials, zorder=2)
 
-    # Session average
-    if session_stats is None and config is not None:
-        session_stats = compute_session_averages(
-            data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
-        )
-    if session_stats and trial_type in session_stats:
+    # Session average ± SEM
+    if trial_type in session_stats:
         avg = session_stats[trial_type]['session_avg'][:, cell_idx]
         sem = session_stats[trial_type]['session_sem'][:, cell_idx]
+        if smooth_sigma > 0:
+            avg = gaussian_filter1d(avg, sigma=smooth_sigma)
+            sem = gaussian_filter1d(sem, sigma=smooth_sigma)
         x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm / 2)
         n_trials = session_stats[trial_type]['n_trials']
 
@@ -362,11 +343,78 @@ def plot_single_cell(
         ax.fill_between(x_avg, avg - sem, avg + sem,
                         color=avg_color, alpha=0.3, zorder=3)
 
-    ax.set_xlabel('Position (cm)', fontsize=12)
     ax.set_ylabel('ΔF/F', fontsize=12)
-    ax.set_title(f'Cell {cell_idx} - {trial_type}', fontsize=13, fontweight='bold')
-    ax.legend(frameon=False, fontsize=11)
+    ax.set_title(f'{trial_type}', fontsize=12, fontweight='bold', loc='left')
+    ax.legend(frameon=False, fontsize=10, loc='upper right')
 
+
+def plot_single_cell(
+    data: pl.DataFrame,
+    cell_idx: int,
+    trial_type: str,
+    signal_col: str = 'single_day_f',
+    session_stats: dict = None,
+    config: dict = None,
+    bin_size_cm: int = 5,
+    smooth_sigma: float = 0.0,
+    figsize: tuple | None = None,
+    show_trials: bool = True,
+    alpha_trials: float = 0.3,
+    show_cues: bool = True,
+    show: bool = True
+) -> Figure:
+    """Plot tuning curves for a single cell. Stacks subplots if multiple trial types.
+
+    Args:
+        data: frame-level df from process_session().
+        cell_idx: cell index to plot.
+        signal_col: neural signal column name.
+        trial_type: specific trial type, or None for all types stacked.
+        session_stats: from compute_session_averages(); computed if None.
+        config: experiment config.
+        bin_size_cm: spatial bin size in cm.
+        smooth_sigma: Gaussian smoothing sigma (0 to disable).
+        figsize: figure size; auto-scaled if None.
+        show_trials: plot individual trial traces.
+        alpha_trials: transparency for trial traces.
+        show_cues: show cue region shading.
+        show: call plt.show().
+
+    Returns:
+        Matplotlib Figure.
+
+    """
+
+    if trial_type is not None:
+        trial_types = [trial_type]
+    else:
+        trial_types = sorted(data['trial_type'].unique().to_list())
+
+    if not trial_types:
+        print("No trial types found")
+        return None
+
+    if figsize is None:
+        figsize = (12, 5 * len(trial_types))
+
+    if session_stats is None and config is not None:
+        session_stats = compute_session_averages(
+            data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
+        )
+    fig, axes = plt.subplots(len(trial_types), 1, figsize=figsize, squeeze=False)
+    axes = axes.flatten()
+
+    for ax, tt in zip(axes, trial_types):
+        _plot_tuning_on_axis(
+            ax, session_stats, cell_idx, tt, config, signal_col,
+            data=data if show_trials else None,
+            bin_size_cm=bin_size_cm, smooth_sigma=smooth_sigma,
+            show_trials=show_trials, alpha_trials=alpha_trials,
+            show_cues=show_cues,
+        )
+
+    axes[-1].set_xlabel('Position (cm)', fontsize=12)
+    fig.suptitle(f'Cell {cell_idx}', fontsize=14, fontweight='bold')
     plt.tight_layout()
 
     if show and fig is not None:
@@ -528,13 +576,12 @@ def quick_plot(
     
     return fig
 
-#TODO can figure out better names for these 2; one just plots a single cell single session using the registered
-# cells, the othe acutally plots multiple days.  Using the term "multiday" bc that's how it is in the df
 
-def plot_multiday(
+
+def plot_multiday_cell(
     sessions: dict[str, dict],
     cell_idx: int,
-    signal_col: str = 'single_day_f',
+    signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
     figsize: tuple = (14, 9),
     alpha_trials: float = 0.3,
@@ -684,32 +731,35 @@ def plot_multiday(
     plt.show()
 
 
-def plot_multiday_miniplots(
+
+def plot_multiday_comparison(
     sessions: dict[str, dict],
     cell_idx: int,
     signal_col: str = 'single_day_f',
     bin_size_cm: int = 5,
-    alpha_trials: float = 0.3,
+    smooth_sigma: float = 1.0,
+    global_ylim: bool = False,
     show_cues: bool = True,
     show: bool = True,
 ) -> Figure:
     '''
     Grid of place field plots: columns = days, rows = trial types.
-    All days visible at once for quick cross-day comparison.
-    Y-axes shared within each row for fair comparison across days.
+    Shows session average ± SEM only (no individual trials).
+    Y-axes shared within each row, scaled from average + SEM across all days.
 
     Args:
         sessions: dict[str, dict], from load_multiday_sessions().
-            Each value has keys: 'data', 'config', 'session_data', 'metadata'
-        cell_idx: int, cell index (consistent across days)
-        signal_col: str, neural signal column name
-        bin_size_cm: int, spatial bin size in cm
-        alpha_trials: float, transparency for individual trial traces
-        show_cues: bool, show cue region shading
-        show: bool, call plt.show()
+        cell_idx: int, cell index (consistent across days).
+        signal_col: str, neural signal column name.
+        bin_size_cm: int, spatial bin size in cm.
+        smooth_sigma: float, Gaussian smoothing on binned avg w/ small kernel (Dombeck et al 2010).
+        global_ylim: bool, have all plots share the same y-axis limits; If false, each trial type has their own ylims
+        show_cues: bool, show cue region shading.
+        show: bool, call plt.show().
 
     Returns:
-        fig: Figure
+        fig: Figure.
+
     '''
     dates = sorted(sessions.keys())
     if not dates:
@@ -734,21 +784,25 @@ def plot_multiday_miniplots(
             config=s['config'], bin_size_cm=bin_size_cm,
         )
 
-    #calculate ylims and make consistent across days, by trial
+    # Ylims from avg + SEM across all days
     ylims = {}
     for tt in all_trial_types:
-        all_peaks = []
+        all_maxes = []
         for date in dates:
             if tt in precomputed[date]:
-                peaks = precomputed[date][tt]['trial_peaks'][:, cell_idx]
-                all_peaks.append(peaks)
-        if all_peaks:
-            if all_peaks:
-                all_peaks = np.concatenate(all_peaks)
-                ymax = np.nanpercentile(all_peaks, 90) * 3.5
-        else:
-            ymax = 1
+                avg = precomputed[date][tt]['session_avg'][:, cell_idx]
+                sem = precomputed[date][tt]['session_sem'][:, cell_idx]
+                all_maxes.append(np.nanmax(avg + sem))
+                if smooth_sigma > 0:
+                    avg = gaussian_filter1d(avg, sigma=smooth_sigma)
+                    sem = gaussian_filter1d(sem, sigma=smooth_sigma)
+        ymax = max(all_maxes) * 1.15 if all_maxes else 1.0
         ylims[tt] = (-ymax * 0.03, ymax)
+
+    # Global ylim: same scale for all trial types
+    if global_ylim:
+        global_ymax = max(yl[1] for yl in ylims.values())
+        ylims = {tt: (-global_ymax * 0.03, global_ymax) for tt in all_trial_types}
 
     # Figure sizing
     col_width = max(3.5, 14 / n_days)
@@ -768,13 +822,11 @@ def plot_multiday_miniplots(
                 sharey=axes[row, 0] if col > 0 else None,
             )
 
-    # Font scale for mini-plots
     fscale = min(1.0, 3.5 / col_width) if n_days > 3 else 1.0
 
-    # Date headers as centered text above each column
+    # Date headers
     for col, date in enumerate(dates):
         short_date = date[5:]
-        # Get center x of column in figure coords
         bbox = axes[0, col].get_position()
         fig.text(
             (bbox.x0 + bbox.x1) / 2, 0.91,
@@ -793,7 +845,6 @@ def plot_multiday_miniplots(
         for row, tt in enumerate(all_trial_types):
             ax = axes[row, col]
 
-            # Subtitle: always present, same font, same position
             if tt in session_stats and tt in day_trial_types:
                 n_trials = session_stats[tt]['n_trials']
                 n_cells = session_stats[tt]['session_avg'].shape[1]
@@ -820,29 +871,24 @@ def plot_multiday_miniplots(
                 ax.tick_params(labelsize=7 * fscale)
                 continue
 
-            # Cue shading — labels on every row
             shared_params(ax, tt, config, show_cues,
                           show_labels=True, alpha=0.12,
                           label_y=0.95, font_scale=fscale)
 
-            # Individual trial traces
-            trial_color = tt_colors.get(tt, '#2E86AB')
-            traces = _get_trial_traces(data, signal_col, cell_idx, tt, bin_size_cm)
-            for x, signal in traces:
-                ax.plot(x, signal, color=trial_color, linewidth=0.8,
-                        alpha=alpha_trials, zorder=2)
-
-            # Session average ± SEM
+            # Session average ± SEM only
             if tt in session_stats:
                 avg = session_stats[tt]['session_avg'][:, cell_idx]
                 sem = session_stats[tt]['session_sem'][:, cell_idx]
+                if smooth_sigma > 0:
+                    avg = gaussian_filter1d(avg, sigma=smooth_sigma)
+                    sem = gaussian_filter1d(sem, sigma=smooth_sigma)
                 x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm / 2)
 
                 avg_color = tt_colors_dark.get(tt, '#0A4D68')
-                ax.plot(x_avg, avg, color=avg_color, linewidth=2,
+                ax.plot(x_avg, avg, color=avg_color, linewidth=2.5,
                         label='Avg', zorder=4)
                 ax.fill_between(x_avg, avg - sem, avg + sem,
-                                color=avg_color, alpha=0.25, zorder=3)
+                                color=avg_color, alpha=0.3, zorder=3)
 
                 ax.legend(fontsize=8, frameon=False,
                           loc='center right', handlelength=1.5)
@@ -870,8 +916,6 @@ def plot_multiday_miniplots(
 
 
 
-
-
 # SAVE
 
 def save_figure(fig: Figure, path: Path, dpi: int = 150):
@@ -895,10 +939,10 @@ if __name__ == "__main__":
     sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
     ###FTR I added a fake file into the 9-12 day bc again the server is slow.  It is really from 9-03
 
-    #plot_cell_multiday(sessions, cell_idx=7, signal_col='multi_day_dff')
 
+    #plot_cell_multiday(sessions, cell_idx=7, signal_col='multi_day_dff')
     for i in range(5,10):
-        plot_multiday_miniplots(sessions, cell_idx=i, signal_col='multi_day_dff')
+        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
 
 
     #plot single cell
