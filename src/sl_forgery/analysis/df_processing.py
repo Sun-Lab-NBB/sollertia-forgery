@@ -160,6 +160,72 @@ def get_cue_regions(
 
     return regions
 
+def _infer_bin_size(mouse_dir: Path, default: int = 5) -> int:
+    """
+    Infer bin_size_cm from existing processed session metadata in this mouse directory.
+    Searches for .meta.yaml files and reads bin_size_cm from the most recent one. This is used during automatic
+    session processing, to ensure that bin size stays consistent across days.
+
+    Args:
+        mouse_dir: Path, mouse-level directory
+        default: int, fallback if no metadata found
+
+    Returns:
+        bin_size_cm: int
+    """
+    meta_files = sorted(mouse_dir.rglob('*_processed.meta.yaml'), reverse=True)
+    for mf in meta_files:
+        with open(mf, 'r') as f:
+            meta = yaml.safe_load(f)
+        if meta and 'bin_size_cm' in meta:
+            return meta['bin_size_cm']
+    return default
+
+
+def ensure_processed(
+    mouse_dir: Path,
+    date: str,
+    auto_process: bool = False,
+) -> tuple[Path, dict, dict]:
+    '''
+    Ensure a processed parquet exists for this session. If not, prompt user to process or skip.
+    Bin size is inferred from existing session metadata in the mouse directory, defaulting to 5cm.
+
+    Args:
+        mouse_dir: Path, mouse-level directory
+        date: str, session date (e.g., '2025-09-15')
+        auto_process: bool, False shows a prompt to autoprocess, if True skips the prompt and process automatically
+
+    Returns:
+        parquet_path: Path, path to processed parquet file
+        session_data: dict, from session_data.yaml
+        config: dict, from experiment_configuration.yaml
+
+    Raises:
+        FileNotFoundError: if user declines to process
+    '''
+    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
+    prefix = get_session_prefix(session_data)
+    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
+
+    if not parquet_path.exists():
+        bin_size_cm = _infer_bin_size(mouse_dir)
+        print(f"\n  No processed file found for {date}.")
+        print(f"  Raw feather: {behavior_path.name}")
+        print(f"  Bin size (inferred): {bin_size_cm}cm")
+
+        if not auto_process:
+            response = input(f"  Process now? [y/n]: ").strip().lower()
+            if response != 'y':
+                raise FileNotFoundError(f"User skipped processing for {date}")
+
+        print(f"  Processing {date}...")
+        behavior_df = pl.read_ipc(behavior_path)
+        data, metadata = process_session(behavior_df, config, bin_size_cm=bin_size_cm)
+        save_processed_session(data, behavior_path.parent, session_data, metadata)
+
+    return parquet_path, session_data, config
+
 
 # PROCESSING
 
@@ -432,6 +498,7 @@ def compute_session_averages(
             'session_avg': np.nanmean(per_trial, axis=0),
             'session_sem': np.nanstd(per_trial, axis=0, ddof=1) / np.sqrt(n_trials),
             'n_trials': n_trials,
+            'per_trial_max': np.nanmax(per_trial, axis=0),  # (n_bins, n_cells), used for setting ylims in plotting
         }
 
     if not by_trial_type:
@@ -566,6 +633,7 @@ def load_multiday_sessions(
     mouse_dir: Path,
     dates: list[str] | None = None,
     date_range: tuple[str, str] | None = None,
+    auto_process: bool = False,
 ) -> dict[str, dict]:
     '''
     Load multiple processed sessions for cross-day comparison.
@@ -576,6 +644,7 @@ def load_multiday_sessions(
         date_range: tuple[str, str] | None, inclusive range (e.g., ('2025-09-15', '2025-09-24')).
             Auto-discovers all session folders whose date falls within the range.
             Provide either dates or date_range, not both.
+        auto_process: bool, choose if you want to automatically process (cue-offset) the data is it's not found
 
     Returns:
         sessions: dict[str, dict], keyed by date string (sorted chronologically), each containing:
@@ -607,16 +676,9 @@ def load_multiday_sessions(
 
     for date in sorted(dates):
         try:
-            session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-            prefix = get_session_prefix(session_data)
-            parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
-
-            if not parquet_path.exists():
-                print(f"  WARNING: No processed file for {date}, skipping. "
-                      f"Run process_session() first.")
-                continue
-
+            parquet_path, session_data, config = ensure_processed(mouse_dir, date, auto_process=auto_process)
             data, metadata = load_processed_session(parquet_path)
+
             sessions[date] = {
                 'data': data,
                 'config': config,
@@ -626,7 +688,6 @@ def load_multiday_sessions(
             print(f"  Loaded {date}: {len(data)} frames, "
                   f"{data['trial'].n_unique()} trials, "
                   f"types={sorted(data['trial_type'].unique().to_list())}")
-
         except (FileNotFoundError, ValueError) as e:
             print(f"  WARNING: Could not load {date}: {e}")
 
