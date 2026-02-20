@@ -423,64 +423,6 @@ def plot_single_cell(
     return fig
 
 
-# QUICK PLOTTING
-
-def quick_plot(
-    data: pl.DataFrame,
-    config: dict,
-    cell_idx: int,
-    signal_col: str = 'single_day_f',
-    plot_type: str = 'auto',
-    bin_size_cm: int = 5,
-    show: bool = True,
-) -> Figure:
-    """
-    Quick plotting function for exploring cells.
-    
-    Args:
-        data: pl.DataFrame, frame-level df from process_session() or load_processed_session()
-        config: dict, experiment config
-        cell_idx: int, cell index
-        signal_col: str, neural signal column
-        plot_type: str, 'auto', 'comparison', or a trial type name ('ABC', 'ABDC', etc.)
-        bin_size_cm: int, spatial bin size in cm
-        show: bool, call plt.show()
-    
-    Returns:
-        Figure
-    """
-    trial_types = sorted(data['trial_type'].unique().to_list())
-    print(f"Available trial types: {trial_types}")
-    
-    session_stats = compute_session_averages(data, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm)
-    
-    if plot_type == 'auto':
-        plot_type = 'comparison' if len(trial_types) >= 2 else trial_types[0].lower()
-
-    if plot_type == 'comparison':
-        fig = plot_cell_comparison(
-            data, cell_idx, signal_col=signal_col,
-            session_stats=session_stats, config=config,
-            bin_size_cm=bin_size_cm, show=show,
-        )
-    elif plot_type.upper() in trial_types:      #just converts case if incorrectly called
-        fig = plot_single_cell(
-            data, cell_idx, trial_type=plot_type.upper(),
-            signal_col=signal_col, session_stats=session_stats,
-            config=config, bin_size_cm=bin_size_cm, show=show,
-        )
-    else:
-        print(f"Unknown plot_type: {plot_type}")
-        print(f"Options: 'auto', 'comparison', or trial type name ({trial_types})")
-        return None
-    
-    if show and fig is not None:
-        plt.show()
-    
-    return fig
-
-
-
 def plot_multiday_cell(
     sessions: dict[str, dict],
     cell_idx: int,
