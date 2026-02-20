@@ -493,12 +493,17 @@ def compute_session_averages(
         with np.errstate(invalid='ignore'):
             per_trial = sums / counts
 
+        # Peak amplitude per trial for this track type: (n_trials, n_cells)
+        trial_peaks = np.nanmax(per_trial, axis=1)
+
         # Average across trials: (n_bins, n_cells)
         return {
             'session_avg': np.nanmean(per_trial, axis=0),
             'session_sem': np.nanstd(per_trial, axis=0, ddof=1) / np.sqrt(n_trials),
             'n_trials': n_trials,
             'per_trial_max': np.nanmax(per_trial, axis=0),  # (n_bins, n_cells), used for setting ylims in plotting
+            'per_trial_q95': np.nanpercentile(per_trial, 95, axis=0),  # (n_bins, n_cells),
+            'trial_peaks': trial_peaks,  # (n_trials, n_cells)
         }
 
     if not by_trial_type:

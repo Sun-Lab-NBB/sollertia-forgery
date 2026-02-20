@@ -528,7 +528,8 @@ def quick_plot(
     
     return fig
 
-#TODO can figure out better names for these 2
+#TODO can figure out better names for these 2; one just plots a single cell single session using the registered
+# cells, the othe acutally plots multiple days.  Using the term "multiday" bc that's how it is in the df
 
 def plot_multiday(
     sessions: dict[str, dict],
