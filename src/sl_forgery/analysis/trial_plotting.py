@@ -20,6 +20,10 @@ from df_processing import (
     compute_session_averages,
 )
 
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Poppins', 'Liberation Sans', 'DejaVu Sans']
+#'Helvetica', 'Arial', 'Poppins', 'Liberation Sans', 'DejaVu Sans'
+
 
 # COLOR CONFIGURATION
 
@@ -122,6 +126,7 @@ def shared_params(
         show_labels: bool = True,
         alpha: float = 0.15,
         label_y: float = 0.98,
+        font_scale: float = 1.0,
 ):
     """Add cue regions, reward zone, and x-ticks to a track axis."""
 
@@ -141,11 +146,11 @@ def shared_params(
             rz_start = ts['reward_zone_start_cm']
             rz_end = ts['reward_zone_end_cm']
             ax.axvline(rz_start, color='#1B9AAA', linestyle='--',
-                       linewidth=1.5, alpha=0.7, zorder=5)
+                       linewidth=1.5 * font_scale, alpha=0.7, zorder=5)
             ax.axvline(rz_end, color='#1B9AAA', linestyle='--',
-                       linewidth=1.5, alpha=0.7, zorder=5)
+                       linewidth=1.5 * font_scale, alpha=0.7, zorder=5)
             ax.text((rz_start + rz_end) / 2, label_y - 0.08, 'reward',
-                    ha='center', va='top', fontsize=8, fontstyle='italic',
+                    ha='center', va='top', fontsize=6 * font_scale, fontstyle='italic',
                     color='#1B9AAA',
                     transform=ax.get_xaxis_transform())
 
@@ -162,7 +167,7 @@ def shared_params(
     ticks = sorted(set(int(t) for t in ticks))
 
     ax.set_xticks(ticks)
-    ax.set_xticklabels([str(t) for t in ticks], fontsize=9)
+    ax.set_xticklabels([str(t) for t in ticks], fontsize=9 * font_scale)
 
     # Common styling
     ax.spines['top'].set_visible(False)
@@ -179,6 +184,7 @@ def plot_cue_regions(
     show_labels: bool = True,
     alpha: float = 0.15,
     label_y: float = 0.98,
+    font_scale: float = 1.0,
 ):
     """
     Add cue region shading to a matplotlib axis.
@@ -197,6 +203,7 @@ def plot_cue_regions(
         Shading transparency
     label_y : float
         Y position for labels (in axis transform coords)
+    fontscale
     """
     colors = get_cue_colors(config)
     labels = get_cue_labels(config)
@@ -225,7 +232,7 @@ def plot_cue_regions(
                 ax.text(
                     mid, label_y, label,
                     ha='center', va='top',
-                    fontsize=9, fontweight='bold',
+                    fontsize=9 * font_scale, fontweight='bold',
                     transform=ax.get_xaxis_transform(),
                     bbox=dict(
                         boxstyle='round,pad=0.3',
@@ -236,7 +243,7 @@ def plot_cue_regions(
 
 
 # PLACE FIELD PLOTS
-
+#TODO add thresholding for place cells
 def _get_trial_traces(
     df: pl.DataFrame,
     signal_col: str,
@@ -521,6 +528,347 @@ def quick_plot(
     
     return fig
 
+#TODO can figure out better names for these 2
+
+def plot_multiday(
+    sessions: dict[str, dict],
+    cell_idx: int,
+    signal_col: str = 'single_day_f',
+    bin_size_cm: int = 5,
+    figsize: tuple = (14, 9),
+    alpha_trials: float = 0.3,
+    show_cues: bool = True,
+) -> None:
+    '''
+    Scroll through daily place field plots for one cell across sessions.
+    Left/right arrow keys to navigate days. Works standalone and Jupyter.
+
+    Pre-renders all days on init (may take a few seconds), then navigation is instant.
+    Each page shows stacked subplots (one per trial type, union across all days).
+    Missing trial types show "No data". Title includes animal ID and date.
+
+    Args:
+        sessions: dict[str, dict], from load_multiday_sessions().
+            Each value has keys: 'data', 'config', 'session_data', 'metadata'
+        cell_idx: int, cell index (consistent across days)
+        signal_col: str, neural signal column name
+        bin_size_cm: int, spatial bin size in cm
+        figsize: tuple, figure size
+        alpha_trials: float, transparency for individual trial traces
+        show_cues: bool, show cue region shading
+
+    Returns:
+        None (displays interactive figure)
+    '''
+    import io
+    from matplotlib.image import imread
+
+    dates = sorted(sessions.keys())
+    if not dates:
+        print("No sessions to plot.")
+        return
+
+    all_trial_types = sorted(set(
+        tt
+        for s in sessions.values()
+        for tt in s['data']['trial_type'].unique().to_list()
+    ))
+    n_types = len(all_trial_types)
+    animal_id = sessions[dates[0]]['session_data'].get('animal_id', '??')
+
+    # --- Pre-render all days as images ---
+    print(f"Pre-rendering {len(dates)} days...", end=' ', flush=True)
+    day_images = []
+
+    for di, date in enumerate(dates):
+        s = sessions[date]
+        data = s['data']
+        config = s['config']
+        day_trial_types = sorted(data['trial_type'].unique().to_list())
+        tt_colors, tt_colors_dark = get_trial_type_colors(config)
+
+        session_stats = compute_session_averages(
+            data, signal_col=signal_col,
+            config=config, bin_size_cm=bin_size_cm,
+        )
+
+        tmp_fig = plt.figure(figsize=figsize)
+        gs = tmp_fig.add_gridspec(n_types, 1, hspace=0.4, top=0.92, bottom=0.06)
+        tmp_axes = [tmp_fig.add_subplot(gs[i, 0]) for i in range(n_types)]
+
+        for i, tt in enumerate(all_trial_types):
+            ax = tmp_axes[i]
+
+            if tt not in day_trial_types:
+                ax.text(
+                    0.5, 0.5, f'{tt} — no data',
+                    ha='center', va='center',
+                    fontsize=14, color='#999999', fontstyle='italic',
+                    transform=ax.transAxes,
+                )
+                ax.set_ylabel('ΔF/F', fontsize=12)
+                ax.set_title(f'{tt}', fontsize=12, fontweight='bold', loc='left')
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                continue
+
+            shared_params(ax, tt, config, show_cues)
+
+            trial_color = tt_colors.get(tt, '#2E86AB')
+            traces = _get_trial_traces(data, signal_col, cell_idx, tt, bin_size_cm)
+            for x, signal in traces:
+                ax.plot(x, signal, color=trial_color, linewidth=1,
+                        alpha=alpha_trials, zorder=2)
+
+            if tt in session_stats:
+                avg = session_stats[tt]['session_avg'][:, cell_idx]
+                sem = session_stats[tt]['session_sem'][:, cell_idx]
+                x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm / 2)
+                n_trials = session_stats[tt]['n_trials']
+
+                avg_color = tt_colors_dark.get(tt, '#0A4D68')
+                ax.plot(x_avg, avg, color=avg_color, linewidth=3.5,
+                        label=f'Average (n={n_trials})', zorder=4)
+                ax.fill_between(x_avg, avg - sem, avg + sem,
+                                color=avg_color, alpha=0.3, zorder=3)
+
+            ax.set_ylabel('ΔF/F', fontsize=12)
+            ax.set_title(f'{tt}', fontsize=12, fontweight='bold', loc='left')
+            ax.legend(frameon=False, fontsize=10, loc='upper right')
+
+        tmp_axes[-1].set_xlabel('Position (cm)', fontsize=12)
+        tmp_fig.suptitle(
+            f'Mouse {animal_id} — {date} — Cell {cell_idx}'
+            f'    [{di + 1}/{len(dates)}]',
+            fontsize=14, fontweight='bold',
+        )
+
+        # Render to image buffer
+        buf = io.BytesIO()
+        tmp_fig.savefig(buf, format='png', dpi=150)
+        plt.close(tmp_fig)
+        buf.seek(0)
+        day_images.append(imread(buf))
+        buf.close()
+
+        print(f"{di + 1}", end=' ', flush=True)
+
+    print("done.")
+
+    # --- Display with instant arrow key switching ---
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axis('off')
+    img_display = ax.imshow(day_images[0])
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    state = {'idx': 0}
+
+    def _on_key(event):
+        '''Arrow key navigation — instant image swap.'''
+        if event.key == 'right' and state['idx'] < len(dates) - 1:
+            state['idx'] += 1
+        elif event.key == 'left' and state['idx'] > 0:
+            state['idx'] -= 1
+        else:
+            return
+        img_display.set_data(day_images[state['idx']])
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect('key_press_event', _on_key)
+    fig._multiday_state = state
+    fig._multiday_key_handler = _on_key
+    fig._multiday_images = day_images  # prevent GC
+
+    print(f"Use ← → arrow keys to navigate {len(dates)} days.")
+    plt.show()
+
+
+def plot_multiday_miniplots(
+    sessions: dict[str, dict],
+    cell_idx: int,
+    signal_col: str = 'single_day_f',
+    bin_size_cm: int = 5,
+    alpha_trials: float = 0.3,
+    show_cues: bool = True,
+    show: bool = True,
+) -> Figure:
+    '''
+    Grid of place field plots: columns = days, rows = trial types.
+    All days visible at once for quick cross-day comparison.
+    Y-axes shared within each row for fair comparison across days.
+
+    Args:
+        sessions: dict[str, dict], from load_multiday_sessions().
+            Each value has keys: 'data', 'config', 'session_data', 'metadata'
+        cell_idx: int, cell index (consistent across days)
+        signal_col: str, neural signal column name
+        bin_size_cm: int, spatial bin size in cm
+        alpha_trials: float, transparency for individual trial traces
+        show_cues: bool, show cue region shading
+        show: bool, call plt.show()
+
+    Returns:
+        fig: Figure
+    '''
+    dates = sorted(sessions.keys())
+    if not dates:
+        print("No sessions to plot.")
+        return None
+
+    all_trial_types = sorted(set(
+        tt
+        for s in sessions.values()
+        for tt in s['data']['trial_type'].unique().to_list()
+    ))
+    n_types = len(all_trial_types)
+    n_days = len(dates)
+
+    animal_id = sessions[dates[0]]['session_data'].get('animal_id', '??')
+
+    # Pre-compute session averages
+    precomputed = {}
+    for date, s in sessions.items():
+        precomputed[date] = compute_session_averages(
+            s['data'], signal_col=signal_col,
+            config=s['config'], bin_size_cm=bin_size_cm,
+        )
+
+    #calculate ylims and make consistent across days, by trial
+    ylims = {}
+    for tt in all_trial_types:
+        all_peaks = []
+        for date in dates:
+            if tt in precomputed[date]:
+                peaks = precomputed[date][tt]['trial_peaks'][:, cell_idx]
+                all_peaks.append(peaks)
+        if all_peaks:
+            if all_peaks:
+                all_peaks = np.concatenate(all_peaks)
+                ymax = np.nanpercentile(all_peaks, 90) * 3.5
+        else:
+            ymax = 1
+        ylims[tt] = (-ymax * 0.03, ymax)
+
+    # Figure sizing
+    col_width = max(3.5, 14 / n_days)
+    row_height = 2.5
+    fig = plt.figure(figsize=(col_width * n_days, row_height * n_types + 1.5))
+    gs = fig.add_gridspec(
+        n_types, n_days,
+        hspace=0.2, wspace=0.1,
+        top=0.88, bottom=0.06, left=0.06, right=0.98,
+    )
+
+    axes = np.empty((n_types, n_days), dtype=object)
+    for row in range(n_types):
+        for col in range(n_days):
+            axes[row, col] = fig.add_subplot(
+                gs[row, col],
+                sharey=axes[row, 0] if col > 0 else None,
+            )
+
+    # Font scale for mini-plots
+    fscale = min(1.0, 3.5 / col_width) if n_days > 3 else 1.0
+
+    # Date headers as centered text above each column
+    for col, date in enumerate(dates):
+        short_date = date[5:]
+        # Get center x of column in figure coords
+        bbox = axes[0, col].get_position()
+        fig.text(
+            (bbox.x0 + bbox.x1) / 2, 0.91,
+            short_date, ha='center', va='bottom',
+            fontsize=10, fontweight='bold',
+        )
+
+    for col, date in enumerate(dates):
+        s = sessions[date]
+        data = s['data']
+        config = s['config']
+        session_stats = precomputed[date]
+        day_trial_types = sorted(data['trial_type'].unique().to_list())
+        tt_colors, tt_colors_dark = get_trial_type_colors(config)
+
+        for row, tt in enumerate(all_trial_types):
+            ax = axes[row, col]
+
+            # Subtitle: always present, same font, same position
+            if tt in session_stats and tt in day_trial_types:
+                n_trials = session_stats[tt]['n_trials']
+                n_cells = session_stats[tt]['session_avg'].shape[1]
+                ax.set_title(
+                    f'{tt} — {n_trials} trials, {n_cells} cells',
+                    fontsize=8 * fscale, fontweight='bold', loc='left',
+                )
+            else:
+                ax.set_title(f'{tt}', fontsize=8 * fscale,
+                             fontweight='bold', loc='left')
+
+            if tt not in day_trial_types:
+                ax.text(
+                    0.5, 0.5, 'no data',
+                    ha='center', va='center',
+                    fontsize=10 * fscale, color='#999999', fontstyle='italic',
+                    transform=ax.transAxes,
+                )
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.set_ylim(ylims[tt])
+                if col == 0:
+                    ax.set_ylabel('ΔF/F', fontsize=9 * fscale)
+                ax.tick_params(labelsize=7 * fscale)
+                continue
+
+            # Cue shading — labels on every row
+            shared_params(ax, tt, config, show_cues,
+                          show_labels=True, alpha=0.12,
+                          label_y=0.95, font_scale=fscale)
+
+            # Individual trial traces
+            trial_color = tt_colors.get(tt, '#2E86AB')
+            traces = _get_trial_traces(data, signal_col, cell_idx, tt, bin_size_cm)
+            for x, signal in traces:
+                ax.plot(x, signal, color=trial_color, linewidth=0.8,
+                        alpha=alpha_trials, zorder=2)
+
+            # Session average ± SEM
+            if tt in session_stats:
+                avg = session_stats[tt]['session_avg'][:, cell_idx]
+                sem = session_stats[tt]['session_sem'][:, cell_idx]
+                x_avg = np.arange(len(avg)) * bin_size_cm + (bin_size_cm / 2)
+
+                avg_color = tt_colors_dark.get(tt, '#0A4D68')
+                ax.plot(x_avg, avg, color=avg_color, linewidth=2,
+                        label='Avg', zorder=4)
+                ax.fill_between(x_avg, avg - sem, avg + sem,
+                                color=avg_color, alpha=0.25, zorder=3)
+
+                ax.legend(fontsize=8, frameon=False,
+                          loc='center right', handlelength=1.5)
+
+            ax.set_ylim(ylims[tt])
+
+            if col == 0:
+                ax.set_ylabel('ΔF/F', fontsize=9 * fscale)
+            else:
+                ax.set_ylabel('')
+
+            ax.tick_params(labelsize=7 * fscale)
+
+        axes[-1, col].set_xlabel('cm', fontsize=8 * fscale)
+
+    fig.suptitle(
+        f'Mouse {animal_id} — Cell {cell_idx}',
+        fontsize=14, fontweight='bold',
+    )
+
+    if show:
+        plt.show()
+
+    return fig
+
+
+
 
 
 # SAVE
@@ -535,12 +883,24 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 
 if __name__ == "__main__":
     from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
-                               process_session)
+                               process_session, load_multiday_sessions)
     # load all the data
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
     date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
     # ***DO NOT GET MISTAKEN
 
+    #plot multiday
+    # Date range — auto-discovers all sessions between these dates
+    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
+    ###FTR I added a fake file into the 9-12 day bc again the server is slow.  It is really from 9-03
+
+    #plot_cell_multiday(sessions, cell_idx=7, signal_col='multi_day_dff')
+
+    for i in range(5,10):
+        plot_multiday_miniplots(sessions, cell_idx=i, signal_col='multi_day_dff')
+
+
+    #plot single cell
     session_data, config, behavior_path = load_session_dir(mouse_dir, date)
     prefix = get_session_prefix(session_data)
     parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
@@ -556,7 +916,7 @@ if __name__ == "__main__":
 
 
     for i in range(10):
-        quick_plot(data, config, cell_idx=i)
+        quick_plot(data, config, cell_idx=i, signal_col='single_day_dff')
 
 
 
