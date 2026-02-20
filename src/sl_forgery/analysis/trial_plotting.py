@@ -770,19 +770,18 @@ if __name__ == "__main__":
     date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
     # ***DO NOT GET MISTAKEN
 
-    #plot multiday
-    # Date range — auto-discovers all sessions between these dates
-    #sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
+    #plot multiday;  Date range — auto-discovers all sessions between these dates
+    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
     ###FTR I added a fake file into the 9-12 day bc again the server is slow.  It is really from 9-03
 
 
-    #plot_cell_multiday(sessions, cell_idx=7, signal_col='multi_day_dff')
-    # for i in range(5,8):
-    #     plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
-    #     plot_multiday_cell(sessions, cell_idx=i, signal_col='multi_day_dff')
+    plot_multiday_cell(sessions, cell_idx=7, signal_col='multi_day_dff')
+    for i in range(5,8):
+        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
+        plot_multiday_cell(sessions, cell_idx=i, signal_col='multi_day_dff')
 
 
-    #plot single cell
+    # plot single cell
     session_data, config, behavior_path = load_session_dir(mouse_dir, date)
     prefix = get_session_prefix(session_data)
     parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
@@ -799,69 +798,3 @@ if __name__ == "__main__":
     #plot_single_cell(data, cell_idx=8, signal_col='single_day_dff', config=config)
     plot_single_cell(data, cell_idx=6, signal_col='multi_day_dff', show_trials=False, config=config)
     plot_single_cell(data, cell_idx=6, signal_col='multi_day_dff', show_trials=False, smooth_sigma=0, config=config)
-
-
-
-
-
-#####################################################
-    #sanity check for offset correction
-    cell_idx = 0
-    colors = {'ABC': '#2E86AB', 'ABDC': '#A23B72'}
-
-    # Load original frame-level data
-    original_df = pl.read_ipc('/Users/cs963/Desktop/sun_lab_projects/26_explore/2025-09-16-18-44-32-476061.feather')
-    original_df = original_df.filter(pl.col('system_state') == 'run').sort('frame')
-
-
-
-    fig, ax = plt.subplots(figsize=(20, 6))
-
-    # Original: raw distance_cm vs signal
-    for trial_num in original_df['trial'].unique().sort():
-        trial_data = original_df.filter(pl.col('trial') == trial_num).sort('frame')
-        distance = trial_data['distance_cm'].to_numpy()
-        signals = np.vstack(trial_data['single_day_f'].to_list())
-        ax.plot(distance, signals[:, cell_idx], color='black', linewidth=0.5, alpha=0.5)
-
-    # Corrected: also use distance_cm (from the frame-level corrected_df, not trial_df)
-    # Run just step 1 to get the corrected frame-level data:
-    from df_processing import fix_cue_offset, load_experiment_config
-
-    corrected_df = fix_cue_offset(original_df, data.config, system_state='run')
-
-    original_count = original_df.shape[0]
-    corrected_count = corrected_df.shape[0]
-    expected_loss = original_df.filter(
-        (pl.col('trial') == original_df['trial'].unique().sort()[0]) |
-        (pl.col('trial') == original_df['trial'].unique().sort()[-1])
-    ).shape[0]
-
-    print(f"Original frames: {original_count}")
-    print(f"Corrected frames: {corrected_count}")
-    print(f"Expected loss (first+last trial): {expected_loss}")
-    print(f"Actual loss: {original_count - corrected_count}")
-    print(f"Unaccounted missing: {(original_count - corrected_count) - expected_loss}")
-    for trial_num in corrected_df['trial'].unique().sort():
-        trial_data = corrected_df.filter(pl.col('trial') == trial_num).sort('frame')
-        distance = trial_data['distance_cm'].to_numpy()
-        signals = np.vstack(trial_data['single_day_f'].to_list())
-        trial_type = trial_data['trial_type'][0]
-        ax.plot(distance, signals[:, cell_idx], color=colors.get(trial_type, 'gray'),
-                linewidth=0.5)
-        # Mark corrected trial boundaries
-        ax.axvline(distance[0], color='red', linewidth=0.5, alpha=0.5, linestyle='--')
-
-    # Mark original trial boundaries
-    for trial_num in original_df['trial'].unique().sort():
-        trial_data = original_df.filter(pl.col('trial') == trial_num).sort('frame')
-        ax.axvline(trial_data['distance_cm'][0], color='black', linewidth=0.5, alpha=0.3)
-
-    ax.set_xlabel('Cumulative distance (cm)')
-    ax.set_ylabel('ΔF/F')
-    ax.set_title(f'Cell {cell_idx} - Black lines: original boundaries, Red dashed: corrected boundaries')
-    plt.tight_layout()
-    plt.show()
-
-    #
-    # plot_single_cell(data, cell_idx=0, trial_type='ABC')
