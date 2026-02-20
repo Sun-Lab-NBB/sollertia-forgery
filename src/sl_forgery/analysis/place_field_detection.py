@@ -35,9 +35,6 @@ from scipy.signal import convolve2d
 from scipy.ndimage import label, gaussian_filter1d
 from skimage.measure import regionprops
 
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis')
-
 from df_processing import compute_session_averages, get_track_length
 
 
@@ -703,6 +700,7 @@ def get_place_cell_indices(
 def plot_combined_heatmap(
     result: PlaceFieldResult,
     config: dict,
+    session_data: dict,
     trial_types: list[str] | None = None,
     cells: np.ndarray | None = None,
     sort_by: str | None = None,
@@ -777,6 +775,9 @@ def plot_combined_heatmap(
     order = cells[np.argsort(sort_key[cells])]
     data = combined[order, :]
 
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+
     # Color scale
     if vmin is None:
         vmin = np.nanquantile(data, 0.5)
@@ -787,18 +788,16 @@ def plot_combined_heatmap(
     total_cm = sum(get_track_length(config, tt) for tt in trial_types)
     n_cells_plot = len(order)
     if figsize is None:
-        figsize = (10, 8)
+        figsize = (8, 6)
 
     fig = plt.figure(figsize=figsize, dpi=dpi)
     gs = fig.add_gridspec(
-        2, 2,
+        2, 1,
         height_ratios=[1, 30],
-        width_ratios=[1, 0.03],
-        hspace=0.02, wspace=0.03,
+        hspace=0.02,
     )
-    ax_cue = fig.add_subplot(gs[0, 0])
     ax = fig.add_subplot(gs[1, 0])
-    ax_cb = fig.add_subplot(gs[1, 1])
+    ax_cue = fig.add_subplot(gs[0, 0])
 
     # Heatmap
     extent = [0, total_cm, n_cells_plot, 0]
@@ -808,6 +807,13 @@ def plot_combined_heatmap(
     ax.set_ylabel('Neuron #')
 
     # Colorbar in its own axis — same height as heatmap
+    ax_cb = ax.inset_axes([1.02, 0.0, 0.02, 1.0])
+    #if 'dff' in signal_col:
+        #label = 'ΔF/F'
+    #elif 'spikes' in signal_col:
+        #label = 'Spikes'   #does that make sense? would we ever use the spike data?
+    #else:
+        #label = 'Raw fluorescence'
     plt.colorbar(im, cax=ax_cb, label='ΔF/F')
 
     # Trial type boundaries
@@ -839,16 +845,40 @@ def plot_combined_heatmap(
 
         x_offset += get_track_length(config, tt)
 
-    # Cue axis formatting — match heatmap xlim exactly
+    # X-ticks: reset to per-track position labels
+    tick_positions = []
+    tick_labels = []
+    x_offset = 0
+    for tt in trial_types:
+        track_len = get_track_length(config, tt)
+        # Ticks every 30cm within each track
+        local_ticks = np.arange(0, track_len + 1, 30)
+        for t in local_ticks:
+            tick_positions.append(x_offset + t)
+            tick_labels.append(str(int(t)))
+        x_offset += track_len
+
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(tick_labels, fontsize=8)
+
+    # Force cue bar to match heatmap position exactly
+    fig.canvas.draw()
+    ax_pos = ax.get_position()
+    cue_pos = ax_cue.get_position()
+    ax_cue.set_position([ax_pos.x0, cue_pos.y0, ax_pos.width, cue_pos.height])
     ax_cue.set_xlim(ax.get_xlim())
+    ax_cue.set_autoscalex_on(False)
     ax_cue.set_yticks([])
     ax_cue.tick_params(bottom=False, labelbottom=False)
     ax_cue.spines[:].set_visible(False)
 
+    prefix = ''
+    if session_data:
+        prefix = f'Mouse {session_data["animal_id"]} — {session_data["session_name"][:10]} — '
+
     ax_cue.set_title(
-        f'Place Fields — {" + ".join(trial_types)} '
-        f'({n_cells_plot} cells, sorted by {sort_by})',
-        fontsize=12, fontweight='bold', pad=6,
+        f'{prefix}Place Fields ({n_cells_plot} cells, sorted by {sort_by} trials)',
+        fontsize=11, fontweight='bold', pad=6,
     )
 
     plt.subplots_adjust(top=0.95, bottom=0.08)
@@ -1098,12 +1128,12 @@ if __name__ == '__main__':
     print(result.summary())
 
     # Sorted heatmap per trial type
-    for tt, pf in result.fields.items():
-        pf.plot(title=f'{tt} Place Fields — {date}', sort=True)
-        plt.show()
+    # for tt, pf in result.fields.items():
+    #     pf.plot(title=f'{tt} Place Fields — {date}', sort=True)
+    #     plt.show()
 
     # All place cells, sorted by ABC field position
-    plot_combined_heatmap(result, config)
+    plot_combined_heatmap(result, config, session_data)
 
     # ── Multiday detection ──
     sessions = load_multiday_sessions(
