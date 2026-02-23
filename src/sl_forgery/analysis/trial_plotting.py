@@ -244,7 +244,48 @@ def plot_cue_regions(
 
 
 # PLACE FIELD PLOTS
-#TODO add thresholding for place cells
+
+def _shade_place_fields(
+    ax: Axes,
+    pf,
+    cell_idx: int,
+    bin_size_cm: int = 5,
+    color: str = '#b8b69d',
+    alpha: float = 0.6,
+):
+    """Shade detected place field regions for one cell on an axis.
+
+    Args:
+        ax: matplotlib axis.
+        pf: PlaceFields1d object.
+        cell_idx: cell index.
+        bin_size_cm: spatial bin size in cm.
+        color: shading color.
+        alpha: shading transparency.
+
+    """
+    field_mask = pf.label_im[cell_idx] > 0  # bool array, length n_bins
+    if not field_mask.any():
+        return
+
+    # Find contiguous field spans
+    changes = np.diff(field_mask.astype(int))
+    starts = np.where(changes == 1)[0] + 1
+    ends = np.where(changes == -1)[0] + 1
+
+    # Handle field starting at bin 0 or ending at last bin
+    if field_mask[0]:
+        starts = np.concatenate([[0], starts])
+    if field_mask[-1]:
+        ends = np.concatenate([ends, [len(field_mask)]])
+
+    for s, e in zip(starts, ends):
+        x0 = s * bin_size_cm
+        x1 = e * bin_size_cm
+        ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0,
+                   label='place field' if s == starts[0] else None)
+
+
 def _get_trial_traces(
     df: pl.DataFrame,
     signal_col: str,
@@ -295,6 +336,7 @@ def _plot_tuning_on_axis(
     alpha_trials: float = 0.3,
     show_cues: bool = True,
     font_scale: float = 1.0,
+    place_fields: dict | None = None,
 ):
     """Plot avg ± SEM (and optional trial traces) for one cell/trial type on an axis.
     This function removes redundant code blocks
@@ -314,10 +356,16 @@ def _plot_tuning_on_axis(
         alpha_trials: transparency for trial traces.
         show_cues: show cue region shading.
         font_scale: font size scaling to accommodate multiple subplots
+        place_fields: dict mapping trial_type -> PlaceFields1d. If provided and
+            trial_type is present, shades detected field regions for cell_idx.
 
     """
     tt_colors, tt_colors_dark = get_trial_type_colors(config) if config else ({}, {})
     shared_params(ax, trial_type, config, show_cues, font_scale=font_scale)
+
+    # Place field shading
+    if place_fields is not None and trial_type in place_fields:
+        _shade_place_fields(ax, place_fields[trial_type], cell_idx, bin_size_cm)
 
     # Individual trial traces
     if show_trials and data is not None:
@@ -360,6 +408,7 @@ def plot_single_cell(
     show_trials: bool = True,
     alpha_trials: float = 0.3,
     show_cues: bool = True,
+    place_fields: dict | None = None,
     show: bool = True
 ) -> Figure:
     """Plot tuning curves for a single cell. Stacks subplots if multiple trial types. Exploratory.
@@ -430,7 +479,7 @@ def plot_single_cell(
             data=data if show_trials else None,
             bin_size_cm=bin_size_cm, smooth_sigma=smooth_sigma,
             show_trials=show_trials, alpha_trials=alpha_trials,
-            show_cues=show_cues,
+            show_cues=show_cues, place_fields=place_fields,
         )
         n_trials = session_stats[tt]['n_trials'] if tt in session_stats else 0
         n_cells = session_stats[tt]['session_avg'].shape[1] if tt in session_stats else 0
@@ -594,6 +643,7 @@ def plot_multiday_comparison(
     smooth_sigma: float = 1.0,
     global_ylim: bool = False,
     show_cues: bool = True,
+    place_fields: dict | None = None,
     show: bool = True,
 ) -> Figure:
     '''
@@ -695,6 +745,7 @@ def plot_multiday_comparison(
         config = s['config']
         session_stats = precomputed[date]
         day_trial_types = sorted(data['trial_type'].unique().to_list())
+        day_fields = place_fields.get(date) if place_fields else None
 
         for row, tt in enumerate(all_trial_types):
             ax = axes[row, col]
@@ -725,11 +776,13 @@ def plot_multiday_comparison(
                 ax.tick_params(labelsize=7 * fscale)
                 continue
 
+            day_fields = place_fields.get(date) if place_fields else None
+
             _plot_tuning_on_axis(
                 ax, session_stats, cell_idx, tt, config, signal_col,
                 bin_size_cm=bin_size_cm, smooth_sigma=smooth_sigma,
                 show_trials=False, show_cues=show_cues,
-                font_scale=fscale,
+                font_scale=fscale, place_fields=day_fields,
             )
 
             ax.set_ylim(ylims[tt])
@@ -781,8 +834,27 @@ if __name__ == "__main__":
 
     #filter for place cells
     multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    # for i in multiday.union_indices[:1]:
+    #     plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff', global_ylim=True)
+
+    # Debug: why is cell 1 missing ABC field on 09-12?
+    day_result = multiday.per_day['2025-09-12']
+    pf_abc = day_result.fields['ABC']
+    print(f"Cell 1 ABC: has_field={pf_abc.has_place_field[1]}")
+    print(f"  binF peak: {pf_abc.binF[1].max():.2f}")
+    print(f"  binF mean: {pf_abc.binF[1].mean():.2f}")
+    print(f"  peak/mean ratio: {pf_abc.binF[1].max() / pf_abc.binF[1].mean():.2f}")
+
+
+
+    # Build the place_fields dict from per-day results
+    pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
+
     for i in multiday.union_indices[:5]:
-        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
+        plot_multiday_comparison(
+            sessions, cell_idx=i, signal_col='multi_day_dff',
+            global_ylim=True, place_fields=pf_by_date,
+        )
 
 #______________________________
 
