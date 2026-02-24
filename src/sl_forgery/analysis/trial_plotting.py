@@ -1,5 +1,5 @@
 """
-Trial Plotting Module
+Trial Plotting Module -- plots ind and avg place fields and compares trial types
 
 Place field and behavioral visualizations for trial-indexed calcium imaging data.
 Works with frame-level DataFrames from df_processing.py.
@@ -21,100 +21,8 @@ from df_processing import (
     compute_session_averages,
 )
 
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Poppins', 'Liberation Sans', 'DejaVu Sans']
-#'Helvetica', 'Arial', 'Poppins', 'Liberation Sans', 'DejaVu Sans'
+import plot_utils as pfmt  #pfmt == "plot formatting", better than putil (or pu) but we could change it
 
-
-# COLOR CONFIGURATION
-
-# Tableau 10 - colorblind friendly, fixed by cue ID across all experiments
-CUE_COLOR_PALETTE = [
-    '#4E79A7',  # Muted blue
-    '#F28E2B',  # Warm orange
-    '#59A14F',  # Forest green
-    '#E15759',  # Soft red
-    '#B07AA1',  # Dusty purple
-    '#9C755F',  # Warm brown
-    '#EDC948',  # Golden yellow
-    '#76B7B2',  # Dusty teal
-    '#FF9DA7',  # Soft pink
-    '#BAB0AC',  # Warm gray
-]
-
-SPECIAL_CUE_COLORS = {
-    0: '#D3D3D3',   # Light gray (gray zones)
-    255: '#2D2D2D', # Charcoal (dark periods)
-}
-
-SPECIAL_CUE_LABELS = {
-    0: 'Gray',
-    255: 'Dark',
-}
-
-# Trial type palettes: assigned by sorted order of trial_structures keys. Accommodates up to 5 trial types
-# Light = individual traces, Dark = session average
-TRIAL_TYPE_PALETTE = [
-    '#2E86AB',  # Blue
-    '#A23B72',  # Red/magenta
-    '#59A14F',  # Green
-    '#E15759',  # Coral
-    '#B07AA1',  # Purple
-]
-
-TRIAL_TYPE_PALETTE_DARK = [
-    '#0A4D68',  #Dark blue, etc
-    '#6B0848',
-    '#2D6A2E',
-    '#9E2B2D',
-    '#7A4E7A',
-]
-
-def get_trial_type_colors(config: dict) -> tuple[dict[str, str], dict[str, str]]:
-    """Auto-assign trial type colors from config trial_structures keys."""
-    trial_types = sorted(config.get('trial_structures', {}).keys())
-    colors = {}
-    colors_dark = {}
-    for i, tt in enumerate(trial_types):
-        colors[tt] = TRIAL_TYPE_PALETTE[i % len(TRIAL_TYPE_PALETTE)]
-        colors_dark[tt] = TRIAL_TYPE_PALETTE_DARK[i % len(TRIAL_TYPE_PALETTE_DARK)]
-    return colors, colors_dark
-
-TRIAL_TYPE_COLORS = {
-    'ABC': TRIAL_TYPE_PALETTE[0],
-    'ABDC': TRIAL_TYPE_PALETTE[1],
-}
-
-
-def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
-    """Get cue ID to color mapping."""
-    colors = SPECIAL_CUE_COLORS.copy()
-    
-    for cue_id in range(1, max_cue_id + 1):
-        idx = (cue_id - 1) % len(CUE_COLOR_PALETTE)
-        colors[cue_id] = CUE_COLOR_PALETTE[idx]
-    
-    # Allow config override
-    if config and 'cue_colors' in config:
-        colors.update(config['cue_colors'])
-    
-    return colors
-
-
-def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
-    """Get cue ID to label mapping (A, B, C, ...)."""
-    labels = SPECIAL_CUE_LABELS.copy()
-    
-    for cue_id in range(1, max_cue_id + 1):
-        if cue_id <= 26:
-            labels[cue_id] = chr(ord('A') + cue_id - 1)
-        else:
-            labels[cue_id] = 'A' + chr(ord('A') + (cue_id - 27) % 26)
-    
-    if config and 'cue_labels' in config:
-        labels.update(config['cue_labels'])
-    
-    return labels
 
 #Helper function for plotting
 
@@ -192,8 +100,7 @@ def plot_cue_regions(
     
     Parameters
     ----------
-    ax : Axes
-        Matplotlib axis
+    ax: Matplotlib axis
     cue_regions : dict
         {cue_id: (start_cm, end_cm)} from get_cue_regions()
     config : dict, optional
@@ -204,10 +111,10 @@ def plot_cue_regions(
         Shading transparency
     label_y : float
         Y position for labels (in axis transform coords)
-    fontscale
+    fontscale: Scale the fontsize to match the plot
     """
-    colors = get_cue_colors(config)
-    labels = get_cue_labels(config)
+    colors = pfmt.get_cue_colors(config)
+    labels = pfmt.get_cue_labels(config)
     
     for cue_id, region in cue_regions.items():
         color = colors.get(cue_id, '#CCCCCC')
@@ -360,7 +267,7 @@ def _plot_tuning_on_axis(
             trial_type is present, shades detected field regions for cell_idx.
 
     """
-    tt_colors, tt_colors_dark = get_trial_type_colors(config) if config else ({}, {})
+    tt_colors, tt_colors_dark = pfmt.get_trial_type_colors(config) if config else ({}, {})
     shared_params(ax, trial_type, config, show_cues, font_scale=font_scale)
 
     # Place field shading
@@ -375,7 +282,7 @@ def _plot_tuning_on_axis(
             ax.plot(x, signal, color=trial_color, linewidth=1,
                     alpha=alpha_trials, zorder=2)
 
-    # Session average ± SEM
+    # Session average ± SEM, with smoothing
     if trial_type in session_stats:
         avg = session_stats[trial_type]['session_avg'][:, cell_idx]
         sem = session_stats[trial_type]['session_sem'][:, cell_idx]
@@ -594,7 +501,7 @@ def plot_multiday_cell(
             fontsize=14, fontweight='bold',
         )
 
-        # Render to image buffer
+        # Render to image buffer (to help with speed)
         buf = io.BytesIO()
         tmp_fig.savefig(buf, format='png', dpi=150)
         plt.close(tmp_fig)
@@ -606,7 +513,7 @@ def plot_multiday_cell(
 
     print("done.")
 
-    # --- Display with instant arrow key switching ---
+    # Scroll through daily plots using the arrow keys; kind of slow
     fig, ax = plt.subplots(figsize=figsize)
     ax.axis('off')
     img_display = ax.imshow(day_images[0])
