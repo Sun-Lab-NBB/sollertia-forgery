@@ -17,7 +17,7 @@ Across-session (multiday):
 Standard analyses following Leutgeb et al. 2005, Colgin et al. 2008, Sun et al. 2025.
 """
 
-from itertools import combinations
+from itertools import combinations, combinations_with_replacement
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +27,6 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
 import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 from df_processing import (compute_session_averages, get_track_length, get_cue_regions)
 from trial_plotting import TRIAL_TYPE_COLORS, get_cue_colors, CUE_COLOR_PALETTE, SPECIAL_CUE_COLORS
 
@@ -717,7 +716,7 @@ def run_within_session_analysis(
 
     # Cross-track comparisons
     if len(trial_types) >= 2:
-        for type_a, type_b in combinations(trial_types, 2):
+        for type_a, type_b in combinations_with_replacement(trial_types, 2):
             print(f"\nCross-correlation: {type_a} vs {type_b}...")
 
             fig = plot_pv_correlation_across_position(
