@@ -28,8 +28,7 @@ from matplotlib.axes import Axes
 
 import sys
 from df_processing import (compute_session_averages, get_track_length, get_cue_regions)
-from trial_plotting import TRIAL_TYPE_COLORS, get_cue_colors, CUE_COLOR_PALETTE, SPECIAL_CUE_COLORS
-
+import plot_utils as pfmt
 
 
 
@@ -325,61 +324,6 @@ def _build_title(
     return ' — '.join(parts)
 
 
-def _add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2):
-    """Add light cue region shading to an axis. Use standard colors from trial_plotting.
-
-    Args:
-        ax: Matplotlib Axes.
-        config: Experiment configuration dict.
-        trial_type: Trial type for cue layout.
-        alpha: Shading transparency.
-    """
-    ts = config.get('trial_structures', {}).get(trial_type, {})
-    seq = ts.get('cue_sequence', [])
-    cue_widths = config.get('cue_map', {})
-    pos = 0.0
-    for cue_id in seq:
-        w = cue_widths[cue_id]
-        if cue_id != 0:
-            ax.axvspan(pos, pos + w, alpha=alpha, color='gray', zorder=0)
-        pos += w
-
-
-def _add_cue_bar(
-    ax: Axes,
-    config: dict,
-    trial_type: str,
-    axis: str = 'x',
-    bar_width: float = 0.02,
-):
-    """Add a color-coded cue bar along an axis edge of a heatmap.
-
-    Args:
-        ax: Matplotlib Axes.
-        config: Experiment configuration dict.
-        trial_type: Trial type for cue layout.
-        axis: 'x' for bottom bar, 'y' for left bar.
-        bar_width: Fraction of axis extent for bar thickness.
-    """
-    cue_colors = get_cue_colors(config)
-    ts = config.get('trial_structures', {}).get(trial_type, {})
-    seq = ts.get('cue_sequence', [])
-    cue_widths = config.get('cue_map', {})
-
-    pos = 0.0
-    for cue_id in seq:
-        w = cue_widths[cue_id]
-        color = cue_colors.get(cue_id, '#D3D3D3')
-
-        if axis == 'x':
-            ax.axvspan(pos, pos + w, ymin=0, ymax=bar_width,
-                       color=color, alpha=0.9, clip_on=False, zorder=10)
-        else:
-            ax.axhspan(pos, pos + w, xmin=0, xmax=bar_width,
-                       color=color, alpha=0.9, clip_on=False, zorder=10)
-        pos += w
-
-
 def plot_split_half(
     df: pl.DataFrame,
     config: dict,
@@ -417,7 +361,7 @@ def plot_split_half(
     corrs = per_cell_spatial_correlation(even_avg, odd_avg)
     valid = corrs[~np.isnan(corrs)]
 
-    color = TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
+    color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
     fig, ax = plt.subplots(figsize=figsize)
 
     ax.hist(valid, bins=np.linspace(-1, 1, 41), color=color, alpha=0.7,
@@ -502,7 +446,7 @@ def plot_pv_correlation_across_position(
                label='Non-shared region')
 
     if config:
-        _add_cue_shading(ax, config, type_a, alpha=0.05)
+        pfmt.add_cue_shading(ax, config, type_a, alpha=0.05)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
@@ -653,8 +597,8 @@ def plot_pv_correlation_matrix(
     ax.set_title(_build_title(f'PV Matrix — {type_a} vs {type_b}',
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
 
-    _add_cue_bar(ax, config, type_a, axis='x')
-    _add_cue_bar(ax, config, type_b, axis='y')
+    pfmt.add_cue_bar(ax, config, type_a, axis='x')
+    pfmt.add_cue_bar(ax, config, type_b, axis='y')
 
     plt.tight_layout()
 
@@ -982,7 +926,7 @@ def plot_multiday_per_cell_histogram(
     is_auto = day_x == day_y
     pair_label = f'{label_a} split-half' if is_auto else f'{label_a} vs {label_b}'
 
-    color = TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
+    color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.hist(valid, bins=np.linspace(-1, 1, 41), color=color, alpha=0.7,
@@ -1017,7 +961,7 @@ def plot_multiday_pv_across_position(
     sessions: dict[str, dict],
     trial_type: str,
     day_x: str | None = None,
-    day_2: str | None = None,
+    day_y: str | None = None,
     config: dict | None = None,
     signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
@@ -1069,13 +1013,13 @@ def plot_multiday_pv_across_position(
     is_auto = day_x == day_y
     pair_label = f'{label_a} split-half' if is_auto else f'{label_a} vs {label_b}'
 
-    color = TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
+    color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#2E86AB')
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.plot(x, pv, color=color, linewidth=2, zorder=4)
     ax.fill_between(x, pv, alpha=0.15, color=color, zorder=3)
 
-    _add_cue_shading(ax, config, trial_type, alpha=0.05)
+    pfmt.add_cue_shading(ax, config, trial_type, alpha=0.05)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
@@ -1170,8 +1114,8 @@ def plot_multiday_pv_correlation_matrix(
     ax.plot([0, max_len], [0, max_len], color='white', linewidth=0.8,
             linestyle='--', alpha=0.5)
 
-    _add_cue_bar(ax, config, trial_type, axis='x')
-    _add_cue_bar(ax, config, trial_type, axis='y')
+    pfmt.add_cue_bar(ax, config, trial_type, axis='x')
+    pfmt.add_cue_bar(ax, config, trial_type, axis='y')
 
     ax.set_xlabel(f'{trial_type} position (cm) — {label_a}', fontsize=11)
     ax.set_ylabel(f'{trial_type} position (cm) — {label_b}', fontsize=11)
@@ -1327,7 +1271,7 @@ def run_multiday_analysis(
         )
         figs[f'multiday_pv_{trial_type}_{label}'] = fig
 
-    # Day × day matrix summmary (all cells)
+    # Day × day matrix SUMMARY of session (all cells)
     if len(dates) >= 2:
         print(f"\n  Day × day matrix...")
         fig = plot_multiday_correlation_matrix_summary(
