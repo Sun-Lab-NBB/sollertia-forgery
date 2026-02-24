@@ -96,22 +96,16 @@ def plot_cue_regions(
     font_scale: float = 1.0,
 ):
     """
-    Add cue region shading to a matplotlib axis.
+    Add cue region shading to a matplotlib axis (cue bar)
     
-    Parameters
-    ----------
-    ax: Matplotlib axis
-    cue_regions : dict
-        {cue_id: (start_cm, end_cm)} from get_cue_regions()
-    config : dict, optional
-        Experiment config for custom colors/labels
-    show_labels : bool
-        Show cue labels at top
-    alpha : float
-        Shading transparency
-    label_y : float
-        Y position for labels (in axis transform coords)
-    fontscale: Scale the fontsize to match the plot
+    Args:
+        ax: Matplotlib axis
+        cue_regions: {cue_id: (start_cm, end_cm)} from get_cue_regions()
+        config: Experiment config for custom colors/labels
+        show_labels: Show cue labels at top
+        alpha: Shading transparency
+        label_y: Y position for labels (in axis transform coords)
+        fontscale: Scale the fontsize to match the plot
     """
     colors = pfmt.get_cue_colors(config)
     labels = pfmt.get_cue_labels(config)
@@ -201,16 +195,14 @@ def _get_trial_traces(
     bin_size_cm: int = 5,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
 
-    '''
+    """
     Extract per-trial spatial tuning traces for one cell from frame-level data.
     Calls compute_binned_average() on the frame-level DataFrame, grouping by [trial, distance_bin] to get per-trial binned traces.
 
     This is good for plotting single cells; if for some reason we wanted to plot 1/2 or all of the cells, this would
-    takes mins to run.  Instead call compute_session_averages() once and pass the result to the plotting function
+    take mins to run.  Instead call compute_session_averages() once and pass the result to the plotting function
 
-    Args
-
-    '''
+    """
     type_df = df.filter(pl.col('trial_type') == trial_type)
     if len(type_df) == 0:
         return []
@@ -415,7 +407,7 @@ def plot_multiday_cell(
     alpha_trials: float = 0.3,
     show_cues: bool = True,
 ) -> None:
-    '''
+    """
     Scroll through daily place field plots for one cell across sessions.
     Left/right arrow keys to navigate days. Works standalone and Jupyter.
 
@@ -435,7 +427,7 @@ def plot_multiday_cell(
 
     Returns:
         None (displays interactive figure)
-    '''
+    """
     import io
     from matplotlib.image import imread
 
@@ -553,7 +545,7 @@ def plot_multiday_comparison(
     place_fields: dict | None = None,
     show: bool = True,
 ) -> Figure:
-    '''
+    """
     Grid of place field plots: columns = days, rows = trial types.
     Shows session average ± SEM only (no individual trials).
     Y-axes shared within each row, scaled from average + SEM across all days.
@@ -571,7 +563,7 @@ def plot_multiday_comparison(
     Returns:
         fig: Figure.
 
-    '''
+    """
     dates = sorted(sessions.keys())
     if not dates:
         print("No sessions to plot.")
