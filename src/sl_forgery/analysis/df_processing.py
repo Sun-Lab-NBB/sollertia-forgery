@@ -26,6 +26,11 @@ import yaml
 def load_experiment_config(yaml_path: Path) -> dict:
     """Load experiment configuration from YAML file.
 
+    Args:
+        yaml_path: Path to the experiment configuration YAML file.
+
+    Returns:
+        Parsed configuration dictionary.
     """
     with open(yaml_path, 'r') as f:
         return yaml.safe_load(f)
@@ -34,6 +39,11 @@ def load_experiment_config(yaml_path: Path) -> dict:
 def load_session_data(yaml_path: Path) -> dict:
     """Load session metadata from session_data.yaml.
 
+    Args:
+        yaml_path: Path to the session_data.yaml file.
+
+    Returns:
+        Parsed session metadata dictionary.
     """
     with open('/source'/ yaml_path, 'r') as f:
         return yaml.safe_load(f)
@@ -72,12 +82,9 @@ def load_session_dir(mouse_dir: Path, date: str) -> tuple[dict, dict, Path]:
               experiment_configuration.yaml
             *.feather
 
-    Parameters
-    ----------
-    mouse_dir : Path
-        Mouse-level directory (e.g., 26/)
-    date : str
-        Session date (e.g., '2025-09-15')
+    Args:
+        mouse_dir: Mouse-level directory (e.g., 26/)
+        date: Session date (e.g., '2025-09-15')
 
     Returns (session_data.yaml, experiment_config.yaml, behavior_path)
     **This assumes that the feather file is in the same folder as the source data, which I dont thikn will be true?
@@ -115,9 +122,8 @@ def load_session_dir(mouse_dir: Path, date: str) -> tuple[dict, dict, Path]:
 # CONFIGURATIONS
 def get_track_length(config: dict,
                      trial_type: str) -> float | None:
-    """Get track length for a trial type from config.
+    """Get track length for a trial type from experiment config."""
 
-    """
     trial_structures = config.get('trial_structures', {})
     if trial_type in trial_structures:
         return trial_structures[trial_type].get('trial_length_cm')
@@ -131,10 +137,8 @@ def get_cue_regions(
     Extract cue region boundaries from the experiment config file.
     Boundaries are nominal (from config), not measured from encoder data.
 
-    Returns
-    -------
-    dict
-        {cue_id: [(start_cm, end_cm), ...]}
+    Returns:
+        regions: {cue_id: [(start_cm, end_cm), ...]}
     """
     trial_structure = config.get('trial_structures', {}).get(trial_type)
     if not trial_structure:
@@ -244,19 +248,13 @@ def fix_cue_offset(
     2. Reassigns them to the next trial
     3. Drops first trial (incomplete) and last trial (incomplete)
     
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Frame-based dataframe with cumulative distance
-    config : dict
-        Experiment configuration with trial_structures and cue offset information
-    system_state : str
-        Filter to this system state (default 'run')
+    Args:
+        df: Frame-based dataframe with cumulative distance
+        config: Experiment configuration.yaml with trial_structures and cue offset information
+        system_state: Filter to this system state (default 'run')
     
-    Returns
-    -------
-    pl.DataFrame
-        Frame-based dataframe with corrected trial #, trial type, and guided values
+    Returns:
+        active_df: Frame-based dataframe with corrected trial #, trial type, and guided values
     """
     # Get offset
     cue_offset_cm = config.get('cue_offset_cm', 0.0)
@@ -340,19 +338,13 @@ def add_position_and_bins(
         - distance_bin: integer bin index (0 to n_bins-1), clipped per trial type
         - nominal_track_length: from config, per trial type
     
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Frame-based dataframe after fix_cue_offset (must have 'trial', 'trial_type', 'distance_cm')
-    config : dict
-        Experiment config with trial structures and track lengths (for consistent bin counts)
-    bin_size_cm : int
-        Spatial bin size in cm
+    Args:
+        df: Frame-based dataframe after fix_cue_offset (must have 'trial', 'trial_type', 'distance_cm')
+        config: Experiment config with trial structures and track lengths (for consistent bin counts)
+        bin_size_cm: Spatial bin size in cm
     
-    Returns
-    -------
-    pl.DataFrame
-        Input df with position, distance_bin, and nominal_track_length columns added
+    Returns:
+        df: Input df with position, distance_bin, and nominal_track_length columns added
     """
     # Within-trial position: distance relative to first frame in each trial. Takes first distance_cm value for each
     # trial and subtracts it from all the other frames to normalize to nominal track length
@@ -399,20 +391,13 @@ def compute_binned_average(
     """
     Single-cell binned average using Polars. Fast — uses list.get().
 
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Frame-level df with signal_col and distance_bin columns
-    signal_col : str
-        Column containing neural signals (list of floats per frame)
-    cell_idx : int
-        Which cell to extract
-    group_cols : list of str, optional
-        Columns to group by (default: ['trial', 'distance_bin'])
+    Args:
+        df: Frame-level df with signal_col and distance_bin columns
+        signal_col: Column containing neural signals (list of floats per frame)
+        cell_idx: Which cell to extract
+        group_cols: Columns to group by (default: ['trial', 'distance_bin'])
 
-    Returns
-    -------
-    pl.DataFrame
+    Returns:
         Grouped df with group_cols + 'mean_signal' + 'trial_type' columns
     """
     if group_cols is None:
@@ -538,21 +523,15 @@ def process_session(
         - UMAP:         np.vstack(df['single_day_dff'].to_list())
 
     
-    Parameters
-    ----------
-    df : pl.DataFrame
-        Raw frame-based dataframe
-    exp_config : dict
-        Experiment configuration
-    bin_size_cm : int
-        Spatial bin size if binning is used, default is 5 cm; if None, no binning will be applied
-    system_state : str
-        Filter to this system state
+    Args:
+        df: Raw frame-based dataframe
+        exp_config: Experiment configuration (.yaml file)
+        bin_size_cm: Spatial bin size if binning is used, default is 5 cm; if None, no binning will be applied
+        system_state: Filter to this system state
     
-    Returns
-    -------
-    Tuple (pl.DataFrame, metadata.yaml)
-        Corrected frame-level df with position and distance_bin columns
+    Returns:
+        results: Corrected frame-level df with position and distance_bin columns
+        metadata: Information about what was modified in the new df
     """
     print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
     corrected_df = fix_cue_offset(df, exp_config, system_state=system_state)
@@ -585,12 +564,8 @@ def save_processed_session(
         output_path: Path,
         session_data: dict,
         metadata: dict):
-    """Save processed df as {animal_id}_{date}_processed.parquet + .meta.yaml.
+    """Save processed df as {animal_id}_{date}_processed.parquet + .meta.yaml."""
 
-    Parameters
-
-
-    """
     output_path = Path(output_path)
     prefix = get_session_prefix(session_data)
     parquet_path = output_path / f'{prefix}_processed.parquet'
@@ -611,13 +586,7 @@ def save_processed_session(
 
 
 def load_processed_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
-    """Load processed data from parquet, and metadata from yaml
-
-    Parameters
-    session_dir: Path
-
-
-    """
+    """Load processed data from parquet, and metadata from yaml"""
 
     path = Path(path)
     if path.suffix != '.parquet':
