@@ -66,7 +66,7 @@ _PLOTLY_AXIS = dict(visible=False, showbackground=False, showgrid=False, zerolin
 
 def prepare_umap_data(
         df: pl.DataFrame,
-        signal_column: str = "single_day_spikes",
+        signal_column: str = "single_day_dff",
         min_speed: float | None = 2.0,
         max_speed: float | None = None,
         cues_to_include: list[int] | None = None,
@@ -375,7 +375,7 @@ def plot_umap_2d(
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
     return fig
 
-
+#TODO impose cues on plots with legend so we know what we're actually looking at
 def plot_umap_2d_density(
         embedding: np.ndarray,
         metadata: dict[str, np.ndarray],
@@ -526,7 +526,7 @@ def plot_umap_3d_interactive(
         cue_colors = pfmt.get_cue_colors()
         for cue in unique_cues:
             mask = metadata['cue'] == cue
-            label = pfmt.get_cue_labels.get(int(cue), f'Cue {cue}')
+            label = pfmt.get_cue_labels().get(int(cue), f'Cue {cue}')
             color = cue_colors.get(int(cue), '#CCCCCC')
             fig.add_trace(go.Scatter3d(
                 x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
@@ -672,7 +672,7 @@ def plot_umap_3d_overlay_by_cue(
         base_colors = pfmt.get_cue_colors()
         tt_idx = trial_types.index(trial_type)
         factor = 1.3 - tt_idx * 0.3  # 1.3, 1.0, 0.7, ... for successive types esp if more than 1
-        cue_colors = {cid: pfmt.scale_color(c, lightness=factor) for cid, c in base_colors.items()}
+        cue_colors = {cid: pfmt.scale_color(c, factor=factor) for cid, c in base_colors.items()}
         suffix = f' ({trial_type})'
 
         for cue_id in sorted(set(cues)):
@@ -819,7 +819,7 @@ def plot_umap_3d_with_toggle(
                 colorscale=colorscale, cmin=0, cmax=track_len,
                 colorbar=cb_kwargs,
             ),
-            text=[pfmt.get_cue_labels.get(int(c), f'Cue {c}') for c in cues],
+            text=[pfmt.get_cue_labels().get(int(c), f'Cue {c}') for c in cues],
             hovertemplate=f'{trial_type}<br>Pos: %{{marker.color:.1f}} cm<br>Cue: %{{text}}<extra></extra>',
         ))
     n_position_traces = len(trial_types)
@@ -835,7 +835,7 @@ def plot_umap_3d_with_toggle(
         base_colors = pfmt.get_cue_colors()
         tt_idx = trial_types.index(trial_type)
         factor = 1.3 - tt_idx * 0.3
-        cue_colors = {cid: pfmt.scale_color(c, lightness=factor) for cid, c in base_colors.items()}
+        cue_colors = {cid: pfmt.scale_color(c, factor=factor) for cid, c in base_colors.items()}
         suffix = f' ({trial_type})'
 
         for cue_id in sorted(set(cues)):
@@ -843,7 +843,7 @@ def plot_umap_3d_with_toggle(
             if not cue_mask.any():
                 continue
             cue_int = int(cue_id)
-            label = pfmt.get_cue_labels.get(cue_int, f'Cue {cue_int}')
+            label = pfmt.get_cue_labels().get(cue_int, f'Cue {cue_int}')
             color = cue_colors.get(cue_int, '#CCCCCC')
         #TODO again consider fallback color
 
@@ -885,12 +885,12 @@ def plot_umap_3d_single_trial_trajectory(
         embedding: np.ndarray,
         metadata: dict[str, np.ndarray],
         trial_ids: list[int] | None = None,
-        n_trials_per_type: int = 2,
-        point_size: int = 2,
-        line_width: float = 1.5,
+        n_trials_per_type: int = 5,
+        point_size: int = 3,
+        line_width: float = 4,
         opacity: float = 0.7,
         show_background: bool = True,
-        background_opacity: float = 0.05,
+        background_opacity: float = 0.3,
         save_path: Path | None = None,
 ) -> 'go.Figure':
     """3D UMAP with lines connecting consecutive frames within individual trials.
@@ -939,13 +939,13 @@ def plot_umap_3d_single_trial_trajectory(
     ]
 
     fig = go.Figure()
-
+#TODO impose cues on background; the trials should increase in color or something so we can see the temporal relation
     # Background: all points faintly
     if show_background:
         fig.add_trace(go.Scatter3d(
             x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2],
             mode='markers', name='all frames',
-            marker=dict(size=1, opacity=background_opacity, color='#888888'),
+            marker=dict(size=2, opacity=background_opacity, color='#888888'),
             showlegend=False,
             hoverinfo='skip',
         ))
@@ -975,7 +975,7 @@ def plot_umap_3d_single_trial_trajectory(
                 'Pos: %{customdata[0]:.1f} cm<br>'
                 'Cue: %{text}<extra></extra>'
             ),
-            text=[pfmt.get_cue_labels.get(int(c), f'Cue {c}') for c in trial_cues],
+            text=[pfmt.get_cue_labels().get(int(c), f'Cue {c}') for c in trial_cues],
         ))
 
         # Mark trial start with a larger marker
@@ -997,7 +997,7 @@ def plot_umap_3d_single_trial_trajectory(
 
 
 # POSITION-MATCHED COMPARISON
-
+#TODO increase onshared dot size, also consider what the point of this is
 def plot_umap_3d_position_matched(
         embedding: np.ndarray,
         metadata: dict[str, np.ndarray],
