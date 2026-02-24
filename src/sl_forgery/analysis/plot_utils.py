@@ -10,6 +10,7 @@ rather than defining their own, unless needed.
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
+import colorsys
 
 
 # FONT CONFIGURATION
@@ -141,6 +142,31 @@ def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
         labels.update(config['cue_labels'])
 
     return labels
+
+
+def scale_color(hex_color: str, factor: float) -> str:
+    """Scale lightness of a hex color. factor > 1 = lighter, < 1 = darker.
+    Option to add other color properties like saturation, etc
+    Useful in UMAP plotting for comparing across trial types on the manifold"""
+    r, g, b = int(hex_color[1:3], 16) / 255, int(hex_color[3:5], 16) / 255, int(hex_color[5:7], 16) / 255
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    l = max(0, min(1, l * factor))
+    r, g, b = colorsys.hls_to_rgb(h, l, s)
+    return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
+
+
+def trial_type_colorscale(trial_type: str) -> list[list]:
+    """Generate a Plotly colorscale from white to the trial type's standard color.
+
+    Args:
+        trial_type: Trial type name (e.g. 'ABC').
+
+    Returns:
+        Plotly-compatible colorscale (list of [fraction, color] pairs).
+    """
+    color = TRIAL_TYPE_COLORS.get(trial_type, '#999999')
+
+    return [[0, '#FFFFFF'], [1, color]]
 
 
 # PLOT HELPERS
