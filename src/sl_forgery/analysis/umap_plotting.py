@@ -41,8 +41,6 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 import plot_utils as pfmt
 
 
@@ -66,7 +64,7 @@ _PLOTLY_AXIS = dict(visible=False, showbackground=False, showgrid=False, zerolin
 
 def prepare_umap_data(
         df: pl.DataFrame,
-        signal_column: str = "single_day_dff",
+        signal_column: str = "single_day_f",
         min_speed: float | None = 2.0,
         max_speed: float | None = None,
         cues_to_include: list[int] | None = None,
@@ -681,7 +679,7 @@ def plot_umap_3d_overlay_by_cue(
                 continue
             cue_int = int(cue_id)
             label = pfmt.get_cue_labels.get(cue_int, f'Cue {cue_int}')
-            color = pfmt.cue_colors.get(cue_int, '#D3D3D3')
+            color = cue_colors.get(cue_int, '#D3D3D3')
 #TODO this fallback might be an issue bc it's the same as the gray zone; need to rethink
 
             fig.add_trace(go.Scatter3d(
@@ -886,8 +884,9 @@ def plot_umap_3d_single_trial_trajectory(
         metadata: dict[str, np.ndarray],
         trial_ids: list[int] | None = None,
         n_trials_per_type: int = 5,
+        trial_selection: Literal['middle', 'spaced'] = 'spaced',
         point_size: int = 3,
-        line_width: float = 4,
+        line_width: float = 2.5,
         opacity: float = 0.7,
         show_background: bool = True,
         background_opacity: float = 0.3,
@@ -904,6 +903,9 @@ def plot_umap_3d_single_trial_trajectory(
         metadata: Metadata dict from prepare_umap_data.
         trial_ids: Specific trial numbers to plot. If None, auto-selects.
         n_trials_per_type: Trials per type if trial_ids is None.
+        trial_selection: How to pick trials when trial_ids is None.
+            'middle' — consecutive trials from the middle of the session.
+            'spaced' — evenly spaced across the full session.
         point_size: Marker size for trajectory points.
         line_width: Width of connecting lines.
         opacity: Trajectory opacity.
@@ -916,7 +918,6 @@ def plot_umap_3d_single_trial_trajectory(
     """
     _check_plotly()
 
-    unique_trials = np.unique(metadata['trial'])
     unique_types = np.unique(metadata['trial_type'])
 
     # Auto-select trials: pick n from middle of session for each type
@@ -925,30 +926,54 @@ def plot_umap_3d_single_trial_trajectory(
         for trial_type in unique_types:
             type_mask = metadata['trial_type'] == trial_type
             type_trials = np.unique(metadata['trial'][type_mask])
-            # Pick from the middle of the session (more stable behavior)
-            mid = len(type_trials) // 2
-            start = max(0, mid - n_trials_per_type // 2)
-            selected = type_trials[start:start + n_trials_per_type]
+            n_select = min(n_trials_per_type, len(type_trials))
+
+            if trial_selection == 'middle':
+                mid = len(type_trials) // 2
+                start = max(0, mid - n_select // 2)
+                selected = type_trials[start:start + n_select]
+            else:  # 'spaced'
+                indices = np.linspace(0, len(type_trials) - 1, n_select, dtype=int)
+                selected = type_trials[indices]
+
             trial_ids.extend(selected.tolist())
 
-    # Color palette for individual trials
-    trial_palette = [
-        '#FF6B6B', '#4ECDC4', '#45B7D1', '#FFA07A',
-        '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
-        '#F0B27A', '#82E0AA',
-    ]
-
     fig = go.Figure()
-#TODO impose cues on background; the trials should increase in color or something so we can see the temporal relation
-    # Background: all points faintly
+
+#TODO fix background coloration for cues (rn only D showing up)
+    # Background: all points faintly colored by cue for spatial context
     if show_background:
+        cue_colors_map = pfmt.get_cue_colors()
+        cue_labels = pfmt.get_cue_labels()
+        unique_cues = np.unique(metadata['cue'])
+        for cue_id in unique_cues:
+            cue_mask = metadata['cue'] == cue_id
+            cue_int = int(cue_id)
+            label = cue_labels.get(cue_int, f'Cue {cue_int}')
+            color = cue_colors_map.get(cue_int, '#CCCCCC')
         fig.add_trace(go.Scatter3d(
-            x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2],
-            mode='markers', name='all frames',
-            marker=dict(size=2, opacity=background_opacity, color='#888888'),
-            showlegend=False,
+            x=embedding[cue_mask, 0], y=embedding[cue_mask, 1], z=embedding[cue_mask, 2],
+            mode='markers', name=f'{label} (bg)',
+            marker=dict(size=2, opacity=background_opacity, color=color),
+            legendgroup='background',
+            legendgrouptitle_text='Cue zones',
+            showlegend=True,
             hoverinfo='skip',
         ))
+
+        # Sort trial_ids so color gradient matches temporal order
+        trial_ids = sorted(trial_ids)
+
+        # Sequential colorscale for early → late trials
+        n_trials = len(trial_ids)
+        if n_trials <= 1:
+            trial_colors = ['#FF6B6B']
+        else:
+            cmap = plt.cm.get_cmap('cool', n_trials)
+            trial_colors = [
+                f'#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}'
+                for c in [cmap(i / (n_trials - 1)) for i in range(n_trials)]
+            ]
 
     # Plot each selected trial as a connected line
     for i, trial_id in enumerate(trial_ids):
@@ -960,7 +985,7 @@ def plot_umap_3d_single_trial_trajectory(
         trial_pos = metadata['distance'][trial_mask]
         trial_cues = metadata['cue'][trial_mask]
         trial_type = metadata['trial_type'][trial_mask][0]
-        color = trial_palette[i % len(trial_palette)]
+        color = trial_colors[i]
 
         # Line connecting consecutive frames
         fig.add_trace(go.Scatter3d(
@@ -969,6 +994,8 @@ def plot_umap_3d_single_trial_trajectory(
             name=f'Trial {trial_id} ({trial_type})',
             line=dict(color=color, width=line_width),
             marker=dict(size=point_size, color=color, opacity=opacity),
+            legendgroup='trajectories',
+            legendgrouptitle_text='Trials (early→late)',
             customdata=np.column_stack([trial_pos, trial_cues]),
             hovertemplate=(
                 f'Trial {trial_id} ({trial_type})<br>'
@@ -988,9 +1015,9 @@ def plot_umap_3d_single_trial_trajectory(
         ))
 
     fig.update_layout(
-        title='UMAP: Single-Trial Trajectories (◆ = trial start)',
+        title='UMAP: Single-Trial Trajectories (◆ = start, cool→warm = early→late)',
         scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=1, y=0.9, itemsizing='constant'),
+        legend=dict(x=1, y=0.9, itemsizing='constant', groupclick='toggleitem'),
     )
     _show_and_save(fig, save_path)
     return fig
