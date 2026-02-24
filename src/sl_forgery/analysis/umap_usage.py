@@ -13,9 +13,6 @@ import numpy as np
 import polars as pl
 from matplotlib import pyplot as plt
 
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
-from df_processing import process_session, load_experiment_config, load_processed_session
 import umap_plotting as uplot
 
 
@@ -192,7 +189,7 @@ def example_umap_params_sweep(
 
     for n_neighbors in [5, 15, 30, 50]:
         embedding = uplot.compute_umap(neural_data, n_components=2, n_neighbors=n_neighbors)
-        fig = uplot.plot_umap_2d(embedding, metadata, strategy=ColoringStrategy.CUE,
+        fig = uplot.plot_umap_2d(embedding, metadata, strategy=uplot.ColoringStrategy.CUE,
                            title=f'n_neighbors={n_neighbors}')
         _save(fig, save_path, f'umap_nn_{n_neighbors}.png')
         plt.show()
@@ -228,8 +225,8 @@ if __name__ == "__main__":
     # example_compare_trial_types(data, save_path)
     #
     # # Quick one-liners
-    print("\n=== Quick plots ===")
-    example_quick_plots(data)
+    # print("\n=== Quick plots ===")
+    # example_quick_plots(data)
 
     # Single-trial trajectories
     print("\n=== Single-trial trajectories ===")

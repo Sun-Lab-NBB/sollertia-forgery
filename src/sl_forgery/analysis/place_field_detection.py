@@ -1,6 +1,6 @@
 """
 Place Field Detection Module
-Replaces the old place_1d module to work with our data structure
+Replaces the old place_1d module (Janelia) to work with our data structure
 
 Detects and validates place fields from frame-level calcium imaging data.
 Interfaces with df_processing.py — uses compute_session_averages() for binned tuning curves and frame-level data for

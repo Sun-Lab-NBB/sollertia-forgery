@@ -166,7 +166,7 @@ def trial_type_colorscale(trial_type: str) -> list[list]:
     """
     color = TRIAL_TYPE_COLORS.get(trial_type, '#999999')
 
-    return [[0, '#FFFFFF'], [1, color]]
+    return [[.2, color], [1, color]]
 
 
 # PLOT HELPERS
