@@ -9,21 +9,17 @@ Core workflow:
     2. compute_umap() - Neural array → embedding
     3. plot_umap_*() - Embedding + metadata → visualization
 
-Interactive Plotly functions (3D):
-    - plot_umap_3d_interactive: Single coloring strategy
-    - plot_umap_3d_overlay_trial_types: ABC=blue, ABDC=red position gradients
-    - plot_umap_3d_overlay_by_cue: Per-cue clickable legend
-    - plot_umap_3d_with_toggle: Dropdown to switch position ↔ cue
-    - plot_umap_3d_natural_separation: Light/dark cue colors by trial type
-    - compare_trial_types_umap_3d: One-liner convenience function
+Main plotting function:
+    - plot_umap: Handles 1D (matplotlib), 2D (matplotlib), 3D (interactive Plotly).
+        Supports all coloring strategies, trial-type toggles, dropdown to switch
+        between multiple strategies, clickable legends, hover info.
 
+Specialized plots (kept separate):
+    - plot_umap_2d_density: KDE contours per trial type
     - plot_umap_3d_single_trial_trajectory: Lines connecting consecutive frames within a trial
     - plot_umap_3d_position_matched: Side-by-side ABC vs ABDC for shared position range
-
-Static matplotlib (1D/2D):
-    - plot_umap_1d, plot_umap_2d
-    - plot_umap_2d_density: KDE contours per trial type
 """
+
 
 import numpy as np
 import polars as pl
@@ -169,23 +165,25 @@ def compute_umap(
         n_components: int = 3,
         n_neighbors: int = 50,
         min_dist: float = 0.1,
-        metric: str = 'euclidean',
+        metric: str = 'correlation',
         random_state: int = 42,
 ) -> np.ndarray:
-    """Compute UMAP embedding.
+    """Compute UMAP embedding. Check API for more param options.
+        https://umap-learn.readthedocs.io/en/latest/api.html
 
     Args:
         neural_data: Array of shape (n_frames, n_cells).
-        n_components: Embedding dimensions (1, 2, or 3).
-        n_neighbors: UMAP n_neighbors parameter.
-        min_dist: UMAP min_dist parameter.
-        metric: Distance metric for UMAP.
+        n_components: Embedding dimensions (1, 2, or 3). Though theoretically could go up to 100
+        n_neighbors: UMAP nearest neighbors parameter.  50 was used in OSM paper
+        min_dist: UMAP minimum distance between embedded points
+        metric: Distance metric for UMAP. Best options: 'correlation', 'euclidean', 'cosine'.
         random_state: Random seed for reproducibility.
 
     Returns:
         Embedding array of shape (n_frames, n_components).
     """
     print(f"Computing {n_components}D UMAP (n_neighbors={n_neighbors}, min_dist={min_dist})...")
+
     reducer = umap.UMAP(
         n_components=n_components,
         n_neighbors=n_neighbors,
@@ -194,12 +192,13 @@ def compute_umap(
         random_state=random_state,
         verbose=True,
     )
+    # Fit X into an embedded space and return the transformed output
     embedding = reducer.fit_transform(neural_data)
     print(f"Done! Embedding shape: {embedding.shape}")
     return embedding
 
 
-# COLOR HELPERS (for matplotlib plots)
+# MATPLOTLIB HELPERS
 
 def get_colors_for_strategy(
         strategy: ColoringStrategy,
@@ -262,8 +261,6 @@ def get_colors_for_strategy(
     return colors, color_info
 
 
-# MATPLOTLIB PLOTS (1D, 2D — static)
-
 def _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha=0.6, s=20):
     """Scatter for categorical strategies (1D or 2D)."""
     n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
@@ -282,97 +279,377 @@ def _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha=0.
     ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
 
 
-def plot_umap_1d(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        strategy: ColoringStrategy = ColoringStrategy.CUE,
-        cmap_name: str = 'viridis',
-        figsize: tuple[float, float] = (12, 2),
-        alpha: float = 0.6,
-        s: float = 20,
-) -> plt.Figure:
-    """Plot 1D UMAP embedding. Tbh interesting view of the session
+def _plot_matplotlib(embedding, metadata, strategy, title, save_path, alpha, s):
+    """Matplotlib path for 1D and 2D embeddings."""
+    n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
+    colors, color_info = get_colors_for_strategy(strategy, metadata)
 
-    Args:
-        embedding: 1D UMAP embedding array.
-        metadata: Dict with metadata arrays from prepare_umap_data.
-        strategy: Coloring strategy.
-        cmap_name: Colormap name for continuous variables.
-        figsize: Figure size.
-        alpha: Point transparency.
-        s: Point size.
+    if n_dims == 1:
+        fig, ax = plt.subplots(figsize=(12, 2))
+        y_vals = np.random.normal(0, 0.02, size=len(embedding))
+        if color_info['type'] == 'categorical':
+            _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
+        else:
+            ax.scatter(embedding, y_vals, c=colors, alpha=alpha, s=s)
+            plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
+                         ax=ax).set_label(color_info['label'])
+        ax.set_xlabel('UMAP 1')
+        ax.set_yticks([])
+        for spine in ['left', 'right', 'top']:
+            ax.spines[spine].set_visible(False)
+    else:  # 2D
+        fig, ax = plt.subplots(figsize=(10, 8))
+        if color_info['type'] == 'categorical':
+            _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
+        else:
+            ax.scatter(embedding[:, 0], embedding[:, 1], c=colors, alpha=alpha, s=s)
+            plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
+                         ax=ax, shrink=0.8).set_label(color_info.get('label', ''))
+        ax.set_xlabel('UMAP 1')
+        ax.set_ylabel('UMAP 2')
+        ax.set_aspect('equal')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
-    Returns:
-        Matplotlib figure.
-    """
-    colors, color_info = get_colors_for_strategy(strategy, metadata, cmap_name)
-    fig, ax = plt.subplots(figsize=figsize)
-
-    y_vals = np.random.normal(0, 0.02, size=len(embedding))
-    if color_info['type'] == 'categorical':
-        _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
-    else:
-        ax.scatter(embedding, y_vals, c=colors, alpha=alpha, s=s)
-        plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
-                     ax=ax).set_label(color_info['label'])
-
-    ax.set_xlabel('UMAP 1')
-    ax.set_yticks([])
-    for spine in ['left', 'right', 'top']:
-        ax.spines[spine].set_visible(False)
-    plt.tight_layout()
-    return fig
-
-
-def plot_umap_2d(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        strategy: ColoringStrategy = ColoringStrategy.CUE,
-        cmap_name: str = 'viridis',
-        figsize: tuple[float, float] = (10, 8),
-        alpha: float = 0.6,
-        s: float = 20,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> plt.Figure:
-    """Plot 2D UMAP with coloring strategy.
-
-    Args:
-        embedding: 2D UMAP embedding array.
-        metadata: Dict with metadata arrays from prepare_umap_data.
-        strategy: Coloring strategy.
-        cmap_name: Colormap name for continuous variables.
-        figsize: Figure size.
-        alpha: Point transparency.
-        s: Point size.
-        title: Optional plot title.
-        save_path: Optional path to save figure.
-
-    Returns:
-        Matplotlib figure.
-    """
-    colors, color_info = get_colors_for_strategy(strategy, metadata, cmap_name)
-    fig, ax = plt.subplots(figsize=figsize)
-
-    if color_info['type'] == 'categorical':
-        _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
-    else:
-        ax.scatter(embedding[:, 0], embedding[:, 1], c=colors, alpha=alpha, s=s)
-        plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
-                     ax=ax, shrink=0.8).set_label(color_info.get('label', ''))
-
-    ax.set_xlabel('UMAP 1')
-    ax.set_ylabel('UMAP 2')
     ax.set_title(title or f'UMAP — {strategy.value}')
-    ax.set_aspect('equal')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
     plt.tight_layout()
-
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
     return fig
 
+
+# PLOTLY HELPERS
+def _check_plotly():
+    """Raise ImportError if Plotly is not installed."""
+    if not HAS_PLOTLY:
+        raise ImportError("Plotly required. Install with: pip install plotly")
+
+
+def _show_and_save(fig: 'go.Figure', save_path: Path | None = None):
+    """Save to html/image and open in browser.
+
+    Args:
+        fig: Plotly figure.
+        save_path: If .html, writes interactive HTML; otherwise writes image.
+    """
+    if save_path:
+        save_path = Path(save_path)
+        if save_path.suffix == '.html':
+            fig.write_html(str(save_path))
+        else:
+            fig.write_image(str(save_path))
+    fig.show(renderer='browser')
+
+
+# PLOTLY 3D TRACE BUILDERS
+# Each builder returns a list of traces for ONE strategy view.
+# The caller handles visibility toggling across views.
+
+def _build_cue_traces(embedding, metadata, point_size, opacity):
+    """Build per-cue, per-trial-type traces with clickable legend.
+
+    Returns list of trace dicts and list of legend group names.
+    """
+    traces = []
+    trial_types = sorted(np.unique(metadata['trial_type']))
+    base_colors = pfmt.get_cue_colors()
+    cue_labels = pfmt.get_cue_labels()
+
+    for tt_idx, trial_type in enumerate(trial_types):
+        tt_mask = metadata['trial_type'] == trial_type
+        cues = metadata['cue'][tt_mask]
+        positions = metadata['distance'][tt_mask]
+        emb = embedding[tt_mask]
+
+        # Shade cues lighter/darker per trial type for visual distinction
+        factor = 1.3 - tt_idx * 0.3
+        cue_colors = {cid: pfmt.scale_color(c, factor=factor)
+                      for cid, c in base_colors.items()}
+
+        suffix = f' ({trial_type})' if len(trial_types) > 1 else ''
+
+        for cue_id in sorted(set(cues)):
+            cue_mask = cues == cue_id
+            if not cue_mask.any():
+                continue
+            cue_int = int(cue_id)
+            label = cue_labels.get(cue_int, f'Cue {cue_int}')
+            color = cue_colors.get(cue_int, '#AAAAAA')
+
+            traces.append(go.Scatter3d(
+                x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
+                mode='markers', name=f'{label}{suffix}',
+                marker=dict(size=point_size, opacity=opacity, color=color),
+                showlegend=(cue_int != 0),  # hide gray zone from legend
+                customdata=np.column_stack([
+                    positions[cue_mask],
+                    metadata['trial'][tt_mask][cue_mask],
+                ]),
+                hovertemplate=(
+                    f'{trial_type}<br>'
+                    'Pos: %{customdata[0]:.1f} cm<br>'
+                    f'Cue: {label}<br>'
+                    'Trial: %{customdata[1]:.0f}'
+                    '<extra></extra>'
+                ),
+            ))
+    return traces
+
+
+def _build_position_traces(embedding, metadata, point_size, opacity):
+    """Build per-trial-type traces colored by track position (separate colorscales).
+
+    Returns list of traces.
+    """
+    traces = []
+    trial_types = sorted(np.unique(metadata['trial_type']))
+    cue_labels = pfmt.get_cue_labels()
+
+    for i, trial_type in enumerate(trial_types):
+        tt_mask = metadata['trial_type'] == trial_type
+        positions = metadata['distance'][tt_mask]
+        cues = metadata['cue'][tt_mask]
+        track_len = metadata['track_length'][tt_mask].max()
+        colorscale = pfmt.trial_type_colorscale(trial_type)
+
+        # Stagger colorbars so they don't overlap
+        cb_x = 1.0 + i * 0.15
+        cb_y = 0.75 - i * 0.45
+
+        traces.append(go.Scatter3d(
+            x=embedding[tt_mask, 0], y=embedding[tt_mask, 1], z=embedding[tt_mask, 2],
+            mode='markers', name=f'{trial_type}',
+            marker=dict(
+                size=point_size, opacity=opacity, color=positions,
+                colorscale=colorscale, cmin=0, cmax=track_len,
+                colorbar=dict(title=f'{trial_type} pos (cm)', len=0.4,
+                              x=cb_x, y=cb_y),
+            ),
+            text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
+            customdata=metadata['trial'][tt_mask],
+            hovertemplate=(
+                f'{trial_type}<br>'
+                'Pos: %{marker.color:.1f} cm<br>'
+                'Cue: %{text}<br>'
+                'Trial: %{customdata:.0f}'
+                '<extra></extra>'
+            ),
+        ))
+    return traces
+
+
+def _build_trial_type_traces(embedding, metadata, point_size, opacity):
+    """Build per-trial-type traces with flat color per type. Clickable legend."""
+    traces = []
+    cue_labels = pfmt.get_cue_labels()
+
+    for trial_type in sorted(np.unique(metadata['trial_type'])):
+        tt_mask = metadata['trial_type'] == trial_type
+        color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#D3D3D3')
+        positions = metadata['distance'][tt_mask]
+        cues = metadata['cue'][tt_mask]
+
+        traces.append(go.Scatter3d(
+            x=embedding[tt_mask, 0], y=embedding[tt_mask, 1], z=embedding[tt_mask, 2],
+            mode='markers', name=str(trial_type),
+            marker=dict(size=point_size, opacity=opacity, color=color),
+            customdata=np.column_stack([positions, metadata['trial'][tt_mask]]),
+            text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
+            hovertemplate=(
+                f'{trial_type}<br>'
+                'Pos: %{customdata[0]:.1f} cm<br>'
+                'Cue: %{text}<br>'
+                'Trial: %{customdata[1]:.0f}'
+                '<extra></extra>'
+            ),
+        ))
+    return traces
+
+
+def _build_continuous_traces(embedding, metadata, strategy, point_size, opacity):
+    """Build a single trace with continuous colorscale (speed, session progress)."""
+    if strategy == ColoringStrategy.SPEED:
+        values, cscale, label = metadata['speed'], 'Plasma', 'Speed (cm/s)'
+        cmin, cmax = values.min(), values.max()
+    elif strategy == ColoringStrategy.SESSION_PROGRESS:
+        values, cscale, label = metadata['trial'], 'YlOrBr', 'Session Progress'
+        cmin, cmax = values.min(), values.max()
+    else:
+        raise ValueError(f"No continuous builder for {strategy}")
+
+    cue_labels = pfmt.get_cue_labels()
+    cues = metadata['cue']
+    positions = metadata['distance']
+
+    trace = go.Scatter3d(
+        x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2],
+        mode='markers', showlegend=False, name=label,
+        marker=dict(
+            size=point_size, opacity=opacity, color=values,
+            colorscale=cscale, cmin=cmin, cmax=cmax,
+            colorbar=dict(title=label),
+        ),
+        customdata=np.column_stack([positions, metadata['trial']]),
+        text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
+        hovertemplate=(
+            'Pos: %{customdata[0]:.1f} cm<br>'
+            'Cue: %{text}<br>'
+            'Trial: %{customdata[1]:.0f}<br>'
+            f'{label}: %{{marker.color:.1f}}'
+            '<extra></extra>'
+        ),
+    )
+    return [trace]
+
+
+def _get_trace_builder(strategy: ColoringStrategy):
+    """Return the appropriate trace builder for a strategy."""
+    if strategy == ColoringStrategy.CUE:
+        return _build_cue_traces
+    elif strategy == ColoringStrategy.POSITION:
+        return _build_position_traces
+    elif strategy == ColoringStrategy.TRIAL_TYPE:
+        return _build_trial_type_traces
+    elif strategy in (ColoringStrategy.SPEED, ColoringStrategy.SESSION_PROGRESS):
+        return lambda emb, meta, ps, op: _build_continuous_traces(emb, meta, strategy, ps, op)
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+
+# -------------------------------------------
+# MAIN PLOTTING FUNCTION
+def plot_umap(
+        embedding: np.ndarray,
+        metadata: dict[str, np.ndarray],
+        strategy: str | ColoringStrategy | list[str | ColoringStrategy] = 'cue',
+        point_size: int | float = 2,
+        opacity: float = 0.7,
+        title: str | None = None,
+        save_path: Path | str | None = None,
+        alpha: float = 0.6,
+        s: float = 20,
+):
+    """Unified UMAP visualization.
+
+    Handles 1D, 2D (matplotlib) and 3D (interactive Plotly) embeddings.
+
+    For 3D plots:
+        - Single strategy → one coloring mode with clickable legend / colorbar.
+        - List of strategies → dropdown menu to switch between coloring modes.
+        - All 3D plots include hover info (position, cue, trial, speed).
+        - Categorical strategies (cue, trial_type) get clickable legend entries.
+        - The 'position' strategy shows per-trial-type colorscales.
+
+    Args:
+        embedding: UMAP embedding of shape (n_frames, n_components).
+        metadata: Dict with arrays from prepare_umap_data.
+        strategy: Coloring strategy or list of strategies for toggle dropdown.
+            Valid values: 'cue', 'position', 'trial_type', 'speed',
+            'session_progress', or their ColoringStrategy equivalents.
+            Pass a list (e.g. ['cue', 'position']) for a dropdown toggle.
+        point_size: Marker size (Plotly for 3D, ignored for matplotlib — use `s`).
+        opacity: Marker opacity (Plotly for 3D, use `alpha` for matplotlib).
+        title: Plot title. Auto-generated if None.
+        save_path: Save as .html (interactive) or image format. None to skip.
+        alpha: Matplotlib scatter alpha (1D/2D only).
+        s: Matplotlib scatter point size (1D/2D only).
+
+    Returns:
+        tuple of (figure, plot_info) where:
+            - figure: plt.Figure (1D/2D) or go.Figure (3D)
+            - plot_info: dict with 'n_components', 'strategy', 'n_frames',
+              'n_trial_types', 'trial_types'
+    """
+    n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
+
+    # Normalize strategy input
+    if not isinstance(strategy, list):
+        strategy = [strategy]
+    strategies = [ColoringStrategy(s) if isinstance(s, str) else s for s in strategy]
+
+    # Build plot_info return dict
+    trial_types = sorted(np.unique(metadata['trial_type']).tolist())
+    plot_info = {
+        'n_components': n_dims,
+        'strategy': [s_.value for s_ in strategies],
+        'n_frames': len(embedding),
+        'n_trial_types': len(trial_types),
+        'trial_types': trial_types,
+    }
+
+    # ── 1D / 2D: matplotlib ──────────────────────────────────────────────
+    if n_dims <= 2:
+        if len(strategies) > 1:
+            print("Warning: Multiple strategies only supported for 3D. Using first strategy.")
+        fig = _plot_matplotlib(embedding, metadata, strategies[0], title, save_path, alpha, s)
+        return fig, plot_info
+
+    # ── 3D: Plotly ───────────────────────────────────────────────────────
+    _check_plotly()
+    fig = go.Figure()
+
+    if len(strategies) == 1:
+        # Single strategy — just add traces directly
+        builder = _get_trace_builder(strategies[0])
+        traces = builder(embedding, metadata, point_size, opacity)
+        for t in traces:
+            fig.add_trace(t)
+
+        auto_title = f'3D UMAP — {strategies[0].value}'
+
+    else:
+        # Multiple strategies — build all trace groups, wire up dropdown
+        trace_groups = []  # list of (strategy, traces)
+        for strat in strategies:
+            builder = _get_trace_builder(strat)
+            traces = builder(embedding, metadata, point_size, opacity)
+            trace_groups.append((strat, traces))
+
+        # Add all traces, only first group visible
+        for group_idx, (strat, traces) in enumerate(trace_groups):
+            for t in traces:
+                t.visible = (group_idx == 0)
+                fig.add_trace(t)
+
+        # Build visibility arrays for each dropdown button
+        buttons = []
+        offset = 0
+        group_sizes = [len(traces) for _, traces in trace_groups]
+        total_traces = sum(group_sizes)
+
+        for group_idx, (strat, traces) in enumerate(trace_groups):
+            vis = [False] * total_traces
+            start = sum(group_sizes[:group_idx])
+            for j in range(group_sizes[group_idx]):
+                vis[start + j] = True
+            buttons.append(dict(
+                label=f'Color by {strat.value.replace("_", " ").title()}',
+                method='update',
+                args=[{'visible': vis}],
+            ))
+
+        fig.update_layout(
+            updatemenus=[dict(
+                type='dropdown', direction='down',
+                x=0.0, y=1.15, xanchor='left', yanchor='top',
+                buttons=buttons,
+            )],
+        )
+
+        labels = [s_.value for s_ in strategies]
+        auto_title = f'3D UMAP — toggle: {" / ".join(labels)}'
+
+    fig.update_layout(
+        title=title or auto_title,
+        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
+        legend=dict(x=1, y=0.9, itemsizing='constant', groupclick='toggleitem'),
+    )
+    _show_and_save(fig, save_path)
+    return fig, plot_info
+
+# SPECLIAIZED PLOTS ---------------------
+
+# 2D PLOT WITH KDE OVERLAY
 #TODO impose cues on plots with legend so we know what we're actually looking at
 def plot_umap_2d_density(
         embedding: np.ndarray,
@@ -466,419 +743,7 @@ def plot_umap_2d_density(
     return fig
 
 
-# PLOTLY 3D PLOTS (interactive)
-
-def _check_plotly():
-    """Raise ImportError if Plotly is not installed."""
-    if not HAS_PLOTLY:
-        raise ImportError("Plotly required. Install with: pip install plotly")
-
-
-def _show_and_save(fig: 'go.Figure', save_path: Path | None = None):
-    """Save to html/image and open in browser.
-
-    Args:
-        fig: Plotly figure.
-        save_path: If .html, writes interactive HTML; otherwise writes image.
-    """
-    if save_path:
-        save_path = Path(save_path)
-        if save_path.suffix == '.html':
-            fig.write_html(str(save_path))
-        else:
-            fig.write_image(str(save_path))
-    fig.show(renderer='browser')
-
-
-def plot_umap_3d_interactive(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        strategy: ColoringStrategy = ColoringStrategy.CUE,
-        point_size: int = 2,
-        opacity: float = 0.8,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> 'go.Figure':
-    """Interactive 3D UMAP with Plotly — single coloring strategy (position, trial, etc)
-    Great basic plot for exploration
-
-    Clickable legend for categorical, colorbar for continuous.
-
-    Args:
-        embedding: 3D UMAP embedding array.
-        metadata: Dict with metadata arrays from prepare_umap_data.
-        strategy: Coloring strategy.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        title: Plot title.
-        save_path: Save as .html or image.
-
-    Returns:
-        Plotly figure.
-    """
-    _check_plotly()
-    fig = go.Figure()
-
-    if strategy == ColoringStrategy.CUE:
-        unique_cues = np.unique(metadata['cue'])
-        cue_colors = pfmt.get_cue_colors()
-        for cue in unique_cues:
-            mask = metadata['cue'] == cue
-            label = pfmt.get_cue_labels().get(int(cue), f'Cue {cue}')
-            color = cue_colors.get(int(cue), '#CCCCCC')
-            fig.add_trace(go.Scatter3d(
-                x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
-                mode='markers', name=label,
-                marker=dict(size=point_size, opacity=opacity, color=color),
-                hovertemplate=f'{label}<br>Pos: %{{customdata:.1f}} cm<extra></extra>',
-                customdata=metadata['distance'][mask],
-            ))
-
-    elif strategy == ColoringStrategy.TRIAL_TYPE:
-        for trial_type in np.unique(metadata['trial_type']):
-            mask = metadata['trial_type'] == trial_type
-            color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#D3D3D3')
-            fig.add_trace(go.Scatter3d(
-                x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
-                mode='markers', name=str(trial_type),
-                marker=dict(size=point_size, opacity=opacity, color=color),
-            ))
-
-    else:
-        # Continuous strategies
-        if strategy == ColoringStrategy.POSITION:
-            values, cscale, label = metadata['distance'], 'Twilight', 'Position (cm)'
-            cmin, cmax = 0, metadata['track_length'].max()
-        elif strategy == ColoringStrategy.SPEED:
-            values, cscale, label = metadata['speed'], 'Plasma', 'Speed (cm/s)'
-            cmin, cmax = values.min(), values.max()
-        elif strategy == ColoringStrategy.SESSION_PROGRESS:
-            values, cscale, label = metadata['trial'], 'YlOrBr', 'Session Progress'
-            cmin, cmax = values.min(), values.max()
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-
-        fig.add_trace(go.Scatter3d(
-            x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2],
-            mode='markers', showlegend=False,
-            marker=dict(
-                size=point_size, opacity=opacity, color=values,
-                colorscale=cscale, cmin=cmin, cmax=cmax,
-                colorbar=dict(title=label),
-            ),
-        ))
-
-    fig.update_layout(
-        title=title or f'3D UMAP — {strategy.value}',
-        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=1, y=0.9, itemsizing='constant'),
-    )
-    _show_and_save(fig, save_path)
-    return fig
-
-
-def plot_umap_3d_overlay_trial_types(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        point_size: int = 2,
-        opacity: float = 0.7,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> 'go.Figure':
-    """3D UMAP with trial types colored by track position on separate color scale
-
-    Dual colorbars show position within each trial type.
-
-    Args:
-        embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        title: Plot title.
-        save_path: Save path.
-
-    Returns:
-        Plotly figure.
-    """
-    _check_plotly()
-    fig = go.Figure()
-
-    trial_types = sorted(np.unique(metadata['trial_type']))
-    for i, trial_type in enumerate(trial_types):
-        mask = metadata['trial_type'] == trial_type
-        positions = metadata['distance'][mask]
-        track_len = metadata['track_length'][mask].max()
-
-        fig.add_trace(go.Scatter3d(
-            x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
-            mode='markers', name=f'{trial_type} trials',
-            marker=dict(
-                size=point_size, opacity=opacity, color=positions,
-                colorscale=pfmt.trial_type_colorscale(trial_type), cmin=0, cmax=track_len,
-                colorbar=dict(
-                    title=f'{trial_type} (cm)', len=0.4,
-                    x=1.0 + i * 0.15,
-                    y=0.75 - i * 0.5 if i < 2 else 0.5,
-                ),
-            ),
-            hovertemplate=f'{trial_type}<br>Position: %{{marker.color:.1f}} cm<extra></extra>',
-        ))
-
-    fig.update_layout(
-        title=title or f'UMAP: Position by Trial Type ({", ".join(trial_types)})',
-        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=0, y=1),
-    )
-    _show_and_save(fig, save_path)
-    return fig
-
-
-def plot_umap_3d_overlay_by_cue(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        point_size: int = 2,
-        opacity: float = 0.7,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> 'go.Figure':
-    """3D UMAP colored by cue, split by trial type (light=ABC, dark=ABDC).
-
-    Click legend to isolate individual cues.
-
-    Args:
-        embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        title: Plot title.
-        save_path: Save path.
-
-    Returns:
-        Plotly figure.
-    """
-    _check_plotly()
-    fig = go.Figure()
-
-    trial_types = sorted(np.unique(metadata['trial_type']))
-    for trial_type in trial_types:
-        mask = metadata['trial_type'] == trial_type
-        cues = metadata['cue'][mask]
-        positions = metadata['distance'][mask]
-        emb = embedding[mask]
-        type = metadata['trial_type'][mask]
-
-        base_colors = pfmt.get_cue_colors()
-        tt_idx = trial_types.index(trial_type)
-        factor = 1.3 - tt_idx * 0.3  # 1.3, 1.0, 0.7, ... for successive types esp if more than 1
-        cue_colors = {cid: pfmt.scale_color(c, factor=factor) for cid, c in base_colors.items()}
-        suffix = f' ({trial_type})'
-
-        for cue_id in sorted(set(cues)):
-            cue_mask = cues == cue_id
-            if not cue_mask.any():
-                continue
-            cue_int = int(cue_id)
-            label = pfmt.get_cue_labels.get(cue_int, f'Cue {cue_int}')
-            color = cue_colors.get(cue_int, '#D3D3D3')
-#TODO this fallback might be an issue bc it's the same as the gray zone; need to rethink
-
-            fig.add_trace(go.Scatter3d(
-                x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
-                mode='markers', name=f'{label}{suffix}',
-                marker=dict(size=point_size, opacity=opacity, color=color),
-                showlegend=bool(cue_int != 0),
-                customdata=positions[cue_mask],
-                hovertemplate=f'{trial_type}<br>Pos: %{{customdata:.1f}} cm<br>Cue: {label}<extra></extra>',
-            ))
-#TODO need to adjust for additional trial types
-    fig.update_layout(
-        title=title or f'UMAP: Cue Overlay ({", ".join(trial_types)})',
-        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=1, y=0.9, font=dict(size=10), itemsizing='constant'),
-    )
-    _show_and_save(fig, save_path)
-    return fig
-
-
-def plot_umap_3d_natural_separation(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        point_size: int = 2,
-        opacity: float = 0.7,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> 'go.Figure':
-    """Natural manifold positions — see if trial types separate in UMAP space.
-
-        Uses lightness-scaled cue colors to visually distinguish trial types.
-
-    Args:
-        embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        title: Plot title.
-        save_path: Save path.
-
-    Returns:
-        Plotly figure.
-    """
-    _check_plotly()
-
-    fig = go.Figure()
-    trial_types = sorted(np.unique(metadata['trial_type']))
-
-    for trial_type in trial_types:
-        mask = metadata['trial_type'] == trial_type
-        cues = metadata['cue'][mask]
-        positions = metadata['distance'][mask]
-        emb = embedding[mask]
-
-        base_colors = pfmt.get_cue_colors()
-        tt_idx = trial_types.index(trial_type)
-        factor = 1.3 - tt_idx * 0.3
-        cue_colors = {cid: pfmt.scale_color(c, lightness=factor) for cid, c in base_colors.items()}
-        suffix = f' ({trial_type})'
-
-        for cue_id in sorted(set(cues)):
-            cue_mask = cues == cue_id
-            if not cue_mask.any():
-                continue
-            cue_int = int(cue_id)
-            label = pfmt.get_cue_labels.get(cue_int, f'Cue {cue_int}')
-            color = cue_colors.get(cue_int, '#CCCCCC')
-        #TODO is this right? ^
-
-            fig.add_trace(go.Scatter3d(
-                x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
-                mode='markers', name=f'{label}{suffix}',
-                marker=dict(size=point_size, opacity=opacity, color=color),
-                showlegend=bool(cue_int != 0),
-                customdata=positions[cue_mask],
-                hovertemplate=f'{trial_type}<br>Cue: {label}<br>Pos: %{{customdata:.1f}} cm<extra></extra>',
-            ))
-
-    fig.update_layout(
-        title=title or 'UMAP: Natural Manifold Positions (click legend to isolate)',
-        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=1, y=0.9, itemsizing='constant', font=dict(size=10)),
-    )
-    _show_and_save(fig, save_path)
-    return fig
-
-
-def plot_umap_3d_with_toggle(
-        embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
-        point_size: int = 2,
-        opacity: float = 0.7,
-        title: str | None = None,
-        save_path: Path | None = None,
-) -> 'go.Figure':
-    """3D UMAP with dropdown to toggle between POSITION and CUE coloring.
-
-    Position mode: Each trial type gets its own colorscale.
-    Cue mode: Per-cue per-trial-type traces with clickable legend.
-
-    Args:
-        embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        title: Plot title.
-        save_path: Save path.
-
-    Returns:
-        Plotly figure.
-    """
-    _check_plotly()
-    fig = go.Figure()
-    trial_types = sorted(np.unique(metadata['trial_type']))
-
-    # Position traces (visible by default)
-    for trial_type in trial_types:
-        mask = metadata['trial_type'] == trial_type
-        positions = metadata['distance'][mask]
-        cues = metadata['cue'][mask]
-        track_len = metadata['track_length'][mask].max()
-        colorscale = pfmt.trial_type_colorscale(trial_type)
-
-        cb_kwargs = dict(
-            title=f'{trial_type} pos (cm)', len=0.4,
-            x=1.0 if trial_type == trial_types[0] else 1.15,
-            y=0.75 if trial_type == trial_types[0] else 0.25,
-        ) if trial_type in [trial_types[0], trial_types[-1]] else None
-
-        fig.add_trace(go.Scatter3d(
-            x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
-            mode='markers', name=trial_type, visible=True,
-            marker=dict(
-                size=point_size, opacity=opacity, color=positions,
-                colorscale=colorscale, cmin=0, cmax=track_len,
-                colorbar=cb_kwargs,
-            ),
-            text=[pfmt.get_cue_labels().get(int(c), f'Cue {c}') for c in cues],
-            hovertemplate=f'{trial_type}<br>Pos: %{{marker.color:.1f}} cm<br>Cue: %{{text}}<extra></extra>',
-        ))
-    n_position_traces = len(trial_types)
-
-    # Cue traces (hidden by default)
-    cue_trace_count = 0
-    for trial_type in trial_types:
-        mask = metadata['trial_type'] == trial_type
-        cues = metadata['cue'][mask]
-        positions = metadata['distance'][mask]
-        emb = embedding[mask]
-
-        base_colors = pfmt.get_cue_colors()
-        tt_idx = trial_types.index(trial_type)
-        factor = 1.3 - tt_idx * 0.3
-        cue_colors = {cid: pfmt.scale_color(c, factor=factor) for cid, c in base_colors.items()}
-        suffix = f' ({trial_type})'
-
-        for cue_id in sorted(set(cues)):
-            cue_mask = cues == cue_id
-            if not cue_mask.any():
-                continue
-            cue_int = int(cue_id)
-            label = pfmt.get_cue_labels().get(cue_int, f'Cue {cue_int}')
-            color = cue_colors.get(cue_int, '#CCCCCC')
-        #TODO again consider fallback color
-
-            fig.add_trace(go.Scatter3d(
-                x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
-                mode='markers', name=f'{label}{suffix}', visible=False,
-                marker=dict(size=point_size, opacity=opacity, color=color),
-                showlegend=bool(cue_int != 0),
-                customdata=positions[cue_mask],
-                hovertemplate=f'{trial_type}<br>Pos: %{{customdata:.1f}} cm<br>Cue: {label}<extra></extra>',
-            ))
-            cue_trace_count += 1
-
-    # Dropdown toggle
-    pos_visible = [True] * n_position_traces + [False] * cue_trace_count
-    cue_visible = [False] * n_position_traces + [True] * cue_trace_count
-
-    fig.update_layout(
-        updatemenus=[dict(
-            type="dropdown", direction="down", x=0.0, y=1.15, xanchor="left", yanchor="top",
-            buttons=[
-                dict(label="Color by Position", method="update", args=[{"visible": pos_visible}]),
-                dict(label="Color by Cue", method="update", args=[{"visible": cue_visible}]),
-            ],
-        )],
-        title=title or f'UMAP: {" vs ".join(trial_types)} (dropdown to toggle)',
-        scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
-        legend=dict(x=1, y=0.9, itemsizing='constant'),
-    )
-#TODO again need to adjust for multiple trial types
-    _show_and_save(fig, save_path)
-    return fig
-
-
-
-# SINGLE-TRIAL TRAJECTORY
-
+# SINGLE-TRIAL TRAJECTORY OVERLAY UMAP
 def plot_umap_3d_single_trial_trajectory(
         embedding: np.ndarray,
         metadata: dict[str, np.ndarray],
@@ -951,29 +816,29 @@ def plot_umap_3d_single_trial_trajectory(
             cue_int = int(cue_id)
             label = cue_labels.get(cue_int, f'Cue {cue_int}')
             color = cue_colors_map.get(cue_int, '#CCCCCC')
-        fig.add_trace(go.Scatter3d(
-            x=embedding[cue_mask, 0], y=embedding[cue_mask, 1], z=embedding[cue_mask, 2],
-            mode='markers', name=f'{label} (bg)',
-            marker=dict(size=2, opacity=background_opacity, color=color),
-            legendgroup='background',
-            legendgrouptitle_text='Cue zones',
-            showlegend=True,
-            hoverinfo='skip',
-        ))
+    fig.add_trace(go.Scatter3d(
+        x=embedding[cue_mask, 0], y=embedding[cue_mask, 1], z=embedding[cue_mask, 2],
+        mode='markers', name=f'{label} (bg)',
+        marker=dict(size=2, opacity=background_opacity, color=color),
+        legendgroup='background',
+        legendgrouptitle_text='Cue zones',
+        showlegend=True,
+        hoverinfo='skip',
+    ))
 
-        # Sort trial_ids so color gradient matches temporal order
-        trial_ids = sorted(trial_ids)
+    # Sort trial_ids so color gradient matches temporal order
+    trial_ids = sorted(trial_ids)
 
-        # Sequential colorscale for early → late trials
-        n_trials = len(trial_ids)
-        if n_trials <= 1:
-            trial_colors = ['#FF6B6B']
-        else:
-            cmap = plt.cm.get_cmap('cool', n_trials)
-            trial_colors = [
-                f'#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}'
-                for c in [cmap(i / (n_trials - 1)) for i in range(n_trials)]
-            ]
+    # Sequential colorscale for early → late trials
+    n_trials = len(trial_ids)
+    if n_trials <= 1:
+        trial_colors = ['#FF6B6B']
+    else:
+        cmap = plt.cm.get_cmap('cool', n_trials)
+        trial_colors = [
+            f'#{int(c[0] * 255):02x}{int(c[1] * 255):02x}{int(c[2] * 255):02x}'
+            for c in [cmap(i / (n_trials - 1)) for i in range(n_trials)]
+        ]
 
     # Plot each selected trial as a connected line
     for i, trial_id in enumerate(trial_ids):
@@ -1108,116 +973,7 @@ def plot_umap_3d_position_matched(
     _show_and_save(fig, save_path)
     return fig
 
-
-# CONVENIENCE FUNCTIONS
-
-def compare_trial_types_umap_3d(
-        df: pl.DataFrame,
-        signal_column: str = "single_day_spikes",
-        color_by: Literal['position', 'cue', 'toggle', 'natural'] = 'toggle',
-        n_neighbors: int = 50,
-        min_dist: float = 0.1,
-        min_speed: float = 2.0,
-        max_frames: int | None = None,
-        point_size: int = 2,
-        opacity: float = 0.7,
-        save_path: Path | None = None,
-) -> tuple['go.Figure', np.ndarray, dict[str, np.ndarray]]:
-    """One-liner: frame_df → 3D UMAP comparing trial types.
-
-    Args:
-        df: Frame-level data (after process_session).
-        signal_column: Column with neural signals.
-        color_by: 'position' (per-type colorscale gradient), 'cue' (per-cue
-            clickable legend), 'toggle' (dropdown to switch), 'natural'
-            (see if trial types naturally separate).
-        n_neighbors: UMAP n_neighbors.
-        min_dist: UMAP min_dist.
-        min_speed: Filter out slow frames.
-        max_frames: Subsample for speed.
-        point_size: Plotly marker size.
-        opacity: Marker opacity.
-        save_path: Save as .html or image.
-
-    Returns:
-        Tuple of (plotly_figure, embedding, metadata).
-    """
-    neural_data, metadata = prepare_umap_data(
-        df, signal_column=signal_column, min_speed=min_speed, max_frames=max_frames,
-    )
-
-    trial_types = np.unique(metadata['trial_type'])
-    print(f"Trial types: {list(trial_types)}")
-    for trial_type in trial_types:
-        print(f"  {trial_type}: {(metadata['trial_type'] == trial_type).sum()} frames")
-
-    embedding = compute_umap(neural_data, n_components=3, n_neighbors=n_neighbors, min_dist=min_dist)
-
-    plot_fn = {
-        'position': plot_umap_3d_overlay_trial_types,
-        'cue': plot_umap_3d_overlay_by_cue,
-        'toggle': plot_umap_3d_with_toggle,
-        'natural': plot_umap_3d_natural_separation,
-    }
-    fig = plot_fn[color_by](embedding, metadata, point_size, opacity, save_path=save_path)
-    return fig, embedding, metadata
+###############
+#Deleted the natural separation function bc it didn't tell much, btu might be useful again if I do the merging project
 
 
-def quick_umap_plot(
-        df: pl.DataFrame,
-        signal_column: str = "single_day_spikes",
-        n_components: int = 3,
-        strategy: ColoringStrategy = ColoringStrategy.CUE,
-        interactive: bool = True,
-        n_neighbors: int = 50,
-        min_dist: float = 0.1,
-        min_speed: float = 2.0,
-        max_frames: int | None = None,
-        save_path: Path | None = None,
-        **prep_kwargs,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """One-liner: frame_df → UMAP visualization.
-
-    Args:
-        df: Frame-level data (after process_session).
-        signal_column: Neural signal column.
-        n_components: Embedding dimensions (1, 2, or 3).
-        strategy: Coloring strategy.
-        interactive: Use Plotly for 3D (True) or matplotlib (False).
-        n_neighbors: UMAP n_neighbors.
-        min_dist: UMAP min_dist.
-        min_speed: Speed filter.
-        max_frames: Subsample limit.
-        save_path: Save output.
-        **prep_kwargs: Additional args to prepare_umap_data.
-
-    Returns:
-        Tuple of (embedding, metadata).
-    """
-    neural_data, metadata = prepare_umap_data(
-        df, signal_column=signal_column, min_speed=min_speed,
-        max_frames=max_frames, **prep_kwargs,
-    )
-    embedding = compute_umap(neural_data, n_components, n_neighbors, min_dist)
-
-    if n_components == 1:
-        plot_umap_1d(embedding, metadata, strategy)
-        plt.show()
-    elif n_components == 2:
-        plot_umap_2d(embedding, metadata, strategy, save_path=save_path)
-        plt.show()
-    elif n_components == 3 and interactive and HAS_PLOTLY:
-        plot_umap_3d_interactive(embedding, metadata, strategy, save_path=save_path)
-    elif n_components == 3:
-        # Fallback to matplotlib 3D
-        colors, _ = get_colors_for_strategy(strategy, metadata)
-        fig = plt.figure(figsize=(12, 10))
-        ax = fig.add_subplot(111, projection='3d')
-        ax.scatter(embedding[:, 0], embedding[:, 1], embedding[:, 2], c=colors, s=2, alpha=0.6)
-        ax.set_xlabel('UMAP 1')
-        ax.set_ylabel('UMAP 2')
-        ax.set_zlabel('UMAP 3')
-        plt.tight_layout()
-        plt.show()
-
-    return embedding, metadata
