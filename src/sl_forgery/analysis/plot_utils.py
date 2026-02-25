@@ -116,9 +116,17 @@ def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
     if config and 'cue_colors' in config:
         colors.update(config['cue_colors'])
 
+    # Map string cue IDs (e.g. 'A', 'B') to the same colors as their int IDs
+    if config:
+        cue_id_map = config.get('cue_id_map', {})
+        for int_id, str_id in cue_id_map.items():
+            if int_id in colors:
+                colors[str_id] = colors[int_id]
+
     return colors
 
 
+#TODO replace this with the cue_id column, though the gray zones needs better names
 def get_cue_labels(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
     """Get cue ID to label mapping (A, B, C, ...).
 
@@ -220,6 +228,7 @@ def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2)
         trial_type: Trial type for cue layout.
         alpha: Shading transparency.
     """
+    cue_colors = get_cue_colors(config)
     ts = config.get('trial_structures', {}).get(trial_type, {})
     seq = ts.get('cue_sequence', [])
     cue_widths = config.get('cue_map', {})
