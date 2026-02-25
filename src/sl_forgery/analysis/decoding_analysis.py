@@ -1,7 +1,7 @@
 """
 Prospective decoding analysis for hippocampal place cell data.
 
-Asks: can we predict the upcoming trial type from neural activity at shared
+Asks: can we predict the upcoming trial type or cue from neural activity at shared
 track positions (before the physical divergence)?
 
 Analyses:
@@ -12,7 +12,7 @@ Analyses:
        regions, with subplot grid for multiple cues.
     4. Splitter cell index — per-cell selectivity at shared positions.
 
-All functions operate on frame-level pl.DataFrames from df_processing.
+All functions operate on frame-level, post-processed pl.DataFrames from df_processing.
 
 Dependencies: numpy, polars, scikit-learn, matplotlib, df_processing,
               cross_correlation_1, trial_plotting.
@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
-from df_processing import compute_session_averages, get_track_length
+from df_processing import compute_session_averages, get_track_length, _get_bin_size
 from plot_utils import build_title, add_cue_shading, add_cue_bar
 from cross_correlation_1 import (
     get_mean_tuning_curves, per_cell_spatial_correlation,
@@ -44,6 +44,8 @@ def _get_bin_range_for_cue(
     df: pl.DataFrame,
     cue_id: int | str,
     trial_type: str | None = None,
+    config: dict | None = None,
+    metadata: dict | None = None,
 ) -> tuple[int, int]:
     """Get (start_bin, end_bin) for a cue region from the DataFrame.
 
@@ -57,20 +59,44 @@ def _get_bin_range_for_cue(
             str (e.g. 'B', '0a') uses 'cue_id' column.
         trial_type: Trial type to filter to. If None, auto-selects first
             trial type containing this cue.
+        config:Experiment configuration dict. Uses cue_map for exact boundaries.
+        metadata: Processed df metadata, contains bin size used
 
     Returns:
         Tuple of (start_bin_inclusive, end_bin_exclusive).
     """
-    cue_col = 'cue' if isinstance(cue_id, int) else 'cue_id'
-
+    # Resolve trial_type if not provided
     if trial_type is None:
-        # Find first trial type containing this cue
+        cue_col = 'cue' if isinstance(cue_id, int) else 'cue_id'
         match = df.filter(pl.col(cue_col) == cue_id)
         if len(match) == 0:
             available = df[cue_col].unique().sort().to_list()
             raise ValueError(f"Cue {cue_id!r} not found. Available: {available}")
         trial_type = match['trial_type'].first()
 
+    # Config path: exact boundaries
+    if config is not None:
+        from df_processing import get_cue_regions
+        bin_size_cm = _get_bin_size(df, metadata)
+        if bin_size_cm is None:
+            raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
+        regions = get_cue_regions(config, trial_type)
+        # regions: {cue_int_id: [(start_cm, end_cm), ...]}
+        # Match by int key directly, or by str via cue_id_map
+        lookup_key = cue_id
+        if isinstance(cue_id, str):
+            # Reverse-lookup: find int key whose str label matches
+            cue_id_map = config.get('cue_id_map', {})
+            for int_id, str_id in cue_id_map.items():
+                if str_id == cue_id:
+                    lookup_key = int_id
+                    break
+        if lookup_key in regions:
+            # Use first occurrence (for cue 0, caller should specify which via trial_type)
+            start_cm, end_cm = regions[lookup_key][0]
+            return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+
+    cue_col = 'cue' if isinstance(cue_id, int) else 'cue_id'
     sub = df.filter(
         (pl.col('trial_type') == trial_type)
         & (pl.col(cue_col) == cue_id)
@@ -399,7 +425,7 @@ def trial_pv_distance(
     trial_types = sorted(df['trial_type'].unique().to_list())
     type_a, type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue)
+    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config=config)
 
     pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range)
     pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range)
@@ -520,7 +546,7 @@ def region_correlation(
     if bin_range is None:
         if cue_id is None:
             raise ValueError("Provide either cue_id or bin_range")
-        bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue)
+        bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config)
 
     bin_size_cm = _get_bin_size(df, metadata)
     if bin_size_cm is None:
@@ -739,7 +765,7 @@ def splitter_cell_index(
     trial_types = sorted(df['trial_type'].unique().to_list())
     type_a, type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, trial_type_for_cue, cue_id)
+    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config)
 
     pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range)
     pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range)
