@@ -1325,12 +1325,13 @@ if __name__ == "__main__":
     prefix = get_session_prefix(session_data)
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
+
     figs = run_within_session_analysis(data, config, signal_col='multi_day_dff', show=True)
 
 
     # ── Multiday analysis ──
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False,
+        mouse_dir, date_range=('2025-08-10', '2025-09-24'), auto_process=False,
     )
 
     # All pairs + autocorrelation for ABC

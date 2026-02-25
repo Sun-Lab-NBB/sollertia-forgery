@@ -983,6 +983,8 @@ if __name__ == '__main__':
     from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
                                process_session, load_multiday_sessions)
 
+#TODO actualyl this is importing the binned data; call process_session with bins=None for all of the frames
+# and still have the cue alignment
     #import the cue-aligned data
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
     date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
@@ -1010,6 +1012,6 @@ if __name__ == '__main__':
     # plot
     fig, meta = plot_umap(embedding, metadata, strategy=['trial_type', 'cue']) #basic plot, 3D
 
-    fig= plot_umap_3d_single_trial_trajectory(embedding, metadata) # individual rtial plot
+    fig1= plot_umap_3d_single_trial_trajectory(embedding, metadata) # individual rtial plot
 
-    fig = plot_umap_2d_density(embedding, metadata) # 2D with KDE 
+    fig2D = plot_umap_2d_density(embedding, metadata) # 2D with KDE

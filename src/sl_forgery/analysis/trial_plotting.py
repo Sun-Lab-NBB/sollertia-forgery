@@ -728,22 +728,13 @@ if __name__ == "__main__":
     # ***DO NOT GET MISTAKEN
 
     #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
-    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False)
+    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-08-10', '2025-09-24'), auto_process=False)
     ###FTR I added a fake file into the 9-12 day bc again the server is slow.  It is really from 9-03
 
     #filter for place cells
     multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
     # for i in multiday.union_indices[:1]:
     #     plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff', global_ylim=True)
-
-    # Debug: why is cell 1 missing ABC field on 09-12?
-    day_result = multiday.per_day['2025-09-12']
-    pf_abc = day_result.fields['ABC']
-    print(f"Cell 1 ABC: has_field={pf_abc.has_place_field[1]}")
-    print(f"  binF peak: {pf_abc.binF[1].max():.2f}")
-    print(f"  binF mean: {pf_abc.binF[1].mean():.2f}")
-    print(f"  peak/mean ratio: {pf_abc.binF[1].max() / pf_abc.binF[1].mean():.2f}")
-
 
 
     # Build the place_fields dict from per-day results
@@ -752,7 +743,7 @@ if __name__ == "__main__":
     for i in multiday.union_indices[:5]:
         plot_multiday_comparison(
             sessions, cell_idx=i, signal_col='multi_day_dff',
-            global_ylim=True, place_fields=pf_by_date,
+            global_ylim=True, place_fields=None,
         )
 
 #______________________________
