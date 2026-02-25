@@ -164,6 +164,7 @@ def get_cue_regions(
 
     return regions
 
+
 def _infer_bin_size(mouse_dir: Path, default: int = 5) -> int:
     """
     Infer bin_size_cm from existing processed session metadata in this mouse directory.
@@ -240,7 +241,7 @@ def fix_cue_offset(
 ) -> pl.DataFrame:
     """
     Reassign frames across trial boundaries to correct for cue offset. Realigns to cue values instead, location is
-    preserved
+    preserved. Required.
     
     The VR starts 10cm into the track, so trial boundaries in the data
     don't align with visual cue positions. This function:
@@ -325,6 +326,7 @@ def fix_cue_offset(
     return active_df
 
 
+
 def add_position_and_bins(
     df: pl.DataFrame,
     config: dict = None,
@@ -337,7 +339,7 @@ def add_position_and_bins(
         - position: distance_cm normalized to 0 at each trial start
         - distance_bin: integer bin index (0 to n_bins-1), clipped per trial type
         - nominal_track_length: from config, per trial type
-    
+
     Args:
         df: Frame-based dataframe after fix_cue_offset (must have 'trial', 'trial_type', 'distance_cm')
         config: Experiment config with trial structures and track lengths (for consistent bin counts)
@@ -379,6 +381,58 @@ def add_position_and_bins(
     )
 
     return df
+
+
+def add_cue_zone_id(
+        df: pl.DataFrame,
+        cue_names: list[int, str] | None = None,
+) -> pl.DataFrame:
+    """
+    Add string-based cue zone identifiers.
+
+    Maps numeric cues to letters (1→A, 2→B, etc.) and labels gray zones (cue 0)
+    by the preceding cue's letter lowercase (0 after A → "0a"). Can be modified to use different cue names for a
+    different task (like 'star', 'triangle', etc; gray zones become 0star, 0triangle).
+    Can change this in the future if the whole thing isn't working (or we want the names to be gray1, gray2, etc)
+
+    Args:
+        df: Frame-based dataframe with 'cue' column
+
+    Returns:
+        df with new 'cue_id' column
+
+    Raises:
+        ValueError: If a cue value in the data has no corresponding name
+    """
+    if cue_names is None:
+        cue_names = [chr(64 + i) for i in range(1, 27)]  # A-Z
+
+    # Build map: cue 1 → cue_names[0], cue 2 → cue_names[1], etc.
+    cue_to_name = {i + 1: name for i, name in enumerate(cue_names)}
+
+    # Check that all non-zero cues in data have a mapping
+    cues_in_data = set(df.filter(pl.col("cue") != 0)["cue"].unique().to_list())
+    missing = cues_in_data - set(cue_to_name.keys())
+    if missing:
+        raise ValueError(f"No names provided for cue(s): {sorted(missing)}")
+
+    cues = df["cue"].to_list()
+    cue_ids = []
+    prev_name = None
+
+    for c in cues:
+        if c != 0:
+            prev_name = cue_to_name[c]
+            cue_ids.append(prev_name)
+        else:
+            cue_ids.append(f"0{prev_name.lower()}")
+
+    df1 = df.with_columns(pl.Series("cue_id", cue_ids))
+    with pl.Config(tbl_cols=100, tbl_rows=50):
+        print(df1)
+
+    return df.with_columns(pl.Series("cue_id", cue_ids))
+
 
 # AVERAGING
 
@@ -538,6 +592,10 @@ def process_session(
     
     print("\nStep 2: Normalizing position and adding bins...")
     result = add_position_and_bins(corrected_df, exp_config, bin_size_cm=bin_size_cm)
+
+
+    print("\nStep 3: Adding additional columns...")
+    result = add_cue_zone_id(result)
 
     n_trials = result['trial'].n_unique()
     trial_types = result['trial_type'].unique().to_list()
