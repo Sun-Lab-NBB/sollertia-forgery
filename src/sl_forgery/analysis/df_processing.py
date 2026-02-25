@@ -153,7 +153,7 @@ def get_cue_regions(
     for cue_id in cue_sequence:
         if cue_id not in cue_widths:
             raise KeyError(f"Cue ID {cue_id} not found in cue_map config")
-        width = cue_widths.get(cue_id, 30.0)
+        width = cue_widths[cue_id]
 
         if cue_id not in regions:
             regions[cue_id] = [(position, position + width)]
@@ -165,10 +165,45 @@ def get_cue_regions(
     return regions
 
 
+def _get_bin_size(
+    df: pl.DataFrame,
+    metadata: dict | None = None,
+) -> int | None:
+    """Get spatial bin size in cm from metadata or derive from DataFrame.
+
+    Args:
+        df: Frame-level DataFrame with distance_bin and position columns.
+        metadata: Optional metadata dict with 'bin_size_cm' key.
+
+    Returns:
+        Bin size in cm, or None if distance_bin column doesn't exist. Which I dont think is ever the case? It's just
+        populated with 'null's
+    """
+    if metadata and 'bin_size_cm' in metadata:
+        return metadata['bin_size_cm']
+
+    if 'distance_bin' not in df.columns:
+        return None
+
+    # Get median position at bin 0 vs bin 1 within a single trial
+    first_trial = df['trial'].first()
+    sub = df.filter(
+        (pl.col('trial') == first_trial)
+        & (pl.col('distance_bin').is_in([0, 1]))
+    ).group_by('distance_bin').agg(
+        pl.col('position').median()
+    ).sort('distance_bin')
+
+    if len(sub) < 2:
+        return None
+
+    return round(sub['position'][1] - sub['position'][0])
+
+
 def _infer_bin_size(mouse_dir: Path, default: int = 5) -> int:
     """
     Infer bin_size_cm from existing processed session metadata in this mouse directory.
-    Searches for .meta.yaml files and reads bin_size_cm from the most recent one. This is used during automatic
+    Searches for .yaml files and reads bin_size_cm from the most recent one. This is used during automatic
     session processing, to ensure that bin size stays consistent across days.
 
     Args:
@@ -178,7 +213,7 @@ def _infer_bin_size(mouse_dir: Path, default: int = 5) -> int:
     Returns:
         bin_size_cm: int
     """
-    meta_files = sorted(mouse_dir.rglob('*_processed.meta.yaml'), reverse=True)
+    meta_files = sorted(mouse_dir.rglob('*_processed.yaml'), reverse=True)
     for mf in meta_files:
         with open(mf, 'r') as f:
             meta = yaml.safe_load(f)
@@ -326,7 +361,6 @@ def fix_cue_offset(
     return active_df
 
 
-
 def add_position_and_bins(
     df: pl.DataFrame,
     config: dict = None,
@@ -426,10 +460,6 @@ def add_cue_zone_id(
             cue_ids.append(prev_name)
         else:
             cue_ids.append(f"0{prev_name.lower()}")
-
-    df1 = df.with_columns(pl.Series("cue_id", cue_ids))
-    with pl.Config(tbl_cols=100, tbl_rows=50):
-        print(df1)
 
     return df.with_columns(pl.Series("cue_id", cue_ids))
 
@@ -590,11 +620,10 @@ def process_session(
     print("Step 1: Fixing cue offset...")       #this could be an optional argument if we don't want to do this
     corrected_df = fix_cue_offset(df, exp_config, system_state=system_state)
     
-    print("\nStep 2: Normalizing position and adding bins...")
+    print("\nStep 2: Normalizing position...")
     result = add_position_and_bins(corrected_df, exp_config, bin_size_cm=bin_size_cm)
 
-
-    print("\nStep 3: Adding additional columns...")
+    print("\nStep 3: Adding additional columns...")  # may want more than cue ids in the future, add here
     result = add_cue_zone_id(result)
 
     n_trials = result['trial'].n_unique()
@@ -635,7 +664,7 @@ def save_processed_session(
     metadata['session_name'] = session_data['session_name']
     metadata['project_name'] = session_data.get('project_name')
 
-    metadata_path = output_path.with_suffix('.yaml')
+    metadata_path = output_path / f'{prefix}_processed.yaml'
     with open(metadata_path, 'w') as f:
         yaml.dump(metadata, f, default_flow_style=False)
 
@@ -652,7 +681,7 @@ def load_processed_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
 
     df = pl.read_parquet(path)
 
-    meta_path = path.with_suffix('.meta.yaml')
+    meta_path = path.with_suffix('.yaml')
     metadata = None
     if meta_path.exists():
         with open(meta_path, 'r') as f:
@@ -730,7 +759,7 @@ def load_multiday_sessions(
 if __name__ == "__main__":
     #load all the data
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    date = '2025-09-15'   #the .feather file in this is actually from 9-16, too slow to download at my house
+    date = '2025-09-12'   #the .feather file in this is actually from 9-16, too slow to download at my house
 
     session_data, experiment_config, behavior_path = load_session_dir(mouse_dir, date)
     behavior_df = pl.read_ipc(behavior_path)
@@ -743,8 +772,8 @@ if __name__ == "__main__":
     prefix = get_session_prefix(session_data)
     frame_df, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
-    #check
-    print(frame_df.columns)
-    with pl.Config(tbl_cols=100, tbl_rows=100, set_tbl_hide_dataframe_shape=False):
-        print(frame_df.head(100))
+    # #check
+    # print(frame_df.columns)
+    # with pl.Config(tbl_cols=100, tbl_rows=100, set_tbl_hide_dataframe_shape=False):
+    #     print(frame_df.head(100))
 
