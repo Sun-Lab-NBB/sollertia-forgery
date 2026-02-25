@@ -315,6 +315,7 @@ def _plot_matplotlib(embedding, metadata, strategy, title, save_path, alpha, s):
     plt.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.show()
     return fig
 
 
@@ -362,7 +363,7 @@ def _build_cue_traces(embedding, metadata, point_size, opacity):
         emb = embedding[tt_mask]
 
         # Shade cues lighter/darker per trial type for visual distinction
-        factor = 1.3 - tt_idx * 0.3
+        factor = 1.3 - tt_idx * 0.4
         cue_colors = {cid: pfmt.scale_color(c, factor=factor)
                       for cid, c in base_colors.items()}
 
@@ -816,15 +817,16 @@ def plot_umap_3d_single_trial_trajectory(
             cue_int = int(cue_id)
             label = cue_labels.get(cue_int, f'Cue {cue_int}')
             color = cue_colors_map.get(cue_int, '#CCCCCC')
-    fig.add_trace(go.Scatter3d(
-        x=embedding[cue_mask, 0], y=embedding[cue_mask, 1], z=embedding[cue_mask, 2],
-        mode='markers', name=f'{label} (bg)',
-        marker=dict(size=2, opacity=background_opacity, color=color),
-        legendgroup='background',
-        legendgrouptitle_text='Cue zones',
-        showlegend=True,
-        hoverinfo='skip',
-    ))
+
+            fig.add_trace(go.Scatter3d(
+                x=embedding[cue_mask, 0], y=embedding[cue_mask, 1], z=embedding[cue_mask, 2],
+                mode='markers', name=f'{label}',
+                marker=dict(size=2, opacity=background_opacity, color=color),
+                legendgroup='background',
+                legendgrouptitle_text='Cue zones',
+                showlegend=True,
+                hoverinfo='skip',
+            ))
 
     # Sort trial_ids so color gradient matches temporal order
     trial_ids = sorted(trial_ids)
@@ -977,3 +979,37 @@ def plot_umap_3d_position_matched(
 #Deleted the natural separation function bc it didn't tell much, btu might be useful again if I do the merging project
 
 
+if __name__ == '__main__':
+    from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
+                               process_session, load_multiday_sessions)
+
+    #import the cue-aligned data
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
+
+    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
+    prefix = get_session_prefix(session_data)
+    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
+
+    if parquet_path.exists():
+        print(f"Loading: {parquet_path}")
+        data, metadata = load_processed_session(parquet_path)
+    else:
+        print("No processed file found, processing from raw...")  # OR if you want to process the session with
+        # other system states, bc the default is to process by run
+        behavior_df = pl.read_ipc(behavior_path)
+        data, metadata = process_session(behavior_df, config)
+        save_processed_session(data, behavior_path.parent, session_data, metadata)
+
+    save_path = None  # Set to a Path to save figures
+
+    # prepare data
+    neural_data, metadata = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
+    # compute umap
+    embedding = compute_umap(neural_data, n_components=3, n_neighbors=30)
+    # plot
+    fig, meta = plot_umap(embedding, metadata, strategy=['trial_type', 'cue']) #basic plot, 3D
+
+    fig= plot_umap_3d_single_trial_trajectory(embedding, metadata) # individual rtial plot
+
+    fig = plot_umap_2d_density(embedding, metadata) # 2D with KDE 
