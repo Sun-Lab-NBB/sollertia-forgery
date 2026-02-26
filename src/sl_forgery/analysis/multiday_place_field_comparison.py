@@ -123,7 +123,7 @@ def _get_primary_field_centers(
 def classify_cell_recruitment(
     pf_results: dict[str, PlaceFieldResult],
     trial_type: str,
-    field_center_tolerance_cm: float = 10.0,
+    field_center_tolerance_cm: float | None = None,
 ) -> dict[str, dict]:
     """Classify each cell's place field fate across consecutive day pairs.
 
@@ -173,17 +173,19 @@ def classify_cell_recruitment(
         center_shift = center_b - center_a  # NaN where either is NaN
 
         categories = np.full(n_cells, 'absent', dtype='<U10')
+        both = has_field_a & has_field_b
+        shift_dist = np.abs(center_shift)
+
+        categories[has_field_a & ~has_field_b] = 'lost'
+        categories[~has_field_a & has_field_b] = 'gained'
+
         if field_center_tolerance_cm is not None:
             categories[both & (shift_dist <= field_center_tolerance_cm)] = 'stable'
             categories[both & (shift_dist > field_center_tolerance_cm)] = 'shifted'
         else:
             categories[both] = 'both'
-        shift_dist = np.abs(center_shift)
 
-        categories[has_field_a & ~has_field_b] = 'lost'
-        categories[~has_field_a & has_field_b] = 'gained'
-        categories[both & (shift_dist <= field_center_tolerance_cm)] = 'stable'
-        categories[both & (shift_dist > field_center_tolerance_cm)] = 'shifted'
+        shift_dist = np.abs(center_shift)
 
         pair_key = f'{day_a}_vs_{day_b}'
         results[pair_key] = {
@@ -583,9 +585,12 @@ def plot_abc_stability_comparison(
 ) -> Figure:
     """Compare ABC tuning stability: pre-pre vs pre-post vs post-post.
     *Where pre==pre-extension, and post==post-extension.
+    If ABC representations are disrupted by ABDC introduction, the pre-post median r should be lower than the
+    pre-pre median r (which represents baseline drift). If pre-post ≈ pre-pre, then the introduction didn't cause
+    extra remapping.
 
-    Left: overlaid histograms of per-cell correlation for each comparison.
-    Right: box/strip plot of place-cell-only correlations.
+    Left: overlaid histograms of per-cell correlation for each comparison for ALL cells. Each cell gets 1 r-value
+    Right: box/strip plot of place-cell-only correlations. "Do existing fields remap?"
 
     Args:
         stability: From abc_tuning_pre_vs_post().
@@ -726,8 +731,12 @@ def plot_stability_by_recruitment(
 ) -> Figure:
     """Strip plot of per-cell tuning correlation colored by recruitment category.
 
-    Shows how stable/shifted/gained/lost cells contribute to overall
-    correlation changes at a specific comparison (e.g., pre vs post extension).
+    Shows how stable/shifted/gained/lost cells contribute to overall correlation changes at a specific comparison (
+    e.g., pre vs post extension).
+    How to interpret:
+    A) stable/both cells have high r with gain/loss low r == turnover, ABC stable (map expanded to add D)
+    B) stable/both cells have lower r, shape of tuning curve changed == ABC remapping after introduction of D
+    *need to evaluate behaviroal data to ensure comparison
 
     Args:
         stability: From abc_tuning_pre_vs_post().
