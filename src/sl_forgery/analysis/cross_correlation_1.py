@@ -1288,6 +1288,266 @@ def _save_figures(figs: dict[str, Figure], save_dir: str | Path | None):
         print(f"Saved: {path}")
 
 
+# WITHIN-SESSION LEARNING CURVE
+
+def _build_per_trial_tuning_curves(
+    df: pl.DataFrame,
+    config: dict,
+    trial_type: str,
+    signal_col: str = 'multi_day_spikes',
+    bin_size_cm: int = 5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build tuning curve for each individual trial using scatter-add binning.
+    Basically average the deconvolved spike values for all frames where the mouse was in that bin during that one
+    trial. Result is a vector of shape (n_bins, n_cells) — each cell's spatial activity profile on that one lap.
+
+    Args:
+        df: Frame-level DataFrame with distance_bin column.
+        config: Experiment configuration dict.
+        trial_type: Filter to this trial type.
+        signal_col: Column containing neural signals.
+        bin_size_cm: Spatial bin size in cm.
+
+    Returns:
+        Tuple of (per_trial_curves, unique_trials) where per_trial_curves
+        has shape (n_trials, n_bins, n_cells) and unique_trials is (n_trials,).
+    """
+    tt_df = df.filter(pl.col('trial_type') == trial_type)
+    if len(tt_df) == 0:
+        return np.empty((0, 0, 0)), np.array([])
+
+    signals = np.vstack(tt_df[signal_col].to_list())
+    trials = tt_df['trial'].to_numpy()
+    bins = tt_df['distance_bin'].to_numpy()
+
+    n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
+    n_cells = signals.shape[1]
+    unique_trials = np.unique(trials)
+    n_trials = len(unique_trials)
+
+    trial_idx = np.searchsorted(unique_trials, trials)
+    bin_idx = bins.clip(0, n_bins - 1)
+
+    sums = np.zeros((n_trials, n_bins, n_cells))
+    counts = np.zeros((n_trials, n_bins, 1))
+    np.add.at(sums, (trial_idx, bin_idx), signals)
+    np.add.at(counts, (trial_idx, bin_idx, 0), 1)
+
+    with np.errstate(invalid='ignore'):
+        per_trial = sums / counts  # (n_trials, n_bins, n_cells)
+
+    return per_trial, unique_trials
+
+#TODO: test: check whether the decline correlates with trial number or with elapsed time.
+# If it's time-driven, plotting against elapsed_minutes instead of trial number should linearize it.
+# Also check running speed — if the mouse slows down late in the session, spatial sampling gets worse and tuning curves
+# get noisier, which drops correlation even without real remapping.
+def within_session_learning_curve(
+    df: pl.DataFrame,
+    config: dict,
+    signal_col: str = 'multi_day_spikes',
+    bin_size_cm: int = 5,
+    segment: str = 'all',
+) -> dict:
+    """Track trial-by-trial PV correlation to leave-one-out templates.
+
+    For each trial, computes its tuning curve and correlates it against
+    the mean of all *other* trials (leave-one-out), for each type. This
+    shows whether ABC and ABDC representations separate gradually or
+    abruptly across trials within a session.
+
+    Args:
+        df: Frame-level DataFrame with distance_bin column.
+        config: Experiment configuration dict.
+        signal_col: Column containing neural signals.
+        bin_size_cm: Spatial bin size in cm.
+        segment: Which spatial segment to analyze.
+            'all' = full track (up to shared length),
+            'shared' = only pre-divergence bins,
+            'divergent' = only post-divergence bins.
+
+    Returns:
+        Dict with keys:
+            'trial_numbers': dict[str, np.ndarray] — trial indices per type.
+            'corr_to_own': dict[str, np.ndarray] — LOO correlation to own-type mean.
+            'corr_to_other': dict[str, np.ndarray] — LOO correlation to other-type mean.
+            'trial_types': tuple[str, str].
+            'segment': str — which segment was used.
+            'n_cells': int.
+    """
+    trial_types = sorted(df['trial_type'].unique().to_list())
+    if len(trial_types) < 2:
+        raise ValueError("Need ≥2 trial types for learning curve analysis")
+    type_a, type_b = trial_types[0], trial_types[1]
+
+    # Build per-trial tuning curves for each type
+    curves_a, trials_a = _build_per_trial_tuning_curves(
+        df, config, type_a, signal_col, bin_size_cm,
+    )
+    curves_b, trials_b = _build_per_trial_tuning_curves(
+        df, config, type_b, signal_col, bin_size_cm,
+    )
+
+    # Determine bin slice based on segment
+    n_shared = get_shared_bins(config, type_a, type_b, bin_size_cm)
+    n_bins_common = min(curves_a.shape[1], curves_b.shape[1])
+
+    if segment == 'shared':
+        bin_slice = slice(0, n_shared)
+    elif segment == 'divergent':
+        bin_slice = slice(n_shared, n_bins_common)
+    else:  # 'all'
+        bin_slice = slice(0, n_bins_common)
+
+    ca = curves_a[:, bin_slice, :]  # (n_trials_a, n_bins_seg, n_cells)
+    cb = curves_b[:, bin_slice, :]
+
+    # Global mean of each type (used for cross-type correlation)
+    mean_a_global = np.nanmean(ca, axis=0)  # (n_bins_seg, n_cells)
+    mean_b_global = np.nanmean(cb, axis=0)
+
+    def _pv_corr(tuning_single: np.ndarray, tuning_template: np.ndarray) -> float:
+        """Mean PV correlation across bins between a single trial and a template."""
+        n_bins_seg = tuning_single.shape[0]
+        corrs = np.full(n_bins_seg, np.nan)
+        for b in range(n_bins_seg):
+            v1 = tuning_single[b]
+            v2 = tuning_template[b]
+            valid = ~(np.isnan(v1) | np.isnan(v2))
+            if valid.sum() < 3:
+                continue
+            s1, s2 = v1[valid], v2[valid]
+            if np.std(s1) == 0 or np.std(s2) == 0:
+                continue
+            corrs[b] = np.corrcoef(s1, s2)[0, 1]
+        return np.nanmean(corrs)
+
+    results = {
+        'trial_numbers': {},
+        'corr_to_own': {},
+        'corr_to_other': {},
+        'trial_types': (type_a, type_b),
+        'segment': segment,
+        'n_cells': ca.shape[2],
+    }
+
+    # For each type: LOO correlation to own mean + correlation to other mean
+    for label, curves, trials, other_mean in [
+        (type_a, ca, trials_a, mean_b_global),
+        (type_b, cb, trials_b, mean_a_global),
+    ]:
+        n_t = curves.shape[0]
+        corr_own = np.full(n_t, np.nan)
+        corr_other = np.full(n_t, np.nan)
+
+        for i in range(n_t):
+            trial_curve = curves[i]  # (n_bins_seg, n_cells)
+
+            # Leave-one-out mean of own type
+            if n_t > 1:
+                loo_mean = (np.nansum(curves, axis=0) - trial_curve) / (n_t - 1)
+            else:
+                loo_mean = trial_curve  # degenerate, corr will be 1.0
+
+            corr_own[i] = _pv_corr(trial_curve, loo_mean)
+            corr_other[i] = _pv_corr(trial_curve, other_mean)
+
+        results['trial_numbers'][label] = trials
+        results['corr_to_own'][label] = corr_own
+        results['corr_to_other'][label] = corr_other
+
+    return results
+
+
+def plot_within_session_learning_curve(
+    result: dict,
+    animal_id: str | None = None,
+    date: str | None = None,
+    figsize: tuple = (12, 5),
+    show: bool = True,
+) -> Figure:
+    """Plot within-session learning curve: PV correlation over trials.
+
+    Left panel: correlation to own-type template (does representation
+    stabilize?). Right panel: correlation to other-type template (do
+    representations diverge?). Both use leave-one-out templates.
+
+    Args:
+        result: Output from within_session_learning_curve().
+        animal_id: Animal identifier for plot title.
+        date: Session date for plot title.
+        figsize: Figure size.
+        show: Call plt.show().
+
+    Returns:
+        Matplotlib Figure.
+    """
+    type_a, type_b = result['trial_types']
+    segment = result['segment']
+    color_a = pfmt.TRIAL_TYPE_COLORS.get(type_a, '#2E86AB')
+    color_b = pfmt.TRIAL_TYPE_COLORS.get(type_b, '#A23B72')
+
+    fig, (ax_own, ax_cross) = plt.subplots(1, 2, figsize=figsize, sharey=True)
+
+    # Assign sequential x-positions by interleaving trial order
+    # (trials are interleaved ABC/ABDC, so plot by actual trial number)
+    for label, color, marker in [
+        (type_a, color_a, 'o'),
+        (type_b, color_b, 's'),
+    ]:
+        trials = result['trial_numbers'][label]
+        own = result['corr_to_own'][label]
+        other = result['corr_to_other'][label]
+
+        ax_own.scatter(trials, own, c=color, marker=marker, s=30,
+                       alpha=0.7, label=label, edgecolors='white', linewidth=0.3)
+        ax_cross.scatter(trials, other, c=color, marker=marker, s=30,
+                         alpha=0.7, label=label, edgecolors='white', linewidth=0.3)
+
+        # Trend lines
+        valid_own = ~np.isnan(own)
+        if valid_own.sum() > 2:
+            z = np.polyfit(trials[valid_own], own[valid_own], 1)
+            x_fit = np.linspace(trials.min(), trials.max(), 50)
+            ax_own.plot(x_fit, np.polyval(z, x_fit), color=color,
+                        linewidth=1.5, alpha=0.5, linestyle='--')
+
+        valid_cross = ~np.isnan(other)
+        if valid_cross.sum() > 2:
+            z = np.polyfit(trials[valid_cross], other[valid_cross], 1)
+            ax_cross.plot(x_fit, np.polyval(z, x_fit), color=color,
+                          linewidth=1.5, alpha=0.5, linestyle='--')
+
+    # Format left panel
+    ax_own.set_xlabel('Trial number', fontsize=11)
+    ax_own.set_ylabel('Mean PV correlation (r)', fontsize=11)
+    ax_own.set_title('Correlation to own type (LOO)', fontsize=11, fontweight='bold')
+    ax_own.legend(frameon=False, fontsize=9)
+    ax_own.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
+    ax_own.spines['top'].set_visible(False)
+    ax_own.spines['right'].set_visible(False)
+    ax_own.grid(alpha=0.2, axis='y')
+
+    # Format right panel
+    ax_cross.set_xlabel('Trial number', fontsize=11)
+    ax_cross.set_title('Correlation to other type', fontsize=11, fontweight='bold')
+    ax_cross.legend(frameon=False, fontsize=9)
+    ax_cross.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
+    ax_cross.spines['top'].set_visible(False)
+    ax_cross.spines['right'].set_visible(False)
+    ax_cross.grid(alpha=0.2, axis='y')
+
+    fig.suptitle(
+        pfmt.build_title(f'Within-Session Learning Curve — {segment} segment',
+                         animal_id=animal_id, date=date),
+        fontsize=13, fontweight='bold',
+    )
+    plt.tight_layout()
+    if show:
+        plt.show()
+    return fig
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1302,6 +1562,11 @@ if __name__ == "__main__":
     prefix = get_session_prefix(session_data)
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
+    for s in ['shared', 'divergent', 'all']:
+        result = within_session_learning_curve(
+            data, config, signal_col='multi_day_spikes', segment=s,
+        )
+        fig = plot_within_session_learning_curve(result, animal_id='26', date='2025-09-15')
 
     #figs = run_within_session_analysis(data, config, signal_col='multi_day_spikes', show=True)
 
