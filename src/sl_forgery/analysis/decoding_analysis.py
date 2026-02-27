@@ -12,6 +12,9 @@ Analyses:
        regions, with subplot grid for multiple cues.
     4. Splitter cell index — per-cell selectivity at shared positions.
 
+Caveat: Only works on extended sessions, not pre-extension.  Could compare decoder accuracy across days post-ext to
+see if discimrination improves with experience
+
 All functions operate on frame-level, post-processed pl.DataFrames from df_processing.
 
 Dependencies: numpy, polars, scikit-learn, matplotlib, df_processing,
@@ -19,9 +22,6 @@ Dependencies: numpy, polars, scikit-learn, matplotlib, df_processing,
 """
 
 from pathlib import Path
-
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 
 import numpy as np
 import polars as pl
@@ -47,7 +47,7 @@ def _get_bin_range_for_cue(
     config: dict | None = None,
     metadata: dict | None = None,
 ) -> tuple[int, int]:
-    """Get (start_bin, end_bin) for a cue region from the DataFrame.
+    """Get (start_bin, end_bin) for a cue region from either config or the DataFrame.
 
     Accepts either integer cue IDs (from 'cue' column) or string cue IDs
     (from 'cue_id' column). If trial_type is None, uses the first trial
@@ -82,35 +82,30 @@ def _get_bin_range_for_cue(
             raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
         regions = get_cue_regions(config, trial_type)
         # regions: {cue_int_id: [(start_cm, end_cm), ...]}
-        # Match by int key directly, or by str via cue_id_map
-        lookup_key = cue_id
+
+        # Resolve string cue IDs to int keys
         if isinstance(cue_id, str):
-            # Reverse-lookup: find int key whose str label matches
-            cue_id_map = config.get('cue_id_map', {})
-            for int_id, str_id in cue_id_map.items():
-                if str_id == cue_id:
-                    lookup_key = int_id
-                    break
-        if lookup_key in regions:
-            # Use first occurrence (for cue 0, caller should specify which via trial_type)
-            start_cm, end_cm = regions[lookup_key][0]
-            return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+            if cue_id.startswith('0'):
+                # Gray zone: '0a' → 2nd occurrence of cue 0, '0b' → 3rd, etc.
+                # Letter suffix tells us which occurrence (a=1st gray, b=2nd, etc.)
+                suffix = cue_id[1:]  # 'a', 'b', 'c', ...
+                occurrence_idx = ord(suffix.lower()) - ord('a')
+                int_key = 0
+                if int_key in regions and occurrence_idx < len(regions[int_key]):
+                    start_cm, end_cm = regions[int_key][occurrence_idx]
+                    return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+            else:
+                # Letter cue: 'A'→1, 'B'→2, 'C'→3, ...
+                int_key = ord(cue_id.upper()) - ord('A') + 1
+                if int_key in regions:
+                    start_cm, end_cm = regions[int_key][0]
+                    return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+        else:
+            # Already an int
+            if cue_id in regions:
+                start_cm, end_cm = regions[cue_id][0]
 
-    cue_col = 'cue' if isinstance(cue_id, int) else 'cue_id'
-    sub = df.filter(
-        (pl.col('trial_type') == trial_type)
-        & (pl.col(cue_col) == cue_id)
-    )
-    if len(sub) == 0:
-        available = df.filter(
-            pl.col('trial_type') == trial_type
-        )[cue_col].unique().sort().to_list()
-        raise ValueError(f"Cue {cue_id!r} not found in {trial_type}. "
-                         f"Available: {available}")
-
-    start_bin = sub['distance_bin'].min()
-    end_bin = sub['distance_bin'].max() + 1
-    return start_bin, end_bin
+                return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
 
 
 def _extract_trial_population_vectors(
@@ -317,6 +312,7 @@ def sliding_decoder(
 
 def plot_sliding_decoder(
     result: dict,
+    df: pl.DataFrame | None = None,
     config: dict | None = None,
     metadata: dict | None = None,
     trial_type_for_cues: str | None = None,
@@ -329,6 +325,7 @@ def plot_sliding_decoder(
 
     Args:
         result: Output from sliding_decoder().
+        df: main dataframe, really only used to get the bin sizes
         config: For cue shading (optional).
         metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value
         trial_type_for_cues: Which trial type's cue layout to shade.
@@ -396,10 +393,11 @@ def plot_sliding_decoder(
 def trial_pv_distance(
     df: pl.DataFrame,
     config: dict,
-    cue_id: int | str = 'B',
+    cue_id: int | str = '0b',
     signal_col: str = 'multi_day_dff',
     trial_type_for_cue: str | None = None,
     metric: str = 'cosine',
+    metadata: dict | None = None,
 ) -> dict:
     """Compute per-trial distance from each trial-type centroid at a cue region.
 
@@ -413,6 +411,7 @@ def trial_pv_distance(
         signal_col: Column containing neural signals.
         trial_type_for_cue: Trial type for cue region lookup. None auto-selects.
         metric: 'cosine' or 'euclidean'.
+        metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value
 
     Returns:
         Dict with keys: 'dist_to_a', 'dist_to_b', 'labels', 'trial_types',
@@ -425,7 +424,7 @@ def trial_pv_distance(
     trial_types = sorted(df['trial_type'].unique().to_list())
     type_a, type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config=config)
+    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config=config, metadata=metadata)
 
     pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range)
     pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range)
@@ -546,7 +545,7 @@ def region_correlation(
     if bin_range is None:
         if cue_id is None:
             raise ValueError("Provide either cue_id or bin_range")
-        bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config)
+        bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config, metadata)
 
     bin_size_cm = _get_bin_size(df, metadata)
     if bin_size_cm is None:
@@ -733,13 +732,15 @@ def plot_region_correlation_at_cues(
 def splitter_cell_index(
     df: pl.DataFrame,
     config: dict,
-    cue_id: int | str = 'B',
+    cue_id: int | str = '0b',
     signal_col: str = 'multi_day_dff',
     trial_type_for_cue: str = 'ABC',
     n_shuffles: int = 500,
     seed: int = 42,
+    metadata: dict = None,
 ) -> dict:
     """Compute a selectivity index for each cell at a cue region.
+    Helpful for bifurcation-point tuning across trials/days. B and 0b
 
     For each cell, computes mean activity at the cue region on type_a vs
     type_b trials, then computes:
@@ -755,6 +756,7 @@ def splitter_cell_index(
         trial_type_for_cue: Trial type for cue region lookup.
         n_shuffles: Shuffle iterations for p-values.
         seed: Random seed.
+        metadata: processed df metadata with bin size
 
     Returns:
         Dict with keys: 'selectivity', 'p_values', 'mean_a', 'mean_b',
@@ -763,12 +765,12 @@ def splitter_cell_index(
     rng = np.random.default_rng(seed)
 
     trial_types = sorted(df['trial_type'].unique().to_list())
-    type_a, type_b = trial_types[0], trial_types[1]
+    trial_type_a, trial_type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config)
+    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config, metadata)
 
-    pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range)
-    pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range)
+    pv_a = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range)
+    pv_b = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range)
 
     mean_a = np.nanmean(pv_a, axis=0)
     mean_b = np.nanmean(pv_b, axis=0)
@@ -798,7 +800,7 @@ def splitter_cell_index(
         'mean_a': mean_a,
         'mean_b': mean_b,
         'significant': p_values < 0.05,
-        'trial_types': (type_a, type_b),
+        'trial_types': (trial_type_a, trial_type_b),
         'cue_id': cue_id,
         'n_cells': n_cells,
     }
@@ -878,7 +880,7 @@ def run_decoding_analysis(
     config: dict,
     metadata: dict,
     signal_col: str = 'multi_day_dff',
-    cue_ids: list[int | str] | int | str = 'B',
+    cue_ids: list[int | str] | int | str = '0b',
     n_shuffles_decoder: int = 100,
     n_shuffles_splitter: int = 500,
     animal_id: str | None = None,
@@ -927,7 +929,7 @@ def run_decoding_analysis(
     )
     results['decoder'] = dec
     fig = plot_sliding_decoder(
-        dec, config=config, trial_type_for_cues=trial_types[0],
+        dec, df, config=config, trial_type_for_cues=trial_types[0],
         metadata=metadata, animal_id=animal_id, date=date, show=show,
     )
     figs['decoder'] = fig
@@ -956,15 +958,16 @@ def run_decoding_analysis(
               f"per-cell median={np.nanmedian(rc['per_cell_corr']):.3f}")
 
     # 4. Splitter cells (uses first cue)
-    print(f"Computing splitter cell index at cue {primary_cue}...")
-    sp = splitter_cell_index(
-        df, config, cue_id=primary_cue, signal_col=signal_col,
-        n_shuffles=n_shuffles_splitter,
-    )
-    results['splitter'] = sp
-    fig = plot_splitter_cells(sp, animal_id=animal_id, date=date, show=show)
-    figs['splitter'] = fig
-    print(f"  {sp['significant'].sum()}/{sp['n_cells']} significant splitter cells")
+    for i in cue_ids:
+        print(f"Computing splitter cell index at cue {i}...")
+        sp = splitter_cell_index(
+            df, config, cue_id=i, signal_col=signal_col,
+            n_shuffles=n_shuffles_splitter,
+        )
+        results['splitter'] = sp
+        fig = plot_splitter_cells(sp, animal_id=animal_id, date=date, show=show)
+        figs['splitter'] = fig
+        print(f"  {sp['significant'].sum()}/{sp['n_cells']} significant splitter cells")
 
     results['figures'] = figs
 
@@ -989,7 +992,6 @@ if __name__ == "__main__":
     session_data, config, behavior_path = load_session_dir(mouse_dir, date)
     prefix = get_session_prefix(session_data)
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
-    print(meta)
 
     animal_id = session_data.get('animal_id', '')
 
