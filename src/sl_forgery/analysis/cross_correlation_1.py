@@ -563,11 +563,11 @@ def plot_pv_correlation_matrix(
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
 
     pfmt.add_cue_bar(ax, config, type_a, axis='x')
-    pfmt.add_cue_bar(ax, config, type_b, axis='y')
-    ax.tick_params(axis='x', pad=15)
-    ax.tick_params(axis='y', pad=15)
+    pfmt.add_cue_boundary_lines(ax, config, type_a, axis='x')
 
-    plt.tight_layout()
+    pfmt.add_cue_bar(ax, config, type_b, axis='y')
+    pfmt.add_cue_boundary_lines(ax, config, type_b, axis='y')
+    ax.tick_params(axis='both', which='both', pad=20)
 
     if show:
         plt.show()
