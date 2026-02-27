@@ -37,7 +37,7 @@ import plot_utils as pfmt
 def get_mean_tuning_curves(
     df: pl.DataFrame,
     config: dict,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
     """Compute session-averaged tuning curves per cell per trial type.
@@ -64,7 +64,7 @@ def get_split_half_tuning_curves(
     df: pl.DataFrame,
     config: dict,
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split trials into odd/even halves and compute mean tuning curves.
@@ -293,7 +293,7 @@ def plot_split_half(
     df: pl.DataFrame,
     config: dict,
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     figsize: tuple = (8, 5),
     animal_id: str | None = None,
@@ -364,7 +364,7 @@ def plot_pv_correlation_across_position(
     config: dict,
     type_a: str,
     type_b: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     figsize: tuple = (10, 5),
     animal_id: str | None = None,
@@ -437,7 +437,7 @@ def plot_per_cell_cross_correlation(
     config: dict,
     type_a: str,
     type_b: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     segment: str = 'shared',
     figsize: tuple = (8, 5),
@@ -509,7 +509,7 @@ def plot_pv_correlation_matrix(
     config: dict,
     type_a: str,
     type_b: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     figsize: tuple = (8, 7),
     animal_id: str | None = None,
@@ -564,6 +564,8 @@ def plot_pv_correlation_matrix(
 
     pfmt.add_cue_bar(ax, config, type_a, axis='x')
     pfmt.add_cue_bar(ax, config, type_b, axis='y')
+    ax.tick_params(axis='x', pad=15)
+    ax.tick_params(axis='y', pad=15)
 
     plt.tight_layout()
 
@@ -577,7 +579,7 @@ def plot_pv_correlation_matrix(
 def run_within_session_analysis(
     df: pl.DataFrame,
     config: dict,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     animal_id: str | None = None,
     date: str | None = None,
@@ -655,7 +657,7 @@ def run_within_session_analysis(
 def multiday_tuning_curves(
     sessions: dict[str, dict],
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
     """Compute session-averaged tuning curves per cell for one trial type across days.
@@ -694,7 +696,7 @@ def multiday_per_cell_correlation(
     day_x: str,
     day_y: str,
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
 ) -> np.ndarray:
@@ -743,7 +745,7 @@ def multiday_pv_correlation(
     day_x: str,
     day_y: str,
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
 ) -> np.ndarray:
     """PV correlation across positions between two days for one trial type.
@@ -781,7 +783,7 @@ def multiday_pv_correlation(
 def multiday_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
     metric: str = 'per_cell_median',
@@ -847,7 +849,7 @@ def multiday_correlation_matrix(
 def plot_multiday_per_cell_histogram(
     sessions: dict[str, dict],
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     day_x: str | None = None,
     day_y: str | None = None,
@@ -928,7 +930,7 @@ def plot_multiday_pv_across_position(
     day_x: str | None = None,
     day_y: str | None = None,
     config: dict | None = None,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     animal_id: str | None = None,
     figsize: tuple = (10, 5),
@@ -1012,7 +1014,7 @@ def plot_multiday_pv_across_position(
 def plot_multiday_pv_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     day_x: str | None = None,
     day_y: str | None = None,
@@ -1096,7 +1098,7 @@ def plot_multiday_pv_correlation_matrix(
 def plot_multiday_correlation_matrix_summary(
     sessions: dict[str, dict],
     trial_type: str,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
     metric: str = 'per_cell_median',
@@ -1161,7 +1163,7 @@ def plot_multiday_correlation_matrix_summary(
 def run_multiday_analysis(
     sessions: dict[str, dict],
     trial_type: str | None = None,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     animal_id: str | None = None,
     cell_indices: np.ndarray | None = None,
@@ -1249,7 +1251,7 @@ def run_multiday_analysis(
         )
         figs[f'{animal_id} - multiday_pv_matrix_{trial_type}_{label}'] = fig
 
-        fig = plot_multiday_tuning_curves
+        #fig = plot_multiday_tuning_curves
 
     # Day × day matrix SUMMARY of session (all cells)
     if len(dates) >= 2:
@@ -1301,7 +1303,7 @@ if __name__ == "__main__":
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
 
-    #figs = run_within_session_analysis(data, config, signal_col='multi_day_dff', show=True)
+    #figs = run_within_session_analysis(data, config, signal_col='multi_day_spikes', show=True)
 
 
     # ── Multiday analysis ──
@@ -1310,14 +1312,14 @@ if __name__ == "__main__":
     )
 
     # All pairs + autocorrelation for ABC
-    #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_dff', show=True)
+    #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
 
 
     #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
     dates = sorted(sessions.keys())
     if len(dates) >= 2:
         figs = run_multiday_analysis(
-            sessions, trial_type=None, signal_col='multi_day_dff',
+            sessions, trial_type=None, signal_col='multi_day_spikes',
             animal_id=animal_id, day_pairs=None, show=True,
         )
 
@@ -1326,5 +1328,5 @@ if __name__ == "__main__":
     if len(dates) >= 2:
         fig = plot_multiday_pv_correlation_matrix(
             sessions, trial_type='ABC',
-            signal_col='multi_day_dff',show=True,
+            signal_col='multi_day_spikes',show=True,
         )
