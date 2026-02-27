@@ -27,7 +27,7 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
 import sys
-from df_processing import (compute_session_averages, get_track_length, get_cue_regions)
+from df_processing import (compute_session_averages, get_track_length, get_cue_regions, get_bin_size)
 import plot_utils as pfmt
 
 
@@ -510,7 +510,8 @@ def plot_pv_correlation_matrix(
     type_a: str,
     type_b: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
+    metadata: dict | None = None,
+    bin_size_cm: int | None = None,
     figsize: tuple = (8, 7),
     animal_id: str | None = None,
     date: str | None = None,
@@ -524,7 +525,8 @@ def plot_pv_correlation_matrix(
         type_a: First trial type.
         type_b: Second trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
+        metadata: Metadata dict from processed df, has bin size
+        bin_size_cm: Can specify Spatial bin size in cm but discouraged
         figsize: Figure size.
         animal_id: Animal ID for plot titles
         date: Experiment date.
@@ -533,44 +535,30 @@ def plot_pv_correlation_matrix(
     Returns:
         Matplotlib Figure.
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(df, metadata)
+        if bin_size_cm is None:
+            raise ValueError("Cannot determine bin size — provide bin_size_cm or metadata")
+
     avgs = get_mean_tuning_curves(df, config, signal_col=signal_col, bin_size_cm=bin_size_cm)
-    avg_a, avg_b = avgs[type_a], avgs[type_b]
-
-    matrix = pv_correlation_matrix(avg_a, avg_b)
-
-    len_a = avg_a.shape[0] * bin_size_cm
-    len_b = avg_b.shape[0] * bin_size_cm
+    matrix = pv_correlation_matrix(avgs[type_a], avgs[type_b])
+    diverge = get_divergence_point(config, type_a, type_b)
 
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(
-        matrix.T, origin='lower', aspect='auto',
-        cmap='RdBu_r', vmin=-0.3, vmax=1.0,
-        extent=[0, len_a, 0, len_b],
+    pfmt.plot_pv_heatmap(
+        ax, matrix, config,
+        x_type=type_a, y_type=type_b,
+        x_label=f'{type_a} position (cm)',
+        y_label=f'{type_b} position (cm)',
+        bin_size_cm=bin_size_cm,
+        diverge_cm=diverge,
     )
-    plt.colorbar(im, ax=ax, label='PV Correlation (r)', shrink=0.85)
-
-    diverge = get_divergence_point(config, type_a, type_b)
-    ax.axvline(diverge, color='red', linestyle='--', linewidth=1, alpha=0.7)
-    ax.axhline(diverge, color='red', linestyle='--', linewidth=1, alpha=0.7)
-
-    max_len = min(len_a, len_b)
-    ax.plot([0, max_len], [0, max_len], color='white', linewidth=0.8,
-            linestyle='--', alpha=0.5)
-
-    ax.set_xlabel(f'{type_a} position (cm)', fontsize=11)
-    ax.set_ylabel(f'{type_b} position (cm)', fontsize=11)
     ax.set_title(pfmt.build_title(f'PV Matrix — {type_a} vs {type_b}',
-                              animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
-
-    pfmt.add_cue_bar(ax, config, type_a, axis='x')
-    pfmt.add_cue_boundary_lines(ax, config, type_a, axis='x')
-
-    pfmt.add_cue_bar(ax, config, type_b, axis='y')
-    pfmt.add_cue_boundary_lines(ax, config, type_b, axis='y')
-    ax.tick_params(axis='both', which='both', pad=20)
-
+                                  animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
+    plt.tight_layout()
     if show:
         plt.show()
+
     return fig
 
 
@@ -1015,7 +1003,8 @@ def plot_multiday_pv_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
+    metadata: dict | None = None,
+    bin_size_cm: int | None = None,
     day_x: str | None = None,
     day_y: str | None = None,
     animal_id: str | None = None,
@@ -1026,11 +1015,12 @@ def plot_multiday_pv_correlation_matrix(
 
     Args:
         sessions: From load_multiday_sessions().
-        day_x: First date string.
-        day_y: Second date string.
         trial_type: Trial type to compare.
         signal_col: Column containing neural signals.
+        metadata: Metadata from processing the raw df, has bin size
         bin_size_cm: Spatial bin size in cm.
+        day_x: First date string. Defaults to earliest.
+        day_y: Second date string. Defaults to latest.
         animal_id: Animal name for title. Extracted from sessions if None.
         figsize: Figure size.
         show: Call plt.show().
@@ -1044,8 +1034,11 @@ def plot_multiday_pv_correlation_matrix(
     if day_y is None:
         day_y = dates[-1] if len(dates) > 1 else dates[0]
 
-    label_a = day_x[5:]
-    label_b = day_y[5:]
+    if bin_size_cm is None:
+        meta = sessions[day_x].get('metadata')
+        bin_size_cm = _get_bin_size(sessions[day_x]['data'], meta)
+        if bin_size_cm is None:
+            raise ValueError("Cannot determine bin size — provide bin_size_cm or metadata")
 
     tc = multiday_tuning_curves(
         {day_x: sessions[day_x], day_y: sessions[day_y]},
@@ -1057,39 +1050,27 @@ def plot_multiday_pv_correlation_matrix(
         ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
         return fig
 
-    tuning_a = tc[day_x]
-    tuning_b = tc[day_y]
-    matrix = pv_correlation_matrix(tuning_a, tuning_b)
-
-    len_a = tuning_a.shape[0] * bin_size_cm
-    len_b = tuning_b.shape[0] * bin_size_cm
-
+    matrix = pv_correlation_matrix(tc[day_x], tc[day_y])
     config = sessions[day_x]['config']
 
     if animal_id is None:
         animal_id = sessions[day_x]['session_data'].get('animal_id', '')
 
+    label_x = day_x[5:]
+    label_y = day_y[5:]
+
     fig, ax = plt.subplots(figsize=figsize)
-    im = ax.imshow(
-        matrix.T, origin='lower', aspect='auto',
-        cmap='RdBu_r', vmin=-0.3, vmax=1.0,
-        extent=[0, len_a, 0, len_b],
+    pfmt.plot_pv_heatmap(
+        ax, matrix, config,
+        x_type=trial_type, y_type=trial_type,
+        x_label=f'{trial_type} position (cm) — {label_x}',
+        y_label=f'{trial_type} position (cm) — {label_y}',
+        bin_size_cm=bin_size_cm,
     )
-    plt.colorbar(im, ax=ax, label='PV Correlation (r)', shrink=0.85)
-
-    max_len = min(len_a, len_b)
-    ax.plot([0, max_len], [0, max_len], color='white', linewidth=0.8,
-            linestyle='--', alpha=0.5)
-
-    pfmt.add_cue_bar(ax, config, trial_type, axis='x')
-    pfmt.add_cue_bar(ax, config, trial_type, axis='y')
-
-    ax.set_xlabel(f'{trial_type} position (cm) — {label_a}', fontsize=11)
-    ax.set_ylabel(f'{trial_type} position (cm) — {label_b}', fontsize=11)
-    ax.set_title(pfmt.build_title('PV Matrix', trial_type=trial_type, animal_id=animal_id,
-                              day_x=day_x, day_y=day_y), fontsize=13, fontweight='bold')
+    ax.set_title(pfmt.build_title('PV Matrix', trial_type=trial_type,
+                                  animal_id=animal_id, day_x=day_x, day_y=day_y),
+                 fontsize=13, fontweight='bold')
     plt.tight_layout()
-
     if show:
         plt.show()
     return fig
