@@ -165,7 +165,7 @@ def get_cue_regions(
     return regions
 
 
-def _get_bin_size(
+def get_bin_size(
     df: pl.DataFrame,
     metadata: dict | None = None,
 ) -> int | None:

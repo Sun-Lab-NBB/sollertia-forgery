@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
-from df_processing import compute_session_averages, get_track_length, _get_bin_size
+from df_processing import compute_session_averages, get_track_length, get_bin_size
 from plot_utils import build_title, add_cue_shading, add_cue_bar
 from cross_correlation_1 import (
     get_mean_tuning_curves, per_cell_spatial_correlation,
@@ -77,7 +77,7 @@ def _get_bin_range_for_cue(
     # Config path: exact boundaries
     if config is not None:
         from df_processing import get_cue_regions
-        bin_size_cm = _get_bin_size(df, metadata)
+        bin_size_cm = get_bin_size(df, metadata)
         if bin_size_cm is None:
             raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
         regions = get_cue_regions(config, trial_type)
@@ -342,7 +342,7 @@ def plot_sliding_decoder(
     chance_95 = result['chance_95']
     n_shared = result['n_shared_bins']
     type_a, type_b = result['trial_types']
-    bin_size_cm = _get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(df, metadata)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
     diverge_cm = n_shared * bin_size_cm
@@ -547,7 +547,7 @@ def region_correlation(
             raise ValueError("Provide either cue_id or bin_range")
         bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config, metadata)
 
-    bin_size_cm = _get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(df, metadata)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
 
@@ -652,7 +652,7 @@ def plot_region_correlation_at_cues(
         signal_col=signal_col, metadata=metadata,
         trial_type_for_cue=trial_type_for_cue,
     )
-    bin_size_cm = _get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(df, metadata)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
 
