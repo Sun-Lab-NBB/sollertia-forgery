@@ -207,8 +207,54 @@ def classify_cell_recruitment(
     return results
 
 
-# POPULATION SUMMARY ACROSS DAYS
+def compute_rate_remapping(
+    tuning_a: np.ndarray,
+    tuning_b: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Compute rate remapping metrics between two tuning curve arrays.
 
+    For each cell, compares peak amplitude and mean activity between
+    conditions. Pearson r misses these changes because it's scale-invariant (consders shape)
+
+    Args:
+        tuning_a: Tuning curves day A, shape (n_bins, n_cells).
+        tuning_b: Tuning curves day B, shape (n_bins, n_cells).
+
+    Returns:
+        Dict with:
+            'peak_ratio': peak_b / peak_a per cell (>1 = gained amplitude)
+            'mean_ratio': mean_b / mean_a per cell
+            'peak_diff': peak_b - peak_a per cell (raw change)
+            'mean_diff': mean_b - mean_a per cell
+            'log2_peak_ratio': log2(peak_b / peak_a), centered at 0
+    """
+    n_bins = min(tuning_a.shape[0], tuning_b.shape[0])
+    a = tuning_a[:n_bins]
+    b = tuning_b[:n_bins]
+
+    peak_a = np.nanmax(a, axis=0)
+    peak_b = np.nanmax(b, axis=0)
+    mean_a = np.nanmean(a, axis=0)
+    mean_b = np.nanmean(b, axis=0)
+
+    eps = 1e-10
+    peak_ratio = peak_b / (peak_a + eps)
+    mean_ratio = mean_b / (mean_a + eps)
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        log2_peak_ratio = np.log2(peak_ratio)
+        log2_peak_ratio[~np.isfinite(log2_peak_ratio)] = np.nan
+
+    return {
+        'peak_ratio': peak_ratio,
+        'mean_ratio': mean_ratio,
+        'peak_diff': peak_b - peak_a,
+        'mean_diff': mean_b - mean_a,
+        'log2_peak_ratio': log2_peak_ratio,
+    }
+
+
+# POPULATION SUMMARY ACROSS DAYS
 
 def population_summary(
     pf_results: dict[str, PlaceFieldResult],
@@ -261,6 +307,7 @@ def abc_tuning_pre_vs_post(
         - Pre-pre: last two ABC-only days (control drift)
         - Pre-post: last ABC-only day vs first extension day
         - Post-post: consecutive extension days (if available)
+    Log peak ratio 0=same, 1=double, -1=halved
 
     Args:
         sessions: From load_multiday_sessions().
@@ -286,7 +333,7 @@ def abc_tuning_pre_vs_post(
                   if trial_type in sessions[d]['data']['trial_type'].unique().to_list()]
 
     def _compute_pair(day_a, day_b):
-        """Compute per-cell correlation and place cell mask for a day pair."""
+        """Compute per-cell correlation, rate remapping, and place cell mask for a day pair."""
         avg_a = get_mean_tuning_curves(
             sessions[day_a]['data'], sessions[day_a]['config'],
             signal_col=signal_col, bin_size_cm=bin_size_cm,
@@ -297,12 +344,14 @@ def abc_tuning_pre_vs_post(
         )[trial_type]
 
         corrs = per_cell_spatial_correlation(avg_a, avg_b)
+        rate = compute_rate_remapping(avg_a, avg_b)
 
         pc_a = pf_results[day_a].is_place_cell.get(trial_type, np.zeros(len(corrs), dtype=bool))
         pc_b = pf_results[day_b].is_place_cell.get(trial_type, np.zeros(len(corrs), dtype=bool))
 
         return {
             'corrs': corrs,
+            'rate_remapping': rate,
             'day_a': day_a,
             'day_b': day_b,
             'pc_both': pc_a & pc_b,
@@ -315,17 +364,20 @@ def abc_tuning_pre_vs_post(
     if len(pre_dates) >= 2:
         result['pre_pre'] = _compute_pair(pre_dates[-2], pre_dates[-1])
         print(f"Pre-pre: {pre_dates[-2]} vs {pre_dates[-1]}, "
-              f"median r={np.nanmedian(result['pre_pre']['corrs']):.3f}")
+              f"median r={np.nanmedian(result['pre_pre']['corrs']):.3f}, ",
+              f"median log2 peak ratio={np.nanmedian(result['pre_pre']['rate_remapping']['log2_peak_ratio']):.3f}")
 
     if pre_dates and post_dates:
         result['pre_post'] = _compute_pair(pre_dates[-1], post_dates[0])
         print(f"Pre-post: {pre_dates[-1]} vs {post_dates[0]}, "
-              f"median r={np.nanmedian(result['pre_post']['corrs']):.3f}")
+              f"median r={np.nanmedian(result['pre_post']['corrs']):.3f}, ",
+              f"median log2 peak ratio={np.nanmedian(result['pre_post']['rate_remapping']['log2_peak_ratio']):.3f}")
 
     if len(post_dates) >= 2:
         result['post_post'] = _compute_pair(post_dates[0], post_dates[1])
         print(f"Post-post: {post_dates[0]} vs {post_dates[1]}, "
-              f"median r={np.nanmedian(result['post_post']['corrs']):.3f}")
+              f"median r={np.nanmedian(result['post_post']['corrs']):.3f}, ",
+              f"median log2 peak ratio={np.nanmedian(result['post_post']['rate_remapping']['log2_peak_ratio']):.3f}")
 
     return result
 
@@ -544,8 +596,8 @@ def plot_recruitment_categories(
 
     bottom = np.zeros(len(pair_keys))
     for cat in category_names:
-        if cat == 'absent':
-            continue  # skip absent for cleaner plot
+        # if cat == 'absent':
+        #     continue  # skip absent for cleaner plot
         vals = np.array(counts[cat])
         ax.bar(x, vals, bottom=bottom, label=cat,
                color=category_colors[cat], edgecolor='white', linewidth=0.5)
@@ -945,8 +997,10 @@ def plot_bifurcation_activity_across_days(
     act_matrix = np.column_stack([activity[d] for d in dates])  # (n_cells, n_days)
 
     # Sort by peak day for visual structure
-    peak_day = np.nanargmax(act_matrix, axis=1)
-    sort_order = np.argsort(peak_day)
+    # peak_day = np.nanargmax(act_matrix, axis=1)
+    # sort_order = np.argsort(peak_day)
+    mean_activity = np.nanmean(act_matrix, axis=1)
+    sort_order = np.argsort(mean_activity)[::-1]  # highest activity at top
     sorted_act = act_matrix[sort_order]
 
     has_pc_info = pf_results is not None
