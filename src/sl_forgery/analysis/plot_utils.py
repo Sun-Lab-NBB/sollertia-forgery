@@ -257,6 +257,9 @@ def add_cue_bar(
         axis: 'x' for bottom bar, 'y' for left bar.
         bar_width: Fraction of axis extent for bar thickness.
     """
+    from matplotlib.patches import Rectangle
+    from matplotlib.transforms import blended_transform_factory
+
     cue_colors = get_cue_colors(config)
     cue_labels = get_cue_labels(config)
     ts = config.get('trial_structures', {}).get(trial_type, {})
@@ -267,21 +270,37 @@ def add_cue_bar(
     for cue_id in seq:
         w = cue_widths[cue_id]
         color = cue_colors.get(cue_id, '#D3D3D3')
+        print(
+            f"  cue_id={cue_id!r} (type={type(cue_id).__name__}), color={cue_colors.get(cue_id, 'MISS')}, w={cue_widths.get(cue_id, 'MISS')}")
+
         mid = pos + w/2
 
         if axis == 'x':
-            ax.axvspan(pos, pos + w, ymin=0, ymax=bar_width,
-                       color=color, alpha=0.9, clip_on=False, zorder=10)
+            # x = data coords, y = axes fraction; bar sits below axes
+            transform = blended_transform_factory(ax.transData, ax.transAxes)
+            rect = Rectangle(
+                (pos, -bar_width), w, bar_width,
+                transform=transform, color=color, alpha=0.9,
+                clip_on=False, zorder=10,
+            )
+            ax.add_patch(rect)
             if cue_id != 0:
-                ax.text(mid, bar_width / 2, cue_labels.get(cue_id, ''),
+                ax.text(mid, -bar_width / 2, cue_labels.get(cue_id, ''),
                         ha='center', va='center', fontsize=7, fontweight='bold',
-                        color='white', transform=ax.get_xaxis_transform(),
+                        color='white', transform=transform,
                         clip_on=False, zorder=11)
         else:
-            ax.axhspan(pos, pos + w, xmin=0, xmax=bar_width,
-                       color=color, alpha=0.9, clip_on=False, zorder=10)
+            # x = axes fraction, y = data coords; bar sits left of axes
+            transform = blended_transform_factory(ax.transAxes, ax.transData)
+            rect = Rectangle(
+                (-bar_width, pos), bar_width, w,
+                transform=transform, color=color, alpha=0.9,
+                clip_on=False, zorder=10,
+            )
+            ax.add_patch(rect)
             if cue_id != 0:
-                ax.text(bar_width / 2, mid, cue_labels.get(cue_id, ''),
+                ax.text(-bar_width / 2, mid, cue_labels.get(cue_id, ''),
                         ha='center', va='center', fontsize=7, fontweight='bold',
-                        color='white', transform=ax.get_yaxis_transform(),
+                        color='white', transform=transform,
                         clip_on=False, zorder=11)
+        pos += w
