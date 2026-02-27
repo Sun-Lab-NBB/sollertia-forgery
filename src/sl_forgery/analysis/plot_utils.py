@@ -304,3 +304,50 @@ def add_cue_bar(
                         color='white', transform=transform,
                         clip_on=False, zorder=11)
         pos += w
+
+
+def add_cue_boundary_lines(
+    ax: Axes,
+    config: dict,
+    trial_type: str,
+    axis: str = 'both',
+    color: str = 'white',
+    linestyle: str = '--',
+    linewidth: float = 0.8,
+    alpha: float = 0.5,
+):
+    """Add dashed lines at cue boundaries on a heatmap.
+
+    Draws lines at each transition between cues in the cue_sequence.
+    Skips position 0 and the final track edge.
+
+    Args:
+        ax: Matplotlib Axes.
+        config: Experiment configuration dict.
+        trial_type: Trial type for cue layout.
+        axis: 'x', 'y', or 'both'.
+        color: Line color.
+        linestyle: Line style string.
+        linewidth: Line width.
+        alpha: Line transparency.
+    """
+    ts = config.get('trial_structures', {}).get(trial_type, {})
+    seq = ts.get('cue_sequence', [])
+    cue_widths = config.get('cue_map', {})
+
+    boundaries = []
+    pos = 0.0
+    for cue_id in seq:
+        pos += cue_widths[cue_id]
+        boundaries.append(pos)
+    boundaries = boundaries[:-1]
+
+    line_kwargs = dict(color=color, linestyle=linestyle,
+                       linewidth=linewidth, alpha=alpha, zorder=5)
+
+    if axis in ('x', 'both'):
+        for b in boundaries:
+            ax.axvline(b, **line_kwargs)
+    if axis in ('y', 'both'):
+        for b in boundaries:
+            ax.axhline(b, **line_kwargs)
