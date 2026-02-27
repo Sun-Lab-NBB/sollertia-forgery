@@ -433,7 +433,7 @@ def track_bifurcation_selectivity(
 
     return results
 
-
+#TODO consider either rethinking ior removing this, and the plotting func
 def track_bifurcation_activity(
     sessions: dict[str, dict],
     cue_id: int | str = '0b',
@@ -580,7 +580,7 @@ def plot_recruitment_categories(
         'shifted': '#EDC948',  # gold
         'gained': '#4E79A7',   # blue
         'lost': '#E15759',     # red
-        'absent': '#BAB0AC',   # gray
+        'absent': '#FFFFFF',   # white w black outline        #'#BAB0AC',   # gray
     }
 
     counts = {cat: [] for cat in category_names}
@@ -590,7 +590,7 @@ def plot_recruitment_categories(
             counts[cat].append((cats == cat).sum())
 
     x = np.arange(len(pair_keys))
-    bar_labels = [k.replace('_vs_', '\nvs\n') for k in pair_keys]
+    bar_labels = [k.replace('_vs_', '\nto\n') for k in pair_keys]
 
     fig, ax = plt.subplots(figsize=figsize)
 
@@ -600,7 +600,7 @@ def plot_recruitment_categories(
         #     continue  # skip absent for cleaner plot
         vals = np.array(counts[cat])
         ax.bar(x, vals, bottom=bottom, label=cat,
-               color=category_colors[cat], edgecolor='white', linewidth=0.5)
+               color=category_colors[cat], edgecolor='black', linewidth=0.5)
         bottom += vals
 
     # Highlight introduction boundary
@@ -1000,7 +1000,8 @@ def plot_bifurcation_activity_across_days(
     # peak_day = np.nanargmax(act_matrix, axis=1)
     # sort_order = np.argsort(peak_day)
     mean_activity = np.nanmean(act_matrix, axis=1)
-    sort_order = np.argsort(mean_activity)[::-1]  # highest activity at top
+    # Sort by activity on first day (highest at top)
+    sort_order = np.argsort(act_matrix[:, 0])[::-1]  # highest activity at top
     sorted_act = act_matrix[sort_order]
 
     has_pc_info = pf_results is not None
@@ -1014,12 +1015,12 @@ def plot_bifurcation_activity_across_days(
 
     vmax = np.nanpercentile(sorted_act, 95)
     im = ax.imshow(sorted_act, aspect='auto', cmap='magma', vmin=0, vmax=vmax,
-                   interpolation='none')
+                  interpolation='none')
 
     date_labels = [d[5:] for d in dates]
     ax.set_xticks(range(len(dates)))
     ax.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=8)
-    ax.set_ylabel('Cells (sorted by peak day)', fontsize=10)
+    ax.set_ylabel('Cells (sorted by mean activity)', fontsize=10)
     ax.set_xlabel('Session', fontsize=10)
     plt.colorbar(im, ax=ax, label='Mean ΔF/F at bifurcation', shrink=0.8)
 
@@ -1039,7 +1040,7 @@ def plot_bifurcation_activity_across_days(
         ax_pc.imshow(sorted_pc, aspect='auto', cmap='Greens', vmin=0, vmax=1,
                      interpolation='none', alpha=0.8)
         ax_pc.set_xticks(range(len(dates)))
-        ax_pc.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=6)
+        ax_pc.set_xticklabels([d[-2:] for d in date_labels], rotation=0, fontsize=5)
         if not has_pc_info:
             ax.set_ylabel('Cells (sorted by peak day)', fontsize=10)
         ax_pc.set_title('Place\ncell', fontsize=8, fontweight='bold')
