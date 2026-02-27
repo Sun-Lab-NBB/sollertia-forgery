@@ -40,7 +40,7 @@ def get_mean_tuning_curves(
     signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
-    """Compute session-averaged tuning curves per trial type.
+    """Compute session-averaged tuning curves per cell per trial type.
 
     Wrapper around compute_session_averages (from df_processing) that returns just the
     mean tuning curves in (n_bins, n_cells) format.
@@ -123,7 +123,7 @@ def per_cell_spatial_correlation(
     tuning_b: np.ndarray,
     min_bins: int | None = None,
 ) -> np.ndarray:
-    """Pearson correlation of each cell's tuning curve between two conditions.
+    """Pearson correlation of each cell's tuning curve between two conditions (i.e. trial types).
 
     Args:
         tuning_a: Mean tuning curves, shape (n_bins, n_cells).
@@ -287,41 +287,6 @@ def get_divergence_point(
 
 
 # WITHIN-SESSION PLOTTING
-def _build_title(
-    description: str,
-    trial_type: str | None = None,
-    animal_id: str | None = None,
-    date: str | None = None,
-    day_x: str | None = None,
-    day_y: str | None = None,
-) -> str:
-    """Build a consistent plot title with animal ID and date info and reduce redundant code
-
-    Args:
-        description: Main plot description.
-        trial_type: Trial type label.
-        animal_id: Animal identifier.
-        date: Single session date.
-        day_x: First date for multiday comparisons.
-        day_y: Second date for multiday comparisons.
-
-    Returns:
-        Formatted title string.
-    """
-    parts = []
-    if animal_id:
-        parts.append(animal_id)
-    parts.append(description)
-    if trial_type:
-        parts.append(trial_type)
-    if date:
-        parts.append(date[5:])
-    elif day_x and day_y:
-        if day_x == day_y:
-            parts.append(f'{day_x[5:]} split-half')
-        else:
-            parts.append(f'{day_x[5:]} vs {day_y[5:]}')
-    return ' — '.join(parts)
 
 
 def plot_split_half(
@@ -372,7 +337,7 @@ def plot_split_half(
 
     ax.set_xlabel('Pearson r (odd vs even trials)', fontsize=11)
     ax.set_ylabel('Number of cells', fontsize=11)
-    ax.set_title(_build_title('Split-Half Reliability', trial_type=trial_type,
+    ax.set_title(pfmt.build_title('Split-Half Reliability', trial_type=trial_type,
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
     ax.legend(frameon=False, fontsize=10)
 
@@ -450,7 +415,7 @@ def plot_pv_correlation_across_position(
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
-    ax.set_title(_build_title(f'PV Correlation — {type_a} vs {type_b}',
+    ax.set_title(pfmt.build_title(f'PV Correlation — {type_a} vs {type_b}',
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
     ax.set_xlim(0, max(len_a, len_b))
     ax.set_ylim(-0.2, 1.05)
@@ -519,7 +484,7 @@ def plot_per_cell_cross_correlation(
 
     ax.set_xlabel(f'Pearson r ({seg_label})', fontsize=11)
     ax.set_ylabel('Number of cells', fontsize=11)
-    ax.set_title(_build_title(f'Per-Cell Correlation — {type_a} vs {type_b}',
+    ax.set_title(pfmt.build_title(f'Per-Cell Correlation — {type_a} vs {type_b}',
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
     ax.legend(frameon=False, fontsize=10)
 
@@ -594,7 +559,7 @@ def plot_pv_correlation_matrix(
 
     ax.set_xlabel(f'{type_a} position (cm)', fontsize=11)
     ax.set_ylabel(f'{type_b} position (cm)', fontsize=11)
-    ax.set_title(_build_title(f'PV Matrix — {type_a} vs {type_b}',
+    ax.set_title(pfmt.build_title(f'PV Matrix — {type_a} vs {type_b}',
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
 
     pfmt.add_cue_bar(ax, config, type_a, axis='x')
@@ -693,7 +658,7 @@ def multiday_tuning_curves(
     signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
-    """Compute session-averaged tuning curves for one trial type across days.
+    """Compute session-averaged tuning curves per cell for one trial type across days.
 
     Args:
         sessions: From load_multiday_sessions(). Keys are date strings.
@@ -937,7 +902,7 @@ def plot_multiday_per_cell_histogram(
 
     ax.set_xlabel('Pearson r', fontsize=11)
     ax.set_ylabel('Number of cells', fontsize=11)
-    ax.set_title(_build_title('Per-Cell Correlation', trial_type=trial_type,
+    ax.set_title(pfmt.build_title('Per-Cell Correlation', trial_type=trial_type,
                               animal_id=animal_id, day_x=day_x, day_y=day_y), fontsize=13, fontweight='bold')
     ax.legend(frameon=False, fontsize=10)
 
@@ -1023,7 +988,7 @@ def plot_multiday_pv_across_position(
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
-    ax.set_title(_build_title('PV Correlation', trial_type=trial_type, animal_id=animal_id, day_x=day_x,
+    ax.set_title(pfmt.build_title('PV Correlation', trial_type=trial_type, animal_id=animal_id, day_x=day_x,
                               day_y=day_y), fontsize=13, fontweight='bold')
     ax.set_xlim(0, track_len)
     ax.set_ylim(-0.2, 1.05)
@@ -1043,7 +1008,7 @@ def plot_multiday_pv_across_position(
         plt.show()
     return fig
 
-
+#TODO fix hardcoded bin size
 def plot_multiday_pv_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
@@ -1119,7 +1084,7 @@ def plot_multiday_pv_correlation_matrix(
 
     ax.set_xlabel(f'{trial_type} position (cm) — {label_a}', fontsize=11)
     ax.set_ylabel(f'{trial_type} position (cm) — {label_b}', fontsize=11)
-    ax.set_title(_build_title('PV Matrix', trial_type=trial_type, animal_id=animal_id,
+    ax.set_title(pfmt.build_title('PV Matrix', trial_type=trial_type, animal_id=animal_id,
                               day_x=day_x, day_y=day_y), fontsize=13, fontweight='bold')
     plt.tight_layout()
 
@@ -1182,7 +1147,7 @@ def plot_multiday_correlation_matrix_summary(
     ax.set_yticklabels(date_labels, fontsize=9)
     ax.set_xlabel('Session date', fontsize=11)
     ax.set_ylabel('Session date', fontsize=11)
-    ax.set_title(_build_title(f'Day × Day Correlation ({metric})',
+    ax.set_title(pfmt.build_title(f'Day × Day Correlation ({metric})',
                               trial_type=trial_type, animal_id=animal_id), fontsize=13, fontweight='bold')
     plt.tight_layout()
 
@@ -1204,7 +1169,7 @@ def run_multiday_analysis(
     show: bool = True,
     save_dir: str | Path | None = None,
 ) -> dict[str, Figure]:
-    """Run multiday cross-correlation analysis.
+    """Runs all multiday cross-correlation analysis.
 
     By default, computes all pairwise day combinations plus autocorrelations.
     Generates per-cell histograms for each pair and a day×day summary matrix.
@@ -1258,18 +1223,33 @@ def run_multiday_analysis(
         print(f"  {label}...")
 
         fig = plot_multiday_per_cell_histogram(
-            sessions, day_x, day_y, trial_type,
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
-            cell_indices=cell_indices, animal_id=animal_id, show=show,
+            sessions, trial_type,
+            signal_col=signal_col,
+            bin_size_cm=bin_size_cm,
+            day_x=day_x,
+            day_y=day_y,
+            cell_indices=cell_indices,
+            animal_id=animal_id,
+            show=show,
         )
-        figs[f'multiday_cell_{trial_type}_{label}'] = fig
+        figs[f'{animal_id} - multiday_cell_{trial_type}_{label}'] = fig
 
         fig = plot_multiday_pv_across_position(
-            sessions, day_x, day_y, trial_type,
+            sessions, trial_type, day_x, day_y,
             signal_col=signal_col, bin_size_cm=bin_size_cm,
             animal_id=animal_id, show=show,
         )
-        figs[f'multiday_pv_{trial_type}_{label}'] = fig
+        figs[f'{animal_id} - multiday_pv_{trial_type}_{label}'] = fig
+
+        #Day x day PV correlation across trials
+        fig = plot_multiday_pv_correlation_matrix(
+            sessions, trial_type,  signal_col=signal_col,
+            bin_size_cm=bin_size_cm, day_x=day_x, day_y=day_y,
+            animal_id=animal_id, show=show,
+        )
+        figs[f'{animal_id} - multiday_pv_matrix_{trial_type}_{label}'] = fig
+
+        fig = plot_multiday_tuning_curves
 
     # Day × day matrix SUMMARY of session (all cells)
     if len(dates) >= 2:
@@ -1278,15 +1258,9 @@ def run_multiday_analysis(
             sessions, trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
             cell_indices=cell_indices, animal_id=animal_id, show=show,
         )
-        figs[f'multiday_matrix_{trial_type}'] = fig
+        figs[f'{animal_id} - multiday_matrix_{trial_type}'] = fig
 
-    #Day x day PV correlation across trials
-    fig = plot_multiday_pv_correlation_matrix(
-        sessions, day_x, day_y, trial_type,
-        signal_col=signal_col, bin_size_cm=bin_size_cm,
-        animal_id=animal_id, show=show,
-    )
-    figs[f'multiday_pv_matrix_{trial_type}_{label}'] = fig
+
 
     _save_figures(figs, save_dir)
     print(f"\nGenerated {len(figs)} figures.")
@@ -1317,6 +1291,7 @@ def _save_figures(figs: dict[str, Figure], save_dir: str | Path | None):
 if __name__ == "__main__":
     from df_processing import load_session_dir, get_session_prefix, load_processed_session, load_multiday_sessions
 
+    animal_id = '26'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
 
     # ── Single-session analysis ──
@@ -1326,31 +1301,30 @@ if __name__ == "__main__":
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
 
-    figs = run_within_session_analysis(data, config, signal_col='multi_day_dff', show=True)
+    #figs = run_within_session_analysis(data, config, signal_col='multi_day_dff', show=True)
 
 
     # ── Multiday analysis ──
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-08-10', '2025-09-24'), auto_process=False,
+        mouse_dir, date_range=('2025-08-01', '2025-09-24'), auto_process=False,
     )
 
     # All pairs + autocorrelation for ABC
     #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_dff', show=True)
 
 
-    # Specific pairs: day 1 vs day 5, day 1 vs day 1 (
-    # dates = sorted(sessions.keys())
-    # if len(dates) >= 2:
-    #     figs = run_multiday_analysis(
-    #         sessions, trial_type='ABC',
-    #         day_pairs=None,
-    #         signal_col='multi_day_dff', show=True,
-    #     )
+    #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
+    dates = sorted(sessions.keys())
+    if len(dates) >= 2:
+        figs = run_multiday_analysis(
+            sessions, trial_type=None, signal_col='multi_day_dff',
+            animal_id=animal_id, day_pairs=None, show=True,
+        )
 
 # try just the pv for 2 days
     dates = sorted(sessions.keys())
     if len(dates) >= 2:
         fig = plot_multiday_pv_correlation_matrix(
             sessions, trial_type='ABC',
-            signal_col='multi_day_dff', show=True,
+            signal_col='multi_day_dff',show=True,
         )
