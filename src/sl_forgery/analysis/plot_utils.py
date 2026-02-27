@@ -116,12 +116,12 @@ def get_cue_colors(config: dict = None, max_cue_id: int = 20) -> dict[int, str]:
     if config and 'cue_colors' in config:
         colors.update(config['cue_colors'])
 
-    # Map string cue IDs (e.g. 'A', 'B') to the same colors as their int IDs
-    if config:
-        cue_id_map = config.get('cue_id_map', {})
-        for int_id, str_id in cue_id_map.items():
-            if int_id in colors:
-                colors[str_id] = colors[int_id]
+    # Map string cue IDs to the same colors as their int IDs
+    for int_id in range(1, max_cue_id + 1):
+        str_id = chr(ord('A') + int_id - 1)  # 1→'A', 2→'B', ...
+        if int_id in colors:
+            colors[str_id] = colors[int_id]
+            colors[f"0{str_id.lower()}"] = colors[0]  # gray zones: '0a', '0b'
 
     return colors
 
