@@ -343,7 +343,7 @@ class PlaceFieldResult:
 def _quantile_threshold(
     binF: np.ndarray,
     base_quantile: float = 0.25,
-    signal_threshold: float = 0.25,
+    signal_threshold: float = 0.20,
 ) -> np.ndarray:
     """Quantile-based thresholding per cell. Replaces vr2p.quantile_max_threshold.
 
@@ -501,7 +501,7 @@ def _detect_on_tuning_curves(
 def detect_place_fields(
     df: pl.DataFrame,
     config: dict,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     params: DetectionParams | None = None,
 ) -> PlaceFieldResult:
@@ -555,7 +555,7 @@ def validate_place_fields(
     df: pl.DataFrame,
     config: dict,
     result: PlaceFieldResult | None = None,
-    signal_col: str = 'multi_day_dff',
+    signal_col: str = 'multi_day_spikes',
     bin_size_cm: int = 5,
     params: DetectionParams | None = None,
     seed: int = 42,
@@ -1124,7 +1124,7 @@ if __name__ == '__main__':
     prefix = get_session_prefix(session_data)
     data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
 
-    result = detect_place_fields(data, config, signal_col='multi_day_dff')
+    result = detect_place_fields(data, config, signal_col='multi_day_spikes')
     print(result.summary())
 
     # Sorted heatmap per trial type
@@ -1140,7 +1140,7 @@ if __name__ == '__main__':
         mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False,
     )
 
-    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_spikes')
     save_multiday_result(multiday, mouse_dir / 'place_field_results.npz')
 
     # Heatmap per day for union cells
@@ -1158,4 +1158,4 @@ if __name__ == '__main__':
 
     # Multiday comparison for top place cells
     for i in multiday.union_indices[:5]:
-        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
+        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_spikes')
