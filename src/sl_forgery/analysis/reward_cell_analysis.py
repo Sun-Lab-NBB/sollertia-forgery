@@ -1,7 +1,7 @@
 """Identifies reward-associated and reward-predictive neurons from spatial and speed-activity data."""
 
 import os
-from dataclasses import field, dataclass
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 
 from numba import njit, prange
@@ -11,7 +11,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
-from sl_forgery.analysis.place_1d import _bin_fluorescence_by_position
+from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
 
 
 @dataclass

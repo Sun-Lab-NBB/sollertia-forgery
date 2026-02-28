@@ -853,9 +853,7 @@ class PlaceFieldDetector:
 
         # Selects cells with an observed place field and a p-value below the significance threshold.
         significant_cells = (
-            np.argwhere((observed) & (p_values < self.configuration.significance_threshold))
-            .flatten()
-            .astype(np.int32)
+            np.argwhere((observed) & (p_values < self.configuration.significance_threshold)).flatten().astype(np.int32)
         )
 
         return significant_cells, p_values
