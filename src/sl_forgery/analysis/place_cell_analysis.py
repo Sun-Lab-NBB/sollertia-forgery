@@ -360,12 +360,6 @@ class PlaceFields:
     bin_size: float = 5.0
     """Size of spatial bins in centimeters."""
 
-    def __post_init__(self) -> None:
-        """Validates and normalizes field data types."""
-        self.label_image = self.label_image.astype(np.int32)
-        self.binned_fluorescence = self.binned_fluorescence.astype(np.float32)
-        self.centers = self.centers.astype(np.float32)
-
     @property
     def mean_intensity(self) -> NDArray[np.float32]:
         """Returns the mean intensity for each detected place field."""
@@ -752,22 +746,34 @@ def outside_field_threshold(place_fields: PlaceFields, threshold_factor: float =
     return place_fields.remove_fields(indices=invalid_regions)
 
 
-@dataclass
 class PlaceFieldDetector:
     """Detects, validates, and visualizes 1D place fields using thresholding and connected component analysis."""
 
-    fluorescence: NDArray[np.float32]
-    """Fluorescence data with dimensions (cell_count, timepoint_count)."""
-    position: NDArray[np.float32]
-    """Position data with length timepoint_count."""
-    speed: NDArray[np.float32]
-    """Speed data with length timepoint_count."""
-    track_length: float
-    """Length of the track in centimeters."""
-    bin_size: float = 5.0
-    """Size of spatial bins in centimeters."""
-    detection_params: PlaceFieldDetectionConfiguration = field(default_factory=PlaceFieldDetectionConfiguration)
-    """Configuration parameters for place field detection."""
+    def __init__(
+        self,
+        fluorescence: NDArray[np.float32],
+        position: NDArray[np.float32],
+        speed: NDArray[np.float32],
+        track_length: float,
+        bin_size: float = 5.0,
+        configuration: PlaceFieldDetectionConfiguration | None = None,
+    ) -> None:
+        """Initializes the detector with session data and configuration.
+
+        Args:
+            fluorescence: Fluorescence data with dimensions (cell_count, timepoint_count).
+            position: Position data with length timepoint_count.
+            speed: Speed data with length timepoint_count.
+            track_length: Length of the track in centimeters.
+            bin_size: Size of spatial bins in centimeters.
+            configuration: Configuration parameters for place field detection. Uses defaults if None.
+        """
+        self.fluorescence = fluorescence
+        self.position = position
+        self.speed = speed
+        self.track_length = track_length
+        self.bin_size = bin_size
+        self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
 
     def detect(self, run_shuffle: bool = False) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
@@ -792,7 +798,7 @@ class PlaceFieldDetector:
 
         # Filters to only include cells with statistically significant place fields based on shuffle testing.
         if run_shuffle:
-            significant_cells, _ = self.compute_shuffle_significance(repeat_count=self.detection_params.chunk_count)
+            significant_cells, _ = self.compute_shuffle_significance(repeat_count=self.configuration.chunk_count)
             place_fields = place_fields.filter_cells(indices=significant_cells)
 
         return place_fields
@@ -847,7 +853,7 @@ class PlaceFieldDetector:
 
         # Selects cells with an observed place field and a p-value below the significance threshold.
         significant_cells = (
-            np.argwhere((observed) & (p_values < self.detection_params.significance_threshold))
+            np.argwhere((observed) & (p_values < self.configuration.significance_threshold))
             .flatten()
             .astype(np.int32)
         )
@@ -962,7 +968,7 @@ class PlaceFieldDetector:
             fields.
         """
         # Excludes timepoints where the animal is moving below the minimum speed threshold.
-        speed_indices = speed > self.detection_params.minimum_speed
+        speed_indices = speed > self.configuration.minimum_speed
         position = position[speed_indices]
         fluorescence = fluorescence[:, speed_indices]
 
@@ -974,35 +980,36 @@ class PlaceFieldDetector:
             bin_edges=bin_edges,
         )
 
-        # Applies a moving average filter to smooth binned fluorescence across spatial bins.
+        # Applies a moving average filter to smooth binned fluorescence across spatial bins. Casts back to float32
+        # because uniform_filter1d promotes to float64.
         binned_fluorescence = filters.uniform_filter1d(
-            input=binned_fluorescence, size=self.detection_params.smooth_size, axis=1, mode="wrap"
-        )
+            input=binned_fluorescence, size=self.configuration.smooth_size, axis=1, mode="wrap"
+        ).astype(np.float32)
 
         # Creates a binary mask by thresholding bins that exceed the baseline-to-max activity level.
         thresholded_fluorescence = _compute_quantile_max_threshold(
-            fluorescence=binned_fluorescence.astype(np.float32),
-            base_quantile=self.detection_params.base_quantile,
-            threshold_factor=self.detection_params.signal_threshold,
+            fluorescence=binned_fluorescence,
+            base_quantile=self.configuration.base_quantile,
+            threshold_factor=self.configuration.signal_threshold,
         )
 
         # Detects place fields as horizontally connected regions in the thresholded binary mask.
         place_fields = compute_circular_connected_place_fields(
             thresholded_image=thresholded_fluorescence,
-            binned_fluorescence=binned_fluorescence.astype(np.float32),
-            minimum_bins=self.detection_params.minimum_bins,
+            binned_fluorescence=binned_fluorescence,
+            minimum_bins=self.configuration.minimum_bins,
         )
         place_fields.bin_size = self.bin_size
 
         # Removes fields where in-field activity does not sufficiently exceed outside-field activity.
         place_fields = outside_field_threshold(
             place_fields=place_fields,
-            threshold_factor=self.detection_params.outside_threshold,
+            threshold_factor=self.configuration.outside_threshold,
         )
 
         # Removes fields with peak intensity below the minimum threshold.
         place_fields = place_fields.remove_fields(
-            indices=np.argwhere(place_fields.max_intensity < self.detection_params.maximum_intensity_threshold)
+            indices=np.argwhere(place_fields.max_intensity < self.configuration.maximum_intensity_threshold)
         )
 
         return place_fields
@@ -1021,7 +1028,7 @@ class PlaceFieldDetector:
 
         # Computes the minimum shift as a fraction of total frames based on chunk_count configuration.
         total_frames = data.shape[1]
-        minimum_shift = total_frames // self.detection_params.chunk_count
+        minimum_shift = total_frames // self.configuration.chunk_count
 
         # Generates a random shift amount that ensures at least minimum_shift displacement in either direction.
         shift_amount = random_generator.integers(minimum_shift, total_frames - minimum_shift)
