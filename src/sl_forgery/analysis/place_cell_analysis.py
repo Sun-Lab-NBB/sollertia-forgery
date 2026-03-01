@@ -4,15 +4,20 @@ track.
 
 import os
 from copy import deepcopy
-from dataclasses import field, dataclass
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import field, dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+from ataraxis_base_utilities import console
+import matplotlib.pyplot as plt
 from numba import njit, prange
 import numpy as np
-from numpy.typing import NDArray
+import polars as pl
 from scipy.ndimage import filters
-import matplotlib.pyplot as plt
-from ataraxis_base_utilities import console
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 @dataclass
@@ -185,8 +190,8 @@ def _accumulate_binned_fluorescence(
 
         # Adds each fluorescence value to its corresponding spatial bin based on the animal's position at that frame.
         for frame_index in range(frame_count):
-            bin_idx = bin_indices[frame_index]
-            bin_sums[bin_idx] += fluorescence[cell_index, frame_index]
+            bin_index = bin_indices[frame_index]
+            bin_sums[bin_index] += fluorescence[cell_index, frame_index]
 
         # Converts accumulated sums to mean values (if requested) by dividing by the number of samples in each bin.
         for bin_index in range(bin_count):
@@ -751,26 +756,37 @@ class PlaceFieldDetector:
 
     def __init__(
         self,
-        fluorescence: NDArray[np.float32],
-        position: NDArray[np.float32],
-        speed: NDArray[np.float32],
+        session_path: Path,
         track_length: float,
+        fluorescence_column: str = "single_day_dff",
+        trial_type: str | None = None,
         bin_size: float = 5.0,
         configuration: PlaceFieldDetectionConfiguration | None = None,
     ) -> None:
-        """Initializes the detector with session data and configuration.
+        """Loads fluorescence, position, and speed data from a memory-mapped feather file for place field detection.
+        Filters to 'run' state frames and converts cumulative distance to track position via modulo.
 
         Args:
-            fluorescence: Fluorescence data with dimensions (cell_count, timepoint_count).
-            position: Position data with length timepoint_count.
-            speed: Speed data with length timepoint_count.
+            session_path: Path to the session feather file.
             track_length: Length of the track in centimeters.
+            fluorescence_column: Name of the fluorescence column to use.
+            trial_type: Trial type to filter by (e.g. "ABC", "ABCD"). If None, includes all trial types.
             bin_size: Size of spatial bins in centimeters.
             configuration: Configuration parameters for place field detection. Uses defaults if None.
         """
-        self.fluorescence = fluorescence
-        self.position = position
-        self.speed = speed
+        df = pl.read_ipc(
+            session_path, columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s"]
+        )
+        df = df.filter(pl.col("system_state") == "run")
+        if trial_type is not None:
+            df = df.filter(pl.col("trial_type") == trial_type)
+
+        # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
+        self.fluorescence = np.vstack(df[fluorescence_column].to_list()).T.astype(np.float32)
+
+        # Converts the cumulative distance to track position using modulus to wrap within a single lap.
+        self.position = df["distance_cm"].to_numpy().astype(np.float32) % track_length
+        self.speed = df["speed_cm_s"].to_numpy().astype(np.float32)
         self.track_length = track_length
         self.bin_size = bin_size
         self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()

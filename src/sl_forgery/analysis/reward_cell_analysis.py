@@ -1,17 +1,23 @@
 """Identifies reward-associated and reward-predictive neurons from spatial and speed-activity data."""
 
 import os
-from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING
 
+import matplotlib.pyplot as plt
 from numba import njit, prange
 import numpy as np
-from numpy.typing import NDArray
+import polars as pl
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
-import matplotlib.pyplot as plt
 
 from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
+from sl_forgery.analysis.utilities import compute_within_trial_position
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 @dataclass
@@ -355,31 +361,43 @@ class RewardCellDetector:
 
     def __init__(
         self,
-        fluorescence: NDArray[np.float32],
-        position: NDArray[np.float32],
-        speed: NDArray[np.float32],
+        session_path: Path,
         track_length: float,
         reward_position: float,
-        trial_ids: NDArray[np.int32],
+        fluorescence_column: str = "single_day_dff",
+        trial_type: str | None = None,
         configuration: RewardCellConfiguration | None = None,
     ) -> None:
-        """Initializes the detector with session data and configuration.
+        """Loads fluorescence, position, speed, and trial data from a memory-mapped feather file for reward cell
+        detection. Filters to 'run' state frames and computes within-trial position.
 
         Args:
-            fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-            position: Position values in centimeters with length frame_count.
-            speed: Speed values in cm/s with length frame_count.
+            session_path: Path to the session feather file.
             track_length: Length of the track in centimeters.
             reward_position: Position of the reward zone in centimeters.
-            trial_ids: Trial identity for each frame with length frame_count.
+            fluorescence_column: Name of the fluorescence column to use.
+            trial_type: Trial type to filter by (e.g. "ABC", "ABCD"). If None, includes all trial types.
             configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if None.
         """
-        self.fluorescence = fluorescence
-        self.position = position
-        self.speed = speed
+        df = pl.read_ipc(
+            session_path,
+            columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s", "trial"],
+        )
+        df = df.filter(pl.col("system_state") == "run")
+        if trial_type is not None:
+            df = df.filter(pl.col("trial_type") == trial_type)
+
+        # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
+        self.fluorescence = np.vstack(df[fluorescence_column].to_list()).T.astype(np.float32)
+
+        distance = df["distance_cm"].to_numpy().astype(np.float64)
+        self.trial_ids = df["trial"].to_numpy().astype(np.int32)
+
+        # Computes within-trial position to avoid inter-trial drift from global modulo.
+        self.position = compute_within_trial_position(distance=distance, trial_ids=self.trial_ids)
+        self.speed = df["speed_cm_s"].to_numpy().astype(np.float32)
         self.track_length = track_length
         self.reward_position = reward_position
-        self.trial_ids = trial_ids
         self.configuration = configuration if configuration is not None else RewardCellConfiguration()
 
     def detect(self) -> RewardCellResults:
