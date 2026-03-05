@@ -22,7 +22,7 @@ import polars as pl
 import yaml
 
 
-# IMPORTS
+# LOAD CONFIG FILE
 def load_experiment_config(yaml_path: Path) -> dict:
     """Load experiment configuration from YAML file.
 
@@ -35,22 +35,10 @@ def load_experiment_config(yaml_path: Path) -> dict:
     with open(yaml_path, 'r') as f:
         return yaml.safe_load(f)
 
-#TODO while this is the name of the file the function name might be confusing.  Use session_config?
-def load_session_data(yaml_path: Path) -> dict:
-    """Load session metadata from session_data.yaml.
 
-    Args:
-        yaml_path: Path to the session_data.yaml file.
-
-    Returns:
-        Parsed session metadata dictionary.
-    """
-    with open('/source'/ yaml_path, 'r') as f:
-        return yaml.safe_load(f)
-
-
+# NAMING/VALIDATION HELPERS
 def get_session_prefix(session_data: dict) -> str:
-    """Build filename prefix: {animal_id}_{session_date}. Relies on load_session_data.
+    """Build filename prefix: {animal_id}_{session_date}
 
     """
     animal_id = session_data['animal_id']
@@ -58,7 +46,7 @@ def get_session_prefix(session_data: dict) -> str:
     return f"{animal_id}_{session_date}"
 
 
-def validate_session_date(session_data: dict, behavior_filename: str):
+def _validate_session_date(session_data: dict, behavior_filename: str):
     """Check that behavior.feather filename date matches session_data.yaml date.
 
     """
@@ -70,28 +58,22 @@ def validate_session_date(session_data: dict, behavior_filename: str):
             f"behavior file says {file_date}"
         )
 
+#
+def find_session_dir(mouse_dir: Path, date: str) -> Path:
+    """Find the session directory matching a date.
 
-def load_session_dir(mouse_dir: Path, date: str) -> tuple[dict, dict, Path]:
-    """
-    Auto-discover session files from a directory. Current expected layout (not sure):
-       Project/
+    Expected layout:
         mouse_dir/
-          {session_name}/
-            source_data/
-              session_data.yaml
-              experiment_configuration.yaml
-            *.feather
+          {session_name}/     <-- session_name starts with date string
 
     Args:
-        mouse_dir: Mouse-level directory (e.g., 26/)
+        mouse_dir: Mouse-level directory (e.g., datasets/26/)
         date: Session date (e.g., '2025-09-15')
 
-    Returns (session_data.yaml, experiment_config.yaml, behavior_path)
-    **This assumes that the feather file is in the same folder as the source data, which I dont thikn will be true?
+    Returns:
+        Path to the session directory.
     """
     mouse_dir = Path(mouse_dir)
-
-    #find the right session to process
     matches = sorted([
         d for d in mouse_dir.iterdir()
         if d.is_dir() and d.name.startswith(date)
@@ -102,22 +84,62 @@ def load_session_dir(mouse_dir: Path, date: str) -> tuple[dict, dict, Path]:
         raise FileNotFoundError(
             f"Multiple sessions for '{date}': {[d.name for d in matches]}"
         )
-    session_dir = matches[0]
+    return matches[0]
 
-    source_dir = session_dir / 'source_data'
-    session_data = load_session_data(source_dir / 'session_data.yaml')
+
+def load_session_context(session_dir: Path) -> tuple[dict, dict]:
+    """Load session_data.yaml and experiment_configuration.yaml from a session directory.
+
+    Expected layout:
+        session_dir/
+          source_data/
+            session_data.yaml
+            experiment_configuration.yaml
+
+    Args:
+        session_dir: Path to the session directory.
+
+    Returns:
+        (session_data, experiment_config) dicts.
+    """
+    source_dir = Path(session_dir) / 'source_data'
+    with open(source_dir / 'session_data.yaml', 'r') as f:
+        session_data = yaml.safe_load(f)
     experiment_config = load_experiment_config(source_dir / 'experiment_configuration.yaml')
+    return session_data, experiment_config
 
-#TODO this will need to change depending on the project structure
+
+def get_session_paths(session_dir: Path, session_data: dict) -> dict:
+    """Get all relevant file paths for a session. Single source of truth for naming conventions.
+
+    Finds the raw .feather file (expects exactly one) and builds the processed output paths
+    using the {animal_id}_{date}_processed naming convention.
+
+    Args:
+        session_dir: Path to the session directory.
+        session_data: Parsed session_data.yaml dict (needed for animal_id and date prefix).
+
+    Returns:
+        dict with keys: 'session_dir', 'feather', 'parquet', 'metadata'
+        where each value is a Path to that file (or directory).
+    """
+    session_dir = Path(session_dir)
+    prefix = get_session_prefix(session_data)
+
+    # find the raw feather
     feather_files = sorted(session_dir.glob('*.feather'))
     if len(feather_files) != 1:
         raise FileNotFoundError(
             f"Expected 1 feather file in {session_dir}, found {len(feather_files)}"
         )
-    validate_session_date(session_data, feather_files[0].name)
+    _validate_session_date(session_data, feather_files[0].name)
 
-    return session_data, experiment_config, feather_files[0]
-
+    return {
+        'session_dir': session_dir,
+        'feather': feather_files[0],
+        'parquet': session_dir / f'{prefix}_processed.parquet',
+        'metadata': session_dir / f'{prefix}_processed.yaml',
+    }
 
 # CONFIGURATIONS
 def get_track_length(config: dict,
@@ -758,19 +780,22 @@ def load_multiday_sessions(
 
 if __name__ == "__main__":
     #load all the data
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    date = '2025-09-12'   #the .feather file in this is actually from 9-16, too slow to download at my house
+    mouse_id = '26'
+    date = '2025-08-21'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-    session_data, experiment_config, behavior_path = load_session_dir(mouse_dir, date)
-    behavior_df = pl.read_ipc(behavior_path)
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, experiment_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+
+    behavior_df = pl.read_ipc(paths['feather'])
 
     #process and save the offset-corrected df
     processed_df, meta = process_session(behavior_df, experiment_config)
-    save_processed_session(processed_df, behavior_path.parent, session_data, meta)  #.parent gets session folder
+    save_processed_session(processed_df, session_dir, session_data, meta)  #.parent gets session folder
 
     #load it back to check
-    prefix = get_session_prefix(session_data)
-    frame_df, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
+    frame_df, meta = load_processed_session(paths['parquet'])
 
     # #check
     # print(frame_df.columns)
