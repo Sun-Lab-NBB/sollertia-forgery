@@ -5,9 +5,9 @@ Visualization functions for analyzing neural manifolds using UMAP.
 Works with frame-level data (after process_session or fix_cue_offset) — NOT spatially binned trial data.
 
 Core workflow:
-    1. prepare_umap_data() - Frame df → neural array + metadata dict
-    2. compute_umap() - Neural array → embedding
-    3. plot_umap_*() - Embedding + metadata → visualization
+    1. prepare_umap_data() - Frame df → neural array + filtered_df (signal columns dropped)
+    2. compute_umap() - Neural array → embedding + umap_params as config file
+    3. plot_umap_*() - Embedding + filtered_df → visualization
 
 Main plotting function:
     - plot_umap: Handles 1D (matplotlib), 2D (matplotlib), 3D (interactive Plotly).
@@ -68,12 +68,12 @@ def prepare_umap_data(
         trial_types_to_include: list[str] | None = None,
         state_filters: dict[str, Any] | None = None,
         max_frames: int | None = None,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+) -> tuple[np.ndarray, pl.DataFrame]:
     """Prepare frame-level data for UMAP.
 
-    Extracts neural activity arrays and behavioral metadata from a processed
-    frame-level DataFrame. Handles filtering, subsampling, and position
-    normalization.
+    Filters the DataFrame, extracts neural activity as a numpy array, and
+    returns the lightweight filtered DataFrame (signal columns dropped) for
+    downstream use. The filtered DataFrame is frame-aligned with neural_data.
 
     Uses 'position' and 'nominal_track_length' columns if present (from
     process_session), otherwise computes them from 'distance_cm'.
@@ -91,8 +91,8 @@ def prepare_umap_data(
 
     Returns:
         neural_data: Array of shape (n_frames, n_cells).
-        metadata: Dict with keys 'distance', 'cue', 'trial_type', 'speed',
-            'trial', 'track_length'.
+        filtered_df: Filtered DataFrame with signal columns dropped. Frame-aligned
+            with neural_data; use columns directly for coloring/segmenting.
     """
     filtered = df
 
@@ -118,44 +118,30 @@ def prepare_umap_data(
 
     neural_data = np.vstack(filtered[signal_column].to_list())
 
-    # Use existing 'position' column if available (from process_session),
-    # otherwise compute normalized position from distance_cm
-    if 'position' in filtered.columns:
-        position = filtered['position'].to_numpy()
-    else:
-        position = (
-            filtered.with_columns(
-                (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
-                .alias('_norm_pos')
-            )['_norm_pos'].to_numpy()
+    # Add 'position' if not present (normalized within-trial distance)
+    if 'position' not in filtered.columns:
+        filtered = filtered.with_columns(
+            (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
+            .alias('position')
         )
 
-    # Use existing 'nominal_track_length' if available, otherwise estimate
-    if 'nominal_track_length' in filtered.columns:
-        track_lengths = filtered['nominal_track_length'].to_numpy().astype(float)
-    else:
-        track_lengths = (
-            filtered.with_columns(
-                (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
-                .max().over('trial').alias('_track_len')
-            )['_track_len'].to_numpy()
+    # Add 'nominal_track_length' if not present
+    if 'nominal_track_length' not in filtered.columns:
+        filtered = filtered.with_columns(
+            (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
+            .max().over('trial').alias('nominal_track_length')
         )
 
-    metadata = {
-        'distance': position,
-        'cue': filtered['cue'].to_numpy(),
-        'trial_type': filtered['trial_type'].to_numpy(),
-        'speed': filtered['speed_cm_s'].to_numpy(),
-        'trial': filtered['trial'].to_numpy(),
-        'track_length': track_lengths,
-    }
+    # Drop signal columns — neural_data already extracted as numpy array
+    signal_cols = [c for c in filtered.columns if c.startswith(('single_day_', 'multi_day_'))]
+    filtered_df = filtered.drop(signal_cols)
 
-    n_filtered = len(df) - len(filtered)
+    n_filtered = len(df) - len(filtered_df)
     print(f"Prepared {neural_data.shape[0]} frames × {neural_data.shape[1]} cells")
     if n_filtered > 0:
         print(f"  Filtered out {n_filtered} frames")
 
-    return neural_data, metadata
+    return neural_data, filtered_df
 
 
 # UMAP COMPUTATION
@@ -180,7 +166,8 @@ def compute_umap(
         random_state: Random seed for reproducibility.
 
     Returns:
-        Embedding array of shape (n_frames, n_components).
+        embedding: array of shape (n_frames, n_components).
+        umap_params: Dict of hyperparameters used for reproducibility/saving.
     """
     print(f"Computing {n_components}D UMAP (n_neighbors={n_neighbors}, min_dist={min_dist})...")
 
@@ -194,6 +181,17 @@ def compute_umap(
     )
     # Fit X into an embedded space and return the transformed output
     embedding = reducer.fit_transform(neural_data)
+
+    umap_params = {
+        'n_components': n_components,
+        'n_neighbors': n_neighbors,
+        'min_dist': min_dist,
+        'metric': metric,
+        'random_state': random_state,
+        'n_frames': neural_data.shape[0],
+        'n_cells': neural_data.shape[1],
+    }
+
     print(f"Done! Embedding shape: {embedding.shape}")
     return embedding
 
@@ -202,14 +200,14 @@ def compute_umap(
 
 def get_colors_for_strategy(
         strategy: ColoringStrategy,
-        metadata: dict[str, np.ndarray],
+        filtered_df: pl.DataFrame,
         cmap_name: str = 'viridis',
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Generate colors and colormap info for a coloring strategy.
 
     Args:
         strategy: How to color the points.
-        metadata: Dict with arrays from prepare_umap_data.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
         cmap_name: Colormap name for continuous variables (not used for all strategies).
 
     Returns:
@@ -219,8 +217,8 @@ def get_colors_for_strategy(
     if strategy == ColoringStrategy.CUE:
         cue_color_map = pfmt.get_cue_colors()
         cue_label_map = pfmt.get_cue_labels()
-        unique_cues = np.unique(metadata['cue'])
-        colors = np.array([cue_color_map.get(int(c), '#D3D3D3') for c in metadata['cue']])
+        unique_cues = np.unique(filtered_df['cue'].to_numpy())
+        colors = np.array([cue_color_map.get(int(c), '#D3D3D3') for c in filtered_df['cue'].to_numpy()])
         legend = {}
         for cue in unique_cues:
             label = cue_label_map.get(int(cue), f'Cue {cue}')
@@ -232,27 +230,27 @@ def get_colors_for_strategy(
 
     elif strategy == ColoringStrategy.POSITION:
         cmap = plt.cm.get_cmap('twilight')
-        vmax = metadata['track_length'].max() if 'track_length' in metadata else metadata['distance'].max()
+        vmax = filtered_df['nominal_track_length'].to_numpy().max()
         norm = Normalize(vmin=0, vmax=vmax)
-        colors = cmap(norm(metadata['distance']))
+        colors = cmap(norm(filtered_df['position'].to_numpy()))
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Position (cm)'}
 
     elif strategy == ColoringStrategy.TRIAL_TYPE:
-        unique_types = np.unique(metadata['trial_type'])
-        colors = np.array([pfmt.TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in metadata['trial_type']])
+        unique_types = np.unique(filtered_df['trial_type'].to_numpy())
+        colors = np.array([pfmt.TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in filtered_df['trial_type'].to_numpy()])
         legend = {tt: pfmt.TRIAL_TYPE_COLORS.get(tt, '#999999') for tt in unique_types}
         color_info = {'type': 'categorical', 'legend': legend, 'label': 'Trial Type'}
 
     elif strategy == ColoringStrategy.SPEED:
         cmap = plt.cm.get_cmap('plasma')
-        norm = Normalize(vmin=metadata['speed'].min(), vmax=metadata['speed'].max())
-        colors = cmap(norm(metadata['speed']))
+        norm = Normalize(vmin=filtered_df['speed'].to_numpy().min(), vmax=filtered_df['speed'].to_numpy().max())
+        colors = cmap(norm(filtered_df['speed'].to_numpy()))
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Speed (cm/s)'}
 
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
         cmap = plt.cm.get_cmap('YlOrBr')
-        norm = Normalize(vmin=metadata['trial'].min(), vmax=metadata['trial'].max())
-        colors = cmap(norm(metadata['trial']))
+        norm = Normalize(vmin=filtered_df['trial'].to_numpy().min(), vmax=filtered_df['trial'].to_numpy().max())
+        colors = cmap(norm(filtered_df['trial'].to_numpy()))
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Session Progress'}
 
     else:
@@ -261,15 +259,15 @@ def get_colors_for_strategy(
     return colors, color_info
 
 
-def _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha=0.6, s=20):
+def _scatter_categorical(ax, embedding, filtered_df, color_info, strategy, alpha=0.6, s=20):
     """Scatter for categorical strategies (1D or 2D)."""
     n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
     for label, color in color_info['legend'].items():
         if strategy == ColoringStrategy.CUE:
             raw_ids = [k for k, v in color_info['raw_cue_map'].items() if v == label]
-            mask = np.isin(metadata['cue'], raw_ids)
+            mask = np.isin(filtered_df['cue'].to_numpy(), raw_ids)
         else:
-            mask = metadata['trial_type'] == label
+            mask = filtered_df['trial_type'].to_numpy() == label
 
         if n_dims == 1:
             y_vals = np.random.normal(0, 0.02, size=mask.sum())
@@ -279,16 +277,16 @@ def _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha=0.
     ax.legend(title=color_info['label'], bbox_to_anchor=(1.05, 1), loc='upper left')
 
 
-def _plot_matplotlib(embedding, metadata, strategy, title, save_path, alpha, s):
+def _plot_matplotlib(embedding, filtered_df, strategy, title, save_path, alpha, s):
     """Matplotlib path for 1D and 2D embeddings."""
     n_dims = embedding.shape[1] if embedding.ndim > 1 else 1
-    colors, color_info = get_colors_for_strategy(strategy, metadata)
+    colors, color_info = get_colors_for_strategy(strategy, filtered_df)
 
     if n_dims == 1:
         fig, ax = plt.subplots(figsize=(12, 2))
         y_vals = np.random.normal(0, 0.02, size=len(embedding))
         if color_info['type'] == 'categorical':
-            _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
+            _scatter_categorical(ax, embedding, filtered_df, color_info, strategy, alpha, s)
         else:
             ax.scatter(embedding, y_vals, c=colors, alpha=alpha, s=s)
             plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
@@ -300,7 +298,7 @@ def _plot_matplotlib(embedding, metadata, strategy, title, save_path, alpha, s):
     else:  # 2D
         fig, ax = plt.subplots(figsize=(10, 8))
         if color_info['type'] == 'categorical':
-            _scatter_categorical(ax, embedding, metadata, color_info, strategy, alpha, s)
+            _scatter_categorical(ax, embedding, filtered_df, color_info, strategy, alpha, s)
         else:
             ax.scatter(embedding[:, 0], embedding[:, 1], c=colors, alpha=alpha, s=s)
             plt.colorbar(ScalarMappable(norm=color_info['norm'], cmap=color_info['cmap']),
@@ -346,20 +344,20 @@ def _show_and_save(fig: 'go.Figure', save_path: Path | None = None):
 # Each builder returns a list of traces for ONE strategy view.
 # The caller handles visibility toggling across views.
 
-def _build_cue_traces(embedding, metadata, point_size, opacity):
+def _build_cue_traces(embedding, filtered_df, point_size, opacity):
     """Build per-cue, per-trial-type traces with clickable legend.
 
     Returns list of trace dicts and list of legend group names.
     """
     traces = []
-    trial_types = sorted(np.unique(metadata['trial_type']))
+    trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()))
     base_colors = pfmt.get_cue_colors()
     cue_labels = pfmt.get_cue_labels()
 
     for tt_idx, trial_type in enumerate(trial_types):
-        tt_mask = metadata['trial_type'] == trial_type
-        cues = metadata['cue'][tt_mask]
-        positions = metadata['distance'][tt_mask]
+        tt_mask = filtered_df['trial_type'].to_numpy() == trial_type
+        cues = filtered_df['cue'].to_numpy()[tt_mask]
+        positions = filtered_df['position'].to_numpy()[tt_mask]
         emb = embedding[tt_mask]
 
         # Shade cues lighter/darker per trial type for visual distinction
@@ -384,7 +382,7 @@ def _build_cue_traces(embedding, metadata, point_size, opacity):
                 showlegend=(cue_int != 0),  # hide gray zone from legend
                 customdata=np.column_stack([
                     positions[cue_mask],
-                    metadata['trial'][tt_mask][cue_mask],
+                    filtered_df['trial'].to_numpy()[tt_mask][cue_mask],
                 ]),
                 hovertemplate=(
                     f'{trial_type}<br>'
@@ -397,20 +395,20 @@ def _build_cue_traces(embedding, metadata, point_size, opacity):
     return traces
 
 
-def _build_position_traces(embedding, metadata, point_size, opacity):
+def _build_position_traces(embedding, filtered_df, point_size, opacity):
     """Build per-trial-type traces colored by track position (separate colorscales).
 
     Returns list of traces.
     """
     traces = []
-    trial_types = sorted(np.unique(metadata['trial_type']))
+    trial_types = sorted(np.unique(filtered_df['trial_type']))
     cue_labels = pfmt.get_cue_labels()
 
     for i, trial_type in enumerate(trial_types):
-        tt_mask = metadata['trial_type'] == trial_type
-        positions = metadata['distance'][tt_mask]
-        cues = metadata['cue'][tt_mask]
-        track_len = metadata['track_length'][tt_mask].max()
+        tt_mask = filtered_df['trial_type'].to_numpy() == trial_type
+        positions = filtered_df['position'].to_numpy()[tt_mask]
+        cues = filtered_df['cue'].to_numpy()[tt_mask]
+        track_len = filtered_df['track_length'].to_numpy()[tt_mask].max()
         colorscale = pfmt.trial_type_colorscale(trial_type)
 
         # Stagger colorbars so they don't overlap
@@ -427,7 +425,7 @@ def _build_position_traces(embedding, metadata, point_size, opacity):
                               x=cb_x, y=cb_y),
             ),
             text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
-            customdata=metadata['trial'][tt_mask],
+            customdata=filtered_df['trial'][tt_mask],
             hovertemplate=(
                 f'{trial_type}<br>'
                 'Pos: %{marker.color:.1f} cm<br>'
@@ -439,22 +437,22 @@ def _build_position_traces(embedding, metadata, point_size, opacity):
     return traces
 
 
-def _build_trial_type_traces(embedding, metadata, point_size, opacity):
+def _build_trial_type_traces(embedding, filtered_df, point_size, opacity):
     """Build per-trial-type traces with flat color per type. Clickable legend."""
     traces = []
     cue_labels = pfmt.get_cue_labels()
 
-    for trial_type in sorted(np.unique(metadata['trial_type'])):
-        tt_mask = metadata['trial_type'] == trial_type
+    for trial_type in sorted(np.unique(filtered_df['trial_type'])):
+        tt_mask = filtered_df['trial_type'].to_numpy() == trial_type
         color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#D3D3D3')
-        positions = metadata['distance'][tt_mask]
-        cues = metadata['cue'][tt_mask]
+        positions = filtered_df['position'].to_numpy()[tt_mask]
+        cues = filtered_df['cue'].to_numpy()[tt_mask]
 
         traces.append(go.Scatter3d(
             x=embedding[tt_mask, 0], y=embedding[tt_mask, 1], z=embedding[tt_mask, 2],
             mode='markers', name=str(trial_type),
             marker=dict(size=point_size, opacity=opacity, color=color),
-            customdata=np.column_stack([positions, metadata['trial'][tt_mask]]),
+            customdata=np.column_stack([positions, filtered_df['trial'].to_numpy()[tt_mask]]),
             text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
             hovertemplate=(
                 f'{trial_type}<br>'
@@ -467,20 +465,20 @@ def _build_trial_type_traces(embedding, metadata, point_size, opacity):
     return traces
 
 
-def _build_continuous_traces(embedding, metadata, strategy, point_size, opacity):
+def _build_continuous_traces(embedding, filtered_df, strategy, point_size, opacity):
     """Build a single trace with continuous colorscale (speed, session progress)."""
     if strategy == ColoringStrategy.SPEED:
-        values, cscale, label = metadata['speed'], 'Plasma', 'Speed (cm/s)'
+        values, cscale, label = filtered_df['speed'].to_numpy(), 'Plasma', 'Speed (cm/s)'
         cmin, cmax = values.min(), values.max()
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
-        values, cscale, label = metadata['trial'], 'YlOrBr', 'Session Progress'
+        values, cscale, label = filtered_df['trial'].to_numpy(), 'YlOrBr', 'Session Progress'
         cmin, cmax = values.min(), values.max()
     else:
         raise ValueError(f"No continuous builder for {strategy}")
 
     cue_labels = pfmt.get_cue_labels()
-    cues = metadata['cue']
-    positions = metadata['distance']
+    cues = filtered_df['cue'].to_numpy()
+    positions = filtered_df['position'].to_numpy()
 
     trace = go.Scatter3d(
         x=embedding[:, 0], y=embedding[:, 1], z=embedding[:, 2],
@@ -490,7 +488,7 @@ def _build_continuous_traces(embedding, metadata, strategy, point_size, opacity)
             colorscale=cscale, cmin=cmin, cmax=cmax,
             colorbar=dict(title=label),
         ),
-        customdata=np.column_stack([positions, metadata['trial']]),
+        customdata=np.column_stack([positions, filtered_df['trial'].to_numpy()]),
         text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
         hovertemplate=(
             'Pos: %{customdata[0]:.1f} cm<br>'
@@ -521,7 +519,7 @@ def _get_trace_builder(strategy: ColoringStrategy):
 # MAIN PLOTTING FUNCTION
 def plot_umap(
         embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
+        filtered_df:pl.DataFrame,
         strategy: str | ColoringStrategy | list[str | ColoringStrategy] = 'cue',
         point_size: int | float = 2,
         opacity: float = 0.7,
@@ -543,7 +541,7 @@ def plot_umap(
 
     Args:
         embedding: UMAP embedding of shape (n_frames, n_components).
-        metadata: Dict with arrays from prepare_umap_data.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
         strategy: Coloring strategy or list of strategies for toggle dropdown.
             Valid values: 'cue', 'position', 'trial_type', 'speed',
             'session_progress', or their ColoringStrategy equivalents.
@@ -569,7 +567,7 @@ def plot_umap(
     strategies = [ColoringStrategy(s) if isinstance(s, str) else s for s in strategy]
 
     # Build plot_info return dict
-    trial_types = sorted(np.unique(metadata['trial_type']).tolist())
+    trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()).tolist())
     plot_info = {
         'n_components': n_dims,
         'strategy': [s_.value for s_ in strategies],
@@ -582,7 +580,7 @@ def plot_umap(
     if n_dims <= 2:
         if len(strategies) > 1:
             print("Warning: Multiple strategies only supported for 3D. Using first strategy.")
-        fig = _plot_matplotlib(embedding, metadata, strategies[0], title, save_path, alpha, s)
+        fig = _plot_matplotlib(embedding, filtered_df, strategies[0], title, save_path, alpha, s)
         return fig, plot_info
 
     # ── 3D: Plotly ───────────────────────────────────────────────────────
@@ -592,7 +590,7 @@ def plot_umap(
     if len(strategies) == 1:
         # Single strategy — just add traces directly
         builder = _get_trace_builder(strategies[0])
-        traces = builder(embedding, metadata, point_size, opacity)
+        traces = builder(embedding, filtered_df, point_size, opacity)
         for t in traces:
             fig.add_trace(t)
 
@@ -603,7 +601,7 @@ def plot_umap(
         trace_groups = []  # list of (strategy, traces)
         for strat in strategies:
             builder = _get_trace_builder(strat)
-            traces = builder(embedding, metadata, point_size, opacity)
+            traces = builder(embedding, filtered_df, point_size, opacity)
             trace_groups.append((strat, traces))
 
         # Add all traces, only first group visible
@@ -654,7 +652,7 @@ def plot_umap(
 #TODO impose cues on plots with legend so we know what we're actually looking at
 def plot_umap_2d_density(
         embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
+        filtered_df: pl.DataFrame,
         figsize: tuple[float, float] = (14, 6),
         n_levels: int = 6,
         bandwidth: float | None = None,
@@ -670,7 +668,7 @@ def plot_umap_2d_density(
 
     Args:
         embedding: 2D UMAP embedding array.
-        metadata: Dict with metadata arrays from prepare_umap_data.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
         figsize: Figure size.
         n_levels: Number of contour levels.
         bandwidth: KDE bandwidth (None = auto via Scott's rule).
@@ -684,12 +682,12 @@ def plot_umap_2d_density(
     """
     from scipy.stats import gaussian_kde
 
-    unique_types = np.unique(metadata['trial_type'])
+    unique_types = np.unique(filtered_df['trial_type'].to_numpy())
     fig, axes = plt.subplots(1, len(unique_types) + 1, figsize=figsize)
 
     # Per-trial-type panels
     for ax, trial_type in zip(axes[:-1], unique_types):
-        mask = metadata['trial_type'] == trial_type
+        mask = filtered_df['trial_type'].to_numpy() == trial_type
         color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#999999')
         emb = embedding[mask]
 
@@ -715,7 +713,7 @@ def plot_umap_2d_density(
     # Overlay panel
     ax_overlay = axes[-1]
     for trial_type in unique_types:
-        mask = metadata['trial_type'] == trial_type
+        mask = filtered_df['trial_type'].to_numpy() == trial_type
         color = pfmt.TRIAL_TYPE_COLORS.get(trial_type, '#999999')
         emb = embedding[mask]
 
@@ -747,7 +745,7 @@ def plot_umap_2d_density(
 # SINGLE-TRIAL TRAJECTORY OVERLAY UMAP
 def plot_umap_3d_single_trial_trajectory(
         embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
+        filtered_df: pl.DataFrame,
         trial_ids: list[int] | None = None,
         n_trials_per_type: int = 5,
         trial_selection: Literal['middle', 'spaced'] = 'spaced',
@@ -766,7 +764,7 @@ def plot_umap_3d_single_trial_trajectory(
 
     Args:
         embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
         trial_ids: Specific trial numbers to plot. If None, auto-selects.
         n_trials_per_type: Trials per type if trial_ids is None.
         trial_selection: How to pick trials when trial_ids is None.
@@ -784,14 +782,14 @@ def plot_umap_3d_single_trial_trajectory(
     """
     _check_plotly()
 
-    unique_types = np.unique(metadata['trial_type'])
+    unique_types = np.unique(filtered_df['trial_type'].to_numpy())
 
     # Auto-select trials: pick n from middle of session for each type
     if trial_ids is None:
         trial_ids = []
         for trial_type in unique_types:
-            type_mask = metadata['trial_type'] == trial_type
-            type_trials = np.unique(metadata['trial'][type_mask])
+            type_mask = filtered_df['trial_type'].to_numpy() == trial_type
+            type_trials = np.unique(filtered_df['trial'].to_numpy()[type_mask])
             n_select = min(n_trials_per_type, len(type_trials))
 
             if trial_selection == 'middle':
@@ -811,9 +809,9 @@ def plot_umap_3d_single_trial_trajectory(
     if show_background:
         cue_colors_map = pfmt.get_cue_colors()
         cue_labels = pfmt.get_cue_labels()
-        unique_cues = np.unique(metadata['cue'])
+        unique_cues = np.unique(filtered_df['cue'].to_numpy())
         for cue_id in unique_cues:
-            cue_mask = metadata['cue'] == cue_id
+            cue_mask = filtered_df['cue'] == cue_id
             cue_int = int(cue_id)
             label = cue_labels.get(cue_int, f'Cue {cue_int}')
             color = cue_colors_map.get(cue_int, '#CCCCCC')
@@ -844,14 +842,14 @@ def plot_umap_3d_single_trial_trajectory(
 
     # Plot each selected trial as a connected line
     for i, trial_id in enumerate(trial_ids):
-        trial_mask = metadata['trial'] == trial_id
+        trial_mask = filtered_df['trial'].to_numpy() == trial_id
         if not trial_mask.any():
             continue
 
         trial_emb = embedding[trial_mask]
-        trial_pos = metadata['distance'][trial_mask]
-        trial_cues = metadata['cue'][trial_mask]
-        trial_type = metadata['trial_type'][trial_mask][0]
+        trial_pos = filtered_df['position'].to_numpy()[trial_mask]
+        trial_cues = filtered_df['cue'].to_numpy()[trial_mask]
+        trial_type = filtered_df['trial_type'].to_numpy()[trial_mask][0]
         color = trial_colors[i]
 
         # Line connecting consecutive frames
@@ -894,7 +892,7 @@ def plot_umap_3d_single_trial_trajectory(
 #TODO increase onshared dot size, also consider what the point of this is
 def plot_umap_3d_position_matched(
         embedding: np.ndarray,
-        metadata: dict[str, np.ndarray],
+        filtered_df: pl.DataFrame,
         max_position: float | None = None,
         point_size: int = 2,
         opacity: float = 0.7,
@@ -908,7 +906,7 @@ def plot_umap_3d_position_matched(
 
     Args:
         embedding: 3D UMAP embedding.
-        metadata: Metadata dict from prepare_umap_data.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
         max_position: Upper position cutoff. Defaults to ABC track length.
         point_size: Plotly marker size.
         opacity: Marker opacity.
@@ -921,19 +919,19 @@ def plot_umap_3d_position_matched(
 
     # Auto-detect cutoff from shortest trial type
     if max_position is None:
-        trial_types = sorted(np.unique(metadata['trial_type']))
-        max_lengths = {tt: metadata['track_length'][metadata['trial_type'] == tt].max()
+        trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()))
+        max_lengths = {tt: filtered_df['track_length'].to_numpy()[filtered_df['trial_type'].to_numpy() == tt].max()
                        for tt in trial_types}
         max_position = min(max_lengths.values())
 
     fig = go.Figure()
 
     # Shared colorscale for matched positions
-    trial_types = sorted(np.unique(metadata['trial_type']))
+    trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()))
 
     for i, trial_type in enumerate(trial_types):
-        type_mask = metadata['trial_type'] == trial_type
-        positions = metadata['distance'][type_mask]
+        type_mask = filtered_df['trial_type'].to_numpy() == trial_type
+        positions = filtered_df['position'].to_numpy()[type_mask]
         emb = embedding[type_mask]
 
         # In-range points (shared position)
@@ -975,43 +973,49 @@ def plot_umap_3d_position_matched(
     _show_and_save(fig, save_path)
     return fig
 
+
+
+
+
+
+
 ###############
 #Deleted the natural separation function bc it didn't tell much, btu might be useful again if I do the merging project
 
 
 if __name__ == '__main__':
-    from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
-                               process_session, load_multiday_sessions)
+    from df_processing import (find_session_dir, get_session_paths, process_session,
+                               load_session_context, load_processed_session, save_processed_session)
 
-#TODO actualyl this is importing the binned data; call process_session with bins=None for all of the frames
-# and still have the cue alignment
-    #import the cue-aligned data
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    date = '2025-09-15'  # again, the .feather file in this is actually from 9-16, too slow to download at my house.
+    mouse_id = '26'
+    date = '2025-08-20'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, experiment_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
 
-    if parquet_path.exists():
-        print(f"Loading: {parquet_path}")
-        data, metadata = load_processed_session(parquet_path)
+    if paths['parquet'].exists():
+        print(f"Loading: {paths['parquet']}")
+        data, metadata = load_processed_session(paths['parquet'])
     else:
         print("No processed file found, processing from raw...")  # OR if you want to process the session with
         # other system states, bc the default is to process by run
-        behavior_df = pl.read_ipc(behavior_path)
-        data, metadata = process_session(behavior_df, config)
-        save_processed_session(data, behavior_path.parent, session_data, metadata)
+        behavior_df = pl.read_ipc(paths['feather'])
+        data, metadata = process_session(behavior_df, experiment_config)
+        save_processed_session(data, session_dir, session_data, metadata)
 
     save_path = None  # Set to a Path to save figures
 
+
     # prepare data
-    neural_data, metadata = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
+    neural_data, filtered_df = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
     # compute umap
     embedding = compute_umap(neural_data, n_components=3, n_neighbors=30)
+
     # plot
-    fig, meta = plot_umap(embedding, metadata, strategy=['trial_type', 'cue']) #basic plot, 3D
+    fig, meta = plot_umap(embedding, filtered_df, strategy=['trial_type', 'cue']) #basic plot, 3D
 
-    fig1= plot_umap_3d_single_trial_trajectory(embedding, metadata) # individual rtial plot
+    fig1= plot_umap_3d_single_trial_trajectory(embedding, filtered_df, n_trials_per_type=10) # individual rtial plot
 
-    fig2D = plot_umap_2d_density(embedding, metadata) # 2D with KDE
+    #fig2D = plot_umap_2d_density(embedding, filtered_df) # 2D with KDE, needs a 2D embedding
