@@ -46,6 +46,7 @@ import plot_utils as pfmt
 class ColoringStrategy(Enum):
     """Defines different strategies for coloring UMAP points."""
     CUE = "cue"
+    CUE_ID = "cue_id"
     POSITION = "position"
     TRIAL_TYPE = "trial_type"
     SPEED = "speed"
@@ -60,7 +61,7 @@ _PLOTLY_AXIS = dict(visible=False, showbackground=False, showgrid=False, zerolin
 
 def prepare_umap_data(
         df: pl.DataFrame,
-        signal_column: str = "single_day_f",
+        signal_column: str = "single_day_dff",
         min_speed: float | None = 2.0,
         max_speed: float | None = None,
         cues_to_include: list[int] | None = None,
@@ -140,6 +141,10 @@ def prepare_umap_data(
     print(f"Prepared {neural_data.shape[0]} frames × {neural_data.shape[1]} cells")
     if n_filtered > 0:
         print(f"  Filtered out {n_filtered} frames")
+
+    cues = filtered_df['cue'].to_numpy()  # uint8
+    for cue_val in sorted(set(cues), key=str):
+        print(type(cue_val), cue_val, (cues == cue_val).sum())
 
     return neural_data, filtered_df
 
@@ -228,6 +233,17 @@ def get_colors_for_strategy(
             'raw_cue_map': {int(c): cue_label_map.get(int(c), f'Cue {c}') for c in unique_cues},
         }
 
+    elif strategy == ColoringStrategy.CUE_ID:
+        cue_color_map = pfmt.get_cue_colors()
+        cue_ids = filtered_df['cue_id'].to_numpy()
+        unique_cue_ids = sorted(set(cue_ids), key=str)
+        colors = np.array([cue_color_map.get(c, '#D3D3D3') for c in cue_ids])
+        legend = {c: cue_color_map.get(c, '#D3D3D3') for c in unique_cue_ids}
+        color_info = {
+            'type': 'categorical', 'legend': legend, 'label': 'Cue ID',
+            'column': 'cue_id',
+        }
+
     elif strategy == ColoringStrategy.POSITION:
         cmap = plt.cm.get_cmap('twilight')
         vmax = filtered_df['nominal_track_length'].to_numpy().max()
@@ -266,6 +282,8 @@ def _scatter_categorical(ax, embedding, filtered_df, color_info, strategy, alpha
         if strategy == ColoringStrategy.CUE:
             raw_ids = [k for k, v in color_info['raw_cue_map'].items() if v == label]
             mask = np.isin(filtered_df['cue'].to_numpy(), raw_ids)
+        elif strategy == ColoringStrategy.CUE_ID:
+            mask = filtered_df['cue_id'].to_numpy() == label
         else:
             mask = filtered_df['trial_type'].to_numpy() == label
 
@@ -344,53 +362,70 @@ def _show_and_save(fig: 'go.Figure', save_path: Path | None = None):
 # Each builder returns a list of traces for ONE strategy view.
 # The caller handles visibility toggling across views.
 
-def _build_cue_traces(embedding, filtered_df, point_size, opacity):
+def _build_cue_traces(embedding, filtered_df, point_size, opacity, use_cue_id=False):
     """Build per-cue, per-trial-type traces with clickable legend.
 
-    Returns list of trace dicts and list of legend group names.
+    Args:
+        embedding: UMAP embedding array.
+        filtered_df: Filtered DataFrame from prepare_umap_data.
+        point_size: Plotly marker size.
+        opacity: Marker opacity.
+        use_cue_id: If True, color by 'cue_id' (unique gray zones).
+            If False, color by 'cue' (int, gray zones merged).
+
+    Returns:
+        List of Plotly Scatter3d traces (trace dicts and list of legend group names.
     """
     traces = []
     trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()))
     base_colors = pfmt.get_cue_colors()
     cue_labels = pfmt.get_cue_labels()
+    col = 'cue_id' if use_cue_id else 'cue'
+
 
     for tt_idx, trial_type in enumerate(trial_types):
         tt_mask = filtered_df['trial_type'].to_numpy() == trial_type
-        cues = filtered_df['cue'].to_numpy()[tt_mask]
+        cues = filtered_df[col].to_numpy()[tt_mask]
         positions = filtered_df['position'].to_numpy()[tt_mask]
         emb = embedding[tt_mask]
 
         # Shade cues lighter/darker per trial type for visual distinction
         factor = 1.3 - tt_idx * 0.4
         cue_colors = {cid: pfmt.scale_color(c, factor=factor)
+        if cid not in pfmt.SPECIAL_CUE_COLORS else c
                       for cid, c in base_colors.items()}
 
         suffix = f' ({trial_type})' if len(trial_types) > 1 else ''
 
-        for cue_id in sorted(set(cues)):
-            cue_mask = cues == cue_id
+        for cue_val in sorted(set(cues), key=str):
+            cue_mask = cues == cue_val
             if not cue_mask.any():
                 continue
-            cue_int = int(cue_id)
-            label = cue_labels.get(cue_int, f'Cue {cue_int}')
-            color = cue_colors.get(cue_int, '#AAAAAA')
+
+            # For int cues, use int key; for cue_id strings, use string key directly
+            color_key = int(cue_val) if not use_cue_id else cue_val
+            label = cue_labels.get(color_key, str(cue_val)) if not use_cue_id else str(cue_val)
+            color = cue_colors.get(color_key, '#AAAAAA')
+            is_gray = (color_key == 0) if not use_cue_id else str(cue_val).startswith('0')
+
+            print(f"Adding trace: cue_val={cue_val}, color={color}, n_points={cue_mask.sum()}")
 
             traces.append(go.Scatter3d(
-                x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
-                mode='markers', name=f'{label}{suffix}',
-                marker=dict(size=point_size, opacity=opacity, color=color),
-                showlegend=(cue_int != 0),  # hide gray zone from legend
-                customdata=np.column_stack([
-                    positions[cue_mask],
-                    filtered_df['trial'].to_numpy()[tt_mask][cue_mask],
-                ]),
-                hovertemplate=(
-                    f'{trial_type}<br>'
-                    'Pos: %{customdata[0]:.1f} cm<br>'
-                    f'Cue: {label}<br>'
-                    'Trial: %{customdata[1]:.0f}'
-                    '<extra></extra>'
-                ),
+                    x=emb[cue_mask, 0], y=emb[cue_mask, 1], z=emb[cue_mask, 2],
+                    mode='markers', name=f'{label}{suffix}',
+                    marker=dict(size=point_size, opacity=opacity, color=color),
+                    showlegend=True,  # hide gray zone from legend
+                    customdata=np.column_stack([
+                        positions[cue_mask],
+                        filtered_df['trial'].to_numpy()[tt_mask][cue_mask],
+                    ]),
+                    hovertemplate=(
+                        f'{trial_type}<br>'
+                        'Pos: %{customdata[0]:.1f} cm<br>'
+                        f'Cue: {label}<br>'
+                        'Trial: %{customdata[1]:.0f}'
+                        '<extra></extra>'
+                    ),
             ))
     return traces
 
@@ -502,15 +537,23 @@ def _build_continuous_traces(embedding, filtered_df, strategy, point_size, opaci
 
 
 def _get_trace_builder(strategy: ColoringStrategy):
-    """Return the appropriate trace builder for a strategy."""
+    """Return the appropriate trace builder for a strategy.
+        - emb: embedding
+        - df: dataframe
+        - ps: point size
+        - opacity: opacity
+
+    """
     if strategy == ColoringStrategy.CUE:
         return _build_cue_traces
+    elif strategy == ColoringStrategy.CUE_ID:
+        return lambda emb, df, ps, op: _build_cue_traces(emb, df, ps, op, use_cue_id=True)
     elif strategy == ColoringStrategy.POSITION:
         return _build_position_traces
     elif strategy == ColoringStrategy.TRIAL_TYPE:
         return _build_trial_type_traces
     elif strategy in (ColoringStrategy.SPEED, ColoringStrategy.SESSION_PROGRESS):
-        return lambda emb, meta, ps, op: _build_continuous_traces(emb, meta, strategy, ps, op)
+        return lambda emb, df, ps, op: _build_continuous_traces(emb, df, strategy, ps, op)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
 
@@ -521,7 +564,7 @@ def plot_umap(
         embedding: np.ndarray,
         filtered_df:pl.DataFrame,
         strategy: str | ColoringStrategy | list[str | ColoringStrategy] = 'cue',
-        point_size: int | float = 2,
+        point_size: int | float = 3,
         opacity: float = 0.7,
         title: str | None = None,
         save_path: Path | str | None = None,
@@ -988,7 +1031,7 @@ if __name__ == '__main__':
                                load_session_context, load_processed_session, save_processed_session)
 
     mouse_id = '26'
-    date = '2025-08-20'
+    date = '2025-08-27'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1011,7 +1054,7 @@ if __name__ == '__main__':
     # prepare data
     neural_data, filtered_df = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
     # compute umap
-    embedding = compute_umap(neural_data, n_components=3, n_neighbors=30)
+    embedding = compute_umap(neural_data, n_components=3, n_neighbors=50)       #3D embedding
 
     # plot
     fig, meta = plot_umap(embedding, filtered_df, strategy=['trial_type', 'cue']) #basic plot, 3D
