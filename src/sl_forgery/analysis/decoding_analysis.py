@@ -2,7 +2,7 @@
 Prospective decoding analysis for hippocampal place cell data.
 
 Asks: can we predict the upcoming trial type or cue from neural activity at shared
-track positions (before the physical divergence)?
+track positions (i.e.before the physical divergence)?
 
 Analyses:
     1. Sliding-window decoder — SVM accuracy at each spatial bin.
@@ -202,7 +202,12 @@ def sliding_decoder(
     n_shuffles: int = 100,
     seed: int = 42,
 ) -> dict:
-    """Decode upcoming trial type at each spatial bin using cross-validated SVM.
+    """Decode current trial type at each spatial bin using cross-validated SVM.
+
+    At shared track positions (before divergence), tests whether
+    neural activity already differentiates between trial types — i.e., whether
+    the hippocampus encodes trajectory identity before the animal experiences
+    the distinguishing features.
 
     At each bin in the shared track segment, trains a classifier on the
     population vector to predict ABC vs ABDC. Reports accuracy at each bin
@@ -352,6 +357,7 @@ def plot_sliding_decoder(
     # Chance band
     ax.fill_between(x, 0.5, chance_95, alpha=0.15, color='gray', label='95% shuffle')
     ax.axhline(0.5, color='gray', linewidth=0.5, alpha=0.5)
+    print(result['chance_95'])
 
     # Accuracy
     valid = ~np.isnan(acc)
@@ -365,7 +371,7 @@ def plot_sliding_decoder(
 
     # Cue shading
     if config and trial_type_for_cues:
-        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.05)
+        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.15)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('Decoder Accuracy', fontsize=11)
@@ -984,20 +990,22 @@ def run_decoding_analysis(
 
 
 if __name__ == "__main__":
-    from df_processing import load_session_dir, get_session_prefix, load_processed_session
+    from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
 
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
-    date = '2025-09-15'
+    mouse_id = '26'
+    date = '2025-09-08'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, exp_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
 
-    animal_id = session_data.get('animal_id', '')
+    data, meta = load_processed_session(paths['parquet'])
 
+# run decoder
     results = run_decoding_analysis(
-        data, config, metadata=meta, signal_col='multi_day_spikes',
+        data, exp_config, metadata=meta, signal_col='multi_day_spikes',
         cue_ids=['A', '0a', 'B', '0b', 'C'],
-        animal_id=animal_id, date=date,
+        animal_id=mouse_id, date=date,
         show=True,
     )
