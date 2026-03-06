@@ -1172,7 +1172,8 @@ def run_multiday_analysis(
         Dict of {name: Figure}.
     """
     dates = sorted(sessions.keys())
-    animal_id = next(iter(sessions.values()))['session_data'].get('animal_id', '')
+    if animal_id is None:
+        animal_id = next(iter(sessions.values()))['session_data'].get('animal_id', '')
     figs = {}
 
     # Determine trial type
@@ -1485,11 +1486,12 @@ def plot_within_session_learning_curve(
         ax_cross.scatter(trials, other, c=color, marker=marker, s=30,
                          alpha=0.7, label=label, edgecolors='white', linewidth=0.3)
 
+        x_fit = np.linspace(trials.min(), trials.max(), 50)
+
         # Trend lines
         valid_own = ~np.isnan(own)
         if valid_own.sum() > 2:
             z = np.polyfit(trials[valid_own], own[valid_own], 1)
-            x_fit = np.linspace(trials.min(), trials.max(), 50)
             ax_own.plot(x_fit, np.polyval(z, x_fit), color=color,
                         linewidth=1.5, alpha=0.5, linestyle='--')
 
@@ -1532,47 +1534,52 @@ def plot_within_session_learning_curve(
 # ─── MAIN ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    from df_processing import load_session_dir, get_session_prefix, load_processed_session, load_multiday_sessions
+    from df_processing import (find_session_dir, load_session_context,
+                               get_session_paths, load_processed_session, load_multiday_sessions)
 
-    animal_id = '26'
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    mouse_id = '26'
+    date = '2025-08-21'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-    # ── Single-session analysis ──
-    date = '2025-09-15'
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, exp_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+    data, meta = load_processed_session(paths['parquet'])
+
+    # plot
+    fig = plot_pv_correlation_matrix(data, exp_config, type_a='ABC', type_b='ABDC', animal_id=mouse_id, date=date)
 
     for s in ['shared', 'divergent', 'all']:
         result = within_session_learning_curve(
-            data, config, signal_col='multi_day_spikes', segment=s,
+            data, exp_config, signal_col='multi_day_spikes', segment=s,
         )
-        fig = plot_within_session_learning_curve(result, animal_id='26', date='2025-09-15')
+        fig = plot_within_session_learning_curve(result, animal_id=mouse_id, date=date)
 
-    #figs = run_within_session_analysis(data, config, signal_col='multi_day_spikes', show=True)
-
-
-    # ── Multiday analysis ──
-    sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-08-01', '2025-09-24'), auto_process=False,
-    )
-
-    # All pairs + autocorrelation for ABC
-    #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
+    figs = run_within_session_analysis(data, exp_config, signal_col='multi_day_spikes', animal_id=mouse_id,
+                                       date=date, show=True)
 
 
-    #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
-    dates = sorted(sessions.keys())
-    if len(dates) >= 2:
-        figs = run_multiday_analysis(
-            sessions, trial_type=None, signal_col='multi_day_spikes',
-            animal_id=animal_id, day_pairs=None, show=True,
-        )
-
-# try just the pv for 2 days
-    dates = sorted(sessions.keys())
-    if len(dates) >= 2:
-        fig = plot_multiday_pv_correlation_matrix(
-            sessions, trial_type='ABC',
-            signal_col='multi_day_spikes',show=True,
-        )
+#     # ── Multiday analysis ──
+#     sessions = load_multiday_sessions(
+#         mouse_dir, date_range=('2025-09-03', '2025-09-08'), auto_process=True,
+#     )
+#
+#     # All pairs + autocorrelation for ABC
+#     #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
+#
+#
+#     #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
+#     dates = sorted(sessions.keys())
+#     if len(dates) >= 2:
+#         figs = run_multiday_analysis(
+#             sessions, trial_type=None, signal_col='multi_day_spikes',
+#             animal_id=mouse_id, day_pairs=None, show=True,
+#         )
+#
+# # try just the pv for 2 days
+#     dates = sorted(sessions.keys())
+#     if len(dates) >= 2:
+#         fig = plot_multiday_pv_correlation_matrix(
+#             sessions, trial_type='ABC',
+#             signal_col='multi_day_spikes',show=True,
+#         )
