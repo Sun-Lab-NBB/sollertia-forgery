@@ -37,7 +37,7 @@ CUE_COLOR_PALETTE = [
 ]
 
 SPECIAL_CUE_COLORS = {
-    0: '#D3D3D3',   # Light gray (gray zones)
+    0: '#A3A3A3',   # Light gray (gray zones)
     255: '#2D2D2D',  # Charcoal (dark periods)
 }
 
@@ -247,7 +247,7 @@ def add_cue_bar(
     config: dict,
     trial_type: str,
     axis: str = 'x',
-    bar_width: float = 0.02,
+    bar_width: float = 0.03,
 ):
     """Add a color-coded cue bar along an axis edge of a heatmap.
 
@@ -271,8 +271,6 @@ def add_cue_bar(
     for cue_id in seq:
         w = cue_widths[cue_id]
         color = cue_colors.get(cue_id, '#D3D3D3')
-        print(
-            f"  cue_id={cue_id!r} (type={type(cue_id).__name__}), color={cue_colors.get(cue_id, 'MISS')}, w={cue_widths.get(cue_id, 'MISS')}")
 
         mid = pos + w/2
 
@@ -305,6 +303,8 @@ def add_cue_bar(
                         color='white', transform=transform,
                         clip_on=False, zorder=11)
         pos += w
+
+    ax.tick_params(axis='both', which='both', pad=20)
 
 
 def add_cue_boundary_lines(
@@ -419,7 +419,7 @@ def plot_pv_heatmap(
     add_cue_bar(ax, config, y_type, axis='y')
     add_cue_boundary_lines(ax, config, y_type, axis='y')
 
-    ax.tick_params(axis='both', which='both', pad=20)
+    ax.tick_params(axis='x', which='both', pad=15)
     ax.set_xlabel(x_label, fontsize=11)
     ax.set_ylabel(y_label, fontsize=11)
 
