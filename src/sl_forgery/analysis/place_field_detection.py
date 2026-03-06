@@ -733,8 +733,8 @@ def plot_combined_heatmap(
     Returns:
         Matplotlib Figure.
     """
-    from trial_plotting import get_cue_colors, get_cue_labels
     from df_processing import get_cue_regions
+    import plot_utils as pfmt
 
     if trial_types is None:
         trial_types = sorted(result.fields.keys())
@@ -823,8 +823,8 @@ def plot_combined_heatmap(
         ax_cue.axvline(x, color='black', linestyle='--', linewidth=1, alpha=0.5)
 
     # Cue bar
-    cue_colors = get_cue_colors(config)
-    cue_labels_map = get_cue_labels(config)
+    cue_colors = pfmt.get_cue_colors(config)
+    cue_labels_map = pfmt.get_cue_labels(config)
     x_offset = 0
 
     for tt in trial_types:
@@ -872,12 +872,13 @@ def plot_combined_heatmap(
     ax_cue.tick_params(bottom=False, labelbottom=False)
     ax_cue.spines[:].set_visible(False)
 
-    prefix = ''
-    if session_data:
-        prefix = f'Mouse {session_data["animal_id"]} — {session_data["session_name"][:10]} — '
-
+    animal_id = session_data.get('animal_id', '') if session_data else ''
+    date = session_data.get('session_name', '')[:10] if session_data else ''
     ax_cue.set_title(
-        f'{prefix}Place Fields ({n_cells_plot} cells, sorted by {sort_by} trials)',
+        pfmt.build_title(
+            f'Place Fields ({n_cells_plot} cells, sorted by {sort_by})',
+            animal_id=animal_id, date=date,
+        ),
         fontsize=11, fontweight='bold', pad=6,
     )
 
@@ -1113,31 +1114,35 @@ def load_multiday_result(path: Path) -> MultidayPlaceFieldResult:
 
 
 if __name__ == '__main__':
-    from df_processing import load_session_dir, get_session_prefix, load_processed_session, load_multiday_sessions
+    from df_processing import (find_session_dir, get_session_paths, load_session_context,
+                               load_processed_session, load_multiday_sessions)
     from trial_plotting import plot_multiday_comparison
 
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    mouse_id = '26'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     # ── Single-day detection ──
-    date = '2025-09-15'
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    data, meta = load_processed_session(behavior_path.parent / f'{prefix}_processed.parquet')
+    date = '2025-09-16'
 
-    result = detect_place_fields(data, config, signal_col='multi_day_spikes')
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, exp_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+    data, meta = load_processed_session(paths['parquet'])
+
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes')
     print(result.summary())
 
     # Sorted heatmap per trial type
-    # for tt, pf in result.fields.items():
-    #     pf.plot(title=f'{tt} Place Fields — {date}', sort=True)
-    #     plt.show()
+    for tt, pf in result.fields.items():
+        pf.plot(title=f'{tt} Place Fields — {date}', sort=True)
+        plt.show()
 
     # All place cells, sorted by ABC field position
-    plot_combined_heatmap(result, config, session_data)
+    plot_combined_heatmap(result, exp_config, session_data)
 
     # ── Multiday detection ──
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-03', '2025-09-24'), auto_process=False,
+        mouse_dir, date_range=('2025-09-03', '2025-09-16'), auto_process=False,     #pre-ext and all post-ext
     )
 
     multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_spikes')
@@ -1153,8 +1158,8 @@ if __name__ == '__main__':
             plt.show()
 
     # Only union cells from multiday, sorted by ABDC
-    plot_combined_heatmap(result, config, cells=multiday.union_indices, sort_by='ABDC')
-    plot_combined_heatmap(result, config, cells=multiday.union_indices, sort_by='ABC')
+    plot_combined_heatmap(result, exp_config, session_data, cells=multiday.union_indices, sort_by='ABDC')
+    plot_combined_heatmap(result, exp_config, session_data, cells=multiday.union_indices, sort_by='ABC')
 
     # Multiday comparison for top place cells
     for i in multiday.union_indices[:5]:
