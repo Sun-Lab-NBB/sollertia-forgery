@@ -104,8 +104,9 @@ def load_session_context(session_dir: Path) -> tuple[dict, dict]:
     """
     source_dir = Path(session_dir) / 'source_data'
     with open(source_dir / 'session_data.yaml', 'r') as f:
-        session_data = yaml.safe_load(f)
-    experiment_config = load_experiment_config(source_dir / 'experiment_configuration.yaml')
+        session_data = yaml.safe_load(f)     # this is from the exp session, has experiment info (project, scene, etc)
+    experiment_config = load_experiment_config(source_dir / 'experiment_configuration.yaml')  # exp config file, unity
+
     return session_data, experiment_config
 
 
@@ -266,14 +267,14 @@ def ensure_processed(
     Raises:
         FileNotFoundError: if user declines to process
     '''
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
 
-    if not parquet_path.exists():
+    if not paths['parquet'].exists():
         bin_size_cm = _infer_bin_size(mouse_dir)
         print(f"\n  No processed file found for {date}.")
-        print(f"  Raw feather: {behavior_path.name}")
+        print(f"  Raw feather: {paths['feather'].name}")
         print(f"  Bin size (inferred): {bin_size_cm}cm")
 
         if not auto_process:
@@ -282,11 +283,11 @@ def ensure_processed(
                 raise FileNotFoundError(f"User skipped processing for {date}")
 
         print(f"  Processing {date}...")
-        behavior_df = pl.read_ipc(behavior_path)
+        behavior_df = pl.read_ipc(paths['feather'])
         data, metadata = process_session(behavior_df, config, bin_size_cm=bin_size_cm)
-        save_processed_session(data, behavior_path.parent, session_data, metadata)
+        save_processed_session(data, session_dir, session_data, metadata)
 
-    return parquet_path, session_data, config
+    return paths['parquet'], session_data, config
 
 
 # PROCESSING
@@ -316,6 +317,10 @@ def fix_cue_offset(
     """
     # Get offset
     cue_offset_cm = config.get('cue_offset_cm', 0.0)
+
+    # Keep all states
+    if system_state == None:
+        system_state = 'run'  ## THIS IS WHAT NEEDS TO EB CHANGED
 
     # Filter to active running
     active_df = df.filter(pl.col('system_state') == system_state).sort('frame')
