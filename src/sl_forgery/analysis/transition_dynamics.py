@@ -16,6 +16,7 @@ Key analyses:
 """
 
 import numpy as np
+import polars as pl
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 from scipy.spatial.distance import pdist, squareform
@@ -23,8 +24,6 @@ from typing import Literal
 from pathlib import Path
 
 
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 
 
 # CORE METRICS
@@ -420,15 +419,13 @@ def compute_trajectory_variability(embedding: np.ndarray,
     return results
 
 
-# =============================================================================
 # DIVERGENCE ANALYSIS
-# =============================================================================
-
 def compute_divergence_over_learning(embedding: np.ndarray,
                                      metadata: dict,
                                      window_size: int = 10,
                                      step_size: int = 5,
-                                     threshold: float = 0.3
+                                     threshold: float = 0.3,
+                                     reward_filter: bool = True,
                                      ) -> dict:
     """
     Track when ABC and ABDC trajectories diverge, over learning.
@@ -436,24 +433,24 @@ def compute_divergence_over_learning(embedding: np.ndarray,
     For each window, computes the mean trajectory for each trial type
     and finds the timepoint (position) where they diverge.
     
-    Parameters
-    ----------
-    embedding, metadata : as usual
-    window_size, step_size : window parameters
-    threshold : float
-        Distance threshold for considering trajectories "diverged"
+    Args:
+        embedding, metadata: umap embedding and metadata (parameters)
+        window_size, step_size: window parameters
+        threshold: Distance threshold for considering trajectories "diverged"
+        reward_filter: Choose whether to only include trials where the animal was engaged
     
-    Returns
-    -------
-    divergence : dict
-        {
-            'window_centers': array,
-            'divergence_position': array (position in cm where divergence occurs),
-            'divergence_timepoint': array (frame index within trial),
-            'max_divergence': array (maximum separation achieved),
-        }
+    Returns:
+        divergence: dict
+            {
+                'window_centers': array (location of center of sliding window),
+                'divergence_position': array (position in cm where divergence occurs),
+                'divergence_timepoint': array (frame index within trial),
+                'max_divergence': array (maximum separation achieved),
+            }
     """
     trials = segment_trials(embedding, metadata)
+    if reward_filter:
+        trials = {tid: t for tid, t in trials.items() if metadata['reward'][t['indices][0]']] == 1}
     sorted_trial_ids = sorted(trials.keys())
     
     results = {
@@ -487,22 +484,23 @@ def compute_divergence_over_learning(embedding: np.ndarray,
             results['divergence_timepoint'].append(np.nan)
             results['max_divergence'].append(np.nan)
             continue
-        
-        # Align by truncating to shortest
-        min_len = min(
-            min(len(t) for t in abc_trajs),
-            min(len(t) for t in abdc_trajs)
-        )
-        
-        abc_aligned = np.array([t[:min_len] for t in abc_trajs])
-        abdc_aligned = np.array([t[:min_len] for t in abdc_trajs])
-        abc_pos_aligned = np.array([p[:min_len] for p in abc_pos])
+
+        # Interpolate onto common position grid (shared track only)
+        common_positions = np.arange(0, bifurcation_cm, 1.0)
+
+        abc_interp = np.array([
+            interpolate_trial(t, p, common_positions)
+            for t, p in zip(abc_trajs, abc_pos)
+        ])
+        abdc_interp = np.array([
+            interpolate_trial(t, p, common_positions)
+            for t, p in zip(abdc_trajs, abdc_pos)
+        ])
         
         # Mean trajectories
-        mean_abc = np.mean(abc_aligned, axis=0)
-        mean_abdc = np.mean(abdc_aligned, axis=0)
-        mean_pos = np.mean(abc_pos_aligned, axis=0)
-        
+        mean_abc = np.mean(abc_interp, axis=0)
+        mean_abdc = np.mean(abdc_interp, axis=0)
+
         # Distance between means over time
         distances = np.linalg.norm(mean_abc - mean_abdc, axis=1)
         
@@ -511,7 +509,7 @@ def compute_divergence_over_learning(embedding: np.ndarray,
         
         if len(diverged) > 0:
             div_idx = diverged[0]
-            results['divergence_position'].append(mean_pos[div_idx])
+            results['divergence_position'].append(common_positions[div_idx])
             results['divergence_timepoint'].append(div_idx)
         else:
             results['divergence_position'].append(np.nan)
@@ -1110,9 +1108,7 @@ def run_full_analysis(embedding: np.ndarray,
     }
 
 
-# =============================================================================
-# EXAMPLE USAGE
-# =============================================================================
+
 
 if __name__ == '__main__':
 
@@ -1143,7 +1139,7 @@ if __name__ == '__main__':
     save_path = None  # Set to a Path to save figures
 
     # prepare data
-    neural_data, metadata = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
+    neural_data, umap_config = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
 
     # compute umap
     embedding = compute_umap(neural_data, n_components=3, n_neighbors=50)
@@ -1155,8 +1151,6 @@ if __name__ == '__main__':
     mask = np.isin(metadata['cue'], ['B', '0b'])
     print(f"Frames matching decision_cues: {mask.sum()} / {len(mask)}")
 
-    # Check per trial
-    from transition_dynamics import segment_trials, get_decision_region
 
     trials = segment_trials(embedding, metadata)
 
@@ -1168,13 +1162,12 @@ if __name__ == '__main__':
 
     
     # Define divergence region by cue IDs
-    # (check your cue mapping - these are placeholder values)
     decision_cues = ['B', '0b']  # B and gray zone
     
     # Run analysis
     results = run_full_analysis(
         embedding, 
-        metadata,
+        data,
         decision_cues=decision_cues,
         cue_id='cue_id',
         output_dir='./transition_analysis',
