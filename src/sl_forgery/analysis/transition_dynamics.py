@@ -4,9 +4,8 @@ Transition Dynamics Analysis for UMAP Embeddings
 Analyzes how neural trajectories behave at divergence points (bifurcations, or in the future connections/merges)
 and how this changes over learning.
 
-Designed to work with embedding and metadata from umap_plotting.py:
+Designed to work with embedding from umap_plotting.py:
     - embedding: (n_frames, n_dims) UMAP coordinates
-    - metadata: dict with 'trial', 'trial_type', 'distance', 'cue', 'speed', 'track_length'
 
 Key analyses:
     1. Velocity/curvature at divergence region
@@ -135,65 +134,75 @@ def interpolate_trial(trial_embedding, trial_distance, common_positions):
 
 # TRIAL SEGMENTATION
 
-def segment_trials(embedding: np.ndarray, metadata: dict
+def segment_trials(embedding: np.ndarray,
+                   filtered_df: pl.DataFrame,
+                   min_speed: float | None = None,
+                   exclude_unrewarded: bool = False,
+                   reward_col: str = 'reward',
+                   speed_col: str = 'speed_cm_s',
                    ) -> dict[int, dict]:
+    """Segment continuous embedding into individual trials with optional filtering.
+
+    Args:
+        embedding: UMAP coordinates, shape (n_frames, n_dims).
+        filtered_df: Frame-level DataFrame (signal columns dropped), row-aligned with embedding.
+        min_speed: Exclude frames below this speed (cm/s). Removes SWR/stationary contamination.
+        exclude_unrewarded: Exclude entire trials where reward was never delivered.
+        reward_col: Column name for reward status.
+        speed_col: Column name for behavioral speed.
+
+    Returns:
+        Dict mapping trial_id to dict with keys: 'embedding', 'trial_type',
+        'distance', 'cue', 'cue_id', 'speed', 'indices'.
     """
-    Segment continuous embedding into individual trials.
-    
-    Parameters
-    ----------
-    embedding : array (n_frames, n_dims)
-    metadata : dict with 'trial', 'trial_type', 'distance', 'cue', 'speed'
-    
-    Returns
-    -------
-    trials : dict
-        {trial_id: {
-            'embedding': array (n_frames_in_trial, n_dims),
-            'trial_type': str,
-            'distance': array,
-            'cue': array,
-            'speed': array,
-            'indices': array (original indices in full embedding)
-        }}
-    """
+    # Add row index for tracking alignment with embedding
+    df = filtered_df.with_row_index('_row_idx')
+
+    # Trial-level reward filter: keep only trials where reward was delivered at least once
+    if exclude_unrewarded:
+        rewarded_trials = (
+            df.group_by('trial')
+            .agg(pl.col(reward_col).ne('no').any().alias('got_reward'))
+            .filter(pl.col('got_reward'))
+            ['trial']
+        )
+        df = df.filter(pl.col('trial').is_in(rewarded_trials))
+
+    # Frame-level speed filter
+    if min_speed is not None:
+        df = df.filter(pl.col(speed_col) >= min_speed)
+
     trials = {}
-    unique_trials = np.unique(metadata['trial'])
-    
-    for trial_id in unique_trials:
-        mask = metadata['trial'] == trial_id
-        indices = np.where(mask)[0]
-        
+    for trial_id, group in df.group_by('trial', maintain_order=True):
+        trial_id = trial_id[0]  # group_by returns tuple
+        indices = group['_row_idx'].to_numpy()
+
         trials[trial_id] = {
-            'embedding': embedding[mask],
-            'trial_type': metadata['trial_type'][mask][0],  # all same within trial
-            'distance': metadata['distance'][mask],
-            'cue': metadata['cue'][mask],
-            'cue_id': metadata['cue_id'][mask],
-            'speed': metadata['speed'][mask],
+            'embedding': embedding[indices],
+            'trial_type': group['trial_type'][0],
+            'distance': group['distance_cm'].to_numpy(),
+            'cue': group['cue'].to_numpy(),
+            'cue_id': group['cue_id'].to_numpy(),
+            'speed': group[speed_col].to_numpy(),
             'indices': indices,
         }
-    
+
     return trials
 
 
 def get_decision_region(trial_data: dict, 
                         decision_cues: list | None = None,
                         position_range: tuple[float, float] | None = None,
-                        cue_id: str = 'cue'
+                        cue_id: str = '0b'
                         ) -> dict | None:
     """
     Extract the divergence region from a single trial.
     
-    Parameters
-    ----------
-    trial_data : dict
-        Single trial from segment_trials()
-    decision_cues : list
-        Cue IDs that define the divergence region (e.g., [2, 0] for B and gray)
-    position_range : tuple
-        (min_pos, max_pos) to define divergence region by position
-    cue_id: the string label (B, 0b)
+    Args:
+        trial_data: Single trial from segment_trials()
+        decision_cues: Cue IDs that define the divergence region (e.g., 'B', '0b')
+        position_range: (min_pos, max_pos) to define divergence region by position
+        cue_id: the string label (B, 0b)
     
     Returns
     -------
@@ -225,48 +234,45 @@ def get_decision_region(trial_data: dict,
 # DECISION REGION METRICS
 
 def extract_decision_metrics(embedding: np.ndarray, 
-                             metadata: dict,
+                             filtered_df: pl.DataFrame,
                              decision_cues: list | None = None,
                              position_range: tuple[float, float] | None = None,
                              dt: float = 0.1,
                              smooth_sigma: float = 2,
                              cue_id: str = 'cue',
+                             min_speed: float | None = None,
+                             exclude_unrewarded: bool = False,
                              ) -> dict:
     """
     Extract dynamics metrics from the divergence region for all trials.
     
-    Parameters
-    ----------
-    embedding : array (n_frames, n_dims)
-    metadata : dict
-    decision_cues : list
-        Cue IDs defining divergence region
-    position_range : tuple
-        Alternative: (min_pos, max_pos) for divergence region
-    dt : float
-        Frame interval (seconds)
-    smooth_sigma : float
-        Smoothing for velocity/curvature
+    Args:
+        embedding: UMAP embedding (n_frames, n_dims)
+        filtered_df: filtered dataframe
+        decision_cues: Cue IDs defining divergence region
+        position_range: Alternative: (min_pos, max_pos) for divergence region
+        dt: Frame interval (seconds)
+        smooth_sigma: Smoothing for velocity/curvature
     
-    Returns
-    -------
-    metrics : dict
-        {
-            'trial_id': array,
-            'trial_type': array,
-            'trial_number': array (temporal order, for learning analysis),
-            'mean_velocity': array,
-            'max_velocity': array,
-            'mean_curvature': array,
-            'max_curvature': array,
-            'path_length': array,
-            'direct_distance': array,
-            'tortuosity': array,
-            'mean_speed_behavioral': array,
-            'n_frames': array,
-        }
+    Returns:
+        metrics : dict
+            {
+                'trial_id': array,
+                'trial_type': array,
+                'trial_number': array (temporal order, for learning analysis),
+                'mean_velocity': array,
+                'max_velocity': array,
+                'mean_curvature': array,
+                'max_curvature': array,
+                'path_length': array,
+                'direct_distance': array,
+                'tortuosity': array,
+                'mean_speed_behavioral': array,
+                'n_frames': array,
+            }
     """
-    trials = segment_trials(embedding, metadata)
+    trials = segment_trials(embedding, filtered_df, min_speed=min_speed,
+                            exclude_unrewarded=exclude_unrewarded)
     
     metrics = {
         'trial_id': [],
@@ -334,12 +340,14 @@ def extract_decision_metrics(embedding: np.ndarray,
 # TRIAL-TO-TRIAL VARIABILITY
 
 def compute_trajectory_variability(embedding: np.ndarray,
-                                   metadata: dict,
+                                   filtered_df: pl.DataFrame,
                                    decision_cues: list | None = None,
                                    position_range: tuple[float, float] | None = None,
                                    window_size: int = 10,
                                    step_size: int = 5,
                                    cue_id: str = 'cue',
+                                   min_speed: float | None = None,
+                                   exclude_unrewarded: bool = False,
                                    ) -> dict:
     """
     Compute trial-to-trial variability in sliding windows.
@@ -349,7 +357,7 @@ def compute_trajectory_variability(embedding: np.ndarray,
     
     Parameters
     ----------
-    embedding, metadata : as usual
+    embedding: umap embedding
     decision_cues, position_range : divergence region definition
     window_size : int
         Number of trials per window
@@ -367,7 +375,8 @@ def compute_trajectory_variability(embedding: np.ndarray,
             'ABDC_n_trials': array,
         }
     """
-    trials = segment_trials(embedding, metadata)
+    trials = segment_trials(embedding, filtered_df, min_speed=min_speed,
+                            exclude_unrewarded=exclude_unrewarded)
     sorted_trial_ids = sorted(trials.keys())
     
     results = {
@@ -421,11 +430,13 @@ def compute_trajectory_variability(embedding: np.ndarray,
 
 # DIVERGENCE ANALYSIS
 def compute_divergence_over_learning(embedding: np.ndarray,
-                                     metadata: dict,
+                                     filtered_df: pl.DataFrame,
                                      window_size: int = 10,
                                      step_size: int = 5,
                                      threshold: float = 0.3,
-                                     reward_filter: bool = True,
+                                     bifurcation_cm: float = 120.0,
+                                     min_speed: float | None = None,
+                                     exclude_unrewarded: bool = False,
                                      ) -> dict:
     """
     Track when ABC and ABDC trajectories diverge, over learning.
@@ -434,10 +445,10 @@ def compute_divergence_over_learning(embedding: np.ndarray,
     and finds the timepoint (position) where they diverge.
     
     Args:
-        embedding, metadata: umap embedding and metadata (parameters)
+        embedding,
         window_size, step_size: window parameters
         threshold: Distance threshold for considering trajectories "diverged"
-        reward_filter: Choose whether to only include trials where the animal was engaged
+        bifurcation_cm: bifurcation parameter
     
     Returns:
         divergence: dict
@@ -448,9 +459,8 @@ def compute_divergence_over_learning(embedding: np.ndarray,
                 'max_divergence': array (maximum separation achieved),
             }
     """
-    trials = segment_trials(embedding, metadata)
-    if reward_filter:
-        trials = {tid: t for tid, t in trials.items() if metadata['reward'][t['indices][0]']] == 1}
+    trials = segment_trials(embedding, filtered_df, min_speed=min_speed,
+                            exclude_unrewarded=exclude_unrewarded)
     sorted_trial_ids = sorted(trials.keys())
     
     results = {
@@ -595,17 +605,20 @@ def compute_recurrence_metrics(recurrence: np.ndarray) -> dict:
 
 
 def compute_recurrence_over_learning(embedding: np.ndarray,
-                                     metadata: dict,
+                                     filtered_df: pl.DataFrame,
                                      window_size: int = 15,
                                      step_size: int = 5,
-                                     threshold_percentile: float = 20
+                                     threshold_percentile: float = 20,
+                                     min_speed: float | None = None,
+                                     exclude_unrewarded: bool = False,
                                      ) -> dict:
     """
     Track recurrence structure over learning.
     
     Computes recurrence plots for sliding windows and extracts metrics.
     """
-    trials = segment_trials(embedding, metadata)
+    trials = segment_trials(embedding, filtered_df, min_speed=min_speed,
+                            exclude_unrewarded=exclude_unrewarded)
     sorted_trial_ids = sorted(trials.keys())
     
     results = {
@@ -802,16 +815,19 @@ def plot_divergence_over_learning(divergence: dict,
 
 
 def plot_recurrence_comparison(embedding: np.ndarray,
-                               metadata: dict,
+                               filtered_df: pl.DataFrame,
                                early_trials: int = 10,
                                late_trials: int = 10,
                                threshold_percentile: float = 20,
+                               min_speed: float | None = None,
+                               exclude_unrewarded: bool = False,
                                save_path: Path | str | None = None
                                ) -> plt.Figure:
     """
     Compare recurrence plots: early vs late in session.
     """
-    trials = segment_trials(embedding, metadata)
+    trials = segment_trials(embedding, filtered_df, min_speed=min_speed,
+                            exclude_unrewarded=exclude_unrewarded)
     sorted_trial_ids = sorted(trials.keys())
     
     # Early trials
@@ -869,6 +885,8 @@ def plot_recurrence_with_umap(
     threshold_percentile: float = 20,
     umap_dims: tuple[int, int] = (0, 1),
     figsize_per_row: tuple[float, float] = (14, 5),
+    min_speed: float | None = None,
+    exclude_unrewarded: bool = False,
     save_path: Path | str | None = None,
 ) -> plt.Figure:
     """
@@ -879,7 +897,7 @@ def plot_recurrence_with_umap(
     sessions : list of dict
         Each dict must have:
             'embedding': array (n_frames, n_dims)
-            'metadata': dict with 'cue', 'trial_type', 'trial'
+            'filtered_df': dataframe to filter with
             'label': str (e.g., 'Day 1', 'Day 3 - Late Learning')
     color_by : 'cue' or 'trial_type'
         How to color the UMAP scatter.
@@ -914,14 +932,15 @@ def plot_recurrence_with_umap(
 
     for i, session in enumerate(sessions):
         emb = session['embedding']
-        meta = session['metadata']
+        df = session['filtered_df']
         label = session.get('label', f'Session {i + 1}')
 
         # --- Left: UMAP scatter with trajectory lines ---
         ax_umap = axes[i, 0]
 
         # Draw trial trajectories as light gray lines
-        trials = segment_trials(emb, meta)
+        trials = segment_trials(emb, df, min_speed=min_speed,
+                                exclude_unrewarded=exclude_unrewarded)
         for tid in sorted(trials.keys()):
             t = trials[tid]['embedding']
             ax_umap.plot(t[:, d0], t[:, d1], color='lightgray', alpha=0.3, linewidth=0.5, zorder=1)
@@ -1003,36 +1022,33 @@ def _add_trendline(ax, x, y, color='red', alpha=0.5):
 # MAIN ANALYSIS FUNCTION (WRAPPER)
 
 def run_full_analysis(embedding: np.ndarray,
-                      metadata: dict,
+                      filtered_df: pl.DataFrame,
                       decision_cues: list,
                       output_dir: Path | str | None = None,
                       window_size: int = 10,
                       step_size: int = 5,
                       dt: float = 0.1,
                       cue_id: str = 'cue',
+                      min_speed: float | None = None,
+                      exclude_unrewarded: bool = False,
                       ) -> dict:
     """
     Run complete transition dynamics analysis.
     
-    Parameters
-    ----------
-    embedding : array (n_frames, n_dims)
-    metadata : dict
-    decision_cues : list
-        Cue IDs defining divergence region (e.g., [2, 0] for B and gray)
-    output_dir : Path, optional
-        Directory to save figures
-    window_size : int
-        Trials per sliding window
-    step_size : int
-        Step between windows
-    dt : float
-        Frame interval (seconds)
+    Args:
+        embedding : array (n_frames, n_dims)
+        filtered_df: processed df with signal columns dropped
+        decision_cues: Cue IDs defining divergence region (e.g., [2, 0] for B and gray)
+        output_dir: Directory to save figures
+        window_size: Trials per sliding window
+        step_size: Step between windows
+        dt: Frame interval (seconds)
+        cue_id: Cue ID
+        min_speed: Minimum running speed
+        exclude_unrewarded: Exclude unrewarded trials (if we want ot only look at "engaged" trials)
     
-    Returns
-    -------
-    results : dict
-        All computed metrics and analysis results
+    Returns:
+        results: All computed metrics and analysis results
     """
     if output_dir:
         output_dir = Path(output_dir)
@@ -1040,7 +1056,7 @@ def run_full_analysis(embedding: np.ndarray,
     
     print("Extracting divergence region metrics...")
     metrics = extract_decision_metrics(
-        embedding, metadata, 
+        embedding, filtered_df,
         decision_cues=decision_cues,
         dt=dt,
         cue_id=cue_id,
@@ -1049,7 +1065,7 @@ def run_full_analysis(embedding: np.ndarray,
     
     print("Computing trial-to-trial variability...")
     variability = compute_trajectory_variability(
-        embedding, metadata,
+        embedding, filtered_df,
         decision_cues=decision_cues,
         window_size=window_size,
         step_size=step_size,
@@ -1058,14 +1074,14 @@ def run_full_analysis(embedding: np.ndarray,
     
     print("Computing divergence over learning...")
     divergence = compute_divergence_over_learning(
-        embedding, metadata,
+        embedding, filtered_df,
         window_size=window_size,
         step_size=step_size
     )
     
     print("Computing recurrence over learning...")
     recurrence = compute_recurrence_over_learning(
-        embedding, metadata,
+        embedding, filtered_df,
         window_size=window_size,
         step_size=step_size
     )
@@ -1092,7 +1108,7 @@ def run_full_analysis(embedding: np.ndarray,
     plt.show()
     
     fig4 = plot_recurrence_comparison(
-        embedding, metadata,
+        embedding, filtered_df,
         save_path=output_dir / 'recurrence_comparison.png' if output_dir else None
     )
     plt.show()
@@ -1112,31 +1128,19 @@ def run_full_analysis(embedding: np.ndarray,
 
 if __name__ == '__main__':
 
-    from df_processing import (load_session_dir, get_session_prefix, load_processed_session, save_processed_session,
-                               process_session, load_multiday_sessions)
+    from df_processing import (find_session_dir, load_processed_session, get_session_paths, load_session_context,)
 
     from umap_plotting import prepare_umap_data, compute_umap
 
     # import the cue-aligned data
     mouse_id = '26'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
-    date = '2025-09-11'
+    date = '2025-09-08'
 
-    session_data, config, behavior_path = load_session_dir(mouse_dir, date)
-    prefix = get_session_prefix(session_data)
-    parquet_path = behavior_path.parent / f'{prefix}_processed.parquet'
-
-    if parquet_path.exists():
-        print(f"Loading: {parquet_path}")
-        data, metadata = load_processed_session(parquet_path)
-    else:
-        print("No processed file found, processing from raw...")  # OR if you want to process the session with
-        # other system states, bc the default is to process by run
-        behavior_df = pl.read_ipc(behavior_path)
-        data, metadata = process_session(behavior_df, config)
-        save_processed_session(data, behavior_path.parent, session_data, metadata)
-
-    save_path = None  # Set to a Path to save figures
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, _ = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+    data, meta = load_processed_session(paths['parquet'])
 
     # prepare data
     neural_data, umap_config = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
@@ -1144,15 +1148,8 @@ if __name__ == '__main__':
     # compute umap
     embedding = compute_umap(neural_data, n_components=3, n_neighbors=50)
 
-    # Debug: check what cues exist and if they match
-    print("Unique cues in data:", np.unique(metadata['cue']))
 
-    # Check if any frames match
-    mask = np.isin(metadata['cue'], ['B', '0b'])
-    print(f"Frames matching decision_cues: {mask.sum()} / {len(mask)}")
-
-
-    trials = segment_trials(embedding, metadata)
+    trials = segment_trials(embedding, meta)
 
     # Look at first few trials
     for tid in list(trials.keys())[:5]:
@@ -1166,12 +1163,14 @@ if __name__ == '__main__':
     
     # Run analysis
     results = run_full_analysis(
-        embedding, 
+        embedding,
         data,
         decision_cues=decision_cues,
         cue_id='cue_id',
         output_dir='./transition_analysis',
-        dt=0.1,  # 10 Hz
+        dt=0.1,
+        min_speed=2.0,
+        exclude_unrewarded=True,
     )
     
     # Access results
