@@ -2,19 +2,21 @@
 track.
 """
 
+from __future__ import annotations
+
 import os
 from copy import deepcopy
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import field, dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
+from pathlib import Path
+from dataclasses import field, dataclass
+from concurrent.futures import ThreadPoolExecutor
 
-from ataraxis_base_utilities import console
-import matplotlib.pyplot as plt
 from numba import njit, prange
 import numpy as np
 import polars as pl
 from scipy.ndimage import filters
+import matplotlib.pyplot as plt
+from ataraxis_base_utilities import console
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
