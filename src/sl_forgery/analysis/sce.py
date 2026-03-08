@@ -516,9 +516,6 @@ class SCEDetector:
 
         # Segments the session into contiguous rest and run periods.
         self._results = []
-
-        rest_index = 0
-        run_index = 0
         current_state = None
         period_start = 0
 
@@ -526,9 +523,7 @@ class SCEDetector:
             state = system_state[frame_index] if frame_index < len(system_state) else None
 
             if state != current_state:
-                # Processes the completed period.
                 if current_state in ("rest", "run") and (frame_index - period_start) > 0:
-                    period_length = frame_index - period_start
                     period_fluorescence = fluorescence_all[:, period_start:frame_index]
                     period_timestamps = elapsed_minutes[period_start:frame_index]
 
@@ -546,23 +541,19 @@ class SCEDetector:
 
                         # Skips rest periods where fewer than half the frames have stable torque.
                         if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_FRAME_COUNT:
-                            stable_fluorescence = period_fluorescence[:, stable_mask]
-                            stable_timestamps = period_timestamps[stable_mask]
-
                             result = _detect_sces(
-                                fluorescence=stable_fluorescence,
+                                fluorescence=period_fluorescence[:, stable_mask],
                                 frame_rate=self._frame_rate,
-                                timestamps=stable_timestamps,
+                                timestamps=period_timestamps[stable_mask],
                                 configuration=self._configuration,
                                 period_type=PeriodType.REST,
                             )
                             self._results.append(result)
-                            rest_index += 1
+
                     elif current_state == "run":
-                        # Masks place field activity at the animal's current position for each frame. Identifies which
-                        # spatial bin the animal occupies and zeros out the fluorescence of any cell whose place field
-                        # covers that bin, preserving activity between place field bands.
                         run_fluorescence = period_fluorescence.copy()
+
+                        # Masks place field activity at the animal's current position for each frame.
                         if self._place_fields is not None:
                             period_distance = distance_all[period_start:frame_index]
                             period_position = (period_distance % self._track_length).astype(np.float32)
@@ -594,7 +585,6 @@ class SCEDetector:
                             period_type=PeriodType.RUN,
                         )
                         self._results.append(result)
-                        run_index += 1
 
                 current_state = state
                 period_start = frame_index
