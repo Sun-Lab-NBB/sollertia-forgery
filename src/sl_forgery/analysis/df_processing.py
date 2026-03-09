@@ -757,8 +757,15 @@ def load_multiday_sessions(
         print(f"Found {len(dates)} sessions in range {start} to {end}: {dates}")
 
     if dates is None or len(dates) == 0:
-        print("No dates provided or found.")
-        return {}
+        dates = sorted(set(
+            d.name[:10]
+            for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and d.name[:4].isdigit()
+        ))
+        if not dates:
+            print("No session folders found.")
+            return {}
+        print(f"Auto-discovered {len(dates)} sessions: {dates}")
 
     sessions = {}
 
@@ -786,7 +793,7 @@ def load_multiday_sessions(
 if __name__ == "__main__":
     #load all the data
     mouse_id = '26'
-    date = '2025-08-21'
+    date = '2025-09-12'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
