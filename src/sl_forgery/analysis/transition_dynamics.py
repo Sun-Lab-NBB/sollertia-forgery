@@ -6,6 +6,7 @@ and how this changes over learning.
 
 Designed to work with embedding from umap_plotting.py:
     - embedding: (n_frames, n_dims) UMAP coordinates
+    - filtered_df: returned from prepare_umap(), processed df with signal columns dropped (for filtering)
 
 Key analyses:
     1. Velocity/curvature at divergence region
@@ -193,7 +194,7 @@ def segment_trials(embedding: np.ndarray,
 def get_decision_region(trial_data: dict, 
                         decision_cues: list | None = None,
                         position_range: tuple[float, float] | None = None,
-                        cue_id: str = '0b'
+                        cue_id: str = 'cue_id'
                         ) -> dict | None:
     """
     Extract the divergence region from a single trial.
@@ -654,6 +655,25 @@ def compute_recurrence_over_learning(embedding: np.ndarray,
 # VISUALIZATION
 # =============================================================================
 
+# helper for plots
+def _add_trial_boundaries(ax: plt.Axes, trial_lengths: list[int],
+                          color: str = 'red', alpha: float = 0.3,
+                          linewidth: float = 0.5):
+    """Draw trial boundary lines on a recurrence plot.
+
+    Args:
+        ax: Matplotlib axes with recurrence plot.
+        trial_lengths: Number of frames per trial, in order.
+        color: Line color.
+        alpha: Line transparency.
+        linewidth: Line width.
+    """
+    cumulative = np.cumsum(trial_lengths[:-1])
+    for boundary in cumulative:
+        ax.axhline(boundary, color=color, alpha=alpha, linewidth=linewidth)
+        ax.axvline(boundary, color=color, alpha=alpha, linewidth=linewidth)
+
+
 def plot_decision_metrics_over_learning(metrics: dict,
                                         save_path: Path | str | None = None
                                         ) -> plt.Figure:
@@ -855,16 +875,22 @@ def plot_recurrence_comparison(embedding: np.ndarray,
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
     axes[0].imshow(rec_early, cmap='binary', origin='lower', aspect='auto')
+    early_lengths = [len(trials[tid]['embedding']) for tid in early_ids]
+    _add_trial_boundaries(axes[0], early_lengths)
     axes[0].set_title(f'Early Learning (trials {early_ids[0]}-{early_ids[-1]})')
     axes[0].set_xlabel('Time')
     axes[0].set_ylabel('Time')
 
     axes[1].imshow(rec_mid, cmap='binary', origin='lower', aspect='auto')
+    mid_lengths = [len(trials[tid]['embedding']) for tid in mid_ids]
+    _add_trial_boundaries(axes[1], mid_lengths)
     axes[1].set_title(f'Mid Learning (trials {mid_ids[0]}-{mid_ids[-1]})')
     axes[1].set_xlabel('Time')
     axes[1].set_ylabel('Time')
 
     axes[2].imshow(rec_late, cmap='binary', origin='lower', aspect='auto')
+    late_lengths = [len(trials[tid]['embedding']) for tid in late_ids]
+    _add_trial_boundaries(axes[2], late_lengths)
     axes[2].set_title(f'Late Learning (trials {late_ids[0]}-{late_ids[-1]})')
     axes[2].set_xlabel('Time')
     axes[2].set_ylabel('Time')
@@ -947,7 +973,7 @@ def plot_recurrence_with_umap(
 
         # Scatter points
         if color_by == 'cue':
-            cue_vals = meta['cue']
+            cue_vals = df['cue'].to_numpy()
             unique_cues = np.unique(cue_vals)
 
             if cue_colors is None:
@@ -967,7 +993,7 @@ def plot_recurrence_with_umap(
             ax_umap.legend(fontsize=8, markerscale=2, loc='best')
 
         elif color_by == 'trial_type':
-            tt = meta['trial_type']
+            tt = df['trial_type'].to_numpy()
             for ttype, color in trial_type_colors.items():
                 mask = tt == ttype
                 if mask.any():
@@ -985,6 +1011,8 @@ def plot_recurrence_with_umap(
         ax_rec = axes[i, 1]
         recurrence, _ = compute_recurrence_plot(emb, threshold_percentile)
         ax_rec.imshow(recurrence, cmap='binary', origin='lower', aspect='auto')
+        trial_lengths = [len(trials[tid]['embedding']) for tid in sorted(trials.keys())]
+        _add_trial_boundaries(ax_rec, trial_lengths)
         ax_rec.set_xlabel('Time')
         ax_rec.set_ylabel('Time')
         ax_rec.set_title(f'{label}\nRecurrence Plot')
@@ -1060,6 +1088,8 @@ def run_full_analysis(embedding: np.ndarray,
         decision_cues=decision_cues,
         dt=dt,
         cue_id=cue_id,
+        min_speed=min_speed,
+        exclude_unrewarded=exclude_unrewarded,
     )
     print(f"  Analyzed {len(metrics['trial_id'])} trials")
     
@@ -1070,20 +1100,26 @@ def run_full_analysis(embedding: np.ndarray,
         window_size=window_size,
         step_size=step_size,
         cue_id=cue_id,
+        min_speed=min_speed,
+        exclude_unrewarded=exclude_unrewarded,
     )
     
     print("Computing divergence over learning...")
     divergence = compute_divergence_over_learning(
         embedding, filtered_df,
         window_size=window_size,
-        step_size=step_size
+        step_size=step_size,
+        min_speed=min_speed,
+        exclude_unrewarded=exclude_unrewarded,
     )
     
     print("Computing recurrence over learning...")
     recurrence = compute_recurrence_over_learning(
         embedding, filtered_df,
         window_size=window_size,
-        step_size=step_size
+        step_size=step_size,
+        min_speed=min_speed,
+        exclude_unrewarded=exclude_unrewarded,
     )
     
     # Generate plots
@@ -1106,12 +1142,15 @@ def run_full_analysis(embedding: np.ndarray,
         save_path=output_dir / 'divergence.png' if output_dir else None
     )
     plt.show()
-    
+
     fig4 = plot_recurrence_comparison(
         embedding, filtered_df,
+        min_speed=min_speed,
+        exclude_unrewarded=exclude_unrewarded,
         save_path=output_dir / 'recurrence_comparison.png' if output_dir else None
     )
     plt.show()
+
     
     print("Done!")
     
@@ -1143,28 +1182,18 @@ if __name__ == '__main__':
     data, meta = load_processed_session(paths['parquet'])
 
     # prepare data
-    neural_data, umap_config = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
+    neural_data, filtered_df = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
 
     # compute umap
-    embedding = compute_umap(neural_data, n_components=3, n_neighbors=50)
+    embedding, _ = compute_umap(neural_data, n_components=3, n_neighbors=50)
 
-
-    trials = segment_trials(embedding, meta)
-
-    # Look at first few trials
-    for tid in list(trials.keys())[:5]:
-        region = get_decision_region(trials[tid], decision_cues=['B', '0b'])
-        n_frames = len(region['embedding']) if region else 0
-        print(f"Trial {tid} ({trials[tid]['trial_type']}): {n_frames} frames in divergence region")
-
-    
     # Define divergence region by cue IDs
     decision_cues = ['B', '0b']  # B and gray zone
     
     # Run analysis
     results = run_full_analysis(
         embedding,
-        data,
+        filtered_df,
         decision_cues=decision_cues,
         cue_id='cue_id',
         output_dir='./transition_analysis',
