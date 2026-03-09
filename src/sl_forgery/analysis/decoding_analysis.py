@@ -43,7 +43,7 @@ import plot_utils as pfmt
 def _get_bin_range_for_cue(
     df: pl.DataFrame,
     cue_id: int | str,
-    trial_type: str | None = None,
+    trial_type: str,
     config: dict | None = None,
     metadata: dict | None = None,
 ) -> tuple[int, int]:
@@ -65,14 +65,6 @@ def _get_bin_range_for_cue(
     Returns:
         Tuple of (start_bin_inclusive, end_bin_exclusive).
     """
-    # Resolve trial_type if not provided
-    if trial_type is None:
-        cue_col = 'cue' if isinstance(cue_id, int) else 'cue_id'
-        match = df.filter(pl.col(cue_col) == cue_id)
-        if len(match) == 0:
-            available = df[cue_col].unique().sort().to_list()
-            raise ValueError(f"Cue {cue_id!r} not found. Available: {available}")
-        trial_type = match['trial_type'].first()
 
     # Config path: exact boundaries
     if config is not None:
@@ -86,26 +78,25 @@ def _get_bin_range_for_cue(
         # Resolve string cue IDs to int keys
         if isinstance(cue_id, str):
             if cue_id.startswith('0'):
-                # Gray zone: '0a' → 2nd occurrence of cue 0, '0b' → 3rd, etc.
-                # Letter suffix tells us which occurrence (a=1st gray, b=2nd, etc.)
-                suffix = cue_id[1:]  # 'a', 'b', 'c', ...
-                occurrence_idx = ord(suffix.lower()) - ord('a')
-                int_key = 0
-                if int_key in regions and occurrence_idx < len(regions[int_key]):
-                    start_cm, end_cm = regions[int_key][occurrence_idx]
-                    return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+                suffix = cue_id[1:]
+                preceding_key = ord(suffix.upper()) - ord('A') + 1
+                if preceding_key in regions:
+                    preceding_end = regions[preceding_key][0][1]
+                    for start_cm, end_cm in regions[0]:
+                        if abs(start_cm - preceding_end) < 1e-6:
+                            return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+                return None
             else:
-                # Letter cue: 'A'→1, 'B'→2, 'C'→3, ...
                 int_key = ord(cue_id.upper()) - ord('A') + 1
                 if int_key in regions:
                     start_cm, end_cm = regions[int_key][0]
                     return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+                return None
         else:
-            # Already an int
             if cue_id in regions:
                 start_cm, end_cm = regions[cue_id][0]
-
                 return int(start_cm / bin_size_cm), int(end_cm / bin_size_cm)
+            return None
 
 
 def _extract_trial_population_vectors(
@@ -401,7 +392,6 @@ def trial_pv_distance(
     config: dict,
     cue_id: int | str = '0b',
     signal_col: str = 'multi_day_spikes',
-    trial_type_for_cue: str | None = None,
     metric: str = 'cosine',
     metadata: dict | None = None,
 ) -> dict:
@@ -415,7 +405,6 @@ def trial_pv_distance(
         config: Experiment configuration dict.
         cue_id: Cue to analyze. Int uses 'cue' column, str uses 'cue_id' column.
         signal_col: Column containing neural signals.
-        trial_type_for_cue: Trial type for cue region lookup. None auto-selects.
         metric: 'cosine' or 'euclidean'.
         metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value
 
@@ -430,10 +419,20 @@ def trial_pv_distance(
     trial_types = sorted(df['trial_type'].unique().to_list())
     type_a, type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config=config, metadata=metadata)
+    bin_range_a = _get_bin_range_for_cue(df, cue_id, type_a, config=config, metadata=metadata)
+    bin_range_b = _get_bin_range_for_cue(df, cue_id, type_b, config=config, metadata=metadata)
 
-    pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range)
-    pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range)
+    print(f"  cue={cue_id}, bin_range={bin_range_a}, bin_range={bin_range_b}")
+
+    pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range_a)
+    pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range_b)
+    print(f"  pv_a={pv_a.shape}, pv_b={pv_b.shape}")
+
+    if pv_a.shape[0] == 0 or pv_b.shape[0] == 0:
+        empty_type = type_a if pv_a.shape[0] == 0 else type_b
+        print(f"  WARNING: No trials for {empty_type} at cue {cue_id} (bins {bin_range}). Skipping.")
+        return None
+
 
     centroid_a = np.nanmean(pv_a, axis=0)
     centroid_b = np.nanmean(pv_b, axis=0)
@@ -507,6 +506,15 @@ def plot_trial_pv_distance(
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
+
+    # Classification accuracy
+    correct_a = np.sum((d_a < d_b) & (labels == 0))
+    correct_b = np.sum((d_b < d_a) & (labels == 1))
+    accuracy = (correct_a + correct_b) / len(labels)
+    ax.text(0.05, 0.95, f'Accuracy: {accuracy:.1%}',
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+
     plt.tight_layout()
 
     if show:
@@ -524,7 +532,6 @@ def region_correlation(
     cue_id: str | None = None,
     bin_range: tuple[int, int] | None = None,
     signal_col: str = 'multi_day_spikes',
-    trial_type_for_cue: str | None = None,
     metadata: dict | None = None,
 ) -> dict:
     """PV and per-cell correlation restricted to a cue region or bin range.
@@ -540,7 +547,6 @@ def region_correlation(
         cue_id: Cue to restrict to (looks up bin range from config).
         bin_range: Explicit (start_bin, end_bin). Overrides cue_id.
         signal_col: Column containing neural signals.
-        trial_type_for_cue: Trial type for cue region lookup. Defaults to type_a.
         metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value.
 
 
@@ -551,28 +557,33 @@ def region_correlation(
     if bin_range is None:
         if cue_id is None:
             raise ValueError("Provide either cue_id or bin_range")
-        bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config, metadata)
+        bin_range_a = _get_bin_range_for_cue(df, cue_id, type_a, config, metadata)
+        bin_range_b = _get_bin_range_for_cue(df, cue_id, type_b, config, metadata)
+    else:
+        bin_range_a = bin_range
+        bin_range_b = bin_range
 
     bin_size_cm = get_bin_size(df, metadata)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
 
-    start_bin, end_bin = bin_range
-
     avgs = compute_session_averages(
         df, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
     )
-    avg_a = avgs[type_a]['session_avg'][start_bin:end_bin]  # (n_bins_region, n_cells)
-    avg_b = avgs[type_b]['session_avg'][start_bin:end_bin]
+    start_a, end_a = bin_range_a
+    start_b, end_b = bin_range_b
+    avg_a = avgs[type_a]['session_avg'][start_a:end_a]
+    avg_b = avgs[type_b]['session_avg'][start_b:end_b]
 
     per_cell = per_cell_spatial_correlation(avg_a, avg_b)
     pv = population_vector_correlation(avg_a, avg_b)
 
+    print(f"  region_corr cue={cue_id}: bin_range_a={bin_range_a}, bin_range_b={bin_range_b}")
     return {
         'per_cell_corr': per_cell,
         'pv_corr': pv,
-        'bin_range': bin_range,
-        'region_cm': (start_bin * bin_size_cm, end_bin * bin_size_cm),
+        'bin_range': (bin_range_a, bin_range_b),
+        'region_cm': (start_a * bin_size_cm, end_a * bin_size_cm),
         'cue_id': cue_id,
     }
 
@@ -585,7 +596,6 @@ def region_correlation_multi_cue(
     cue_ids: list[str],
     signal_col: str = 'multi_day_spikes',
     metadata: dict | None = None,
-    trial_type_for_cue: str | None = None,
 ) -> dict[int, dict]:
     """PV and per-cell correlation for multiple cue regions.
 
@@ -599,7 +609,6 @@ def region_correlation_multi_cue(
         cue_ids: List of cue IDs to analyze (e.g. [1, 2, 3]).
         signal_col: Column containing neural signals.
         metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value used in region_correlation
-        trial_type_for_cue: Trial type for cue region lookup. Defaults to type_a.
 
     Returns:
         Dict mapping cue_id -> region_correlation() result dict.
@@ -610,7 +619,6 @@ def region_correlation_multi_cue(
             df, config, type_a, type_b,
             cue_id=cue_id, signal_col=signal_col,
             metadata=metadata,
-            trial_type_for_cue=trial_type_for_cue,
         )
     return results
 
@@ -623,7 +631,6 @@ def plot_region_correlation_at_cues(
     cue_ids: list[int],
     signal_col: str = 'multi_day_spikes',
     metadata: dict | None = None,
-    trial_type_for_cue: str | None = None,
     animal_id: str | None = None,
     date: str | None = None,
     figsize_per_cue: tuple = (5, 4),
@@ -643,7 +650,6 @@ def plot_region_correlation_at_cues(
         cue_ids: List of cue IDs to plot (e.g. [1, 2, 3]).
         signal_col: Column containing neural signals.
         metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value
-        trial_type_for_cue: Trial type for cue region lookup. Defaults to type_a.
         animal_id: Animal identifier for plot title.
         date: Session date for plot title.
         figsize_per_cue: (width, height) per subplot panel.
@@ -656,7 +662,6 @@ def plot_region_correlation_at_cues(
     results = region_correlation_multi_cue(
         df, config, type_a, type_b, cue_ids,
         signal_col=signal_col, metadata=metadata,
-        trial_type_for_cue=trial_type_for_cue,
     )
     bin_size_cm = get_bin_size(df, metadata)
     if bin_size_cm is None:
@@ -740,7 +745,6 @@ def splitter_cell_index(
     config: dict,
     cue_id: int | str = '0b',
     signal_col: str = 'multi_day_spikes',
-    trial_type_for_cue: str = 'ABC',
     n_shuffles: int = 500,
     seed: int = 42,
     metadata: dict = None,
@@ -759,7 +763,6 @@ def splitter_cell_index(
         config: Experiment configuration dict.
         cue_id: Cue region to analyze (2=B).
         signal_col: Column containing neural signals.
-        trial_type_for_cue: Trial type for cue region lookup.
         n_shuffles: Shuffle iterations for p-values.
         seed: Random seed.
         metadata: processed df metadata with bin size
@@ -773,10 +776,11 @@ def splitter_cell_index(
     trial_types = sorted(df['trial_type'].unique().to_list())
     trial_type_a, trial_type_b = trial_types[0], trial_types[1]
 
-    bin_range = _get_bin_range_for_cue(df, cue_id, trial_type_for_cue, config, metadata)
+    bin_range_a = _get_bin_range_for_cue(df, cue_id, trial_type_a, config, metadata)
+    bin_range_b = _get_bin_range_for_cue(df, cue_id, trial_type_b, config, metadata)
 
-    pv_a = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range)
-    pv_b = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range)
+    pv_a = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range_a)
+    pv_b = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range_b)
 
     mean_a = np.nanmean(pv_a, axis=0)
     mean_b = np.nanmean(pv_b, axis=0)
@@ -928,27 +932,28 @@ def run_decoding_analysis(
     figs = {}
 
     # 1. Sliding decoder
-    print("Running sliding decoder...")
-    dec = sliding_decoder(
-        df, config, metadata, signal_col=signal_col,
-        n_shuffles=n_shuffles_decoder,
-    )
-    results['decoder'] = dec
-    fig = plot_sliding_decoder(
-        dec, df, config=config, trial_type_for_cues=trial_types[0],
-        metadata=metadata, animal_id=animal_id, date=date, show=show,
-    )
-    figs['decoder'] = fig
+    # print("Running sliding decoder...")
+    # dec = sliding_decoder(
+    #     df, config, metadata, signal_col=signal_col,
+    #     n_shuffles=n_shuffles_decoder,
+    # )
+    # results['decoder'] = dec
+    # fig = plot_sliding_decoder(
+    #     dec, df, config=config, trial_type_for_cues=trial_types[0],
+    #     metadata=metadata, animal_id=animal_id, date=date, show=show,
+    # )
+    # figs['decoder'] = fig
 
-    # 2. Trial-by-trial PV distance (uses first cue)
-    primary_cue = cue_ids[0]
-    print(f"Computing trial PV distances at cue {primary_cue}...")
-    pvd = trial_pv_distance(
-        df, config, cue_id=primary_cue, signal_col=signal_col,
-    )
-    results['pv_distance'] = pvd
-    fig = plot_trial_pv_distance(pvd, animal_id=animal_id, date=date, show=show)
-    figs['pv_distance'] = fig
+    # 2. Trial-by-trial PV distance (cycle through all cues)
+    results['pv_distance'] = {}
+    for cue in cue_ids:
+        print(f"Computing trial PV distances at cue {cue}...")
+        pvd = trial_pv_distance(
+            df, config, cue_id=cue, signal_col=signal_col, metadata=metadata,
+        )
+        results['pv_distance'][cue] = pvd
+        fig = plot_trial_pv_distance(pvd, animal_id=animal_id, date=date, show=show)
+        figs[f'pv_distance_{cue}'] = fig
 
     # 3. Region-restricted correlation (multi-cue subplot)
     print(f"Computing region correlation at cues {cue_ids}...")
@@ -1002,10 +1007,24 @@ if __name__ == "__main__":
 
     data, meta = load_processed_session(paths['parquet'])
 
+    print(
+        data.filter(pl.col('trial_type') == 'ABDC')
+        .group_by('cue_id')
+        .agg(
+            pl.col('distance_bin').min().alias('min_bin'),
+            pl.col('distance_bin').max().alias('max_bin'),
+        )
+        .sort('min_bin')
+    )
+
+    from df_processing import get_cue_regions
+
+    print("ABC:", get_cue_regions(exp_config, 'ABC'))
+    print("ABDC:", get_cue_regions(exp_config, 'ABDC'))
 # run decoder
     results = run_decoding_analysis(
         data, exp_config, metadata=meta, signal_col='multi_day_spikes',
-        cue_ids=['A', '0a', 'B', '0b', 'C'],
+        cue_ids=['A', '0a', 'B', '0b', 'C', '0c'],
         animal_id=mouse_id, date=date,
         show=True,
     )
