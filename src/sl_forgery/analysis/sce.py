@@ -10,13 +10,12 @@ from dataclasses import dataclass
 from numba import njit, prange
 import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 from scipy.signal import savgol_filter
 from scipy.ndimage import uniform_filter1d
 import matplotlib.pyplot as plt
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-
     from sl_forgery.analysis.place_cell_analysis import PlaceFields
 
 
