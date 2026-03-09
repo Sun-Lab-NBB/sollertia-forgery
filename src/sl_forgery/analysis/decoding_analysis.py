@@ -44,7 +44,7 @@ def _get_bin_range_for_cue(
     df: pl.DataFrame,
     cue_id: int | str,
     trial_type: str,
-    config: dict | None = None,
+    config: dict,
     metadata: dict | None = None,
 ) -> tuple[int, int]:
     """Get (start_bin, end_bin) for a cue region from either config or the DataFrame.
@@ -779,6 +779,8 @@ def splitter_cell_index(
     bin_range_a = _get_bin_range_for_cue(df, cue_id, trial_type_a, config, metadata)
     bin_range_b = _get_bin_range_for_cue(df, cue_id, trial_type_b, config, metadata)
 
+    print(f"  bin_range_a={bin_range_a}, bin_range_b={bin_range_b}")
+
     pv_a = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range_a)
     pv_b = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range_b)
 
@@ -787,6 +789,9 @@ def splitter_cell_index(
 
     eps = 1e-10
     observed_si = (mean_a - mean_b) / (mean_a + mean_b + eps)
+
+    print(f"mean_a: min={mean_a.min():.4f} max={mean_a.max():.4f} shape={mean_a.shape}")
+    print(f"mean_b: min={mean_b.min():.4f} max={mean_b.max():.4f} shape={mean_b.shape}")
 
     # Shuffle test
     all_pvs = np.vstack([pv_a, pv_b])
@@ -932,17 +937,17 @@ def run_decoding_analysis(
     figs = {}
 
     # 1. Sliding decoder
-    # print("Running sliding decoder...")
-    # dec = sliding_decoder(
-    #     df, config, metadata, signal_col=signal_col,
-    #     n_shuffles=n_shuffles_decoder,
-    # )
-    # results['decoder'] = dec
-    # fig = plot_sliding_decoder(
-    #     dec, df, config=config, trial_type_for_cues=trial_types[0],
-    #     metadata=metadata, animal_id=animal_id, date=date, show=show,
-    # )
-    # figs['decoder'] = fig
+    print("Running sliding decoder...")
+    dec = sliding_decoder(
+        df, config, metadata, signal_col=signal_col,
+        n_shuffles=n_shuffles_decoder,
+    )
+    results['decoder'] = dec
+    fig = plot_sliding_decoder(
+        dec, df, config=config, trial_type_for_cues=trial_types[0],
+        metadata=metadata, animal_id=animal_id, date=date, show=show,
+    )
+    figs['decoder'] = fig
 
     # 2. Trial-by-trial PV distance (cycle through all cues)
     results['pv_distance'] = {}
@@ -973,7 +978,7 @@ def run_decoding_analysis(
         print(f"Computing splitter cell index at cue {i}...")
         sp = splitter_cell_index(
             df, config, cue_id=i, signal_col=signal_col,
-            n_shuffles=n_shuffles_splitter,
+            n_shuffles=n_shuffles_splitter, metadata=metadata,
         )
         results['splitter'] = sp
         fig = plot_splitter_cells(sp, animal_id=animal_id, date=date, show=show)
@@ -981,6 +986,11 @@ def run_decoding_analysis(
         print(f"  {sp['significant'].sum()}/{sp['n_cells']} significant splitter cells")
 
     results['figures'] = figs
+
+    print(data.filter(pl.col('trial_type') == 'ABC')
+          .group_by('cue_id')
+          .agg(pl.col('distance_bin').min().alias('min_bin'), pl.col('distance_bin').max().alias('max_bin'))
+          .sort('min_bin'))
 
     # Save
     if save_dir:
@@ -998,7 +1008,7 @@ if __name__ == "__main__":
     from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
 
     mouse_id = '26'
-    date = '2025-09-08'
+    date = '2025-09-10'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1009,6 +1019,15 @@ if __name__ == "__main__":
 
     print(
         data.filter(pl.col('trial_type') == 'ABDC')
+        .group_by('cue_id')
+        .agg(
+            pl.col('distance_bin').min().alias('min_bin'),
+            pl.col('distance_bin').max().alias('max_bin'),
+        )
+        .sort('min_bin')
+    )
+    print(
+        data.filter(pl.col('trial_type') == 'ABC')
         .group_by('cue_id')
         .agg(
             pl.col('distance_bin').min().alias('min_bin'),
