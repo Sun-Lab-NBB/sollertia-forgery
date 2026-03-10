@@ -205,22 +205,18 @@ def get_bin_size(
     if metadata and 'bin_size_cm' in metadata:
         return metadata['bin_size_cm']
 
+    if not (metadata and 'bin_size_cm' in metadata):
+        raise ValueError("metadata with bin_size_cm must be provided")
+
     if 'distance_bin' not in df.columns:
         return None
 
-    # Get median position at bin 0 vs bin 1 within a single trial
-    first_trial = df['trial'].first()
-    sub = df.filter(
-        (pl.col('trial') == first_trial)
-        & (pl.col('distance_bin').is_in([0, 1]))
-    ).group_by('distance_bin').agg(
-        pl.col('position').median()
-    ).sort('distance_bin')
-
-    if len(sub) < 2:
-        return None
-
-    return round(sub['position'][1] - sub['position'][0])
+    bin_size = (
+        df.filter(pl.col('distance_bin').is_not_null() & pl.col('distance_cm').is_not_null())
+        .select((pl.col('distance_cm') / (pl.col('distance_bin') + 1)).mean())
+        .item()
+    )
+    return round(bin_size)
 
 
 def _infer_bin_size(mouse_dir: Path, default: int = 5) -> int:
@@ -792,8 +788,8 @@ def load_multiday_sessions(
 
 if __name__ == "__main__":
     #load all the data
-    mouse_id = '26'
-    date = '2025-09-12'
+    mouse_id = '14'
+    date = '2025-08-22'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
