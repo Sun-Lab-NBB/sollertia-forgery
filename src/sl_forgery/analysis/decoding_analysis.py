@@ -104,7 +104,7 @@ def _extract_trial_population_vectors(
     signal_col: str,
     trial_type: str,
     bin_range: tuple[int, int],
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Extract per-trial population vectors for a range of spatial bins.
 
     For each trial of the given type, averages the signal across frames
@@ -117,7 +117,7 @@ def _extract_trial_population_vectors(
         bin_range: (start_bin, end_bin) inclusive/exclusive.
 
     Returns:
-        Population vectors, shape (n_trials, n_cells).
+        Tuple of (population vectors shape (n_trials, n_cells), trial numbers shape (n_trials,)).
     """
     start_bin, end_bin = bin_range
 
@@ -128,7 +128,7 @@ def _extract_trial_population_vectors(
     )
 
     if len(sub) == 0:
-        return np.empty((0, 0))
+        return np.empty((0, 0)), np.empty((0,), dtype=int)
 
     trials = sub['trial'].to_numpy()
     signals = np.vstack(sub[signal_col].to_list())
@@ -141,7 +141,7 @@ def _extract_trial_population_vectors(
         mask = trials == t
         pvs[i] = np.nanmean(signals[mask], axis=0)
 
-    return pvs
+    return pvs, unique_trials
 
 
 def _extract_per_bin_trial_vectors(
@@ -424,15 +424,9 @@ def trial_pv_distance(
 
     print(f"  cue={cue_id}, bin_range={bin_range_a}, bin_range={bin_range_b}")
 
-    pv_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range_a)
-    pv_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range_b)
+    pv_a, trials_a = _extract_trial_population_vectors(df, signal_col, type_a, bin_range_a)
+    pv_b, trials_b = _extract_trial_population_vectors(df, signal_col, type_b, bin_range_b)
     print(f"  pv_a={pv_a.shape}, pv_b={pv_b.shape}")
-
-    if pv_a.shape[0] == 0 or pv_b.shape[0] == 0:
-        empty_type = type_a if pv_a.shape[0] == 0 else type_b
-        print(f"  WARNING: No trials for {empty_type} at cue {cue_id} (bins {bin_range}). Skipping.")
-        return None
-
 
     centroid_a = np.nanmean(pv_a, axis=0)
     centroid_b = np.nanmean(pv_b, axis=0)
@@ -449,11 +443,13 @@ def trial_pv_distance(
         'labels': labels,
         'trial_types': (type_a, type_b),
         'cue_id': cue_id,
+        'trial_numbers': np.concatenate([trials_a, trials_b])
     }
 
 
 def plot_trial_pv_distance(
     result: dict,
+    trial_order = False,
     animal_id: str | None = None,
     date: str | None = None,
     figsize: tuple = (6, 6),
@@ -466,6 +462,7 @@ def plot_trial_pv_distance(
 
     Args:
         result: Output from trial_pv_distance().
+        trial_order: Color the trials in a gradient along the session
         animal_id: Animal identifier for plot title.
         date: Session date for plot title.
         figsize: Figure size.
@@ -482,15 +479,39 @@ def plot_trial_pv_distance(
     color_a = pfmt.TRIAL_TYPE_COLORS.get(type_a, '#2E86AB')
     color_b = pfmt.TRIAL_TYPE_COLORS.get(type_b, '#A23B72')
 
+    trial_numbers = result['trial_numbers']
+    all_trials = trial_numbers
+    t_min, t_max = all_trials.min(), all_trials.max()
+
+
     fig, ax = plt.subplots(figsize=figsize)
 
-    for label, tt, color, marker in [
-        (0, type_a, color_a, 'o'),
-        (1, type_b, color_b, 's'),
-    ]:
-        mask = labels == label
-        ax.scatter(d_a[mask], d_b[mask], c=color, marker=marker,
-                   alpha=0.7, s=40, label=tt, edgecolors='white', linewidth=0.5)
+    if trial_order:
+        trial_numbers = result['trial_numbers']
+        all_trials = trial_numbers
+        t_min, t_max = all_trials.min(), all_trials.max()
+
+        fig, ax = plt.subplots(figsize=figsize)
+
+        for label, tt, cmap_name, marker in [
+            (0, type_a, 'Blues', 'o'),
+            (1, type_b, 'RdPu', 's'),
+        ]:
+            mask = labels == label
+            trial_norm = (trial_numbers[mask] - t_min) / (t_max - t_min + 1e-8)
+            cmap = plt.get_cmap(cmap_name)
+            colors = cmap(0.3 + 0.6 * trial_norm)  # avoid too-light end
+            sc = ax.scatter(d_a[mask], d_b[mask], c=colors, marker=marker,
+                            alpha=0.8, s=40, edgecolors='white', linewidth=0.3,
+                            label=tt)
+    else:
+        for label, tt, color, marker in [
+            (0, type_a, color_a, 'o'),
+            (1, type_b, color_b, 's'),
+        ]:
+            mask = labels == label
+            ax.scatter(d_a[mask], d_b[mask], c=color, marker=marker,
+                       alpha=0.7, s=40, label=tt, edgecolors='white', linewidth=0.5)
 
     # Diagonal
     lim = max(d_a.max(), d_b.max()) * 1.1
@@ -781,8 +802,8 @@ def splitter_cell_index(
 
     print(f"  bin_range_a={bin_range_a}, bin_range_b={bin_range_b}")
 
-    pv_a = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range_a)
-    pv_b = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range_b)
+    pv_a, _ = _extract_trial_population_vectors(df, signal_col, trial_type_a, bin_range_a)
+    pv_b, _ = _extract_trial_population_vectors(df, signal_col, trial_type_b, bin_range_b)
 
     mean_a = np.nanmean(pv_a, axis=0)
     mean_b = np.nanmean(pv_b, axis=0)
@@ -1008,7 +1029,7 @@ if __name__ == "__main__":
     from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
 
     mouse_id = '26'
-    date = '2025-09-10'
+    date = '2025-09-16'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1036,10 +1057,6 @@ if __name__ == "__main__":
         .sort('min_bin')
     )
 
-    from df_processing import get_cue_regions
-
-    print("ABC:", get_cue_regions(exp_config, 'ABC'))
-    print("ABDC:", get_cue_regions(exp_config, 'ABDC'))
 # run decoder
     results = run_decoding_analysis(
         data, exp_config, metadata=meta, signal_col='multi_day_spikes',
