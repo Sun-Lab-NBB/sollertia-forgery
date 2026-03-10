@@ -44,26 +44,43 @@ class DetectionParams:
     """Parameters for place field detection.
 
     Args:
+        signal_type: Signal type — 'spikes' or 'dff'. Controls thresholding logic and
+            default min_peak. 'spikes' thresholds at signal_threshold × peak (baseline
+            assumed zero). 'dff' computes baseline as mean of sub-threshold bins, then
+            thresholds at baseline + signal_threshold × (peak - baseline).
         smooth_sigma: Gaussian smoothing sigma in bins (0 to disable).
-        base_quantile: Quantile for per-cell baseline estimate.
-        signal_threshold: Fraction of (peak - baseline) above baseline to threshold.
+        base_quantile: Quantile used to identify sub-threshold bins for dff baseline
+            estimation. Ignored for spikes.
+        signal_threshold: For spikes: fraction of peak rate. For dff: fraction of
+            (peak - baseline) above baseline.
         min_bins: Minimum contiguous bins for a valid place field.
         outside_threshold: In-field mean must exceed outside-field mean × this factor.
-        min_peak: Minimum peak ΔF/F within a field.
+        min_peak: Minimum peak value within a field. If None, defaults to 0.005 for
+            spikes (spike probability units) and 0.1 for dff (ΔF/F units).
         sig_threshold: p-value cutoff for shuffle validation.
         n_shuffles: Number of shuffle iterations for validation.
         n_chunks: Number of chunks for temporal shuffle.
     """
+    signal_type: str = 'spikes'
     smooth_sigma: float = 1.0
     base_quantile: float = 0.25
     signal_threshold: float = 0.25
     min_bins: int = 3
     outside_threshold: float = 3.0
-    min_peak: float = 0.1
+    min_peak: float | None = None
     sig_threshold: float = 0.05
     n_shuffles: int = 500
     n_chunks: int = 100
 
+    def get_min_peak(self) -> float:
+        """Return min_peak, applying signal-type-dependent default if None.
+
+        Returns:
+            Minimum peak threshold appropriate for the signal type.
+        """
+        if self.min_peak is not None:
+            return self.min_peak
+        return 0.005 if self.signal_type == 'spikes' else 0.1
 
 # PLACE FIELDS CONTAINER
 
@@ -342,25 +359,43 @@ class PlaceFieldResult:
 
 def _quantile_threshold(
     binF: np.ndarray,
+    signal_type: str = 'spikes',
     base_quantile: float = 0.25,
-    signal_threshold: float = 0.20,
+    signal_threshold: float = 0.25,
 ) -> np.ndarray:
-    """Quantile-based thresholding per cell. Replaces vr2p.quantile_max_threshold.
+    """Threshold binned activity per cell to identify place field candidates.
 
-    For each cell, computes baseline as the base_quantile quantile of its tuning curve.
-    A bin passes threshold if: value > baseline + signal_threshold × (peak - baseline).
+    For spikes: threshold = signal_threshold × peak. Baseline is assumed to be
+    zero since most bins in a sparse spike map will be at or near zero.
+
+    For dff: baseline is computed as the mean of bins at or below the base_quantile
+    quantile (not the quantile value itself). Threshold = baseline + signal_threshold
+    × (peak - baseline). This matches the Tank lab protocol from place_cell_analysis.py
+    and avoids the quantile-as-baseline error where high activity inflates the baseline.
 
     Args:
-        binF: Binned fluorescence, shape (n_cells, n_bins).
-        base_quantile: Quantile for baseline (0-1).
-        signal_threshold: Fraction of dynamic range above baseline.
+        binF: Binned activity, shape (n_cells, n_bins).
+        signal_type: Either 'spikes' or 'dff'.
+        base_quantile: Quantile for identifying sub-threshold bins. Only used for dff.
+        signal_threshold: Fraction of dynamic range to threshold at.
 
     Returns:
         Binary array, shape (n_cells, n_bins). 1 = above threshold.
     """
-    baseline = np.nanquantile(binF, base_quantile, axis=1, keepdims=True)
     peak = np.nanmax(binF, axis=1, keepdims=True)
-    threshold = baseline + signal_threshold * (peak - baseline)
+
+    if signal_type == 'spikes':
+        threshold = signal_threshold * peak
+
+    else:
+        quantile_values = np.nanquantile(binF, base_quantile, axis=1, keepdims=True)
+        # Mean of bins at or below the quantile — lower and more accurate than using
+        # the quantile value itself as the baseline.
+        sub_threshold_mask = binF <= quantile_values
+        masked = np.where(sub_threshold_mask, binF, np.nan)
+        baseline = np.nanmean(masked, axis=1, keepdims=True)
+        threshold = baseline + signal_threshold * (peak - baseline)
+
     return (binF > threshold).astype(int)
 
 
@@ -479,8 +514,9 @@ def _detect_on_tuning_curves(
         smoothed = binF
 
     # Threshold
-    thres_im = _quantile_threshold(smoothed, params.base_quantile, params.signal_threshold)
-
+    thres_im = _quantile_threshold(
+        smoothed, params.signal_type, params.base_quantile, params.signal_threshold,
+    )
     # Connected components (circular)
     pf = circular_connected_placefields(thres_im, smoothed, min_bins=params.min_bins)
     pf.bin_size = bin_size
@@ -490,7 +526,7 @@ def _detect_on_tuning_curves(
 
     # Filter: minimum peak amplitude
     if pf.n_fields > 0:
-        weak = np.where(pf.max_intensity < params.min_peak)[0]
+        weak = np.where(pf.max_intensity < params.get_min_peak())[0]
         pf = pf.remove_fields(weak)
 
     return pf
@@ -1129,7 +1165,9 @@ if __name__ == '__main__':
     paths = get_session_paths(session_dir, session_data)
     data, meta = load_processed_session(paths['parquet'])
 
-    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes')
+    params = DetectionParams(signal_type='spikes')
+
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes', params=params)
     print(result.summary())
 
     # Sorted heatmap per trial type
