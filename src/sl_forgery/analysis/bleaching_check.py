@@ -26,7 +26,6 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from scipy.optimize import curve_fit
 
-from df_processing import load_multiday_sessions
 
 
 # EXTRACTION
@@ -139,7 +138,9 @@ def compute_per_cell_decay(
         y = cell_means[i]
         try:
             p0 = [y[0] - y[-1], max(n_days / 2, 1.0), y[-1]]
-            popt, _ = curve_fit(_exp_decay, x, y, p0=p0, maxfev=2000)
+            lower = [-np.inf, 1e-3, -np.inf]
+            upper = [np.inf, np.inf, np.inf]
+            popt, _ = curve_fit(_exp_decay, x, y, p0=p0, maxfev=2000, bounds=(lower, upper))
             taus[i] = popt[1]
         except (RuntimeError, ValueError):
             continue
@@ -233,7 +234,9 @@ def compute_per_cell_decay_multi(
         y = all_means[:, i]
         try:
             p0 = [y[0] - y[-1], max(all_times[-1] / 2, 1.0), y[-1]]
-            popt, _ = curve_fit(_exp_decay, all_times, y, p0=p0, maxfev=2000)
+            lower = [-np.inf, 1e-3, -np.inf]
+            upper = [np.inf, np.inf, np.inf]
+            popt, _ = curve_fit(_exp_decay, all_times, y, p0=p0, maxfev=2000, bounds=(lower, upper))
             taus[i] = popt[1]
         except (RuntimeError, ValueError):
             continue
@@ -367,9 +370,10 @@ def plot_half_session(
 
 def plot_bleaching_summary(
     sessions: dict[str, dict],
-    signal_col: str = 'multi_day_f',
+    signal_col: str = 'single_day_f',
     downsample: int = 50,
     max_cells_fit: int | None = 1000,
+    max_sessions: int | None = 8,
     frame_rate: float = 10.0,
     figsize: tuple = (16, 10),
     save_path: Path | None = None,
@@ -384,6 +388,7 @@ def plot_bleaching_summary(
         signal_col: raw fluorescence column name.
         downsample: frame binning for intra-session plot.
         max_cells_fit: max cells for exponential fits (None = all, slow for >3k).
+        max_sessions: max number of sessions.  Code seems to crash after 7 sessions, depending on cells. Temp fix
         frame_rate: frame rate for imaging; will extract from data but for now ~10 hz
         figsize: figure size.
         save_path: if provided, saves figure to this path.
@@ -396,6 +401,11 @@ def plot_bleaching_summary(
     signals = extract_session_signals(sessions, signal_col)
 
     dates = sorted(signals.keys())
+    if max_sessions is not None and len(dates) > max_sessions:
+        step = len(dates) // max_sessions + 1
+        dates = dates[::step]
+        sessions = {d: sessions[d] for d in dates}
+        print(f"  Subsampled to {len(dates)} sessions (step={step})")
     n_cells = signals[dates[0]].shape[1]
     total_frames = sum(m.shape[0] for m in signals.values())
     print(f"  {len(dates)} sessions, {n_cells} cells, {total_frames} total frames")
@@ -428,13 +438,16 @@ def plot_bleaching_summary(
 
 
 if __name__ == '__main__':
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    from df_processing import load_multiday_sessions
+    mouse_id = '26'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     sessions = load_multiday_sessions(
         mouse_dir,
-        date_range=('2025-09-03', '2025-09-24'),
+        date_range=('2025-08-20', '2025-09-16'),
         auto_process=True,
     )
 
-    fig = plot_bleaching_summary(sessions)
+    fig = plot_bleaching_summary(sessions, show=True)
+
 

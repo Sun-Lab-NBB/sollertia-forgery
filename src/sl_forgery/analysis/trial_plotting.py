@@ -608,6 +608,11 @@ def plot_multiday_comparison(
         global_ymax = max(yl[1] for yl in ylims.values())
         ylims = {tt: (-global_ymax * 0.03, global_ymax) for tt in all_trial_types}
 
+    if signal_col.endswith('dff'):
+        y_label = 'ΔF/F'
+    else:
+        y_label = 'Deconvolved Signal'
+
     # Figure sizing
     col_width = max(3.5, 14 / n_days)
     row_height = 2.5
@@ -615,7 +620,7 @@ def plot_multiday_comparison(
     gs = fig.add_gridspec(
         n_types, n_days,
         hspace=0.2, wspace=0.1,
-        top=0.88, bottom=0.06, left=0.06, right=0.98,
+        top=0.88, bottom=0.06, left=0.03, right=0.98,
     )
 
     axes = np.empty((n_types, n_days), dtype=object)
@@ -671,7 +676,7 @@ def plot_multiday_comparison(
                 ax.spines['right'].set_visible(False)
                 ax.set_ylim(ylims[tt])
                 if col == 0:
-                    ax.set_ylabel('ΔF/F', fontsize=9 * fscale)
+                    ax.set_ylabel(y_label, fontsize=9 * fscale)
                 ax.tick_params(labelsize=7 * fscale)
                 continue
 
@@ -749,7 +754,7 @@ if __name__ == "__main__":
 
     for i in multiday.union_indices[:5]:
         plot_multiday_comparison(
-            sessions, cell_idx=i+5, signal_col='multi_day_dff',
+            sessions, cell_idx=i+5, signal_col='multi_day_spikes',
             global_ylim=True, place_fields=None,
         )
 

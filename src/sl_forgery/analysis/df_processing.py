@@ -189,7 +189,7 @@ def get_cue_regions(
 
 
 def get_bin_size(
-    df: pl.DataFrame,
+    df: pl.DataFrame | None = None,
     metadata: dict | None = None,
 ) -> int | None:
     """Get spatial bin size in cm from metadata or derive from DataFrame.

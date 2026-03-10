@@ -198,7 +198,7 @@ def compute_umap(
     }
 
     print(f"Done! Embedding shape: {embedding.shape}")
-    return embedding
+    return embedding, umap_params
 
 
 # MATPLOTLIB HELPERS
@@ -1054,7 +1054,7 @@ if __name__ == '__main__':
     # prepare data
     neural_data, filtered_df = prepare_umap_data(data, signal_column='multi_day_dff', max_frames=None)
     # compute umap
-    embedding = compute_umap(neural_data, n_components=3, n_neighbors=50)       #3D embedding
+    embedding, _ = compute_umap(neural_data, n_components=3, n_neighbors=50)       #3D embedding
 
     # plot
     fig, meta = plot_umap(embedding, filtered_df, strategy=['trial_type', 'cue']) #basic plot, 3D
