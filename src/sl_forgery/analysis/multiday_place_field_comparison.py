@@ -31,7 +31,7 @@ from matplotlib.figure import Figure
 import sys
 sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 
-from df_processing import (
+from df_processing import (get_bin_size,
     compute_session_averages, get_track_length, get_cue_regions,
     load_multiday_sessions,
 )
@@ -55,7 +55,6 @@ import plot_utils as pfmt
 def detect_fields_multiday(
     sessions: dict[str, dict],
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     params: DetectionParams | None = None,
 ) -> dict[str, PlaceFieldResult]:
     """Run place field detection on each session independently.
@@ -65,7 +64,6 @@ def detect_fields_multiday(
     Args:
         sessions: From load_multiday_sessions(). Keys are date strings.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         params: Detection parameters. Uses defaults if None.
 
     Returns:
@@ -75,6 +73,7 @@ def detect_fields_multiday(
     for date in sorted(sessions):
         s = sessions[date]
         print(f"Detecting fields: {date}...")
+        bin_size_cm = get_bin_size(None, s['metadata'])
         result = detect_place_fields(
             s['data'], s['config'],
             signal_col=signal_col, bin_size_cm=bin_size_cm, params=params,
@@ -299,7 +298,6 @@ def abc_tuning_pre_vs_post(
     introduction_day: str,
     trial_type: str = 'ABC',
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
 ) -> dict:
     """Compare ABC tuning curve stability before vs after ABDC introduction.
 
@@ -315,7 +313,6 @@ def abc_tuning_pre_vs_post(
         introduction_day: Date string of first session with the new trial type.
         trial_type: Trial type to track (usually 'ABC').
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         Dict with keys 'pre_pre', 'pre_post', 'post_post', each containing:
@@ -336,11 +333,11 @@ def abc_tuning_pre_vs_post(
         """Compute per-cell correlation, rate remapping, and place cell mask for a day pair."""
         avg_a = get_mean_tuning_curves(
             sessions[day_a]['data'], sessions[day_a]['config'],
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
+            sessions[day_a]['metadata'], signal_col=signal_col,
         )[trial_type]
         avg_b = get_mean_tuning_curves(
             sessions[day_b]['data'], sessions[day_b]['config'],
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
+            sessions[day_b]['metadata'], signal_col=signal_col,
         )[trial_type]
 
         corrs = per_cell_spatial_correlation(avg_a, avg_b)
@@ -600,7 +597,7 @@ def plot_recruitment_categories(
         #     continue  # skip absent for cleaner plot
         vals = np.array(counts[cat])
         ax.bar(x, vals, bottom=bottom, label=cat,
-               color=category_colors[cat], edgecolor='black', linewidth=0.5)
+               color=category_colors[cat], edgecolor=None, linewidth=0.5)
         bottom += vals
 
     # Highlight introduction boundary
@@ -608,7 +605,7 @@ def plot_recruitment_categories(
         for i, key in enumerate(pair_keys):
             day_b = recruitment[key]['day_b']
             if day_b == introduction_day:
-                ax.axvline(i, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
+                ax.axvline(i + .5, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
                            label='ABDC introduced')
                 break
 
@@ -1069,7 +1066,6 @@ def run_recruitment_analysis(
     trial_type: str = 'ABC',
     bifurcation_cue: int | str = '0b',
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     detection_params: DetectionParams | None = None,
     n_shuffles_splitter: int = 500,
     field_center_tolerance_cm: float = 10.0,
@@ -1091,7 +1087,6 @@ def run_recruitment_analysis(
         trial_type: Primary trial type to track (usually 'ABC').
         bifurcation_cue: Cue for bifurcation analysis (e.g., 'B' or '0b').
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         detection_params: Place field detection parameters. Uses defaults if None.
         n_shuffles_splitter: Shuffle iterations for splitter p-values.
         field_center_tolerance_cm: Tolerance for stable vs shifted classification.
@@ -1119,7 +1114,7 @@ def run_recruitment_analysis(
     print("1. Place field detection across days")
     print("=" * 60)
     pf_results = detect_fields_multiday(
-        sessions, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        sessions, signal_col=signal_col,
         params=detection_params,
     )
     results['pf_results'] = pf_results
@@ -1152,7 +1147,7 @@ def run_recruitment_analysis(
     print("=" * 60)
     stability = abc_tuning_pre_vs_post(
         sessions, pf_results, introduction_day,
-        trial_type=trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        trial_type=trial_type, signal_col=signal_col,
     )
     results['abc_stability'] = stability
 
@@ -1217,21 +1212,22 @@ def run_recruitment_analysis(
 
 
 if __name__ == '__main__':
-    from multiday_place_field_comparison import run_recruitment_analysis
 
-    from df_processing import load_session_dir, get_session_prefix, load_processed_session, load_multiday_sessions
+    from df_processing import load_multiday_sessions
 
-    animal_id = '26'
-    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/26_explore')
+    mouse_id = '26'
+    date = '2025-09-08'
+    mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
+
 
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-08-01', '2025-09-24'), auto_process=False,
+        mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False,
     )
 
     results = run_recruitment_analysis(
         sessions,
-        introduction_day='2025-09-15',  # first day with ABDC (9-15 is actually last day, first is 9-08)
+        introduction_day='2025-09-08',  # first day with ABDC (9-15 is actually last day, first is 9-08)
         trial_type='ABC',
         bifurcation_cue='0b',   #0b is gray zone before C, B is the cue before C
-        animal_id=animal_id,
+        animal_id=mouse_id,
     )
