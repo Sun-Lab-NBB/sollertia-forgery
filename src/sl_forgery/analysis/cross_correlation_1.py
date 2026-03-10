@@ -37,8 +37,8 @@ import plot_utils as pfmt
 def get_mean_tuning_curves(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
     """Compute session-averaged tuning curves per cell per trial type.
 
@@ -47,13 +47,15 @@ def get_mean_tuning_curves(
 
     Args:
         df: Frame-level DataFrame with position/bin columns.
+        metadata: From df_processings, has bin size in cm
         config: Experiment configuration dict.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm (default 5 cm).
 
     Returns:
         Dict mapping trial_type -> (n_bins, n_cells) array.
     """
+    bin_size_cm = get_bin_size(df, metadata)
+
     stats = compute_session_averages(
         df, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
     )
@@ -63,18 +65,18 @@ def get_mean_tuning_curves(
 def get_split_half_tuning_curves(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Split trials into odd/even halves and compute mean tuning curves.
 
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
+        metadata: From df_processings, has bin size in cm
         trial_type: Which trial type to split.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         Tuple of (even_avg, odd_avg), each (n_bins, n_cells).
@@ -86,8 +88,11 @@ def get_split_half_tuning_curves(
     even_trials = unique_trials[::2]
     odd_trials = unique_trials[1::2]
 
+    bin_size_cm = get_bin_size(df, metadata)
+
     n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
     n_cells = len(df[signal_col][0])
+
 
     def _avg_for_trials(trial_set):
         """Bin and average signals for a subset of trials."""
@@ -229,7 +234,7 @@ def get_shared_bins(
     config: dict,
     type_a: str,
     type_b: str,
-    bin_size_cm: int = 5,
+    metadata: dict
 ) -> int:
     """Number of shared spatial bins between two track types.
 
@@ -239,8 +244,7 @@ def get_shared_bins(
         config: Experiment configuration dict.
         type_a: First trial type.
         type_b: Second trial type.
-        bin_size_cm: Spatial bin size in cm.
-
+        metadata: metadata from df_processing, ahs bin size
     Returns:
         Number of shared bins.
     """
@@ -248,6 +252,9 @@ def get_shared_bins(
     seq_a = ts.get(type_a, {}).get('cue_sequence', [])
     seq_b = ts.get(type_b, {}).get('cue_sequence', [])
     cue_widths = config.get('cue_map', {})
+
+    bin_size_cm = get_bin_size(None, metadata)
+
 
     shared_cm = 0.0
     for ca, cb in zip(seq_a, seq_b):
@@ -293,8 +300,8 @@ def plot_split_half(
     df: pl.DataFrame,
     config: dict,
     trial_type: str,
+    metadata: dict,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     figsize: tuple = (8, 5),
     animal_id: str | None = None,
     date: str | None = None,
@@ -310,8 +317,8 @@ def plot_split_half(
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
         trial_type: Which trial type to test.
+        metadata: metadata from df_processing, has bin size
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         figsize: Figure size.
         animal_id: Which animal to plot.
         date: Expeirment date.
@@ -321,7 +328,7 @@ def plot_split_half(
         Matplotlib Figure.
     """
     even_avg, odd_avg = get_split_half_tuning_curves(
-        df, config, trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        df, config, metadata, trial_type, signal_col=signal_col,
     )
     corrs = per_cell_spatial_correlation(even_avg, odd_avg)
     valid = corrs[~np.isnan(corrs)]
@@ -362,10 +369,10 @@ def plot_split_half(
 def plot_pv_correlation_across_position(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     type_a: str,
     type_b: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     figsize: tuple = (10, 5),
     animal_id: str | None = None,
     date: str | None = None,
@@ -376,10 +383,10 @@ def plot_pv_correlation_across_position(
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
+        metadata: metadata from df_processing, has bin size
         type_a: First trial type.
         type_b: Second trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         figsize: Figure size.
         animal_id: Animal ID
         date: Expeirment date
@@ -388,10 +395,12 @@ def plot_pv_correlation_across_position(
     Returns:
         Matplotlib Figure.
     """
-    avgs = get_mean_tuning_curves(df, config, signal_col=signal_col, bin_size_cm=bin_size_cm)
+    bin_size_cm = get_bin_size(df, metadata)
+
+    avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     avg_a, avg_b = avgs[type_a], avgs[type_b]
 
-    shared_bins = get_shared_bins(config, type_a, type_b, bin_size_cm)
+    shared_bins = get_shared_bins(config, type_a, type_b, metadata)
     diverge_cm = get_divergence_point(config, type_a, type_b)
 
     pv_shared = population_vector_correlation(avg_a, avg_b, min_bins=shared_bins)
@@ -417,7 +426,7 @@ def plot_pv_correlation_across_position(
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
     ax.set_title(pfmt.build_title(f'PV Correlation — {type_a} vs {type_b}',
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
-    ax.set_xlim(0, max(len_a, len_b))
+    ax.set_xlim(0, shared_bins * bin_size_cm)
     ax.set_ylim(-0.2, 1.05)
     ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
     ax.legend(frameon=False, fontsize=10, loc='lower left')
@@ -435,10 +444,10 @@ def plot_pv_correlation_across_position(
 def plot_per_cell_cross_correlation(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     type_a: str,
     type_b: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     segment: str = 'shared',
     figsize: tuple = (8, 5),
     animal_id: str | None = None,
@@ -450,10 +459,10 @@ def plot_per_cell_cross_correlation(
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
+        metadata: metadata from df_processing, has bin size
         type_a: First trial type.
         type_b: Second trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         segment: 'shared' for shared bins only, 'full' for shorter track length.
         figsize: Figure size.
         animal_id: Animal ID for plot titles
@@ -462,12 +471,14 @@ def plot_per_cell_cross_correlation(
     Returns:
         Matplotlib Figure.
     """
-    avgs = get_mean_tuning_curves(df, config, signal_col=signal_col, bin_size_cm=bin_size_cm)
+    bin_size_cm = get_bin_size(df, metadata)
+
+    avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     avg_a, avg_b = avgs[type_a], avgs[type_b]
 
     min_bins = None
     if segment == 'shared':
-        min_bins = get_shared_bins(config, type_a, type_b, bin_size_cm)
+        min_bins = get_shared_bins(config, type_a, type_b, metadata)
 
     corrs = per_cell_spatial_correlation(avg_a, avg_b, min_bins=min_bins)
     valid = corrs[~np.isnan(corrs)]
@@ -509,9 +520,8 @@ def plot_pv_correlation_matrix(
     config: dict,
     type_a: str,
     type_b: str,
+    metadata: dict,
     signal_col: str = 'multi_day_spikes',
-    metadata: dict | None = None,
-    bin_size_cm: int | None = None,
     figsize: tuple = (8, 7),
     animal_id: str | None = None,
     date: str | None = None,
@@ -523,10 +533,9 @@ def plot_pv_correlation_matrix(
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
         type_a: First trial type.
-        type_b: Second trial type.
-        signal_col: Column containing neural signals.
+        type_b: Second trial type
         metadata: Metadata dict from processed df, has bin size
-        bin_size_cm: Can specify Spatial bin size in cm but discouraged
+        signal_col: Column containing neural signals.
         figsize: Figure size.
         animal_id: Animal ID for plot titles
         date: Experiment date.
@@ -535,12 +544,9 @@ def plot_pv_correlation_matrix(
     Returns:
         Matplotlib Figure.
     """
-    if bin_size_cm is None:
-        bin_size_cm = get_bin_size(df, metadata)
-        if bin_size_cm is None:
-            raise ValueError("Cannot determine bin size — provide bin_size_cm or metadata")
+    bin_size_cm = get_bin_size(df, metadata)
 
-    avgs = get_mean_tuning_curves(df, config, signal_col=signal_col, bin_size_cm=bin_size_cm)
+    avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     matrix = pv_correlation_matrix(avgs[type_a], avgs[type_b])
     diverge = get_divergence_point(config, type_a, type_b)
 
@@ -567,8 +573,8 @@ def plot_pv_correlation_matrix(
 def run_within_session_analysis(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     animal_id: str | None = None,
     date: str | None = None,
     show: bool = True,
@@ -582,8 +588,8 @@ def run_within_session_analysis(
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
+        metadata: Metadata dict from processed df, has bin size
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         animal_id: Animal ID.
         date: Experiment date.
         show: Call plt.show() for each figure.
@@ -593,6 +599,7 @@ def run_within_session_analysis(
         Dict of {name: Figure}.
     """
     trial_types = sorted(df['trial_type'].unique().to_list())
+
     figs = {}
 
     trial_counts = {
@@ -609,7 +616,7 @@ def run_within_session_analysis(
             print(f"Skipping split-half for {tt}: only {n} trials (need ≥4)")
             continue
         print(f"Split-half reliability: {tt}...")
-        fig = plot_split_half(df, config, tt, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        fig = plot_split_half(df, config, tt, metadata, signal_col=signal_col,
                               animal_id=animal_id, date=date, show=show)
         figs[f'split_half_{tt}'] = fig
 
@@ -619,17 +626,17 @@ def run_within_session_analysis(
             print(f"\nCross-correlation: {type_a} vs {type_b}...")
 
             fig = plot_pv_correlation_across_position(
-                df, config, type_a, type_b, signal_col=signal_col, bin_size_cm=bin_size_cm,
+                df, config, metadata, type_a, type_b, signal_col=signal_col,
                 animal_id=animal_id, date=date, show=show)
             figs[f'pv_position_{type_a}_vs_{type_b}'] = fig
 
             fig = plot_per_cell_cross_correlation(
-                df, config, type_a, type_b, signal_col=signal_col, bin_size_cm=bin_size_cm,
+                df, config, metadata, type_a, type_b, signal_col=signal_col,
                 segment='shared', animal_id=animal_id, date=date, show=show)
             figs[f'cell_corr_shared_{type_a}_vs_{type_b}'] = fig
 
             fig = plot_pv_correlation_matrix(
-                df, config, type_a, type_b, signal_col=signal_col, bin_size_cm=bin_size_cm,
+                df, config, type_a, type_b, metadata, signal_col=signal_col,
                 animal_id=animal_id, date=date, show=show)
             figs[f'pv_matrix_{type_a}_vs_{type_b}'] = fig
     else:
@@ -646,7 +653,6 @@ def multiday_tuning_curves(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
 ) -> dict[str, np.ndarray]:
     """Compute session-averaged tuning curves per cell for one trial type across days.
 
@@ -654,7 +660,6 @@ def multiday_tuning_curves(
         sessions: From load_multiday_sessions(). Keys are date strings.
         trial_type: Which trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         Dict mapping date -> (n_bins, n_cells) tuning curve array.
@@ -670,9 +675,7 @@ def multiday_tuning_curves(
             print(f"  {date}: {trial_type} not present, skipping")
             continue
 
-        avgs = get_mean_tuning_curves(
-            df, config, signal_col=signal_col, bin_size_cm=bin_size_cm,
-        )
+        avgs = get_mean_tuning_curves(df, config, s['metadata'], signal_col=signal_col)
         if trial_type in avgs:
             result[date] = avgs[trial_type]
 
@@ -685,7 +688,6 @@ def multiday_per_cell_correlation(
     day_y: str,
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-cell tuning curve correlation between two days.
@@ -698,7 +700,6 @@ def multiday_per_cell_correlation(
         day_y: Second date string.
         trial_type: Which trial type to compare.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         cell_indices: Subset of cells to compute. None = all cells.
 
     Returns:
@@ -708,15 +709,15 @@ def multiday_per_cell_correlation(
         # Autocorrelation: split-half within the same session
         s = sessions[day_x]
         even_avg, odd_avg = get_split_half_tuning_curves(
-            s['data'], s['config'], trial_type,
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
+            s['data'], s['config'], s['metadata'], trial_type,
+            signal_col=signal_col,
         )
         corrs = per_cell_spatial_correlation(even_avg, odd_avg)
     else:
         # Cross-day: full session averages
         tc = multiday_tuning_curves(
             {day_x: sessions[day_x], day_y: sessions[day_y]},
-            trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+            trial_type, signal_col=signal_col,
         )
         if day_x not in tc or day_y not in tc:
             n_cells = len(sessions[day_x]['data'][signal_col][0])
@@ -734,7 +735,6 @@ def multiday_pv_correlation(
     day_y: str,
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
 ) -> np.ndarray:
     """PV correlation across positions between two days for one trial type.
 
@@ -746,22 +746,23 @@ def multiday_pv_correlation(
         day_y: Second date string.
         trial_type: Which trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         PV correlation per bin, shape (n_bins,).
     """
+
+
     if day_x == day_y:
         s = sessions[day_x]
         even_avg, odd_avg = get_split_half_tuning_curves(
-            s['data'], s['config'], trial_type,
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
+            s['data'], s['config'], s['metadata'], trial_type,
+            signal_col=signal_col,
         )
         return population_vector_correlation(even_avg, odd_avg)
     else:
         tc = multiday_tuning_curves(
             {day_x: sessions[day_x], day_y: sessions[day_y]},
-            trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+            trial_type, signal_col=signal_col,
         )
         if day_x not in tc or day_y not in tc:
             return np.array([])
@@ -772,7 +773,6 @@ def multiday_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
     metric: str = 'per_cell_median',
 ) -> tuple[np.ndarray, list[str]]:
@@ -785,7 +785,6 @@ def multiday_correlation_matrix(
         sessions: From load_multiday_sessions().
         trial_type: Which trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         cell_indices: Subset of cells. None = all.
         metric: How to summarize per-pair. Options:
             'per_cell_median' — median of per-cell correlations.
@@ -809,7 +808,7 @@ def multiday_correlation_matrix(
             if metric.startswith('per_cell'):
                 corrs = multiday_per_cell_correlation(
                     sessions, day_x, day_y, trial_type,
-                    signal_col=signal_col, bin_size_cm=bin_size_cm,
+                    signal_col=signal_col,
                     cell_indices=cell_indices,
                 )
                 valid = corrs[~np.isnan(corrs)]
@@ -823,7 +822,7 @@ def multiday_correlation_matrix(
             elif metric == 'pv_mean':
                 pv = multiday_pv_correlation(
                     sessions, day_x, day_y, trial_type,
-                    signal_col=signal_col, bin_size_cm=bin_size_cm,
+                    signal_col=signal_col,
                 )
                 valid = pv[~np.isnan(pv)]
                 if len(valid) > 0:
@@ -838,7 +837,6 @@ def plot_multiday_per_cell_histogram(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     day_x: str | None = None,
     day_y: str | None = None,
     cell_indices: np.ndarray | None = None,
@@ -854,7 +852,6 @@ def plot_multiday_per_cell_histogram(
         day_y: Second date string.
         trial_type: Which trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         cell_indices: Subset of cells. None = all.
         animal_id: Which animal's data to plot.
         figsize: Figure size.
@@ -868,10 +865,10 @@ def plot_multiday_per_cell_histogram(
         day_x = dates[0]
     if day_y is None:
         day_y = dates[-1] if len(dates) > 1 else dates[0]
-    
+
     corrs = multiday_per_cell_correlation(
         sessions, day_x, day_y, trial_type,
-        signal_col=signal_col, bin_size_cm=bin_size_cm,
+        signal_col=signal_col,
         cell_indices=cell_indices,
     )
     valid = corrs[~np.isnan(corrs)]
@@ -919,7 +916,6 @@ def plot_multiday_pv_across_position(
     day_y: str | None = None,
     config: dict | None = None,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     animal_id: str | None = None,
     figsize: tuple = (10, 5),
     show: bool = True,
@@ -929,11 +925,10 @@ def plot_multiday_pv_across_position(
     Args:
         sessions: From load_multiday_sessions().
         day_x: First date string.
-        day_2: Second date string.
+        day_y: Second date string.
         trial_type: Which trial type.
         config: Experiment config for cue shading. Uses day_x's config if None.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         animal_id: Which animal's data to plot.
         figsize: Figure size.
         show: Call plt.show().
@@ -949,7 +944,7 @@ def plot_multiday_pv_across_position(
 
     pv = multiday_pv_correlation(
         sessions, day_x, day_y, trial_type,
-        signal_col=signal_col, bin_size_cm=bin_size_cm,
+        signal_col=signal_col,
     )
     if len(pv) == 0:
         print(f"No data for {trial_type} on {day_x} or {day_y}")
@@ -960,6 +955,7 @@ def plot_multiday_pv_across_position(
     if config is None:
         config = sessions[day_x]['config']
 
+    bin_size_cm = get_bin_size(None, sessions[day_x]['metadata'])
     x = np.arange(len(pv)) * bin_size_cm + bin_size_cm / 2
     track_len = len(pv) * bin_size_cm
 
@@ -998,13 +994,10 @@ def plot_multiday_pv_across_position(
         plt.show()
     return fig
 
-#TODO fix hardcoded bin size
 def plot_multiday_pv_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    metadata: dict | None = None,
-    bin_size_cm: int | None = None,
     day_x: str | None = None,
     day_y: str | None = None,
     animal_id: str | None = None,
@@ -1017,8 +1010,6 @@ def plot_multiday_pv_correlation_matrix(
         sessions: From load_multiday_sessions().
         trial_type: Trial type to compare.
         signal_col: Column containing neural signals.
-        metadata: Metadata from processing the raw df, has bin size
-        bin_size_cm: Spatial bin size in cm.
         day_x: First date string. Defaults to earliest.
         day_y: Second date string. Defaults to latest.
         animal_id: Animal name for title. Extracted from sessions if None.
@@ -1034,15 +1025,11 @@ def plot_multiday_pv_correlation_matrix(
     if day_y is None:
         day_y = dates[-1] if len(dates) > 1 else dates[0]
 
-    if bin_size_cm is None:
-        meta = sessions[day_x].get('metadata')
-        bin_size_cm = _get_bin_size(sessions[day_x]['data'], meta)
-        if bin_size_cm is None:
-            raise ValueError("Cannot determine bin size — provide bin_size_cm or metadata")
+    bin_size_cm = get_bin_size(None, sessions[day_x]['metadata'])
 
     tc = multiday_tuning_curves(
         {day_x: sessions[day_x], day_y: sessions[day_y]},
-        trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        trial_type, signal_col=signal_col,
     )
     if day_x not in tc or day_y not in tc:
         print(f"No data for {trial_type} on {day_x} or {day_y}")
@@ -1080,7 +1067,6 @@ def plot_multiday_correlation_matrix_summary(
     sessions: dict[str, dict],
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     cell_indices: np.ndarray | None = None,
     metric: str = 'per_cell_median',
     animal_id: str | None = None,
@@ -1095,7 +1081,6 @@ def plot_multiday_correlation_matrix_summary(
         sessions: From load_multiday_sessions().
         trial_type: Which trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         cell_indices: Subset of cells. None = all.
         metric: Summary metric ('per_cell_median', 'per_cell_mean', 'pv_mean').
         animal_id: Animal name for title. Extracted from sessions if None.
@@ -1106,7 +1091,7 @@ def plot_multiday_correlation_matrix_summary(
         Matplotlib Figure.
     """
     matrix, dates = multiday_correlation_matrix(
-        sessions, trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+        sessions, trial_type, signal_col=signal_col,
         cell_indices=cell_indices, metric=metric,
     )
 
@@ -1145,7 +1130,6 @@ def run_multiday_analysis(
     sessions: dict[str, dict],
     trial_type: str | None = None,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     animal_id: str | None = None,
     cell_indices: np.ndarray | None = None,
     day_pairs: list[tuple[str, str]] | None = None,
@@ -1161,7 +1145,6 @@ def run_multiday_analysis(
         sessions: From load_multiday_sessions().
         trial_type: Which trial type. If None, uses first type found.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         animal_id: Animal name for title. Extracted from sessions if None.
         cell_indices: Subset of cells. None = all.
         day_pairs: Specific (day_x, day_y) pairs to analyze. None = all pairs + diagonal.
@@ -1209,7 +1192,6 @@ def run_multiday_analysis(
         fig = plot_multiday_per_cell_histogram(
             sessions, trial_type,
             signal_col=signal_col,
-            bin_size_cm=bin_size_cm,
             day_x=day_x,
             day_y=day_y,
             cell_indices=cell_indices,
@@ -1220,31 +1202,27 @@ def run_multiday_analysis(
 
         fig = plot_multiday_pv_across_position(
             sessions, trial_type, day_x, day_y,
-            signal_col=signal_col, bin_size_cm=bin_size_cm,
+            signal_col=signal_col,
             animal_id=animal_id, show=show,
         )
         figs[f'{animal_id} - multiday_pv_{trial_type}_{label}'] = fig
 
-        #Day x day PV correlation across trials
+        # Day x day PV correlation across trials
         fig = plot_multiday_pv_correlation_matrix(
-            sessions, trial_type,  signal_col=signal_col,
-            bin_size_cm=bin_size_cm, day_x=day_x, day_y=day_y,
+            sessions, trial_type, signal_col=signal_col,
+            day_x=day_x, day_y=day_y,
             animal_id=animal_id, show=show,
         )
         figs[f'{animal_id} - multiday_pv_matrix_{trial_type}_{label}'] = fig
-
-        #fig = plot_multiday_tuning_curves
 
     # Day × day matrix SUMMARY of session (all cells)
     if len(dates) >= 2:
         print(f"\n  Day × day matrix...")
         fig = plot_multiday_correlation_matrix_summary(
-            sessions, trial_type, signal_col=signal_col, bin_size_cm=bin_size_cm,
+            sessions, trial_type, signal_col=signal_col,
             cell_indices=cell_indices, animal_id=animal_id, show=show,
         )
         figs[f'{animal_id} - multiday_matrix_{trial_type}'] = fig
-
-
 
     _save_figures(figs, save_dir)
     print(f"\nGenerated {len(figs)} figures.")
@@ -1275,9 +1253,9 @@ def _save_figures(figs: dict[str, Figure], save_dir: str | Path | None):
 def _build_per_trial_tuning_curves(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build tuning curve for each individual trial using scatter-add binning.
     Basically average the deconvolved spike values for all frames where the mouse was in that bin during that one
@@ -1286,9 +1264,9 @@ def _build_per_trial_tuning_curves(
     Args:
         df: Frame-level DataFrame with distance_bin column.
         config: Experiment configuration dict.
+        metadata: Experiment metadata with bin size
         trial_type: Filter to this trial type.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         Tuple of (per_trial_curves, unique_trials) where per_trial_curves
@@ -1301,6 +1279,8 @@ def _build_per_trial_tuning_curves(
     signals = np.vstack(tt_df[signal_col].to_list())
     trials = tt_df['trial'].to_numpy()
     bins = tt_df['distance_bin'].to_numpy()
+
+    bin_size_cm = get_bin_size(df, metadata)
 
     n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
     n_cells = signals.shape[1]
@@ -1327,8 +1307,8 @@ def _build_per_trial_tuning_curves(
 def within_session_learning_curve(
     df: pl.DataFrame,
     config: dict,
+    metadata: dict,
     signal_col: str = 'multi_day_spikes',
-    bin_size_cm: int = 5,
     segment: str = 'all',
 ) -> dict:
     """Track trial-by-trial PV correlation to leave-one-out templates.
@@ -1341,8 +1321,8 @@ def within_session_learning_curve(
     Args:
         df: Frame-level DataFrame with distance_bin column.
         config: Experiment configuration dict.
+        metadata: Experiment metadata, has bin size in cm
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         segment: Which spatial segment to analyze.
             'all' = full track (up to shared length),
             'shared' = only pre-divergence bins,
@@ -1364,14 +1344,14 @@ def within_session_learning_curve(
 
     # Build per-trial tuning curves for each type
     curves_a, trials_a = _build_per_trial_tuning_curves(
-        df, config, type_a, signal_col, bin_size_cm,
+        df, config, metadata, type_a, signal_col,
     )
     curves_b, trials_b = _build_per_trial_tuning_curves(
-        df, config, type_b, signal_col, bin_size_cm,
+        df, config, metadata, type_b, signal_col,
     )
 
     # Determine bin slice based on segment
-    n_shared = get_shared_bins(config, type_a, type_b, bin_size_cm)
+    n_shared = get_shared_bins(config, type_a, type_b, metadata)
     n_bins_common = min(curves_a.shape[1], curves_b.shape[1])
 
     if segment == 'shared':
@@ -1538,7 +1518,7 @@ if __name__ == "__main__":
                                get_session_paths, load_processed_session, load_multiday_sessions)
 
     mouse_id = '26'
-    date = '2025-08-21'
+    date = '2025-09-08'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1546,40 +1526,41 @@ if __name__ == "__main__":
     paths = get_session_paths(session_dir, session_data)
     data, meta = load_processed_session(paths['parquet'])
 
-    # plot
-    fig = plot_pv_correlation_matrix(data, exp_config, type_a='ABC', type_b='ABDC', animal_id=mouse_id, date=date)
+    # # plot
+    # fig = plot_pv_correlation_across_position(data, exp_config, type_a='ABC', type_b='ABDC',
+    #                                     animal_id=mouse_id, date=date)
 
     for s in ['shared', 'divergent', 'all']:
         result = within_session_learning_curve(
-            data, exp_config, signal_col='multi_day_spikes', segment=s,
+            data, exp_config, meta, signal_col='multi_day_spikes', segment=s,
         )
         fig = plot_within_session_learning_curve(result, animal_id=mouse_id, date=date)
 
-    figs = run_within_session_analysis(data, exp_config, signal_col='multi_day_spikes', animal_id=mouse_id,
+    figs = run_within_session_analysis(data, exp_config, meta, signal_col='multi_day_spikes', animal_id=mouse_id,
                                        date=date, show=True)
 
 
 #     # ── Multiday analysis ──
-#     sessions = load_multiday_sessions(
-#         mouse_dir, date_range=('2025-09-03', '2025-09-08'), auto_process=True,
-#     )
-#
-#     # All pairs + autocorrelation for ABC
-#     #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
-#
-#
-#     #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
-#     dates = sorted(sessions.keys())
-#     if len(dates) >= 2:
-#         figs = run_multiday_analysis(
-#             sessions, trial_type=None, signal_col='multi_day_spikes',
-#             animal_id=mouse_id, day_pairs=None, show=True,
-#         )
-#
-# # try just the pv for 2 days
-#     dates = sorted(sessions.keys())
-#     if len(dates) >= 2:
-#         fig = plot_multiday_pv_correlation_matrix(
-#             sessions, trial_type='ABC',
-#             signal_col='multi_day_spikes',show=True,
-#         )
+    sessions = load_multiday_sessions(
+        mouse_dir, date_range=('2025-09-03', '2025-09-08'), auto_process=True,
+    )
+
+    # All pairs + autocorrelation for ABC
+    #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
+
+
+    #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
+    dates = sorted(sessions.keys())
+    if len(dates) >= 2:
+        figs = run_multiday_analysis(
+            sessions, trial_type=None, signal_col='multi_day_spikes',
+            animal_id=mouse_id, day_pairs=None, show=True,
+        )
+
+# try just the pv for 2 days
+    dates = sorted(sessions.keys())
+    if len(dates) >= 2:
+        fig = plot_multiday_pv_correlation_matrix(
+            sessions, trial_type='ABC',
+            signal_col='multi_day_spikes',show=True,
+        )
