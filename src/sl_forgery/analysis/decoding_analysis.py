@@ -42,10 +42,10 @@ import plot_utils as pfmt
 
 def _get_bin_range_for_cue(
     df: pl.DataFrame,
+    metadata: dict,
     cue_id: int | str,
     trial_type: str,
     config: dict,
-    metadata: dict | None = None,
 ) -> tuple[int, int]:
     """Get (start_bin, end_bin) for a cue region from either config or the DataFrame.
 
@@ -65,11 +65,11 @@ def _get_bin_range_for_cue(
     Returns:
         Tuple of (start_bin_inclusive, end_bin_exclusive).
     """
+    bin_size_cm = get_bin_size(df, metadata)
 
     # Config path: exact boundaries
     if config is not None:
         from df_processing import get_cue_regions
-        bin_size_cm = get_bin_size(df, metadata)
         if bin_size_cm is None:
             raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
         regions = get_cue_regions(config, trial_type)
@@ -419,8 +419,8 @@ def trial_pv_distance(
     trial_types = sorted(df['trial_type'].unique().to_list())
     type_a, type_b = trial_types[0], trial_types[1]
 
-    bin_range_a = _get_bin_range_for_cue(df, cue_id, type_a, config=config, metadata=metadata)
-    bin_range_b = _get_bin_range_for_cue(df, cue_id, type_b, config=config, metadata=metadata)
+    bin_range_a = _get_bin_range_for_cue(df, metadata, cue_id, type_a, config=config)
+    bin_range_b = _get_bin_range_for_cue(df, metadata, cue_id, type_b, config=config)
 
     print(f"  cue={cue_id}, bin_range={bin_range_a}, bin_range={bin_range_b}")
 
@@ -578,8 +578,8 @@ def region_correlation(
     if bin_range is None:
         if cue_id is None:
             raise ValueError("Provide either cue_id or bin_range")
-        bin_range_a = _get_bin_range_for_cue(df, cue_id, type_a, config, metadata)
-        bin_range_b = _get_bin_range_for_cue(df, cue_id, type_b, config, metadata)
+        bin_range_a = _get_bin_range_for_cue(df, metadata, cue_id, type_a, config)
+        bin_range_b = _get_bin_range_for_cue(df, metadata, cue_id, type_b, config)
     else:
         bin_range_a = bin_range
         bin_range_b = bin_range
@@ -797,8 +797,8 @@ def splitter_cell_index(
     trial_types = sorted(df['trial_type'].unique().to_list())
     trial_type_a, trial_type_b = trial_types[0], trial_types[1]
 
-    bin_range_a = _get_bin_range_for_cue(df, cue_id, trial_type_a, config, metadata)
-    bin_range_b = _get_bin_range_for_cue(df, cue_id, trial_type_b, config, metadata)
+    bin_range_a = _get_bin_range_for_cue(df, metadata, cue_id, trial_type_a, config)
+    bin_range_b = _get_bin_range_for_cue(df, metadata, cue_id, trial_type_b, config)
 
     print(f"  bin_range_a={bin_range_a}, bin_range_b={bin_range_b}")
 
