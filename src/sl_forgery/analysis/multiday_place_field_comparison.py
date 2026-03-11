@@ -73,7 +73,7 @@ def detect_fields_multiday(
     for date in sorted(sessions):
         s = sessions[date]
         print(f"Detecting fields: {date}...")
-        bin_size_cm = get_bin_size(None, s['metadata'])
+        bin_size_cm = get_bin_size(s['metadata'])
         result = detect_place_fields(
             s['data'], s['config'],
             signal_col=signal_col, bin_size_cm=bin_size_cm, params=params,
@@ -422,7 +422,7 @@ def track_bifurcation_selectivity(
         print(f"  {date}: computing splitter index at cue {cue_id}...")
         result = splitter_cell_index(
             df, config, cue_id=cue_id, signal_col=signal_col,
-            n_shuffles=n_shuffles, seed=seed,
+            n_shuffles=n_shuffles, seed=seed, metadata=s['metadata']
         )
         results[date] = result
         n_sig = result['significant'].sum()
@@ -458,7 +458,9 @@ def track_bifurcation_activity(
 
         trial_types = sorted(df['trial_type'].unique().to_list())
         # Use first trial type that contains the cue
-        bin_range = _get_bin_range_for_cue(df, cue_id, config=config)
+        bin_range = _get_bin_range_for_cue(df, s['metadata'], cue_id,
+                                           trial_type=trial_types[0], config=config
+                                           )
 
         # Average across all trials regardless of type
         pvs = []

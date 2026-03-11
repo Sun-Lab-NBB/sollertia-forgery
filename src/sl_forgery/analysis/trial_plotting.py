@@ -16,6 +16,7 @@ import polars as pl
 
 from df_processing import (
     get_cue_regions,
+    get_bin_size,
     get_track_length,
     compute_binned_average,
     compute_session_averages,
@@ -150,7 +151,6 @@ def _shade_place_fields(
     ax: Axes,
     pf,
     cell_idx: int,
-    bin_size_cm: int = 5,
     color: str = '#b8b69d',
     alpha: float = 0.6,
 ):
@@ -160,7 +160,6 @@ def _shade_place_fields(
         ax: matplotlib axis.
         pf: PlaceFields1d object.
         cell_idx: cell index.
-        bin_size_cm: spatial bin size in cm.
         color: shading color.
         alpha: shading transparency.
 
@@ -192,7 +191,6 @@ def _get_trial_traces(
     signal_col: str,
     cell_idx: int,
     trial_type: str,
-    bin_size_cm: int = 5,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
 
     """
@@ -228,8 +226,8 @@ def _plot_tuning_on_axis(
     trial_type: str,
     config: dict,
     signal_col: str,
+    bin_size_cm = int,
     data: pl.DataFrame | None = None,
-    bin_size_cm: int = 5,
     smooth_sigma: float = 0.0,
     show_trials: bool = True,
     alpha_trials: float = 0.3,
@@ -248,8 +246,8 @@ def _plot_tuning_on_axis(
         trial_type: trial type string.
         config: experiment config.
         signal_col: neural signal column name.
+        bin_seize_cm: spatial bin size in cm (derived from metadata)
         data: frame-level df, needed only if show_trials=True.
-        bin_size_cm: spatial bin size in cm.
         smooth_sigma: Gaussian smoothing sigma (0 to disable).
         show_trials: plot individual trial traces. If False, plots the average +/- SEM
         alpha_trials: transparency for trial traces.
@@ -297,11 +295,11 @@ def _plot_tuning_on_axis(
 def plot_single_cell(
     data: pl.DataFrame,
     cell_idx: int,
+    metadata: dict,
     signal_col: str = 'single_day_f',
     trial_type: str = None,
     session_stats: dict = None,
     config: dict = None,
-    bin_size_cm: int = 5,
     smooth_sigma: float = 1.0,
     figsize: tuple | None = None,
     show_trials: bool = True,
@@ -315,11 +313,11 @@ def plot_single_cell(
     Args:
         data: frame-level df from process_session().
         cell_idx: cell index to plot.
+         metadata: session metadata dict (from load_processed_session).
         trial_type: specific trial type, or None for all types stacked.
         signal_col: neural signal column name.
         session_stats: from compute_session_averages(); computed if None.
         config: experiment config.
-        bin_size_cm: spatial bin size in cm.
         smooth_sigma: Gaussian smoothing sigma param (0 to disable).
         figsize: figure size; auto-scaled if None.
         show_trials: plot individual trial traces. If False, plots the average +/- SEM and uses a global ylimit <--
@@ -344,6 +342,8 @@ def plot_single_cell(
 
     if figsize is None:
         figsize = (12, 5 * len(trial_types))
+
+    bin_size_cm = get_bin_size(metadata)
 
     if session_stats is None and config is not None:
         session_stats = compute_session_averages(
@@ -375,8 +375,9 @@ def plot_single_cell(
     for ax, tt in zip(axes, trial_types):
         _plot_tuning_on_axis(
             ax, session_stats, cell_idx, tt, config, signal_col,
+            bin_size_cm=bin_size_cm,
             data=data if show_trials else None,
-            bin_size_cm=bin_size_cm, smooth_sigma=smooth_sigma,
+            smooth_sigma=smooth_sigma,
             show_trials=show_trials, alpha_trials=alpha_trials,
             show_cues=show_cues, place_fields=place_fields,
         )
@@ -402,7 +403,6 @@ def plot_multiday_cell(
     sessions: dict[str, dict],
     cell_idx: int,
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     figsize: tuple = (14, 9),
     alpha_trials: float = 0.3,
     show_cues: bool = True,
@@ -420,7 +420,6 @@ def plot_multiday_cell(
             Each value has keys: 'data', 'config', 'session_data', 'metadata'
         cell_idx: int, cell index (consistent across days)
         signal_col: str, neural signal column name
-        bin_size_cm: int, spatial bin size in cm
         figsize: tuple, figure size
         alpha_trials: float, transparency for individual trial traces
         show_cues: bool, show cue region shading
@@ -452,6 +451,7 @@ def plot_multiday_cell(
         s = sessions[date]
         data = s['data']
         config = s['config']
+        bin_size = s['bin_size']
         day_trial_types = sorted(data['trial_type'].unique().to_list())
 
         session_stats = compute_session_averages(
@@ -538,7 +538,6 @@ def plot_multiday_comparison(
     sessions: dict[str, dict],
     cell_idx: int,
     signal_col: str = 'multi_day_f',
-    bin_size_cm: int = 5,
     smooth_sigma: float = 1.0,
     global_ylim: bool = False,
     show_cues: bool = True,
@@ -554,7 +553,6 @@ def plot_multiday_comparison(
         sessions: dict[str, dict], from load_multiday_sessions().
         cell_idx: int, cell index (consistent across days).
         signal_col: str, neural signal column name.
-        bin_size_cm: int, spatial bin size in cm.
         smooth_sigma: float, Gaussian smoothing on binned avg w/ small kernel (Dombeck et al 2010).
         global_ylim: bool, have all plots share the same y-axis limits; If false, each trial type has their own ylims
         show_cues: bool, show cue region shading.
@@ -582,6 +580,8 @@ def plot_multiday_comparison(
     # Pre-compute session averages
     precomputed = {}
     for date, s in sessions.items():
+        bin_size_cm = get_bin_size(s['metadata'])
+
         precomputed[date] = compute_session_averages(
             s['data'], signal_col=signal_col,
             config=s['config'], bin_size_cm=bin_size_cm,
@@ -737,8 +737,10 @@ if __name__ == "__main__":
 
     #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
     # sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False)
-    sessions = load_multiday_sessions(mouse_dir, dates=['2025-09-02','2025-09-03', '2025-09-08', '2025-09-09',
-                                                        '2025-09-11', '2025-09-16'],
+    sessions = load_multiday_sessions(mouse_dir, dates=[    #pre ext '2025-09-','2025-09-03'
+                                                        '2025-09-08', '2025-09-09',     #add ext
+                                                        '2025-09-10', '2025-09-11', '2025-09-12',
+                                                        '2025-09-15', '2025-09-16'],    #last 2 days
                                                         auto_process=False)
 
     #filter for place cells
@@ -778,5 +780,6 @@ if __name__ == "__main__":
     # or: require_all=True --> gives both types
 
     for i in pc_indices:
-        plot_single_cell(data, cell_idx=i, signal_col='multi_day_dff', show_trials=False, config=exp_config)
+        plot_single_cell(data, cell_idx=i, metadata=meta, signal_col='multi_day_dff',
+                         show_trials=False, config=exp_config)
 
