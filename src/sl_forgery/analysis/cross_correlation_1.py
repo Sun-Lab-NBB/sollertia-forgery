@@ -54,7 +54,7 @@ def get_mean_tuning_curves(
     Returns:
         Dict mapping trial_type -> (n_bins, n_cells) array.
     """
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata)
 
     stats = compute_session_averages(
         df, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
@@ -253,7 +253,7 @@ def get_shared_bins(
     seq_b = ts.get(type_b, {}).get('cue_sequence', [])
     cue_widths = config.get('cue_map', {})
 
-    bin_size_cm = get_bin_size(None, metadata)
+    bin_size_cm = get_bin_size( metadata)
 
 
     shared_cm = 0.0
@@ -395,7 +395,7 @@ def plot_pv_correlation_across_position(
     Returns:
         Matplotlib Figure.
     """
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata)
 
     avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     avg_a, avg_b = avgs[type_a], avgs[type_b]
@@ -471,7 +471,7 @@ def plot_per_cell_cross_correlation(
     Returns:
         Matplotlib Figure.
     """
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata)
 
     avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     avg_a, avg_b = avgs[type_a], avgs[type_b]
@@ -544,7 +544,7 @@ def plot_pv_correlation_matrix(
     Returns:
         Matplotlib Figure.
     """
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
 
     avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     matrix = pv_correlation_matrix(avgs[type_a], avgs[type_b])
@@ -955,7 +955,7 @@ def plot_multiday_pv_across_position(
     if config is None:
         config = sessions[day_x]['config']
 
-    bin_size_cm = get_bin_size(None, sessions[day_x]['metadata'])
+    bin_size_cm = get_bin_size(sessions[day_x]['metadata'])
     x = np.arange(len(pv)) * bin_size_cm + bin_size_cm / 2
     track_len = len(pv) * bin_size_cm
 
@@ -1025,7 +1025,7 @@ def plot_multiday_pv_correlation_matrix(
     if day_y is None:
         day_y = dates[-1] if len(dates) > 1 else dates[0]
 
-    bin_size_cm = get_bin_size(None, sessions[day_x]['metadata'])
+    bin_size_cm = get_bin_size(sessions[day_x]['metadata'])
 
     tc = multiday_tuning_curves(
         {day_x: sessions[day_x], day_y: sessions[day_y]},
@@ -1280,7 +1280,7 @@ def _build_per_trial_tuning_curves(
     trials = tt_df['trial'].to_numpy()
     bins = tt_df['distance_bin'].to_numpy()
 
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
 
     n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
     n_cells = signals.shape[1]

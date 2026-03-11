@@ -189,8 +189,8 @@ def get_cue_regions(
 
 
 def get_bin_size(
+    metadata: dict,
     df: pl.DataFrame | None = None,
-    metadata: dict | None = None,
 ) -> int | None:
     """Get spatial bin size in cm from metadata or derive from DataFrame.
 
@@ -211,6 +211,7 @@ def get_bin_size(
     if 'distance_bin' not in df.columns:
         return None
 
+    #otherwise, infer bin size from the dataframe
     bin_size = (
         df.filter(pl.col('distance_bin').is_not_null() & pl.col('distance_cm').is_not_null())
         .select((pl.col('distance_cm') / (pl.col('distance_bin') + 1)).mean())
@@ -523,7 +524,7 @@ def compute_session_averages(
         df: pl.DataFrame,
         signal_col: str,
         config: dict,
-        bin_size_cm: int = 5,
+        bin_size_cm: int,
         by_trial_type: bool = True,
 ) -> dict:
     """
