@@ -790,7 +790,7 @@ def load_multiday_sessions(
 if __name__ == "__main__":
     #load all the data
     mouse_id = '14'
-    date = '2025-08-22'
+    date = '2025-09-03'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)

@@ -1031,7 +1031,7 @@ if __name__ == '__main__':
                                load_session_context, load_processed_session, save_processed_session)
 
     mouse_id = '26'
-    date = '2025-08-27'
+    date = '2025-09-10'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)

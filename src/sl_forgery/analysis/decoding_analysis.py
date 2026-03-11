@@ -194,15 +194,16 @@ def sliding_decoder(
     seed: int = 42,
 ) -> dict:
     """Decode current trial type at each spatial bin using cross-validated SVM.
+    Asks: Can the neural population distinguish between trial types at this spatial bin?
 
     At shared track positions (before divergence), tests whether
     neural activity already differentiates between trial types — i.e., whether
     the hippocampus encodes trajectory identity before the animal experiences
     the distinguishing features.
 
-    At each bin in the shared track segment, trains a classifier on the
-    population vector to predict ABC vs ABDC. Reports accuracy at each bin
-    plus a shuffle-based chance distribution.
+    Trains a classifier on the population vector at each bin in the shared track segment
+    to predict ABC vs ABDC.
+    Reports accuracy at each bin plus a shuffle-based chance distribution.
 
     Args:
         df: Frame-level DataFrame with distance_bin column.
@@ -244,6 +245,7 @@ def sliding_decoder(
     chance_mean = np.full(n_total_bins, np.nan)
     chance_95 = np.full(n_total_bins, np.nan)
 
+    #find population vectors for bin
     for b in range(n_total_bins):
         pv_a = _extract_per_bin_trial_vectors(df, signal_col, type_a, b)
         pv_b = _extract_per_bin_trial_vectors(df, signal_col, type_b, b)
@@ -267,15 +269,18 @@ def sliding_decoder(
         n_cv = min(n_splits, min(len(pv_a), len(pv_b)))
         if n_cv < 2:
             continue
-
+        # Kfold Provides train/test indices to split data in train/test sets for cross validation
+        # checks whether decoder generalizes or memorizes
+        # folds == groups, holds out one groups for testing against the others (training)
+        # stratified: each fold preserves the same proportion of trial types
         skf = StratifiedKFold(n_splits=n_cv, shuffle=True, random_state=seed)
 
         if classifier == 'svm':
-            clf = make_pipeline(StandardScaler(), SVC(kernel='linear', C=1.0))
+            clf = make_pipeline(StandardScaler(), SVC(kernel='linear', C=1.0)) #could use rbf
         else:
             clf = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
 
-        # Real accuracy
+        # Real accuracy (cross validation)
         scores = []
         for train_idx, test_idx in skf.split(X, y):
             clf.fit(X[train_idx], y[train_idx])
@@ -917,8 +922,8 @@ def run_decoding_analysis(
     metadata: dict,
     signal_col: str = 'multi_day_spikes',
     cue_ids: list[int | str] | int | str = '0b',
-    n_shuffles_decoder: int = 100,
-    n_shuffles_splitter: int = 500,
+    n_shuffles_decoder: int = 300,
+    n_shuffles_splitter: int = 300,
     animal_id: str | None = None,
     date: str | None = None,
     show: bool = True,
