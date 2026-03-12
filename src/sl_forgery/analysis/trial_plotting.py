@@ -48,8 +48,9 @@ def shared_params(
     # Cue shading
     if show_cues:
         cue_regions = get_cue_regions(config, trial_type)
-        plot_cue_regions(ax, cue_regions, config, show_labels=show_labels,
-                         alpha=alpha, label_y=label_y)
+        pfmt.add_cue_shading_with_labels(ax, config, trial_type,
+                                         alpha=alpha, label_y=label_y,
+                                         font_scale=font_scale)
 
     # Reward zone
     if show_reward_zone and 'reward_zone_start_cm' in ts:
@@ -85,71 +86,12 @@ def shared_params(
     ax.grid(alpha=0.3, axis='y', zorder=0)
 
 
-# CUE REGION PLOTTING
-
-def plot_cue_regions(
-    ax: Axes,
-    cue_regions: dict[int, tuple],
-    config: dict = None,
-    show_labels: bool = True,
-    alpha: float = 0.15,
-    label_y: float = 0.98,
-    font_scale: float = 1.0,
-):
-    """
-    Add cue region shading to a matplotlib axis (cue bar)
-    
-    Args:
-        ax: Matplotlib axis
-        cue_regions: {cue_id: (start_cm, end_cm)} from get_cue_regions()
-        config: Experiment config for custom colors/labels
-        show_labels: Show cue labels at top
-        alpha: Shading transparency
-        label_y: Y position for labels (in axis transform coords)
-        fontscale: Scale the fontsize to match the plot
-    """
-    colors = pfmt.get_cue_colors(config)
-    labels = pfmt.get_cue_labels(config)
-    
-    for cue_id, region in cue_regions.items():
-        color = colors.get(cue_id, '#CCCCCC')
-        
-        # Handle single region or multiple
-        if isinstance(region, tuple) and len(region) == 2:
-            regions = [region]
-        elif isinstance(region, list):
-            regions = region
-        else:
-            continue
-        
-        for i, (start, end) in enumerate(regions):
-            start = max(start, 0)  # Clip to track start
-            if end <= 0:
-                continue
-            ax.axvspan(start, end, alpha=alpha, color=color, zorder=1)
-            
-            # Label only first occurrence
-            if show_labels:
-                mid = (start + end) / 2
-                label = labels.get(cue_id, f'Cue {cue_id}')
-                ax.text(
-                    mid, label_y, label,
-                    ha='center', va='top',
-                    fontsize=9 * font_scale, fontweight='bold',
-                    transform=ax.get_xaxis_transform(),
-                    bbox=dict(
-                        boxstyle='round,pad=0.3',
-                        facecolor=color, alpha=0.6, edgecolor='none'
-                    )
-                )
-
-
-
 # PLACE FIELD PLOTS
 
 def _shade_place_fields(
     ax: Axes,
     pf,
+    metadata,
     cell_idx: int,
     color: str = '#b8b69d',
     alpha: float = 0.6,
@@ -159,6 +101,7 @@ def _shade_place_fields(
     Args:
         ax: matplotlib axis.
         pf: PlaceFields1d object.
+        emtadata: from processed df, has bin size
         cell_idx: cell index.
         color: shading color.
         alpha: shading transparency.
@@ -178,6 +121,7 @@ def _shade_place_fields(
         starts = np.concatenate([[0], starts])
     if field_mask[-1]:
         ends = np.concatenate([ends, [len(field_mask)]])
+    bin_size_cm = get_bin_size(metadata)
 
     for s, e in zip(starts, ends):
         x0 = s * bin_size_cm
@@ -188,6 +132,7 @@ def _shade_place_fields(
 
 def _get_trial_traces(
     df: pl.DataFrame,
+    metadata: dict,
     signal_col: str,
     cell_idx: int,
     trial_type: str,
@@ -208,6 +153,8 @@ def _get_trial_traces(
         type_df, signal_col=signal_col, cell_idx=cell_idx,
         group_cols=['trial', 'distance_bin'],
     )
+    bin_size_cm = get_bin_size(metadata, df)
+
     traces = []
     for trial_num in binned['trial'].unique().sort().to_list():
         trial_data = binned.filter(pl.col('trial') == trial_num).sort('distance_bin')
@@ -225,8 +172,8 @@ def _plot_tuning_on_axis(
     cell_idx: int,
     trial_type: str,
     config: dict,
+    metadata: dict,
     signal_col: str,
-    bin_size_cm = int,
     data: pl.DataFrame | None = None,
     smooth_sigma: float = 0.0,
     show_trials: bool = True,
@@ -245,8 +192,8 @@ def _plot_tuning_on_axis(
         cell_idx: cell index.
         trial_type: trial type string.
         config: experiment config.
+        metadata: experiment metadata (needed for bin size)
         signal_col: neural signal column name.
-        bin_seize_cm: spatial bin size in cm (derived from metadata)
         data: frame-level df, needed only if show_trials=True.
         smooth_sigma: Gaussian smoothing sigma (0 to disable).
         show_trials: plot individual trial traces. If False, plots the average +/- SEM
@@ -262,15 +209,16 @@ def _plot_tuning_on_axis(
 
     # Place field shading
     if place_fields is not None and trial_type in place_fields:
-        _shade_place_fields(ax, place_fields[trial_type], cell_idx, bin_size_cm)
+        _shade_place_fields(ax, place_fields[trial_type], metadata, cell_idx)
 
     # Individual trial traces
     if show_trials and data is not None:
         trial_color = tt_colors.get(trial_type, '#2E86AB')
-        traces = _get_trial_traces(data, signal_col, cell_idx, trial_type, bin_size_cm)
+        traces = _get_trial_traces(data, metadata, signal_col, cell_idx, trial_type)
         for x, signal in traces:
             ax.plot(x, signal, color=trial_color, linewidth=1,
                     alpha=alpha_trials, zorder=2)
+    bin_size_cm = get_bin_size(metadata, data)
 
     # Session average ± SEM, with smoothing
     if trial_type in session_stats:
@@ -374,8 +322,7 @@ def plot_single_cell(
 
     for ax, tt in zip(axes, trial_types):
         _plot_tuning_on_axis(
-            ax, session_stats, cell_idx, tt, config, signal_col,
-            bin_size_cm=bin_size_cm,
+            ax, session_stats, cell_idx, tt, config, metadata, signal_col,
             data=data if show_trials else None,
             smooth_sigma=smooth_sigma,
             show_trials=show_trials, alpha_trials=alpha_trials,
@@ -451,7 +398,7 @@ def plot_multiday_cell(
         s = sessions[date]
         data = s['data']
         config = s['config']
-        bin_size = s['bin_size']
+        bin_size_cm = get_bin_size(s['metadata'])
         day_trial_types = sorted(data['trial_type'].unique().to_list())
 
         session_stats = compute_session_averages(
@@ -481,7 +428,7 @@ def plot_multiday_cell(
 
             _plot_tuning_on_axis(
                 ax, session_stats, cell_idx, tt, config, signal_col,
-                data=data, bin_size_cm=bin_size_cm,
+                data=data,
                 show_trials=True, alpha_trials=alpha_trials,
                 show_cues=show_cues,
             )
@@ -683,8 +630,9 @@ def plot_multiday_comparison(
             day_fields = place_fields.get(date) if place_fields else None
 
             _plot_tuning_on_axis(
-                ax, session_stats, cell_idx, tt, config, signal_col,
-                bin_size_cm=bin_size_cm, smooth_sigma=smooth_sigma,
+                ax, session_stats, cell_idx, tt, config, s['metadata'],
+                signal_col,
+                smooth_sigma=smooth_sigma,
                 show_trials=False, show_cues=show_cues,
                 font_scale=fscale, place_fields=day_fields,
             )
@@ -735,30 +683,30 @@ if __name__ == "__main__":
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
 
-    #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
-    # sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False)
-    sessions = load_multiday_sessions(mouse_dir, dates=[    #pre ext '2025-09-','2025-09-03'
-                                                        '2025-09-08', '2025-09-09',     #add ext
-                                                        '2025-09-10', '2025-09-11', '2025-09-12',
-                                                        '2025-09-15', '2025-09-16'],    #last 2 days
-                                                        auto_process=False)
-
-    #filter for place cells
-    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
-
-
-    # Build the place_fields dict from per-day results
-    pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
-
-
-    plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
-
-
-    for i in multiday.union_indices[:5]:
-        plot_multiday_comparison(
-            sessions, cell_idx=i+5, signal_col='multi_day_spikes',
-            global_ylim=True, place_fields=None,
-        )
+    # #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
+    # # sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False)
+    # sessions = load_multiday_sessions(mouse_dir, dates=[    #pre ext '2025-09-','2025-09-03'
+    #                                                     '2025-09-08', '2025-09-09',     #add ext
+    #                                                     '2025-09-10', '2025-09-11', '2025-09-12',
+    #                                                     '2025-09-15', '2025-09-16'],    #last 2 days
+    #                                                     auto_process=False)
+    #
+    # #filter for place cells
+    # multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    #
+    #
+    # # Build the place_fields dict from per-day results
+    # pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
+    #
+    #
+    # plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
+    #
+    #
+    # for i in multiday.union_indices[:5]:
+    #     plot_multiday_comparison(
+    #         sessions, cell_idx=i+5, signal_col='multi_day_spikes',
+    #         global_ylim=True, place_fields=None,
+    #     )
 
 #______________________________
 
