@@ -307,6 +307,58 @@ def add_cue_bar(
     ax.tick_params(axis='both', which='both', pad=20)
 
 
+def add_cue_shading_with_labels(
+    ax: Axes,
+    config: dict,
+    trial_type: str,
+    alpha: float = 0.15,
+    label_y: float = 0.98,
+    font_scale: float = 1.0,
+    skip_gray: bool = True,
+):
+    """Add cue region shading with labeled boxes at the top.
+
+    Draws colored axvspan for each cue and places a rounded label box
+    at the top of the shaded region.  Gray zones (cue_id=0) get shading
+    but no label by default.
+
+    Args:
+        ax: Matplotlib Axes.
+        config: Experiment configuration dict.
+        trial_type: Trial type for cue layout.
+        alpha: Shading transparency.
+        label_y: Y position for labels in axes-fraction coords.
+        font_scale: Scale factor for label font size.
+        skip_gray: If True, skip labels for gray zones.
+    """
+    cue_colors = get_cue_colors(config)
+    cue_labels = get_cue_labels(config)
+    ts = config.get('trial_structures', {}).get(trial_type, {})
+    seq = ts.get('cue_sequence', [])
+    cue_widths = config.get('cue_map', {})
+
+    pos = 0.0
+    for cue_id in seq:
+        w = cue_widths[cue_id]
+        color = cue_colors.get(cue_id, '#D3D3D3')
+        ax.axvspan(pos, pos + w, alpha=alpha, color=color, zorder=0)
+
+        if not (skip_gray and cue_id == 0):
+            label = cue_labels.get(cue_id, '')
+            mid = pos + w / 2
+            ax.text(
+                mid, label_y, label,
+                ha='center', va='top',
+                fontsize=9 * font_scale, fontweight='bold',
+                transform=ax.get_xaxis_transform(),
+                bbox=dict(
+                    boxstyle='round,pad=0.3',
+                    facecolor=color, alpha=0.6, edgecolor='none',
+                ),
+            )
+        pos += w
+
+
 def add_cue_boundary_lines(
     ax: Axes,
     config: dict,
@@ -352,6 +404,28 @@ def add_cue_boundary_lines(
     if axis in ('y', 'both'):
         for b in boundaries:
             ax.axhline(b, **line_kwargs)
+
+
+def set_cue_boundary_ticks(ax: Axes, config: dict, trial_type: str):
+    """Set x-ticks at cue region boundaries.
+
+    Args:
+        ax: Matplotlib Axes.
+        config: Experiment configuration dict.
+        trial_type: Trial type for cue layout.
+    """
+    ts = config.get('trial_structures', {}).get(trial_type, {})
+    seq = ts.get('cue_sequence', [])
+    cue_widths = config.get('cue_map', {})
+
+    ticks = [0.0]
+    pos = 0.0
+    for cue_id in seq:
+        pos += cue_widths[cue_id]
+        ticks.append(pos)
+
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f'{t:.0f}' for t in ticks])
 
 
 def plot_pv_heatmap(
