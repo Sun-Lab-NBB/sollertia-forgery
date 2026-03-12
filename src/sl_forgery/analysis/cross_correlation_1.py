@@ -26,7 +26,6 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 
-import sys
 from df_processing import (compute_session_averages, get_track_length, get_cue_regions, get_bin_size)
 import plot_utils as pfmt
 
@@ -88,7 +87,7 @@ def get_split_half_tuning_curves(
     even_trials = unique_trials[::2]
     odd_trials = unique_trials[1::2]
 
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata)
 
     n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
     n_cells = len(df[signal_col][0])
@@ -416,11 +415,11 @@ def plot_pv_correlation_across_position(
 
     ax.axvline(diverge_cm, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
                label=f'Tracks diverge ({diverge_cm:.0f} cm)', zorder=5)
-    ax.axvspan(diverge_cm, max(len_a, len_b), alpha=0.06, color='red', zorder=0,
-               label='Non-shared region')
+
 
     if config:
-        pfmt.add_cue_shading(ax, config, type_a, alpha=0.05)
+        pfmt.add_cue_shading(ax, config, type_a, alpha=0.1)
+        pfmt.set_cue_boundary_ticks(ax, config, type_a)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
@@ -970,7 +969,8 @@ def plot_multiday_pv_across_position(
     ax.plot(x, pv, color=color, linewidth=2, zorder=4)
     ax.fill_between(x, pv, alpha=0.15, color=color, zorder=3)
 
-    pfmt.add_cue_shading(ax, config, trial_type, alpha=0.05)
+    pfmt.add_cue_shading_with_labels(ax, config, trial_type, alpha=0.1)
+    pfmt.set_cue_boundary_ticks(ax, config, trial_type)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
@@ -980,10 +980,10 @@ def plot_multiday_pv_across_position(
     ax.set_ylim(-0.2, 1.05)
     ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
 
-    ax.text(0.02, 0.95,
-            f'mean r = {np.nanmean(pv):.3f}',
-            transform=ax.transAxes, fontsize=9, va='top',
-            bbox=dict(facecolor='white', alpha=0.8, edgecolor='none'))
+    mean_r = np.nanmean(pv)
+    ax.axhline(mean_r, color=color, linestyle='--', linewidth=1, alpha=0.5,
+               label=f'mean r = {mean_r:.3f}')
+    ax.legend(frameon=False, fontsize=9, loc='lower left')
 
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -1518,7 +1518,7 @@ if __name__ == "__main__":
                                get_session_paths, load_processed_session, load_multiday_sessions)
 
     mouse_id = '26'
-    date = '2025-09-08'
+    date = '2025-09-10'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
