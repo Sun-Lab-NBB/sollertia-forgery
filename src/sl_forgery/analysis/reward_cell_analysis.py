@@ -1,23 +1,20 @@
 """Identifies reward-associated and reward-predictive neurons from spatial and speed-activity data."""
 
 import os
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
-import matplotlib.pyplot as plt
 from numba import njit, prange
 import numpy as np
 import polars as pl
+from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
+import matplotlib.pyplot as plt
 
-from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
 from sl_forgery.analysis.utilities import compute_within_trial_position
-
-if TYPE_CHECKING:
-    from numpy.typing import NDArray
+from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
 
 
 @dataclass

@@ -94,8 +94,8 @@ def compute_reward_position(session_path: Path, track_length: float, trial_type:
         trial_mask = trial_ids == trial_id
         trial_reward_zone = in_reward_zone[trial_mask]
         trial_position = position[trial_mask]
-        if np.any(trial_reward_zone == 1):
 
+        if np.any(trial_reward_zone == 1):
             # Estimates the center as the midpoint between the first and last reward zone frame positions.
             reward_zone_positions = trial_position[trial_reward_zone == 1]
             centers.append(float((reward_zone_positions[0] + reward_zone_positions[-1]) / 2.0))
