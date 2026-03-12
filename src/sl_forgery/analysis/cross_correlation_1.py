@@ -29,9 +29,12 @@ from matplotlib.axes import Axes
 from df_processing import (compute_session_averages, get_track_length, get_cue_regions, get_bin_size)
 import plot_utils as pfmt
 
+# TODO
+#  multiday pv corr uses split half but single day doesnt.
+#  Cmight want to increase ylim on pv corr by position plots to see smaller diffs
+#  multiple dates make a million plots; not sure if auto is so informative
 
-
-# TUNING CURVE EXTRACTION
+# TUNING CURVE EXTRACTIO
 
 def get_mean_tuning_curves(
     df: pl.DataFrame,
@@ -396,38 +399,48 @@ def plot_pv_correlation_across_position(
     """
     bin_size_cm = get_bin_size(metadata)
 
-    avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
-    avg_a, avg_b = avgs[type_a], avgs[type_b]
+    if type_a == type_b:
+        avg_a, avg_b = get_split_half_tuning_curves(
+            df, config, metadata, type_a, signal_col=signal_col,
+        )
+    else:
+        avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
+        avg_a, avg_b = avgs[type_a], avgs[type_b]
 
     shared_bins = get_shared_bins(config, type_a, type_b, metadata)
-    diverge_cm = get_divergence_point(config, type_a, type_b)
 
     pv_shared = population_vector_correlation(avg_a, avg_b, min_bins=shared_bins)
     x_shared = np.arange(shared_bins) * bin_size_cm + bin_size_cm / 2
-
-    len_a = avg_a.shape[0] * bin_size_cm
-    len_b = avg_b.shape[0] * bin_size_cm
 
     fig, ax = plt.subplots(figsize=figsize)
 
     ax.plot(x_shared, pv_shared, color='black', linewidth=2, zorder=4)
     ax.fill_between(x_shared, pv_shared, alpha=0.15, color='black', zorder=3)
 
-    ax.axvline(diverge_cm, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
-               label=f'Tracks diverge ({diverge_cm:.0f} cm)', zorder=5)
-
+    if type_a != type_b:
+        diverge_cm = get_divergence_point(config, type_a, type_b)
+        ax.axvline(diverge_cm, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
+                   label=f'Tracks diverge ({diverge_cm:.0f} cm)', zorder=5)
 
     if config:
-        pfmt.add_cue_shading(ax, config, type_a, alpha=0.1)
+        pfmt.add_cue_shading_with_labels(ax, config, type_a, alpha=0.1,
+                                         max_cm=shared_bins * bin_size_cm)
         pfmt.set_cue_boundary_ticks(ax, config, type_a)
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('PV Correlation (Pearson r)', fontsize=11)
-    ax.set_title(pfmt.build_title(f'PV Correlation — {type_a} vs {type_b}',
-                              animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
+    title_desc = (f'PV Correlation — {type_a} split-half' if type_a == type_b
+                  else f'PV Correlation — {type_a} vs {type_b}')
+    ax.set_title(pfmt.build_title(title_desc,
+                                  animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
     ax.set_xlim(0, shared_bins * bin_size_cm)
     ax.set_ylim(-0.2, 1.05)
     ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
+
+    color = pfmt.TRIAL_TYPE_COLORS.get(type_a, 'black')
+    mean_r = np.nanmean(pv_shared)
+    ax.axhline(mean_r, color=color, linestyle='--', linewidth=1, alpha=0.5,
+               label=f'mean r = {mean_r:.3f}')
     ax.legend(frameon=False, fontsize=10, loc='lower left')
 
     ax.spines['top'].set_visible(False)
@@ -629,10 +642,11 @@ def run_within_session_analysis(
                 animal_id=animal_id, date=date, show=show)
             figs[f'pv_position_{type_a}_vs_{type_b}'] = fig
 
-            fig = plot_per_cell_cross_correlation(
-                df, config, metadata, type_a, type_b, signal_col=signal_col,
-                segment='shared', animal_id=animal_id, date=date, show=show)
-            figs[f'cell_corr_shared_{type_a}_vs_{type_b}'] = fig
+            if type_a != type_b:
+                fig = plot_per_cell_cross_correlation(
+                    df, config, metadata, type_a, type_b, signal_col=signal_col,
+                    segment='shared', animal_id=animal_id, date=date, show=show)
+                figs[f'cell_corr_shared_{type_a}_vs_{type_b}'] = fig
 
             fig = plot_pv_correlation_matrix(
                 df, config, type_a, type_b, metadata, signal_col=signal_col,
@@ -1527,8 +1541,8 @@ if __name__ == "__main__":
     data, meta = load_processed_session(paths['parquet'])
 
     # # plot
-    # fig = plot_pv_correlation_across_position(data, exp_config, type_a='ABC', type_b='ABDC',
-    #                                     animal_id=mouse_id, date=date)
+    fig = plot_pv_correlation_across_position(data, exp_config, meta, type_a='ABC', type_b='ABDC',
+                                        animal_id=mouse_id, date=date)
 
     for s in ['shared', 'divergent', 'all']:
         result = within_session_learning_curve(
@@ -1542,7 +1556,8 @@ if __name__ == "__main__":
 
 #     # ── Multiday analysis ──
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-03', '2025-09-08'), auto_process=True,
+        mouse_dir, dates=('2025-08-30', '2025-09-03', '2025-09-08', '2025-09-12', '2025-09-16' ),
+        auto_process=True,
     )
 
     # All pairs + autocorrelation for ABC
