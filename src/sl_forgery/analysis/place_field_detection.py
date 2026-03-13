@@ -480,15 +480,17 @@ def _quantile_threshold(
 # CORE DETECTION ALGORITHMS
 
 
-def circular_connected_placefields1(
+def circular_connected_placefields(
     thres_im: np.ndarray,
     binF: np.ndarray,
     min_bins: int = 3,
 ) -> PlaceFields1d:
-    """Detect place fields using circular connected components.
+    """Detect place fields with optional wrap-around merging.
 
-    Handles wrap-around connectivity (track is a loop) by padding the binary image,
-    running connected component labeling, then mapping back to original coordinates.
+    First detects fields on the unpadded array (no cross-copy merging).
+    Then checks if fields at the first and last bins of the same cell
+    should be merged (true wrap-around). Computes weighted centroids
+    using circular mean for wrapped fields.
 
     Args:
         thres_im: Binary thresholded image, shape (n_cells, n_bins).
@@ -499,40 +501,73 @@ def circular_connected_placefields1(
         PlaceFields1d with detected fields.
     """
     num_bins = thres_im.shape[1]
+    struct = np.array([[0, 0, 0], [1, 1, 1], [0, 0, 0]])
 
-    # Circular padding
-    pad_thres = np.pad(thres_im, ((0, 0), (num_bins, num_bins)), mode='wrap')
-    F_padded = np.pad(binF, ((0, 0), (num_bins, num_bins)), mode='wrap')
+    # Step 1: detect on unpadded array
+    label_im, n_labels = label(thres_im, struct)
 
-    # Connected components (horizontal connectivity only — each row is independent)
-    label_im, _ = label(pad_thres, [[0, 0, 0], [1, 1, 1], [0, 0, 0]])
-    props = np.array(regionprops(label_im, F_padded, cache=False))
-
-    if len(props) == 0:
+    if n_labels == 0:
         return PlaceFields1d(
             np.zeros(thres_im.shape, dtype=np.uint32), binF,
             centers=np.empty((0, 2)),
         )
 
-    centers = np.array([p['weighted_centroid'] for p in props])
-    area = np.array([p['area'] for p in props], dtype=np.uint32)
+    # Step 2: merge wrap-around fields per cell
+    # Only merge if the combined field is a plausible place field (< half the track)
+    max_merge_bins = num_bins // 2
+    for row in range(label_im.shape[0]):
+        left_label = label_im[row, 0]
+        right_label = label_im[row, num_bins - 1]
+        if left_label > 0 and right_label > 0 and left_label != right_label:
+            left_size = (label_im[row] == left_label).sum()
+            right_size = (label_im[row] == right_label).sum()
+            if left_size + right_size <= max_merge_bins:
+                label_im[row, label_im[row] == left_label] = right_label
 
-    # Keep components with center in the original (non-padded) region + min size
-    valid = (centers[:, 1] >= num_bins) & (centers[:, 1] < num_bins * 2) & (area >= min_bins)
+    # Renumber labels to be contiguous 1..N
+    unique_labels = np.unique(label_im)
+    unique_labels = unique_labels[unique_labels > 0]
+    new_label_im = np.zeros_like(label_im)
+    for new_id, old_id in enumerate(unique_labels, start=1):
+        new_label_im[label_im == old_id] = new_id
 
+    # Step 3: filter by min_bins and compute centers
+    props = regionprops(new_label_im, binF, cache=False)
     result_label = np.zeros(thres_im.shape, dtype=np.uint32)
-    adj_centers = []
+    centers_list = []
+    counter = 1
 
-    for counter, prop in enumerate(props[valid]):
+    for prop in props:
+        if prop['area'] < min_bins:
+            continue
+
         coords = prop['coords']
-        wrapped_bins = np.take(np.arange(num_bins), coords[:, 1], mode='wrap')
-        result_label[coords[:, 0], wrapped_bins] = counter + 1
+        cell_idx = coords[0, 0]
+        bin_indices = coords[:, 1]
+        result_label[cell_idx, bin_indices] = counter
 
-        center = np.array(prop['weighted_centroid'])
-        center[1] -= num_bins
-        adj_centers.append(center)
+        # Weighted centroid — use circular mean for wrapped fields
+        weights = binF[cell_idx, bin_indices]
+        weight_sum = weights.sum()
+        if weight_sum == 0:
+            center_bin = bin_indices.mean()
+        else:
+            touches_start = 0 in bin_indices
+            touches_end = (num_bins - 1) in bin_indices
+            is_wrapped = touches_start and touches_end
 
-    centers_out = np.vstack(adj_centers) if adj_centers else np.empty((0, 2))
+            if is_wrapped:
+                # Circular weighted mean: shift bins so the gap is at the far side
+                shifted = (bin_indices + num_bins // 2) % num_bins
+                center_shifted = np.average(shifted, weights=weights)
+                center_bin = (center_shifted - num_bins // 2) % num_bins
+            else:
+                center_bin = np.average(bin_indices, weights=weights)
+
+        centers_list.append([float(cell_idx), float(center_bin)])
+        counter += 1
+
+    centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
     return PlaceFields1d(result_label, binF, centers=centers_out)
 
 
@@ -564,6 +599,7 @@ def outside_field_threshold(
     invalid = np.where(pf.mean_intensity < threshold_values)[0]
 
     return pf.remove_fields(invalid)
+
 
 # TODO fix bin size/meta
 def _detect_on_tuning_curves(
