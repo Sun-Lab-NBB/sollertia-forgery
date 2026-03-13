@@ -1,18 +1,30 @@
 """
 Cross-correlation analysis for place cell spatial tuning curves
 
-Computes population vector (PV) correlations and per-cell spatial correlations
-across track types and across days.
+This module implements standard population-level and single-cell analyses for
+comparing spatial representations across trial types (within-session) and across
+recording days (multiday). It is designed for hippocampal / cortical calcium-imaging
+data recorded on a virtual-reality linear track with interleaved trial types
+(e.g. ABC vs ABDC cue sequences), but could be expanded to handle different tasks
 
-Within-session:
-    - Split-half reliability (odd vs even trials)
-    - Cross-track PV correlation and per-cell correlation
-    - PV correlation matrix (bin × bin heatmap)
+Within-session analyses:
+    - Split-half reliability: odd vs even trial tuning curves per cell (sanity check
+      for stable spatial tuning within a session).
+    - Cross-track population vector (PV) correlation: at each spatial bin, correlate
+      the population activity vector between two trial types to ask where along the
+      track the representations diverge.
+    - Per-cell spatial correlation: Pearson r of each cell's tuning curve between
+      two conditions — tests how individual neurons remap.
+    - PV correlation matrix: full bin × bin heatmap (off-diagonal structure reveals
+      whether spatial representations stretch, compress, or globally remap).
+    - Within-session learning curve: trial-by-trial leave-one-out PV correlation to
+      own-type vs other-type templates — tracks gradual emergence of discrimination.
 
-Across-session (multiday):
-    - Per-cell tuning curve correlation between any two days (or same day = split-half)
-    - PV correlation across days
-    - Full pairwise day matrix (autocorrelation on diagonal)
+Across-session (multiday) analyses:
+    - Per-cell tuning curve correlation between any two days, or same-day split-half.
+    - PV correlation across days at each spatial bin.
+    - Full pairwise day × day summary matrix (diagonal = autocorrelation via
+      split-half; off-diagonal = cross-day stability).
 
 Standard analyses following Leutgeb et al. 2005, Colgin et al. 2008, Sun et al. 2025.
 """
@@ -34,7 +46,7 @@ import plot_utils as pfmt
 #  Cmight want to increase ylim on pv corr by position plots to see smaller diffs
 #  multiple dates make a million plots; not sure if auto is so informative
 
-# TUNING CURVE EXTRACTIO
+# TUNING CURVE EXTRACTION
 
 def get_mean_tuning_curves(
     df: pl.DataFrame,
@@ -42,25 +54,32 @@ def get_mean_tuning_curves(
     metadata: dict,
     signal_col: str = 'multi_day_spikes',
 ) -> dict[str, np.ndarray]:
-    """Compute session-averaged tuning curves per cell per trial type.
+    """Compute session-averaged tuning curves per cell, per trial type.
 
     Wrapper around compute_session_averages (from df_processing) that returns just the
-    mean tuning curves in (n_bins, n_cells) format.
+    mean tuning curves in (n_bins, n_cells) format needed for correlation functions.
+
+    The averaging pipeline bins each frame by `distance_bin`, computes per-trial
+    mean activity in each bin, then averages across trials for each trial type.
+    This two-stage mean (within-trial → across-trial) avoids biasing toward trials
+    with more frames per bin (i.e. slower running speed).
 
     Args:
-        df: Frame-level DataFrame with position/bin columns.
-        metadata: From df_processings, has bin size in cm
-        config: Experiment configuration dict.
-        signal_col: Column containing neural signals.
+        df: Frame-level DataFrame with position, bin columns, trial type, and signal
+        config: Experiment configuration dict (track structure, cue map, etc)
+        metadata: Pipeline metadata from df_processing(), has bin size in cm
+        signal_col: Column containing neural signals
 
     Returns:
-        Dict mapping trial_type -> (n_bins, n_cells) array.
+        Dict mapping trial_type -> (n_bins, n_cells) array w session-averaged tuning curve
     """
     bin_size_cm = get_bin_size(metadata)
 
+    # compute_session_averages returns a nested dict: {trial_type: {'session_avg': ..., ...}}
     stats = compute_session_averages(
         df, signal_col=signal_col, config=config, bin_size_cm=bin_size_cm,
     )
+    # Extract only the session-averaged tuning curves, discarding per-trial stats
     return {tt: s['session_avg'] for tt, s in stats.items()}
 
 
@@ -71,11 +90,20 @@ def get_split_half_tuning_curves(
     trial_type: str,
     signal_col: str = 'multi_day_spikes',
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Split trials into odd/even halves and compute mean tuning curves.
+    """Split trials into odd/even halves and compute independent mean tuning curves.
+
+    Used for split-half reliability (within-session autocorrelation) and as the
+    same-day diagonal entry in multiday matrices.  Odd/even splitting is preferred
+    over first-half/second-half because it is robust to slow drifts in neural
+    activity or behavioral engagement across a session.
+
+    Implementation uses scatter-add binning (np.add.at) to accumulate activity
+    per (trial, bin) pair, then divides by frame counts and averages across trials.
+    This is equivalent to compute_session_averages() but applied to a trial subset.
 
     Args:
-        df: Frame-level DataFrame.
-        config: Experiment configuration dict.
+        df: Frame-level DataFrame
+        config: Experiment configuration dict — needed to look up track length.
         metadata: From df_processings, has bin size in cm
         trial_type: Which trial type to split.
         signal_col: Column containing neural signals.
@@ -87,20 +115,36 @@ def get_split_half_tuning_curves(
     trials = tt_df['trial'].to_numpy()
     unique_trials = np.unique(trials)
 
+    # Interleaved split: indices 0, 2, 4, ... → even; 1, 3, 5, ... → odd
     even_trials = unique_trials[::2]
     odd_trials = unique_trials[1::2]
 
     bin_size_cm = get_bin_size(metadata)
 
+    # Determine array dimensions from config and data
     n_bins = int(get_track_length(config, trial_type) / bin_size_cm)
     n_cells = len(df[signal_col][0])
 
 
     def _avg_for_trials(trial_set):
-        """Bin and average signals for a subset of trials."""
+        """Bin and average signals for a subset of trials.
+
+        Uses scatter-add (np.add.at) for efficient accumulation without
+        explicit loops over trials or bins. Steps:
+            1. Filter frames to the requested trial subset.
+            2. Map each frame to (trial_index, bin_index) coordinates.
+            3. Accumulate signal sums and frame counts into a 3-D array.
+            4. Divide to get per-trial bin means, then average across trials.
+
+        Args:
+            trial_set: 1-D array of trial numbers to include.
+
+        Returns:
+            ndarray of shape (n_bins, n_cells) — mean tuning curve over the subset."""
         mask_pl = pl.col('trial').is_in(trial_set.tolist())
         sub = tt_df.filter(mask_pl)
 
+        # Stack per-frame signal vectors into (n_frames, n_cells)
         signals = np.vstack(sub[signal_col].to_list())
         sub_trials = sub['trial'].to_numpy()
         sub_bins = sub['distance_bin'].to_numpy()
@@ -108,16 +152,20 @@ def get_split_half_tuning_curves(
         u_trials = np.unique(sub_trials)
         n_t = len(u_trials)
         trial_idx = np.searchsorted(u_trials, sub_trials)
+    # TODO do we actuall want this clipping?
         bin_idx = sub_bins.clip(0, n_bins - 1)
 
         sums = np.zeros((n_t, n_bins, n_cells))
         counts = np.zeros((n_t, n_bins, 1))
+        # Scatter-add: each frame's signal is added to the correct (trial, bin) slot
         np.add.at(sums, (trial_idx, bin_idx), signals)
         np.add.at(counts, (trial_idx, bin_idx, 0), 1)
 
+# TODO check if this is ever the case; potentially if the mouse is running faster than the framerate but unlikely
+        # Per-trial bin means; 0/0 → NaN (bins the mouse never visited on a given trial)
         with np.errstate(invalid='ignore'):
             per_trial = sums / counts
-
+        #average across trials
         return np.nanmean(per_trial, axis=0)  # (n_bins, n_cells)
 
     return _avg_for_trials(even_trials), _avg_for_trials(odd_trials)
@@ -132,6 +180,15 @@ def per_cell_spatial_correlation(
 ) -> np.ndarray:
     """Pearson correlation of each cell's tuning curve between two conditions (i.e. trial types).
 
+    For each neuron independently, this correlates its mean firing-rate-by-position
+    profile in condition A against condition B. This is the standard "rate remapping"
+    metric: a cell with r ≈ 1 fires in the same place with the same relative rates
+    in both conditions; r ≈ 0 means it remapped.
+
+    Cells whose tuning curve has zero variance in either condition (e.g. silent cells
+    or cells active in only one bin) receive NaN — they carry no spatial information
+    for this comparison.
+
     Args:
         tuning_a: Mean tuning curves, shape (n_bins, n_cells).
         tuning_b: Mean tuning curves, shape (n_bins, n_cells).
@@ -140,23 +197,27 @@ def per_cell_spatial_correlation(
     Returns:
         Per-cell Pearson r, shape (n_cells,). NaN for cells with zero variance.
     """
+    # Optional truncation to shared spatial segment
     if min_bins is not None:
         tuning_a = tuning_a[:min_bins]
         tuning_b = tuning_b[:min_bins]
 
+    # Align to the shorter array
     n_bins = min(tuning_a.shape[0], tuning_b.shape[0])
     a = tuning_a[:n_bins]
     b = tuning_b[:n_bins]
     n_cells = a.shape[1]
 
-    # Vectorized: mask NaNs, compute correlation per cell
+    # Boolean mask: True where both conditions have finite data at that bin
     valid = ~(np.isnan(a) | np.isnan(b))  # (n_bins, n_cells)
     valid_count = valid.sum(axis=0)
 
     corrs = np.full(n_cells, np.nan)
+    # Only compute for cells with enough valid bins to estimate a correlation (3 is minimum for pearson, could do 5)
     for c in np.where(valid_count >= 3)[0]:
         m = valid[:, c]
         ac, bc = a[m, c], b[m, c]
+        # Skip zero-variance cells (no spatial modulation in one condition)
         if np.std(ac) == 0 or np.std(bc) == 0:
             continue
         corrs[c] = np.corrcoef(ac, bc)[0, 1]
@@ -168,16 +229,24 @@ def population_vector_correlation(
     tuning_b: np.ndarray,
     min_bins: int | None = None,
 ) -> np.ndarray:
-    """PV correlation across positions: at each spatial bin, correlate the
-    population vector (all cells' activity) between two conditions.
+    """Population vector (PV) correlation at each spatial bin between two conditions.
+
+    At each position along the track, this takes the vector of all cells' mean
+    activity and computes Pearson r between the two conditions. High PV correlation
+    at a bin means the population code at that location is similar across conditions;
+    a drop in PV correlation indicates local remapping.
+
+    This is the complement to ``per_cell_spatial_correlation``: PV correlation asks
+    "does the population look the same at this position?", while per-cell correlation
+    asks "does this cell fire in the same places?"
 
     Args:
-        tuning_a: Shape (n_bins, n_cells).
-        tuning_b: Shape (n_bins, n_cells).
-        min_bins: Restrict to first min_bins bins.
+        tuning_a: Shape (n_bins, n_cells), session-averaged tuning curves for condition A
+        tuning_b: Shape (n_bins, n_cells), session-averaged tuning curves for condition B
+        min_bins: Restrict to first min_bins bins (shared-segment comparison)
 
     Returns:
-        Pearson r at each spatial bin, shape (n_shared_bins,). NaN where undefined.
+        Pearson r at each spatial bin, shape (n_shared_bins,). NaN where undefined or <3 valid cells
     """
     if min_bins is not None:
         tuning_a = tuning_a[:min_bins]
@@ -189,6 +258,7 @@ def population_vector_correlation(
 
     pv_corrs = np.full(n_bins, np.nan)
     for i in range(n_bins):
+        # Mask out cells with NaN at this bin in either condition
         valid = ~(np.isnan(a[i]) | np.isnan(b[i]))
         if valid.sum() < 3:
             continue
@@ -205,7 +275,16 @@ def pv_correlation_matrix(
 ) -> np.ndarray:
     """Full bin-by-bin PV correlation matrix.
 
-    Entry (i, j) = correlation of PV at bin i in condition A with bin j in condition B.
+    Entry (i, j) = correlation of PV (Pearson r) at bin i in condition A
+    with bin j in condition B. The diagonal of this matrix is the
+    standard PV-by-position curve (same as ``population_vector_correlation``).
+    Off-diagonal structure reveals spatial distortions: if the strongest
+    correlation at row i is shifted from the diagonal, the representation at
+    that location has shifted between conditions.
+
+    This is a more information-rich version of PV correlation — the diagonal
+    gives the same signal as ``population_vector_correlation``, but the full
+    matrix also reveals stretching, compression, and non-monotonic remapping.
 
     Args:
         tuning_a: Shape (n_bins_a, n_cells).
@@ -237,18 +316,32 @@ def get_shared_bins(
     type_a: str,
     type_b: str,
     metadata: dict
-) -> int:
-    """Number of shared spatial bins between two track types.
+) -> tuple[float,int]:
+    """Identify the spatial point where two track types' cue sequences first differ.
 
-    Counts bins from position 0 until the cue sequences diverge.
+    Walks through the ordered cue sequences of both trial types from position 0,
+    accumulating cue widths as long as the cues match. The first mismatch defines
+    the divergence point — the boundary between the shared segment (where sensory
+    input is identical across trial types) and the divergent segment (where cues
+    differ and any representational similarity reflects learned generalization
+    rather than shared input).
+
+    Returns both the raw position in cm (for plotting divergence lines) and the
+    corresponding bin count (for slicing tuning curve arrays into shared vs.
+    divergent segments).
 
     Args:
-        config: Experiment configuration dict.
-        type_a: First trial type.
-        type_b: Second trial type.
-        metadata: metadata from df_processing, ahs bin size
+        config: Experiment configuration dict containing 'trial_structures' (cue sequences per
+            trial type) and 'cue_map' (cue name → width in cm)
+        type_a: First trial type
+        type_b: Second trial type
+        metadata: metadata from df_processing, use for bin size
     Returns:
-        Number of shared bins.
+         Tuple of:
+            - divergence_cm: track position (cm) where cue sequences first differ
+              Equal to the total length of the shared segment
+            - n_shared_bins: number of spatial bins fully contained in the shared
+              segment
     """
     ts = config.get('trial_structures', {})
     seq_a = ts.get(type_a, {}).get('cue_sequence', [])
@@ -257,46 +350,17 @@ def get_shared_bins(
 
     bin_size_cm = get_bin_size( metadata)
 
-
+    # Walk through both sequences in parallel; stop at first mismatch
     shared_cm = 0.0
     for ca, cb in zip(seq_a, seq_b):
         if ca != cb:
             break
         shared_cm += cue_widths[ca]
 
-    return int(shared_cm / bin_size_cm)
-
-
-def get_divergence_point(
-    config: dict,
-    type_a: str,
-    type_b: str,
-) -> float:
-    """Position (cm) where two track types diverge.
-
-    Args:
-        config: Experiment configuration dict.
-        type_a: First trial type.
-        type_b: Second trial type.
-
-    Returns:
-        Divergence position in cm.
-    """
-    ts = config.get('trial_structures', {})
-    seq_a = ts.get(type_a, {}).get('cue_sequence', [])
-    seq_b = ts.get(type_b, {}).get('cue_sequence', [])
-    cue_widths = config.get('cue_map', {})
-
-    pos = 0.0
-    for ca, cb in zip(seq_a, seq_b):
-        if ca != cb:
-            break
-        pos += cue_widths[ca]
-    return pos
+    return shared_cm, int(shared_cm / bin_size_cm)
 
 
 # WITHIN-SESSION PLOTTING
-
 
 def plot_split_half(
     df: pl.DataFrame,
@@ -311,27 +375,30 @@ def plot_split_half(
 ) -> Figure:
     """Split-half reliability histogram for one track type. Sanity check.
     Splits trials into odd/even for each cell, single trial type.
-    High median r>.5 == stable spatial tuning within session.
+    High median r>.5 == stable spatial tuning within session. If the distribution is
+    centered near zero, spatial coding is noisy or non-stationary.
 
     Per-cell Pearson r between odd and even trial tuning curves.
 
     Args:
-        df: Frame-level DataFrame.
-        config: Experiment configuration dict.
-        trial_type: Which trial type to test.
+        df: Frame-level DataFrame
+        config: Experiment configuration dict
+        trial_type: Which trial type to test
         metadata: metadata from df_processing, has bin size
-        signal_col: Column containing neural signals.
-        figsize: Figure size.
-        animal_id: Which animal to plot.
-        date: Expeirment date.
-        show: Call plt.show().
+        signal_col: Column containing neural signals
+        figsize: Figure size
+        animal_id: Which animal to plot
+        date: Expeirment date
+        show: Call plt.show()
 
     Returns:
-        Matplotlib Figure.
+        Matplotlib Figure
     """
+    # Compute independent tuning curves from odd and even trials
     even_avg, odd_avg = get_split_half_tuning_curves(
         df, config, metadata, trial_type, signal_col=signal_col,
     )
+    # Per-cell Pearson r between the two halves
     corrs = per_cell_spatial_correlation(even_avg, odd_avg)
     valid = corrs[~np.isnan(corrs)]
 
@@ -350,6 +417,7 @@ def plot_split_half(
                               animal_id=animal_id, date=date), fontsize=13, fontweight='bold')
     ax.legend(frameon=False, fontsize=10)
 
+    # Summary statistics annotation
     n_total = len(corrs)
     n_valid = len(valid)
     n_sig = np.sum(valid > 0.3)
@@ -381,6 +449,17 @@ def plot_pv_correlation_across_position(
     show: bool = True,
 ) -> Figure:
     """PV correlation at each shared spatial bin between two trial types.
+
+    Shows where along the track the population representation is similar vs.
+    different between conditions. For same-type comparisons (type_a == type_b),
+    uses split-half tuning curves; otherwise uses full session averages.
+
+    A vertical red dashed line marks the point where the two track types' cue
+    sequences first diverge — PV correlation is expected to drop after this point
+    if the population discriminates the two conditions.
+
+    Cue-region shading and boundary ticks are overlaid from ``plot_utils`` for
+    anatomical reference.
 
     Args:
         df: Frame-level DataFrame.
@@ -468,6 +547,13 @@ def plot_per_cell_cross_correlation(
 ) -> Figure:
     """Histogram of per-cell spatial correlations between two trial types.
 
+    Each cell's session-averaged tuning curve on type_a is correlated with its
+    curve on type_b. The segment parameter controls whether the correlation
+    uses only the shared (pre-divergence) spatial bins or the full shorter track.
+
+    This complements the PV-by-position plot: PV correlation tells you where
+    the representations differ; this histogram tells you how many cells remap.
+
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
@@ -541,6 +627,15 @@ def plot_pv_correlation_matrix(
 ) -> Figure:
     """Full bin×bin PV correlation heatmap between two track types.
 
+    Delegates to pv_correlation_matrix for computation and pfmt.plot_pv_heatmap
+    for rendering. The divergence point is passed so the heatmap can optionally mark
+    where the tracks separate.
+
+    On the diagonal, you see the same-position PV correlation (equivalent to
+    population_vector_correlation). Off-diagonal structure shows whether
+    one condition's representation at position X resembles the other condition's
+    representation at a different position Y.
+
     Args:
         df: Frame-level DataFrame.
         config: Experiment configuration dict.
@@ -594,8 +689,12 @@ def run_within_session_analysis(
 ) -> dict[str, Figure]:
     """Run full within-session cross-correlation analysis (single day)
 
-    Generates split-half reliability, cross-track PV correlation (divergence point), per-cell
-    correlation, and PV correlation matrix for all trial type combinations.
+    Generates:
+        1. Split-half reliability histogram for each trial type.
+        2. For each pair of trial types (including self-pairs):
+            a. PV correlation across position.
+            b. Per-cell cross-correlation histogram (cross-type pairs only).
+            c. Full bin × bin PV correlation matrix.
 
     Args:
         df: Frame-level DataFrame.
@@ -669,6 +768,14 @@ def multiday_tuning_curves(
 ) -> dict[str, np.ndarray]:
     """Compute session-averaged tuning curves per cell for one trial type across days.
 
+    Iterates over sessions (keyed by date string), calls get_mean_tuning_curves()
+    for each, and collects results. Sessions where the requested trial type was
+    not run are silently skipped with a console warning.
+
+    Cell identity across days is assumed to be aligned via cross-day registration
+    (e.g. Suite2P multi-session), so column indices in the returned arrays correspond
+    to the same physical neurons.
+
     Args:
         sessions: From load_multiday_sessions(). Keys are date strings.
         trial_type: Which trial type.
@@ -706,6 +813,9 @@ def multiday_per_cell_correlation(
     """Per-cell tuning curve correlation between two days.
 
     When day_x == day_y, computes split-half correlation (autocorrelation).
+    When the days differ, it correlates full session-averaged tuning curves across days.
+
+    Used to assess long-term stability of individual place fields
 
     Args:
         sessions: From load_multiday_sessions().
@@ -859,6 +969,9 @@ def plot_multiday_per_cell_histogram(
 ) -> Figure:
     """Histogram of per-cell correlations between two days.
 
+    Defaults to earliest vs latest day if day_x/day_y are not specified.
+    Same-day comparisons (day_x == day_y) show split-half autocorrelation.
+
     Args:
         sessions: From load_multiday_sessions().
         day_x: First date string.
@@ -933,7 +1046,14 @@ def plot_multiday_pv_across_position(
     figsize: tuple = (10, 5),
     show: bool = True,
 ) -> Figure:
-    """PV correlation across position between two days.
+    """Plot PV correlation across position between two days.
+
+    Same visual format as ``plot_pv_correlation_across_position`` but for cross-day
+    comparisons. Includes cue-region shading and a horizontal line at the mean
+    correlation.
+
+    If no data is available for the requested trial type on either day, a blank
+    figure with "No data" text is returned.
 
     Args:
         sessions: From load_multiday_sessions().
@@ -1008,6 +1128,7 @@ def plot_multiday_pv_across_position(
         plt.show()
     return fig
 
+
 def plot_multiday_pv_correlation_matrix(
     sessions: dict[str, dict],
     trial_type: str,
@@ -1018,7 +1139,12 @@ def plot_multiday_pv_correlation_matrix(
     figsize: tuple = (8, 7),
     show: bool = True,
 ) -> Figure:
-    """Bin×bin PV correlation heatmap for one trial type across two days.
+    """Plot a bin×bin PV correlation heatmap for one trial type across two days.
+
+    This is the multiday analog of ``plot_pv_correlation_matrix``. It shows whether
+    the spatial code at each position on one day matches the code at each position
+    on another day. Strong diagonal structure means the map is stable across days;
+    off-diagonal peaks indicate spatial drift.
 
     Args:
         sessions: From load_multiday_sessions().
@@ -1087,7 +1213,7 @@ def plot_multiday_correlation_matrix_summary(
     figsize: tuple = (7, 6),
     show: bool = True,
 ) -> Figure:
-    """Day × day SUMMARY correlation heatmap.
+    """Plot a day × day SUMMARY (e.g. median per-cell r) correlation heatmap.
 
     Diagonal = autocorrelation (split-half). Off-diagonal = cross-day.
 
@@ -1152,12 +1278,20 @@ def run_multiday_analysis(
 ) -> dict[str, Figure]:
     """Runs all multiday cross-correlation analysis.
 
-    By default, computes all pairwise day combinations plus autocorrelations.
-    Generates per-cell histograms for each pair and a day×day summary matrix.
+    Full multiday analysis pipeline:
+        1. For each day-pair (including autocorrelation on the diagonal):
+            a. Per-cell correlation histogram.
+            b. PV correlation across position.
+            c. Bin × bin PV correlation heatmap.
+        2. Day × day summary matrix (if ≥ 2 days).
+
+    If day_pairs is None, generates all unique pairs plus autocorrelation
+    entries for each day. If trial_type is None, picks the first trial type
+    found across all sessions (alphabetically).
 
     Args:
         sessions: From load_multiday_sessions().
-        trial_type: Which trial type. If None, uses first type found.
+        trial_type: Which trial type to analyze. If None, uses first type found.
         signal_col: Column containing neural signals.
         animal_id: Animal name for title. Extracted from sessions if None.
         cell_indices: Subset of cells. None = all.
@@ -1203,6 +1337,7 @@ def run_multiday_analysis(
 
         print(f"  {label}...")
 
+        # Per-cell histogram
         fig = plot_multiday_per_cell_histogram(
             sessions, trial_type,
             signal_col=signal_col,
@@ -1214,6 +1349,7 @@ def run_multiday_analysis(
         )
         figs[f'{animal_id} - multiday_cell_{trial_type}_{label}'] = fig
 
+        # PV correlation across position
         fig = plot_multiday_pv_across_position(
             sessions, trial_type, day_x, day_y,
             signal_col=signal_col,
@@ -1243,25 +1379,6 @@ def run_multiday_analysis(
     return figs
 
 
-# SAVE
-
-def _save_figures(figs: dict[str, Figure], save_dir: str | Path | None):
-    """Save all figures to directory.
-
-    Args:
-        figs: Dict of {name: Figure}.
-        save_dir: Directory path, or None to skip.
-    """
-    if save_dir is None:
-        return
-    save_dir = Path(save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    for name, fig in figs.items():
-        path = save_dir / f'{name}.png'
-        fig.savefig(path, dpi=150, bbox_inches='tight')
-        print(f"Saved: {path}")
-
-
 # WITHIN-SESSION LEARNING CURVE
 
 def _build_per_trial_tuning_curves(
@@ -1272,8 +1389,13 @@ def _build_per_trial_tuning_curves(
     signal_col: str = 'multi_day_spikes',
 ) -> tuple[np.ndarray, np.ndarray]:
     """Build tuning curve for each individual trial using scatter-add binning.
-    Basically average the deconvolved spike values for all frames where the mouse was in that bin during that one
-    trial. Result is a vector of shape (n_bins, n_cells) — each cell's spatial activity profile on that one lap.
+
+    Basically average the deconvolved spike values for all frames where the mouse was
+    in that bin during that one trial. Result is a vector of shape (n_bins, n_cells) —
+    each cell's spatial activity profile on that one lap.
+
+    This is used by the within-session learning curve analysis to get trial-level
+    resolution rather than session averages.
 
     Args:
         df: Frame-level DataFrame with distance_bin column.
@@ -1304,11 +1426,13 @@ def _build_per_trial_tuning_curves(
     trial_idx = np.searchsorted(unique_trials, trials)
     bin_idx = bins.clip(0, n_bins - 1)
 
+    #Scatter-add signals and counts into (trial, bin) slots
     sums = np.zeros((n_trials, n_bins, n_cells))
     counts = np.zeros((n_trials, n_bins, 1))
     np.add.at(sums, (trial_idx, bin_idx), signals)
     np.add.at(counts, (trial_idx, bin_idx, 0), 1)
 
+    # Divide to get per-trial, per-bin mean activity (0/0 → NaN)
     with np.errstate(invalid='ignore'):
         per_trial = sums / counts  # (n_trials, n_bins, n_cells)
 
@@ -1327,10 +1451,19 @@ def within_session_learning_curve(
 ) -> dict:
     """Track trial-by-trial PV correlation to leave-one-out templates.
 
-    For each trial, computes its tuning curve and correlates it against
-    the mean of all *other* trials (leave-one-out), for each type. This
-    shows whether ABC and ABDC representations separate gradually or
-    abruptly across trials within a session.
+    For each trial of each type, this:
+        1. Builds that trial's tuning curve via _build_per_trial_tuning_curves
+        2. Computes a leave-one-out (LOO) mean of all *other* trials of the same type.
+        3. Correlates the single trial against the LOO own-type template.
+        4. Correlates the single trial against the *other* type's global mean.
+
+    Plotting correlation-to-own-type over trial number reveals whether the
+    representation stabilizes within the session (increasing trend) or degrades
+    (decreasing, e.g. due to fatigue or reduced running speed).
+
+    Plotting correlation-to-other-type reveals whether the two trial types start
+    similar and gradually diverge (learning to discriminate) or are immediately
+    distinct.
 
     Args:
         df: Frame-level DataFrame with distance_bin column.
@@ -1444,9 +1577,14 @@ def plot_within_session_learning_curve(
 ) -> Figure:
     """Plot within-session learning curve: PV correlation over trials.
 
-    Left panel: correlation to own-type template (does representation
-    stabilize?). Right panel: correlation to other-type template (do
-    representations diverge?). Both use leave-one-out templates.
+    Two-panel figure:
+        Left: correlation to own-type template (LOO). An increasing trend means the
+        representation is stabilizing over trials; decreasing suggests fatigue or drift.
+        Right: correlation to other-type template. A decreasing trend means the
+        representations are gradually diverging (the animal is learning to discriminate).
+
+    Points are colored by trial type; linear trend lines (OLS) are overlaid when
+    enough valid data points exist.
 
     Args:
         result: Output from within_session_learning_curve().
@@ -1482,20 +1620,20 @@ def plot_within_session_learning_curve(
 
         x_fit = np.linspace(trials.min(), trials.max(), 50)
 
-        # Trend lines
+        # linear trend line for own-type corr
         valid_own = ~np.isnan(own)
         if valid_own.sum() > 2:
             z = np.polyfit(trials[valid_own], own[valid_own], 1)
             ax_own.plot(x_fit, np.polyval(z, x_fit), color=color,
                         linewidth=1.5, alpha=0.5, linestyle='--')
-
+        # linear trend line for cross-type corr
         valid_cross = ~np.isnan(other)
         if valid_cross.sum() > 2:
             z = np.polyfit(trials[valid_cross], other[valid_cross], 1)
             ax_cross.plot(x_fit, np.polyval(z, x_fit), color=color,
                           linewidth=1.5, alpha=0.5, linestyle='--')
 
-    # Format left panel
+    # Format left panel (own-type LOO)
     ax_own.set_xlabel('Trial number', fontsize=11)
     ax_own.set_ylabel('Mean PV correlation (r)', fontsize=11)
     ax_own.set_title('Correlation to own type (LOO)', fontsize=11, fontweight='bold')
@@ -1505,7 +1643,7 @@ def plot_within_session_learning_curve(
     ax_own.spines['right'].set_visible(False)
     ax_own.grid(alpha=0.2, axis='y')
 
-    # Format right panel
+    # Format right panel (cross-type)
     ax_cross.set_xlabel('Trial number', fontsize=11)
     ax_cross.set_title('Correlation to other type', fontsize=11, fontweight='bold')
     ax_cross.legend(frameon=False, fontsize=9)
@@ -1523,6 +1661,26 @@ def plot_within_session_learning_curve(
     if show:
         plt.show()
     return fig
+
+
+# SAVE
+
+def _save_figures(figs: dict[str, Figure],
+                  save_dir: str | Path | None):
+    """Save all figures to directory as 150-dpi PNGs..
+
+    Args:
+        figs: Dict of {name: Figure}.
+        save_dir: Directory path, or None to skip.
+    """
+    if save_dir is None:
+        return
+    save_dir = Path(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    for name, fig in figs.items():
+        path = save_dir / f'{name}.png'
+        fig.savefig(path, dpi=150, bbox_inches='tight')
+        print(f"Saved: {path}")
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────
@@ -1564,7 +1722,7 @@ if __name__ == "__main__":
     #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
 
 
-    #Specific pairs: day 1 vs day 5, day 1 vs day 1 (
+    #Can use pecific pairs: day 1 vs day 5, day 1 vs day 1 OR will do all days
     dates = sorted(sessions.keys())
     if len(dates) >= 2:
         figs = run_multiday_analysis(
