@@ -21,6 +21,10 @@ import numpy as np
 import polars as pl
 import yaml
 
+SIGNAL_COLUMNS = [
+    'multi_day_dff', 'multi_day_spikes', 'multi_day_f',
+    'single_day_f', 'single_day_dff', 'single_day_spikes',
+]
 
 # LOAD CONFIG FILE
 def load_experiment_config(yaml_path: Path) -> dict:
@@ -696,14 +700,29 @@ def save_processed_session(
     print(f"Saved:  {metadata_path}")
 
 
-def load_processed_session(path: Path) -> tuple[pl.DataFrame, dict | None]:
-    """Load processed data from parquet, and metadata from yaml"""
+def load_processed_session(path: Path,
+                           signal_cols: list[str] | None = None,
+                           ) -> tuple[pl.DataFrame, dict | None]:
+    """Load processed data from parquet, and metadata from yaml
+
+    Args:
+        path: Path to parquet file.
+        signal_cols: Keep only these signal columns, drop the rest for memory.
+            None keeps all signal columns.
+
+    Returns:
+        Tuple of (DataFrame, metadata dict or None).
+    """
 
     path = Path(path)
     if path.suffix != '.parquet':
         path = path.with_suffix('.parquet')
 
     df = pl.read_parquet(path)
+
+    if signal_cols is not None:
+        drop = [c for c in SIGNAL_COLUMNS if c not in signal_cols and c in df.columns]
+        df = df.drop(drop)
 
     meta_path = path.with_suffix('.yaml')
     metadata = None
@@ -719,6 +738,7 @@ def load_multiday_sessions(
     dates: list[str] | None = None,
     date_range: tuple[str, str] | None = None,
     auto_process: bool = False,
+    signal_cols: list[str] | None = None,
 ) -> dict[str, dict]:
     '''
     Load multiple processed sessions for cross-day comparison.
@@ -730,6 +750,7 @@ def load_multiday_sessions(
             Auto-discovers all session folders whose date falls within the range.
             Provide either dates or date_range, not both.
         auto_process: bool, choose if you want to automatically process (cue-offset) the data is it's not found
+        signal_cols: signal columns to load, important for multiday for memory constraints
 
     Returns:
         sessions: dict[str, dict], keyed by date string (sorted chronologically), each containing:
@@ -769,7 +790,7 @@ def load_multiday_sessions(
     for date in sorted(dates):
         try:
             parquet_path, session_data, config = ensure_processed(mouse_dir, date, auto_process=auto_process)
-            data, metadata = load_processed_session(parquet_path)
+            data, metadata = load_processed_session(parquet_path, signal_cols=signal_cols)
 
             sessions[date] = {
                 'data': data,
