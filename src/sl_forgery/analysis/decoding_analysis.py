@@ -65,7 +65,7 @@ def _get_bin_range_for_cue(
     Returns:
         Tuple of (start_bin_inclusive, end_bin_exclusive).
     """
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
 
     # Config path: exact boundaries
     if config is not None:
@@ -190,7 +190,7 @@ def sliding_decoder(
     signal_col: str = 'multi_day_spikes',
     classifier: str = 'svm',
     n_splits: int = 5,
-    n_shuffles: int = 100,
+    n_shuffles: int = 100,  #really should be 500 but 100 for testing; for 14 this takes forever bc she has >300 trials
     seed: int = 42,
 ) -> dict:
     """Decode current trial type at each spatial bin using cross-validated SVM.
@@ -225,7 +225,7 @@ def sliding_decoder(
     from sklearn.preprocessing import StandardScaler
     from sklearn.pipeline import make_pipeline
 
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed)   #create random generator
     bin_size_cm = metadata['bin_size_cm']
 
     trial_types = sorted(df['trial_type'].unique().to_list())
@@ -234,7 +234,7 @@ def sliding_decoder(
     type_a, type_b = trial_types[0], trial_types[1]
 
     # Shared bins
-    n_shared = get_shared_bins(config, type_a, type_b, bin_size_cm)
+    n_shared = get_shared_bins(config, type_a, type_b, metadata)
 
     # Also decode a few bins past divergence for comparison
     max_bins_a = int(get_track_length(config, type_a) / bin_size_cm)
@@ -343,7 +343,7 @@ def plot_sliding_decoder(
     chance_95 = result['chance_95']
     n_shared = result['n_shared_bins']
     type_a, type_b = result['trial_types']
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
     diverge_cm = n_shared * bin_size_cm
@@ -589,7 +589,7 @@ def region_correlation(
         bin_range_a = bin_range
         bin_range_b = bin_range
 
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
 
@@ -689,7 +689,7 @@ def plot_region_correlation_at_cues(
         df, config, type_a, type_b, cue_ids,
         signal_col=signal_col, metadata=metadata,
     )
-    bin_size_cm = get_bin_size(df, metadata)
+    bin_size_cm = get_bin_size(metadata, df)
     if bin_size_cm is None:
         raise ValueError("Cannot determine bin size — no distance_bin column or metadata")
 
@@ -1033,8 +1033,8 @@ def run_decoding_analysis(
 if __name__ == "__main__":
     from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
 
-    mouse_id = '26'
-    date = '2025-09-16'
+    mouse_id = '14'
+    date = '2025-08-27'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1043,29 +1043,13 @@ if __name__ == "__main__":
 
     data, meta = load_processed_session(paths['parquet'])
 
-    print(
-        data.filter(pl.col('trial_type') == 'ABDC')
-        .group_by('cue_id')
-        .agg(
-            pl.col('distance_bin').min().alias('min_bin'),
-            pl.col('distance_bin').max().alias('max_bin'),
-        )
-        .sort('min_bin')
-    )
-    print(
-        data.filter(pl.col('trial_type') == 'ABC')
-        .group_by('cue_id')
-        .agg(
-            pl.col('distance_bin').min().alias('min_bin'),
-            pl.col('distance_bin').max().alias('max_bin'),
-        )
-        .sort('min_bin')
-    )
 
 # run decoder
     results = run_decoding_analysis(
         data, exp_config, metadata=meta, signal_col='multi_day_spikes',
         cue_ids=['A', '0a', 'B', '0b', 'C', '0c'],
+        n_shuffles_decoder= 200,
+        n_shuffles_splitter=200,
         animal_id=mouse_id, date=date,
         show=True,
     )
