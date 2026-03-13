@@ -22,9 +22,6 @@ Install fastDSA:
 """
 
 from pathlib import Path
-import sys
-
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
 
 import numpy as np
 import polars as pl
@@ -38,9 +35,7 @@ from df_processing import (
     load_session_context,
     get_session_paths,
     load_processed_session,
-    load_multiday_sessions,
     get_track_length,
-    get_cue_regions,
 )
 
 try:
@@ -347,6 +342,74 @@ def within_session_dsa(
     return results
 
 
+def within_session_dsa_across_days(
+    mouse_dir: Path,
+    dates: list[str],
+    signal_col: str = 'multi_day_dff',
+    n_pca_components: int = 10,
+    min_speed: float = 2.0,
+    dsa_cfg: 'SimDistConfig | None' = None,
+) -> dict:
+    """Run within-session ABC vs ABDC DSA for each session.
+
+    Memory-efficient: loads one session at a time.
+
+    Args:
+        mouse_dir: Mouse-level directory path.
+        dates: List of session date strings.
+        signal_col: Column with neural signals.
+        n_pca_components: PCA dimensions.
+        min_speed: Speed filter.
+        dsa_cfg: fastDSA config. None = default.
+
+    Returns:
+        Dict with 'dates', 'dsa_scores', 'ranks_used',
+        'n_trials' (dict per date).
+    """
+    _columns = ['frame', 'trial', 'trial_type', 'experiment_state',
+                'position', 'speed_cm_s', 'water_uL', signal_col]
+
+    valid_dates = []
+    scores = []
+    ranks = []
+    trial_info = {}
+
+    for date in sorted(dates):
+        try:
+            session_dir = find_session_dir(mouse_dir, date)
+            session_data, config = load_session_context(session_dir)
+            paths = get_session_paths(session_dir, session_data)
+            data = pl.read_parquet(paths['parquet'], columns=_columns)
+
+            result = within_session_dsa(
+                data, config,
+                signal_col=signal_col,
+                n_pca_components=n_pca_components,
+                min_speed=min_speed,
+                dsa_cfg=dsa_cfg,
+            )
+            valid_dates.append(date)
+            scores.append(result['dsa_score'])
+            ranks.append(result['rank_used'])
+            trial_info[date] = {
+                tt: result.get(f'n_trials_{tt}', 0)
+                for tt in result.get('trial_types', [])
+            }
+            print(f"  {date}: DSA={result['dsa_score']:.4f}, rank={result['rank_used']}")
+
+            del data
+
+        except Exception as e:
+            print(f"  WARNING: {date}: {e}")
+
+    return {
+        'dates': valid_dates,
+        'dsa_scores': np.array(scores),
+        'ranks_used': np.array(ranks),
+        'n_trials': trial_info,
+    }
+
+
 def position_resolved_dsa(
     df: pl.DataFrame,
     config: dict,
@@ -594,16 +657,16 @@ def cross_animal_dsa(
 def plot_within_session_dsa(
     result: dict,
     config: dict,
-    session_label: str = '',
-    figsize: tuple[float, float] = (5, 3),
+    animal_id: str = '',
+    figsize: tuple[float, float] = (8, 4),
     show: bool = True,
 ) -> Figure:
-    """Bar plot of within-session DSA score with annotation.
+    """Plot ABC vs ABDC DSA score across sessions.
 
     Args:
-        result: Output of within_session_dsa().
+        result: Output of within_session_dsa_across_days().
         config: Experiment configuration dict.
-        session_label: Label for title (e.g., date string).
+        animal_id: For title.
         figsize: Figure size.
         show: Call plt.show().
 
@@ -612,26 +675,24 @@ def plot_within_session_dsa(
     """
     fig, ax = plt.subplots(figsize=figsize)
 
-    trial_types = result['trial_types']
-    score = result['dsa_score']
-    tt_colors, _ = pfmt.get_trial_type_colors(config)
+    dates = result['dates']
+    scores = result['dsa_scores']
+    short_dates = [d[5:] for d in dates]
 
-    bar_colors = [tt_colors.get(trial_types[0], '#999'),
-                  tt_colors.get(trial_types[1], '#666')]
+    ax.plot(range(len(scores)), scores, 'o-', color='#2E86AB',
+            markersize=7, linewidth=2)
 
-    ax.bar(0, score, color=bar_colors[0], edgecolor=bar_colors[1],
-           linewidth=2, width=0.5)
+    ax.set_xticks(range(len(scores)))
+    ax.set_xticklabels(short_dates, rotation=45, ha='right', fontsize=9)
     ax.set_ylabel('DSA distance (angular)', fontsize=10)
-    ax.set_xticks([0])
-    ax.set_xticklabels([f'{trial_types[0]} vs {trial_types[1]}'])
-    ax.set_ylim(0, np.pi / 2)
-    ax.axhline(np.pi / 4, ls='--', color='gray', alpha=0.5, label='π/4')
+    ax.set_xlabel('Session', fontsize=10)
+    max_score = max(scores) if len(scores) > 0 else 0.5
+    ax.set_ylim(0, max(max_score * 1.3, 0.5))
+    ax.axhline(np.pi / 4, ls='--', color='gray', alpha=0.4, label='π/4')
+    ax.legend(fontsize=9)
 
-    n_a = result.get(f'n_trials_{trial_types[0]}', '?')
-    n_b = result.get(f'n_trials_{trial_types[1]}', '?')
-    rank = result.get('rank_used', '?')
     ax.set_title(
-        pfmt.build_title(session_label, f'DSA: {score:.3f}  (n={n_a},{n_b}  rank={rank})'),
+        pfmt.build_title(animal_id, 'ABC vs ABDC dynamics across days'),
         fontsize=11,
     )
 
@@ -809,17 +870,18 @@ if __name__ == '__main__':
 
     print(f"Loaded {date}: {len(data)} frames, {data['trial'].n_unique()} trials")
 
+#TODO use load_mulitsession and loop through
 
     # # --- Build config ---
     dsa_cfg = make_dsa_config(
         n_delays=15,
         rank=None,       # SVHT auto-rank
         method='ro',
-        iters=200,
+        iters=300,
         device='cpu',    # switch to 'cuda' if available
     )
     #
-    # # --- Within-session DSA ---
+    # --- Within-session DSA ---
     # print("\n--- Within-session DSA (ABC vs ABDC) ---")
     # result = within_session_dsa(
     #     data, exp_config,
@@ -831,9 +893,22 @@ if __name__ == '__main__':
     # print(f"DSA score: {result['dsa_score']:.4f}")
     # print(f"SVHT rank: {result['rank_used']}")
     # print(f"PCA variance explained: {result['pca_variance_explained']:.2%}")
+
+    #plot_within_session_dsa(result, exp_config, session_label=date)
     #
-    # plot_within_session_dsa(result, exp_config, session_label=date)
-    #
+
+    dates_26 = ['2025-09-08', '2025-09-10', '2025-09-15', '2025-09-16']
+    result = within_session_dsa_across_days(
+        mouse_dir, dates_26,
+        signal_col='multi_day_dff',
+        n_pca_components=10,
+        min_speed=2.0,
+        dsa_cfg=dsa_cfg,
+    )
+    plot_within_session_dsa(result, exp_config, animal_id=mouse_id)
+
+
+
     # # --- Position-resolved DSA ---
     # print("\n--- Position-resolved DSA ---")
     # pos_cfg = make_dsa_config(n_delays=10, rank=None, method='ro',
@@ -856,11 +931,13 @@ if __name__ == '__main__':
     mouse_dir_b = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id_2)
 
 # days b1, b5, e1, e3, e7
+    # 26 '2025-08-20', '2025-08-25', '2025-08-30', '2025-09-03',
+    #14 '2025-08-12', '2025-08-14', '2025-08-18', '2025-08-20',
     cross_animal_result = cross_animal_dsa(
-        mouse_dir, ['2025-08-20', '2025-08-25', '2025-08-30','2025-09-03', '2025-09-08', '2025-09-10',
+        mouse_dir, [ '2025-09-08', '2025-09-10',
                     '2025-09-11', '2025-09-16'],
-        mouse_dir_b, ['2025-08-12', '2025-08-14', '2025-08-18', '2025-08-20', '2025-08-22', '2025-08-27',
-                      '2025-09-05', '2025-09-05'],
+        mouse_dir_b, [ '2025-08-22', '2025-08-27',
+                      '2025-09-03', '2025-09-05'],
         animal_id_a=mouse_id, animal_id_b=mouse_id_2,
         trial_type='ABC',
         dsa_cfg=dsa_cfg,
