@@ -439,12 +439,12 @@ def plot_bleaching_summary(
 
 if __name__ == '__main__':
     from df_processing import load_multiday_sessions
-    mouse_id = '26'
+    mouse_id = '14'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     sessions = load_multiday_sessions(
         mouse_dir,
-        date_range=('2025-08-20', '2025-09-16'),
+        date_range=('2025-08-12', '2025-09-05'),
         auto_process=True,
     )
 

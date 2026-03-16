@@ -41,7 +41,7 @@ from place_field_detection import (
 )
 from cross_correlation_1 import (
     get_mean_tuning_curves, per_cell_spatial_correlation,
-    get_divergence_point,
+    get_shared_bins,
 )
 from decoding_analysis import (
     splitter_cell_index, _get_bin_range_for_cue,
@@ -465,7 +465,7 @@ def track_bifurcation_activity(
         # Average across all trials regardless of type
         pvs = []
         for tt in trial_types:
-            pv = _extract_trial_population_vectors(df, signal_col, tt, bin_range)
+            pv , _= _extract_trial_population_vectors(df, signal_col, tt, bin_range)
             if pv.size > 0:
                 pvs.append(pv)
 
@@ -545,12 +545,13 @@ def plot_population_summary(
         pfmt.build_title('Place Cell Population', trial_type=trial_type, animal_id=animal_id),
         fontsize=13, fontweight='bold',
     )
+    plt.legend()
     plt.tight_layout()
     if show:
         plt.show()
     return fig
 
-
+#TODO move the legend somewhere else. Also seems like new PF1d is picking up more cells
 def plot_recruitment_categories(
     recruitment: dict[str, dict],
     introduction_day: str | None = None,
@@ -627,7 +628,7 @@ def plot_recruitment_categories(
         plt.show()
     return fig
 
-
+# TODO need to add actual dates to the xaxis, right now just says day a and b
 def plot_abc_stability_comparison(
     stability: dict,
     animal_id: str | None = None,
@@ -771,7 +772,7 @@ def plot_abc_stability_comparison(
         plt.show()
     return fig
 
-
+# TODO again needs dates
 def plot_stability_by_recruitment(
     stability: dict,
     recruitment: dict[str, dict],
@@ -892,7 +893,7 @@ def plot_stability_by_recruitment(
         plt.show()
     return fig
 
-
+# TODO the subplots are not aligned properly
 def plot_bifurcation_selectivity_across_days(
     splitter_results: dict[str, dict],
     animal_id: str | None = None,
@@ -955,7 +956,7 @@ def plot_bifurcation_selectivity_across_days(
     ax2.set_xticklabels(date_labels, rotation=45, ha='right', fontsize=8)
     ax2.set_ylabel('Cells (sorted by |SI|)', fontsize=10)
     ax2.set_xlabel('Session', fontsize=10)
-    plt.colorbar(im, ax=ax2, label='Selectivity Index', shrink=0.8)
+    plt.colorbar(im, ax=[ax1, ax2], label='Selectivity Index', shrink=0.8)
 
     fig.suptitle(
         pfmt.build_title(f'Bifurcation Selectivity at Cue {cue_id}', animal_id=animal_id),
@@ -1121,53 +1122,53 @@ def run_recruitment_analysis(
     )
     results['pf_results'] = pf_results
 
-    fig = plot_population_summary(
-        pf_results, trial_type, introduction_day=introduction_day,
-        animal_id=animal_id, show=show,
-    )
-    figs['population_summary'] = fig
-
-    # 2. Cell recruitment classification
-    print("=" * 60)
-    print("2. Cell recruitment classification")
-    print("=" * 60)
-    recruitment = classify_cell_recruitment(
-        pf_results, trial_type,
-        field_center_tolerance_cm=field_center_tolerance_cm,
-    )
-    results['recruitment'] = recruitment
-
-    fig = plot_recruitment_categories(
-        recruitment, introduction_day=introduction_day,
-        animal_id=animal_id, trial_type=trial_type, show=show,
-    )
-    figs['recruitment_categories'] = fig
-
-    # 3. ABC tuning stability
-    print("\n" + "=" * 60)
-    print("3. ABC tuning stability pre vs post extension")
-    print("=" * 60)
-    stability = abc_tuning_pre_vs_post(
-        sessions, pf_results, introduction_day,
-        trial_type=trial_type, signal_col=signal_col,
-    )
-    results['abc_stability'] = stability
-
-    fig = plot_abc_stability_comparison(stability, animal_id=animal_id, show=show)
-    figs['abc_stability'] = fig
-
-    # Stability broken down by recruitment category (pre-post only)
-    if stability['pre_post'] is not None:
-        # Find the matching recruitment pair
-        day_a = stability['pre_post']['day_a']
-        day_b = stability['pre_post']['day_b']
-        pair_key = f'{day_a}_vs_{day_b}'
-        if pair_key in recruitment:
-            fig = plot_stability_by_recruitment(
-                stability, recruitment, comparison='pre_post',
-                animal_id=animal_id, show=show,
-            )
-            figs['stability_by_recruitment'] = fig
+    # fig = plot_population_summary(
+    #     pf_results, trial_type, introduction_day=introduction_day,
+    #     animal_id=animal_id, show=show,
+    # )
+    # figs['population_summary'] = fig
+    #
+    # # 2. Cell recruitment classification
+    # print("=" * 60)
+    # print("2. Cell recruitment classification")
+    # print("=" * 60)
+    # recruitment = classify_cell_recruitment(
+    #     pf_results, trial_type,
+    #     field_center_tolerance_cm=field_center_tolerance_cm,
+    # )
+    # results['recruitment'] = recruitment
+    #
+    # fig = plot_recruitment_categories(
+    #     recruitment, introduction_day=introduction_day,
+    #     animal_id=animal_id, trial_type=trial_type, show=show,
+    # )
+    # figs['recruitment_categories'] = fig
+    #
+    # # 3. ABC tuning stability
+    # print("\n" + "=" * 60)
+    # print("3. ABC tuning stability pre vs post extension")
+    # print("=" * 60)
+    # stability = abc_tuning_pre_vs_post(
+    #     sessions, pf_results, introduction_day,
+    #     trial_type=trial_type, signal_col=signal_col,
+    # )
+    # results['abc_stability'] = stability
+    #
+    # fig = plot_abc_stability_comparison(stability, animal_id=animal_id, show=show)
+    # figs['abc_stability'] = fig
+    #
+    # # Stability broken down by recruitment category (pre-post only)
+    # if stability['pre_post'] is not None:
+    #     # Find the matching recruitment pair
+    #     day_a = stability['pre_post']['day_a']
+    #     day_b = stability['pre_post']['day_b']
+    #     pair_key = f'{day_a}_vs_{day_b}'
+    #     if pair_key in recruitment:
+    #         fig = plot_stability_by_recruitment(
+    #             stability, recruitment, comparison='pre_post',
+    #             animal_id=animal_id, show=show,
+    #         )
+    #         figs['stability_by_recruitment'] = fig
 
     # 4. Bifurcation tracking
     print("\n" + "=" * 60)
@@ -1228,7 +1229,7 @@ if __name__ == '__main__':
 
     results = run_recruitment_analysis(
         sessions,
-        introduction_day='2025-09-08',  # first day with ABDC (9-15 is actually last day, first is 9-08)
+        introduction_day='2025-09-08',  # first day with extension ABDC
         trial_type='ABC',
         bifurcation_cue='0b',   #0b is gray zone before C, B is the cue before C
         animal_id=mouse_id,

@@ -315,6 +315,7 @@ def add_cue_shading_with_labels(
     label_y: float = 0.98,
     font_scale: float = 1.0,
     skip_gray: bool = True,
+    max_cm: float | None = None,
 ):
     """Add cue region shading with labeled boxes at the top.
 
@@ -330,6 +331,7 @@ def add_cue_shading_with_labels(
         label_y: Y position for labels in axes-fraction coords.
         font_scale: Scale factor for label font size.
         skip_gray: If True, skip labels for gray zones.
+        max_cm: max position to avoid plotting unused cue labels
     """
     cue_colors = get_cue_colors(config)
     cue_labels = get_cue_labels(config)
@@ -340,6 +342,8 @@ def add_cue_shading_with_labels(
     pos = 0.0
     for cue_id in seq:
         w = cue_widths[cue_id]
+        if max_cm is not None and pos >= max_cm:
+            break
         color = cue_colors.get(cue_id, '#D3D3D3')
         ax.axvspan(pos, pos + w, alpha=alpha, color=color, zorder=0)
 

@@ -486,7 +486,7 @@ def plot_pv_correlation_across_position(
         avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
         avg_a, avg_b = avgs[type_a], avgs[type_b]
 
-    shared_bins = get_shared_bins(config, type_a, type_b, metadata)
+    diverge_cm, shared_bins = get_shared_bins(config, type_a, type_b, metadata)
 
     pv_shared = population_vector_correlation(avg_a, avg_b, min_bins=shared_bins)
     x_shared = np.arange(shared_bins) * bin_size_cm + bin_size_cm / 2
@@ -497,7 +497,6 @@ def plot_pv_correlation_across_position(
     ax.fill_between(x_shared, pv_shared, alpha=0.15, color='black', zorder=3)
 
     if type_a != type_b:
-        diverge_cm = get_divergence_point(config, type_a, type_b)
         ax.axvline(diverge_cm, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
                    label=f'Tracks diverge ({diverge_cm:.0f} cm)', zorder=5)
 
@@ -576,7 +575,7 @@ def plot_per_cell_cross_correlation(
 
     min_bins = None
     if segment == 'shared':
-        min_bins = get_shared_bins(config, type_a, type_b, metadata)
+        _, min_bins = get_shared_bins(config, type_a, type_b, metadata)
 
     corrs = per_cell_spatial_correlation(avg_a, avg_b, min_bins=min_bins)
     valid = corrs[~np.isnan(corrs)]
@@ -655,7 +654,7 @@ def plot_pv_correlation_matrix(
 
     avgs = get_mean_tuning_curves(df, config, metadata, signal_col=signal_col)
     matrix = pv_correlation_matrix(avgs[type_a], avgs[type_b])
-    diverge = get_divergence_point(config, type_a, type_b)
+    diverge, _ = get_shared_bins(config, type_a, type_b, metadata)
 
     fig, ax = plt.subplots(figsize=figsize)
     pfmt.plot_pv_heatmap(
@@ -1101,7 +1100,7 @@ def plot_multiday_pv_across_position(
 
     fig, ax = plt.subplots(figsize=figsize)
     ax.plot(x, pv, color=color, linewidth=2, zorder=4)
-    ax.fill_between(x, pv, alpha=0.15, color=color, zorder=3)
+    ax.fill_between(x, pv, alpha=0.25, color=color, zorder=3)
 
     pfmt.add_cue_shading_with_labels(ax, config, trial_type, alpha=0.1)
     pfmt.set_cue_boundary_ticks(ax, config, trial_type)
@@ -1112,7 +1111,7 @@ def plot_multiday_pv_across_position(
                               day_y=day_y), fontsize=13, fontweight='bold')
     ax.set_xlim(0, track_len)
     ax.set_ylim(-0.2, 1.05)
-    ax.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
+    ax.axhline(0, color='gray', linewidth=1, alpha=0.5)
 
     mean_r = np.nanmean(pv)
     ax.axhline(mean_r, color=color, linestyle='--', linewidth=1, alpha=0.5,
@@ -1498,7 +1497,7 @@ def within_session_learning_curve(
     )
 
     # Determine bin slice based on segment
-    n_shared = get_shared_bins(config, type_a, type_b, metadata)
+    _, n_shared = get_shared_bins(config, type_a, type_b, metadata)
     n_bins_common = min(curves_a.shape[1], curves_b.shape[1])
 
     if segment == 'shared':

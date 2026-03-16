@@ -33,7 +33,7 @@ from df_processing import compute_session_averages, get_track_length, get_bin_si
 from plot_utils import build_title, add_cue_shading, add_cue_bar
 from cross_correlation_1 import (
     get_mean_tuning_curves, per_cell_spatial_correlation,
-    population_vector_correlation, get_shared_bins, get_divergence_point,
+    population_vector_correlation, get_shared_bins,
 )
 import plot_utils as pfmt
 
