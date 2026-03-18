@@ -220,7 +220,7 @@ def build_title(
     return ' — '.join(parts)
 
 
-def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2):
+def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2, max_cm: float | None = None):
     """Add light cue region shading to an axis using standard gray.
 
     Args:
@@ -228,6 +228,7 @@ def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2)
         config: Experiment configuration dict.
         trial_type: Trial type for cue layout.
         alpha: Shading transparency.
+        max_cm: If provided, stops drawing cues at this position in cm.
     """
     cue_colors = get_cue_colors(config)
     ts = config.get('trial_structures', {}).get(trial_type, {})
@@ -236,6 +237,10 @@ def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2)
     pos = 0.0
     for cue_id in seq:
         w = cue_widths[cue_id]
+        if max_cm is not None and pos >= max_cm:
+            break
+        if max_cm is not None:
+            w = min(w, max_cm - pos)
         if cue_id != 0:
             color = cue_colors.get(cue_id, '#D3D3D3')  #defaults to light gray; reconsider this fallback
             ax.axvspan(pos, pos + w, alpha=alpha, color=color, zorder=0)
@@ -248,6 +253,7 @@ def add_cue_bar(
     trial_type: str,
     axis: str = 'x',
     bar_width: float = 0.03,
+    max_cm: float | None = None,
 ):
     """Add a color-coded cue bar along an axis edge of a heatmap.
 
@@ -257,6 +263,7 @@ def add_cue_bar(
         trial_type: Trial type for cue layout.
         axis: 'x' for bottom bar, 'y' for left bar.
         bar_width: Fraction of axis extent for bar thickness.
+        max_cm: If provided, stops drawing cues at this position in cm.
     """
     from matplotlib.patches import Rectangle
     from matplotlib.transforms import blended_transform_factory
@@ -270,6 +277,10 @@ def add_cue_bar(
     pos = 0.0
     for cue_id in seq:
         w = cue_widths[cue_id]
+        if max_cm is not None and pos >= max_cm:
+            break
+        if max_cm is not None:
+            w = min(w, max_cm - pos)
         color = cue_colors.get(cue_id, '#D3D3D3')
 
         mid = pos + w/2
@@ -304,7 +315,7 @@ def add_cue_bar(
                         clip_on=False, zorder=11)
         pos += w
 
-    ax.tick_params(axis='both', which='both', pad=20)
+    ax.tick_params(axis='x',  pad=10)
 
 
 def add_cue_shading_with_labels(
@@ -410,24 +421,39 @@ def add_cue_boundary_lines(
             ax.axhline(b, **line_kwargs)
 
 
-def set_cue_boundary_ticks(ax: Axes, config: dict, trial_type: str):
+def get_cue_boundaries(config: dict, trial_type: str, max_cm: float | None = None) -> list[float]:
+    """Returns cumulative cue boundary positions in cm, starting at 0.
+
+    Args:
+        config: Experiment configuration dict.
+        trial_type: Trial type for cue layout.
+        max_cm: If provided, stops at the first boundary that exceeds this value.
+
+    Returns:
+        List of boundary positions starting with 0.0.
+    """
+    ts = config.get('trial_structures', {}).get(trial_type, {})
+    cue_widths = config.get('cue_map', {})
+    boundaries = [0.0]
+    pos = 0.0
+    for cue_id in ts.get('cue_sequence', []):
+        pos += cue_widths[cue_id]
+        if max_cm is not None and pos > max_cm + 1e-6:
+            break
+        boundaries.append(pos)
+    return boundaries
+
+
+def set_cue_boundary_ticks(ax: Axes, config: dict, trial_type: str, max_cm: float | None = None):
     """Set x-ticks at cue region boundaries.
 
     Args:
         ax: Matplotlib Axes.
         config: Experiment configuration dict.
         trial_type: Trial type for cue layout.
+        max_cm: If provided, only ticks at or below this position are included.
     """
-    ts = config.get('trial_structures', {}).get(trial_type, {})
-    seq = ts.get('cue_sequence', [])
-    cue_widths = config.get('cue_map', {})
-
-    ticks = [0.0]
-    pos = 0.0
-    for cue_id in seq:
-        pos += cue_widths[cue_id]
-        ticks.append(pos)
-
+    ticks = get_cue_boundaries(config=config, trial_type=trial_type, max_cm=max_cm)
     ax.set_xticks(ticks)
     ax.set_xticklabels([f'{t:.0f}' for t in ticks])
 
@@ -497,7 +523,7 @@ def plot_pv_heatmap(
     add_cue_bar(ax, config, y_type, axis='y')
     add_cue_boundary_lines(ax, config, y_type, axis='y')
 
-    ax.tick_params(axis='x', which='both', pad=15)
+    ax.tick_params(axis='x', pad=15)     #both
     ax.set_xlabel(x_label, fontsize=11)
     ax.set_ylabel(y_label, fontsize=11)
 
