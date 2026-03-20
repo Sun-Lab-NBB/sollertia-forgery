@@ -220,7 +220,15 @@ def build_title(
     return ' — '.join(parts)
 
 
-def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2, max_cm: float | None = None):
+def add_cue_shading(
+    ax: Axes,
+    config: dict,
+    trial_type: str,
+    alpha: float = 0.2,
+    max_cm: float | None = None,
+    min_cm: float | None = None,
+    override_color: str | None = None,
+):
     """Add light cue region shading to an axis using standard gray.
 
     Args:
@@ -229,6 +237,9 @@ def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2,
         trial_type: Trial type for cue layout.
         alpha: Shading transparency.
         max_cm: If provided, stops drawing cues at this position in cm.
+        min_cm: If provided, skips cue regions that end before this position.
+        override_color: If provided, uses this color for all cue regions instead
+            of the per-cue color.
     """
     cue_colors = get_cue_colors(config)
     ts = config.get('trial_structures', {}).get(trial_type, {})
@@ -241,10 +252,15 @@ def add_cue_shading(ax: Axes, config: dict, trial_type: str, alpha: float = 0.2,
             break
         if max_cm is not None:
             w = min(w, max_cm - pos)
+        cue_end = pos + w
+        if min_cm is not None and cue_end <= min_cm:
+            pos += cue_widths[cue_id]
+            continue
+        draw_start = max(pos, min_cm) if min_cm is not None else pos
         if cue_id != 0:
-            color = cue_colors.get(cue_id, '#D3D3D3')  #defaults to light gray; reconsider this fallback
-            ax.axvspan(pos, pos + w, alpha=alpha, color=color, zorder=0)
-        pos += w
+            color = override_color if override_color else cue_colors.get(cue_id, '#D3D3D3')
+            ax.axvspan(draw_start, cue_end, alpha=alpha, color=color, zorder=0)
+        pos += cue_widths[cue_id]
 
 
 def add_cue_bar(
@@ -315,7 +331,7 @@ def add_cue_bar(
                         clip_on=False, zorder=11)
         pos += w
 
-    ax.tick_params(axis='x',  pad=10)
+    ax.tick_params(axis=axis, pad=10)
 
 
 def add_cue_shading_with_labels(
@@ -523,7 +539,7 @@ def plot_pv_heatmap(
     add_cue_bar(ax, config, y_type, axis='y')
     add_cue_boundary_lines(ax, config, y_type, axis='y')
 
-    ax.tick_params(axis='x', pad=15)     #both
+    ax.tick_params(axis='both', which='both', pad=15)
     ax.set_xlabel(x_label, fontsize=11)
     ax.set_ylabel(y_label, fontsize=11)
 
