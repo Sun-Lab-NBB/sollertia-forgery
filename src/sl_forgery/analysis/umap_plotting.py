@@ -259,8 +259,8 @@ def get_colors_for_strategy(
 
     elif strategy == ColoringStrategy.SPEED:
         cmap = plt.cm.get_cmap('plasma')
-        norm = Normalize(vmin=filtered_df['speed'].to_numpy().min(), vmax=filtered_df['speed'].to_numpy().max())
-        colors = cmap(norm(filtered_df['speed'].to_numpy()))
+        norm = Normalize(vmin=filtered_df['speed_cm_s'].to_numpy().min(), vmax=filtered_df['speed_cm_s'].to_numpy().max())
+        colors = cmap(norm(filtered_df['speed_cm_s'].to_numpy()))
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Speed (cm/s)'}
 
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
@@ -443,7 +443,7 @@ def _build_position_traces(embedding, filtered_df, point_size, opacity):
         tt_mask = filtered_df['trial_type'].to_numpy() == trial_type
         positions = filtered_df['position'].to_numpy()[tt_mask]
         cues = filtered_df['cue'].to_numpy()[tt_mask]
-        track_len = filtered_df['track_length'].to_numpy()[tt_mask].max()
+        track_len = filtered_df['nominal_track_length'].to_numpy()[tt_mask].max()
         colorscale = pfmt.trial_type_colorscale(trial_type)
 
         # Stagger colorbars so they don't overlap
@@ -503,7 +503,7 @@ def _build_trial_type_traces(embedding, filtered_df, point_size, opacity):
 def _build_continuous_traces(embedding, filtered_df, strategy, point_size, opacity):
     """Build a single trace with continuous colorscale (speed, session progress)."""
     if strategy == ColoringStrategy.SPEED:
-        values, cscale, label = filtered_df['speed'].to_numpy(), 'Plasma', 'Speed (cm/s)'
+        values, cscale, label = filtered_df['speed_cm_s'].to_numpy(), 'Plasma', 'Speed (cm/s)'
         cmin, cmax = values.min(), values.max()
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
         values, cscale, label = filtered_df['trial'].to_numpy(), 'YlOrBr', 'Session Progress'
@@ -963,7 +963,7 @@ def plot_umap_3d_position_matched(
     # Auto-detect cutoff from shortest trial type
     if max_position is None:
         trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()))
-        max_lengths = {tt: filtered_df['track_length'].to_numpy()[filtered_df['trial_type'].to_numpy() == tt].max()
+        max_lengths = {tt: filtered_df['nominal_track_length'].to_numpy()[filtered_df['trial_type'].to_numpy() == tt].max()
                        for tt in trial_types}
         max_position = min(max_lengths.values())
 
