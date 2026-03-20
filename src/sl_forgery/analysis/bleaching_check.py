@@ -696,6 +696,10 @@ def plot_intra_session(
             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.8),
         )
 
+    # Extend x-axis to make room for the legend (no ticks in the extra space)
+    x_data_max = max(len(per_frame_mean[d]) for d in dates) * downsample
+    ax.set_xlim(0, x_data_max * 1.35)
+
     ax.set_xlabel('Frame')
     ax.set_ylabel('Mean raw F (across cells)')
     ax.set_title('Intra-session signal')
@@ -706,13 +710,15 @@ def plot_intra_session(
 def plot_decay_distribution(
     ax: plt.Axes,
     taus: np.ndarray,
+    tau_unit: str = 'hours',
     stats: dict | None = None,
 ) -> None:
     """Distribution of tau across cells, with optional IQR shading and convergence annotation.
 
     Args:
         ax: Matplotlib axes.
-        taus: Array of tau values from compute_per_cell_decay.
+        taus: Array of tau values from compute_per_cell_decay or compute_per_cell_decay_multi.
+        tau_unit: Unit label for tau values ('hours' or 'days').
         stats: Full stats dictionary from print_bleaching_stats. When provided, shades the IQR
             region and annotates convergence rate and percent of rapidly-bleaching cells.
     """
@@ -723,33 +729,46 @@ def plot_decay_distribution(
         ax.set_title('Per-cell decay τ')
         return
 
-    # Clips extreme outliers for a readable histogram.
-    lo, hi = np.percentile(valid, [2, 98])
-    clipped = valid[(valid >= lo) & (valid <= hi)]
+    # Uses log-spaced bins because tau values typically span orders of magnitude.
+    positive = valid[valid > 0]
+    if len(positive) == 0:
+        ax.text(0.5, 0.5, 'No positive τ values',
+                ha='center', va='center', transform=ax.transAxes, fontsize=12)
+        ax.set_title('Per-cell decay τ')
+        return
 
-    ax.hist(clipped, bins=50, color='#59A14F', edgecolor='white', linewidth=0.5)
-    median_tau = np.median(valid)
+    log_bins = np.logspace(np.log10(positive.min()), np.log10(positive.max()), 51)
+    ax.hist(positive, bins=log_bins, color='#59A14F', edgecolor='white', linewidth=0.5)
+    ax.set_xscale('log')
+
+    median_tau = float(np.median(positive))
     ax.axvline(median_tau, color='#E15759', linewidth=2, linestyle='--',
                label=f'median τ = {median_tau:.1f}')
+
+    n_excluded = len(valid) - len(positive)
 
     # Shades the IQR region and adds a summary annotation when stats are available.
     if stats is not None and "median" in stats["tau_distribution"]:
         tau_stats = stats["tau_distribution"]
         iqr_25 = tau_stats["iqr_25"]
         iqr_75 = tau_stats["iqr_75"]
-        ax.axvspan(iqr_25, iqr_75, alpha=0.15, color='#59A14F', label=f'IQR: {iqr_25:.1f}–{iqr_75:.1f}')
+        if iqr_25 > 0 and iqr_75 > iqr_25:
+            ax.axvspan(iqr_25, iqr_75, alpha=0.15, color='#59A14F',
+                       label=f'IQR: {iqr_25:.1f}–{iqr_75:.1f}')
 
         label_text = (
             f'{tau_stats["percent_converged"]:.0f}% converged\n'
             f'{tau_stats["percent_below_3"]:.0f}% with τ<3'
         )
+        if n_excluded > 0:
+            label_text += f'\n{n_excluded} non-positive hidden'
         ax.text(
             0.97, 0.97, label_text,
             transform=ax.transAxes, fontsize=8, verticalalignment='top', horizontalalignment='right',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.8),
         )
 
-    ax.set_xlabel('Decay τ (days)')  # Uses 'hours' if compute_per_cell_decay_multi was used.
+    ax.set_xlabel(f'Decay τ ({tau_unit})')
     ax.set_ylabel('Cell count')
     ax.set_title('Per-cell decay time constants')
     ax.legend(fontsize=8, frameon=False)
@@ -824,13 +843,16 @@ def plot_half_session(
 # SUMMARY
 
 def plot_bleaching_summary(
-    sessions: dict[str, dict],
+    mouse_dir: Path,
     signal_col: str = 'single_day_f',
+    decay_signal_col: str = 'multi_day_f',
+    dates: list[str] | None = None,
+    date_range: tuple[str, str] | None = None,
+    auto_process: bool = True,
     downsample: int = 50,
     max_cells_fit: int | None = 1000,
-    max_sessions: int | None = 8,
-    frame_rate: float = 10.0,
-    figsize: tuple = (16, 10),
+    bin_minutes: float = 5.0,
+    figsize: tuple = (18, 12),
     save_path: Path | None = None,
     show: bool = True,
 ) -> Figure:
@@ -838,15 +860,20 @@ def plot_bleaching_summary(
     1. daily mean  2. within-session bleaching
     3. Tau decay (needs >3 sessions)  4. 1st vs 2nd half of sessions
 
-    Processes each session individually to avoid holding all signal matrices in memory at once.
+    Loads each session one at a time and discards it after extracting metrics, so memory usage
+    stays roughly proportional to a single session regardless of how many sessions are analyzed.
 
     Args:
-        sessions: from load_multiday_sessions().
-        signal_col: raw fluorescence column name.
+        mouse_dir: mouse-level directory (e.g., datasets/26).
+        signal_col: raw fluorescence column name for panels 1, 2, 4.
+        decay_signal_col: signal column for decay fits (panel 3). Uses multi_day_f so cell
+            arrays are the same size across sessions.
+        dates: explicit session dates. Provide either dates or date_range, not both.
+        date_range: inclusive (start, end) date range to auto-discover sessions.
+        auto_process: automatically process unprocessed sessions.
         downsample: frame binning for intra-session plot.
-        max_cells_fit: max cells for exponential fits (None = all, slow for >3k).
-        max_sessions: max number of sessions.  Code seems to crash after 7 sessions, depending on cells. Temp fix
-        frame_rate: frame rate for imaging; will extract from data but for now ~10 hz
+        max_cells_fit: max cells for exponential fits (None = all).
+        bin_minutes: time bin size for decay fitting.
         figsize: figure size.
         save_path: if provided, saves figure to this path.
         show: call plt.show().
@@ -854,49 +881,148 @@ def plot_bleaching_summary(
     Returns:
         The matplotlib Figure.
     """
-    dates = sorted(sessions.keys())
-    if max_sessions is not None and len(dates) > max_sessions:
-        step = len(dates) // max_sessions + 1
-        dates = dates[::step]
-        sessions = {d: sessions[d] for d in dates}
-        print(f"  Subsampled to {len(dates)} sessions (step={step})")
+    from df_processing import ensure_processed, load_processed_session
 
-    # Process each session one at a time to save memory. Extract only the small summary metrics
-    # and discard the full signal matrix before moving to the next session.
-    print("Extracting per-session metrics (one at a time to save memory)...")
+    mouse_dir = Path(mouse_dir)
+
+    # Discover session dates (same logic as load_multiday_sessions).
+    if dates is not None and date_range is not None:
+        raise ValueError("Provide either dates or date_range, not both.")
+    if date_range is not None:
+        start, end = date_range
+        dates = sorted(set(
+            d.name[:10]
+            for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and start <= d.name[:10] <= end
+        ))
+        print(f"Found {len(dates)} sessions in range {start} to {end}: {dates}")
+    if dates is None or len(dates) == 0:
+        dates = sorted(set(
+            d.name[:10]
+            for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and d.name[:4].isdigit()
+        ))
+        print(f"Auto-discovered {len(dates)} sessions: {dates}")
+
+    # --- Pass 1: extract per-session summary metrics one at a time ---
+    print("Pass 1: extracting per-session metrics (one at a time to save memory)...")
     per_day: dict[str, float] = {}
     per_frame: dict[str, np.ndarray] = {}
     halves: dict[str, tuple[float, float]] = {}
     snr_per_day: dict[str, float] = {}
+    animal_id: str = '??'
     total_frames = 0
     n_cells = 0
 
     for date in dates:
-        matrix = np.vstack(sessions[date]['data'][signal_col].to_list())
+        try:
+            parquet_path, session_data, config = ensure_processed(mouse_dir, date, auto_process=auto_process)
+            data, _ = load_processed_session(parquet_path, signal_cols=[signal_col])
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  WARNING: Could not load {date}: {e}")
+            continue
+
+        if animal_id == '??':
+            animal_id = session_data.get('animal_id', '??')
+
+        matrix = np.vstack(data[signal_col].to_list())
         n_cells = matrix.shape[1]
         total_frames += matrix.shape[0]
 
-        # Per-day mean
         per_day[date] = float(matrix.mean())
-
-        # Per-frame mean
         per_frame[date] = matrix.mean(axis=1)
-
-        # Half-session means
         midpoint = matrix.shape[0] // 2
         halves[date] = (float(matrix[:midpoint].mean()), float(matrix[midpoint:].mean()))
-
-        # SNR (pre-compute here so we don't need to reload signals later)
         cell_means = matrix.mean(axis=0)
         snr_per_day[date] = float(cell_means.mean() / max(cell_means.std(), 1e-12))
 
-        del matrix  # Free the large array immediately
+        del data, matrix, cell_means
+        print(f"  {date}: done")
 
+    # Update dates to only those that loaded successfully.
+    dates = sorted(per_day.keys())
     print(f"  {len(dates)} sessions, {n_cells} cells, {total_frames} total frames")
 
-    print("Computing decay fits...")
-    taus = compute_per_cell_decay_multi(sessions, max_cells=max_cells_fit)
+    # --- Pass 2: decay fits (loads only the decay signal column) ---
+    print("Pass 2: computing decay fits...")
+    from datetime import date as dt_date
 
+    binned_means: list[np.ndarray] = []
+    binned_times: list[np.ndarray] = []
+    cumulative_hours = 0.0
+
+    for i, date in enumerate(dates):
+        try:
+            parquet_path, _, _ = ensure_processed(mouse_dir, date, auto_process=False)
+            data, _ = load_processed_session(parquet_path, signal_cols=[decay_signal_col, 'elapsed_minutes'])
+        except (FileNotFoundError, ValueError):
+            continue
+
+        if decay_signal_col not in data.columns:
+            print(f"  WARNING: {decay_signal_col} not found in {date}, skipping decay fit for this session.")
+            continue
+
+        matrix = np.vstack(data[decay_signal_col].to_list())
+        elapsed = data['elapsed_minutes'].to_numpy()
+
+        session_duration_sec = (elapsed[-1] - elapsed[0]) * 60.0
+        n_frames = matrix.shape[0]
+        frame_rate = n_frames / session_duration_sec
+        frames_per_bin = int(bin_minutes * 60 * frame_rate)
+        n_bins = n_frames // frames_per_bin
+
+        if n_bins > 0:
+            trimmed = matrix[:n_bins * frames_per_bin]
+            chunk_means = trimmed.reshape(n_bins, frames_per_bin, -1).mean(axis=1)
+            binned_means.append(chunk_means)
+            binned_times.append(cumulative_hours + np.arange(n_bins) * (bin_minutes / 60.0))
+
+        session_hours = session_duration_sec / 3600.0
+        if i < len(dates) - 1:
+            current = dt_date.fromisoformat(date)
+            next_d = dt_date.fromisoformat(dates[i + 1])
+            cumulative_hours += (next_d - current).days * 24.0
+        else:
+            cumulative_hours += session_hours
+
+        del data, matrix
+        print(f"  {date}: done")
+
+    # Fit decay curves.
+    if binned_means:
+        all_means = np.concatenate(binned_means, axis=0)
+        all_times = np.concatenate(binned_times)
+        del binned_means, binned_times
+
+        decay_n_cells = all_means.shape[1]
+        print(f"  {len(all_times)} time bins, {decay_n_cells} cells")
+
+        if max_cells_fit is not None and decay_n_cells > max_cells_fit:
+            rng = np.random.default_rng(42)
+            subset = rng.choice(decay_n_cells, max_cells_fit, replace=False)
+            all_means = all_means[:, subset]
+            decay_n_cells = max_cells_fit
+
+        taus = np.full(decay_n_cells, np.nan)
+        for i in range(decay_n_cells):
+            y = all_means[:, i]
+            try:
+                p0 = [y[0] - y[-1], max(all_times[-1] / 2, 1.0), y[-1]]
+                popt, _ = curve_fit(
+                    _exp_decay, all_times, y, p0=p0, maxfev=2000,
+                    bounds=([-np.inf, 1e-3, -np.inf], [np.inf, np.inf, np.inf]),
+                )
+                taus[i] = popt[1]
+            except (RuntimeError, ValueError):
+                continue
+
+        n_fit = np.count_nonzero(~np.isnan(taus))
+        print(f"  Exponential fits: {n_fit}/{decay_n_cells} cells converged.")
+        del all_means
+    else:
+        taus = np.array([])
+
+    # --- Stats and plotting ---
     print("Computing statistics...")
     stats = print_bleaching_stats_from_metrics(
         per_day_mean=per_day,
@@ -907,17 +1033,16 @@ def plot_bleaching_summary(
     )
 
     print("Plotting...")
-    fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True)
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
 
-    animal_id = sessions[dates[0]]['session_data'].get('animal_id', '??')
     fig.suptitle(f'Bleaching Check — {animal_id}', fontsize=14, fontweight='bold')
 
     plot_daily_mean(axes[0, 0], per_day, stats=stats)
     plot_intra_session(axes[0, 1], per_frame, downsample=downsample, stats=stats)
-    plot_decay_distribution(axes[1, 0], taus, stats=stats)
+    plot_decay_distribution(axes[1, 0], taus, tau_unit='hours', stats=stats)
     plot_half_session(axes[1, 1], halves, stats=stats)
 
-    plt.subplots_adjust(hspace=0.35, wspace=0.3)
+    plt.subplots_adjust(hspace=0.35, wspace=0.3, top=0.92, bottom=0.08)
 
     if save_path is not None:
         fig.savefig(save_path, dpi=200, bbox_inches='tight')
@@ -930,16 +1055,13 @@ def plot_bleaching_summary(
 
 
 if __name__ == '__main__':
-    from df_processing import load_multiday_sessions
     mouse_id = '26'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-    sessions = load_multiday_sessions(
+    fig = plot_bleaching_summary(
         mouse_dir,
-        date_range=('2025-09-02', '2025-09-15'),
-        auto_process=True,
+        date_range=('2025-08-10', '2025-09-16'),
+        show=True,
     )
-
-    fig = plot_bleaching_summary(sessions, show=True)
 
 
