@@ -972,14 +972,34 @@ def plot_history_dependent_remapping(
     for trial_type, avg_curve in trial_type_averages.items():
         all_means_with_avg[trial_type] = avg_curve
 
-    # Figure 1: heatmaps. 2 rows × 4 cols.
-    # Each row: [session avg | hist cond 1 | hist cond 2 | cond1 − cond2 difference].
-    fig_maps, axes_maps = plt.subplots(
-        nrows=2,
-        ncols=4,
-        figsize=(17, 8),
-        gridspec_kw={"width_ratios": [1, 1, 1, 1], "wspace": 0.4},
+    # Figure 1: heatmaps. 2 rows. Columns: [heatmap cbar | 3 heatmaps | diff | diff cbar].
+    # Use constrained_layout for automatic non-overlapping spacing.
+    from matplotlib.gridspec import GridSpec
+
+    fig_maps = plt.figure(
+        figsize=(24, 12),
+        constrained_layout=True,
+        layout="constrained",
     )
+    fig_maps.get_layout_engine().set(
+        w_pad=0.15, h_pad=0.15, wspace=0.08, hspace=0.1,
+    )
+    gs_maps = GridSpec(
+        nrows=2, ncols=6, figure=fig_maps,
+        width_ratios=[0.03, 1, 1, 1, 1, 0.03],
+    )
+
+    # Create all axes up front.
+    cbar_left_axes: list[Axes] = []
+    heatmap_axes = np.empty((2, 4), dtype=object)
+    cbar_right_axes: list[Axes] = []
+    for row in range(2):
+        cbar_left_axes.append(fig_maps.add_subplot(gs_maps[row, 0]))
+        for col in range(4):
+            heatmap_axes[row, col] = fig_maps.add_subplot(gs_maps[row, col + 1])
+        cbar_right_axes.append(fig_maps.add_subplot(gs_maps[row, 5]))
+
+    axes_maps = heatmap_axes
 
     fig_maps.suptitle(f"{title_base} — heatmaps", fontsize=13, fontweight="bold")
 
@@ -996,10 +1016,14 @@ def plot_history_dependent_remapping(
             config=config,
             divergence_cm=results["divergence_cm"],
         )
+
+        # "Norm. activity" colorbar in the left column for this row.
         if last_im is not None:
-            cbar = fig_maps.colorbar(last_im, ax=axes_maps[row_index, 2], fraction=0.046, pad=0.04)
-            cbar.set_label("Norm. activity", fontsize=7)
+            cbar = fig_maps.colorbar(last_im, cax=cbar_left_axes[row_index])
+            cbar.set_label("Norm. activity", fontsize=8)
             cbar.ax.tick_params(labelsize=7)
+        else:
+            cbar_left_axes[row_index].set_visible(False)
 
         # Difference panel: normalize each condition by the cross-condition peak,
         # then subtract so the scale is [-1, 1].
@@ -1033,9 +1057,12 @@ def plot_history_dependent_remapping(
                 vmax=1.0,
                 interpolation="nearest",
             )
-            diff_cbar = fig_maps.colorbar(diff_im, ax=diff_ax, fraction=0.03, pad=0.02)
+
+            # "Norm. diff" colorbar in the right column for this row.
+            diff_cbar = fig_maps.colorbar(diff_im, cax=cbar_right_axes[row_index])
             diff_cbar.set_label("Norm. diff (A−B)", fontsize=7)
             diff_cbar.ax.tick_params(labelsize=7)
+
             parts_a = cond_a.split("_", maxsplit=1)
             parts_b = cond_b.split("_", maxsplit=1)
             label_a = f"prev:{parts_a[1]}" if len(parts_a) == 2 else cond_a
@@ -1066,11 +1093,10 @@ def plot_history_dependent_remapping(
                 )
         else:
             axes_maps[row_index, 3].set_visible(False)
+            cbar_right_axes[row_index].set_visible(False)
 
         for extra_column in range(len(panels), 3):
             axes_maps[row_index, extra_column].set_visible(False)
-
-    fig_maps.tight_layout(rect=[0, 0, 1, 0.96])
 
     if save_path_maps is not None:
         fig_maps.savefig(save_path_maps, dpi=150, bbox_inches="tight")
@@ -1096,6 +1122,33 @@ def plot_history_dependent_remapping(
             config=config,
             divergence_cm=results["divergence_cm"],
         )
+
+    # Bin-wise paired test between the two history conditions for each trial type.
+    for col_index, trial_type in enumerate(trial_types):
+        type_conditions = conditions_by_type.get(trial_type, [])
+        if len(type_conditions) == 2:
+            cond_a, cond_b = type_conditions[0], type_conditions[1]
+            if cond_a in results["condition_variances"] and cond_b in results["condition_variances"]:
+                var_a = np.nanmean(results["condition_variances"][cond_a], axis=1)
+                var_b = np.nanmean(results["condition_variances"][cond_b], axis=1)
+                valid_mask = ~(np.isnan(var_a) | np.isnan(var_b))
+                if valid_mask.sum() >= 3:
+                    stat_result = stats.wilcoxon(var_a[valid_mask], var_b[valid_mask])
+                    p_value = stat_result.pvalue
+                    # Rank-biserial effect size: r = Z / sqrt(N).
+                    n_pairs = int(valid_mask.sum())
+                    z_score = stats.norm.ppf(p_value / 2)
+                    effect_size = abs(z_score) / np.sqrt(n_pairs)
+                    p_str = f"p < 1e-10" if p_value < 1e-10 else f"p = {p_value:.2e}"
+                    axes_variance[col_index].text(
+                        0.98, 0.95,
+                        f"Wilcoxon {p_str}\nr = {effect_size:.3f}, n = {n_pairs} bins",
+                        transform=axes_variance[col_index].transAxes,
+                        fontsize=8,
+                        ha="right",
+                        va="top",
+                        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+                    )
 
     # Single deduplicated legend anchored outside the right edge of the last axis.
     seen: dict[str, object] = {}
@@ -1148,13 +1201,20 @@ def plot_history_dependent_remapping(
             if label in results["pv_correlations"]:
                 pv_corr = results["pv_correlations"][label]
                 positions_cm = np.arange(len(pv_corr)) * bin_size_cm + bin_size_cm / 2
-                pv_ax.plot(positions_cm, pv_corr, color=color, linewidth=1.5, label=current_type)
+                pv_mean = float(np.nanmean(pv_corr))
+                pv_sem = float(np.nanstd(pv_corr) / np.sqrt(np.sum(~np.isnan(pv_corr))))
+                pv_ax.plot(
+                    positions_cm, pv_corr, color=color, linewidth=1.5,
+                    label=f"{current_type} ({pv_mean:.3f} ± {pv_sem:.3f})",
+                )
 
             # Spatial correlation histogram overlay.
             if label in results["spatial_correlations"]:
                 valid_corrs = results["spatial_correlations"][label]
                 valid_corrs = valid_corrs[~np.isnan(valid_corrs)]
                 median_val = float(np.median(valid_corrs)) if len(valid_corrs) > 0 else np.nan
+                mean_val = float(np.mean(valid_corrs)) if len(valid_corrs) > 0 else np.nan
+                sd_val = float(np.std(valid_corrs)) if len(valid_corrs) > 0 else np.nan
                 hist_ax.hist(
                     valid_corrs,
                     bins=np.linspace(-1.0, 1.0, 41),
@@ -1162,7 +1222,8 @@ def plot_history_dependent_remapping(
                     alpha=0.5,
                     edgecolor="white",
                     linewidth=0.5,
-                    label=f"{current_type} (med={median_val:.3f})",
+                    label=f"{current_type} (med={median_val:.3f}, "
+                          f"mean={mean_val:.3f}±{sd_val:.3f})",
                 )
                 hist_ax.axvline(x=median_val, color=color, linewidth=1.5, linestyle="--")
 
@@ -1200,7 +1261,29 @@ def plot_history_dependent_remapping(
         hist_ax.tick_params(labelsize=8)
         hist_ax.spines["top"].set_visible(False)
         hist_ax.spines["right"].set_visible(False)
-        hist_ax.legend(frameon=False, fontsize=8)
+        hist_ax.legend(frameon=False, fontsize=7)
+
+        # Annotate t-test results and shuffle significance on histogram panels.
+        stat_lines: list[str] = []
+        for _, _, label in subset:
+            current_type = label.split(" ")[-1].strip("()")  # Fallback.
+            test = results["parametric_tests"].get(label)
+            if test is not None:
+                stat_lines.append(f"t={test.statistic:.2f}, p={test.pvalue:.1e}")
+            shuffle_pvals = results.get("shuffle_p_values", {}).get(label)
+            if shuffle_pvals is not None:
+                valid_sp = shuffle_pvals[~np.isnan(shuffle_pvals)]
+                n_sig = int((valid_sp < 0.05).sum())
+                stat_lines.append(f"shuffle p<.05: {n_sig}/{len(valid_sp)}")
+        if stat_lines:
+            hist_ax.text(
+                0.02, 0.95,
+                "\n".join(stat_lines),
+                transform=hist_ax.transAxes,
+                fontsize=7,
+                va="top",
+                bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+            )
 
     fig_metrics.tight_layout(rect=[0, 0, 1, 0.96])
 
