@@ -47,10 +47,6 @@ class DetectionParams:
     """Parameters for place field detection.
 
     Args:
-        signal_type: Signal type — 'spikes' or 'dff'. Controls thresholding logic and
-            default min_peak. 'spikes' thresholds at signal_threshold × peak (baseline
-            assumed zero). 'dff' computes baseline as mean of sub-threshold bins, then
-            thresholds at baseline + signal_threshold × (peak - baseline).
         smooth_sigma: Gaussian smoothing sigma in bins (0 to disable).
         base_quantile: Quantile used to identify sub-threshold bins for dff baseline
             estimation. Ignored for spikes.
@@ -58,32 +54,25 @@ class DetectionParams:
             (peak - baseline) above baseline.
         min_bins: Minimum contiguous bins for a valid place field.
         outside_threshold: In-field mean must exceed outside-field mean × this factor.
-        min_peak: Minimum peak value within a field. If None, defaults to 0.005 for
-            spikes (spike probability units) and 0.1 for dff (ΔF/F units).
+        min_peak: Minimum peak value within a field. If None (default), no peak
+            filter is applied — detection relies on outside_threshold instead.
+        min_speed_cm_s: Minimum speed threshold in cm/s. Frames below this speed are
+            excluded before binning. Set to None to disable speed filtering.
         sig_threshold: p-value cutoff for shuffle validation.
         n_shuffles: Number of shuffle iterations for validation.
         n_chunks: Number of chunks for temporal shuffle.
     """
-    signal_type: str = 'spikes'
     smooth_sigma: float = 3.0
     base_quantile: float = 0.25
-    signal_threshold: float = 0.5
+    signal_threshold: float = 0.25
     min_bins: int = 3
     outside_threshold: float = 3.0
-    min_peak: float | None = .1
+    min_peak: float | None = None
+    min_speed_cm_s: float | None = 2.0
     sig_threshold: float = 0.05
     n_shuffles: int = 500
     n_chunks: int = 100
 
-    def get_min_peak(self) -> float:
-        """Return min_peak, applying signal-type-dependent default if None.
-
-        Returns:
-            Minimum peak threshold appropriate for the signal type.
-        """
-        if self.min_peak is not None:
-            return self.min_peak
-        return 0.005 if self.signal_type == 'spikes' else 0.1
 
 # PLACE FIELDS CONTAINER
 
@@ -356,9 +345,7 @@ class PlaceFields1d:
         ax.set_xticklabels([str(int(t)) for t in tick_positions], fontsize=8)
 
         if show_cue_boundaries:
-            for t in tick_positions[1:-1]:
-                ax.axvline(t, color='white', linestyle='--',
-                           linewidth=0.8, alpha=0.6, zorder=5)
+            pfmt.add_cue_boundary_lines(ax, config, trial_type, axis='x', alpha=0.6)
 
         title_str = pfmt.build_title(
             title or 'Place Fields',
@@ -605,6 +592,7 @@ def outside_field_threshold(
 def _detect_on_tuning_curves(
     binF: np.ndarray,
     params: DetectionParams,
+    signal_type: str,
     bin_size: float = 5.0,
 ) -> PlaceFields1d:
     """Run detection pipeline on pre-computed tuning curves.
@@ -614,6 +602,7 @@ def _detect_on_tuning_curves(
     Args:
         binF: Binned fluorescence, shape (n_cells, n_bins).
         params: Detection parameters.
+        signal_type: Either 'spikes' or 'dff', inferred from signal_col.
         bin_size: Spatial bin size in cm.
 
     Returns:
@@ -636,20 +625,20 @@ def _detect_on_tuning_curves(
     else:
         smoothed = binF
 
-    # Threshold
+    # Threshold on smoothed data for robust detection, but store raw binF for plotting/filtering
     thres_im = _quantile_threshold(
-        smoothed, params.signal_type, params.base_quantile, params.signal_threshold,
+        smoothed, signal_type, params.base_quantile, params.signal_threshold,
     )
-    # Connected components (circular)
-    pf = circular_connected_placefields(thres_im, smoothed, min_bins=params.min_bins)
+    # Connected components (circular) — use raw binF so heatmaps aren't blurred
+    pf = circular_connected_placefields(thres_im, binF, min_bins=params.min_bins)
     pf.bin_size = bin_size
 
     # Filter: outside-field ratio
     pf = outside_field_threshold(pf, params.outside_threshold)
 
-    # Filter: minimum peak amplitude
-    if pf.n_fields > 0:
-        weak = np.where(pf.max_intensity < params.get_min_peak())[0]
+    # Filter: minimum peak amplitude (only if explicitly set)
+    if params.min_peak is not None and pf.n_fields > 0:
+        weak = np.where(pf.max_intensity < params.min_peak)[0]
         pf = pf.remove_fields(weak)
 
     return pf
@@ -660,9 +649,8 @@ def _detect_on_tuning_curves(
 def detect_place_fields(
     df: pl.DataFrame,
     config: dict,
-    signal_col: str = 'multi_day_spikes',
+    signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
-    min_speed_cm_s: float = 2.0,
     params: DetectionParams | None = None,
 ) -> PlaceFieldResult:
     """Detect place fields from frame-level data.
@@ -675,7 +663,6 @@ def detect_place_fields(
         config: Experiment configuration dict.
         signal_col: Column containing neural signals (list per frame).
         bin_size_cm: Spatial bin size in cm.
-        min_speed_cm_s: Filter by minimum speed in cm.
         params: Detection parameters. Uses defaults if None.
 
     Returns:
@@ -684,12 +671,15 @@ def detect_place_fields(
     if params is None:
         params = DetectionParams()
 
+    # Infer signal type from column name
+    signal_type = 'spikes' if 'spikes' in signal_col else 'dff'
+
     # Speed filter — exclude stationary frames that inflate occupancy at rest positions
-    if min_speed_cm_s is not None and 'speed_cm_s' in df.columns:
+    if params.min_speed_cm_s is not None and 'speed_cm_s' in df.columns:
         n_before = len(df)
-        df = df.filter(pl.col('speed_cm_s') >= min_speed_cm_s)
+        df = df.filter(pl.col('speed_cm_s') >= params.min_speed_cm_s)
         print(f"Speed filter: {n_before - len(df)}/{n_before} frames removed "
-              f"(< {min_speed_cm_s} cm/s)")
+              f"(< {params.min_speed_cm_s} cm/s)")
 
     # Get session-averaged tuning curves: {trial_type: {'session_avg': (n_bins, n_cells), ...}}
     stats = compute_session_averages(
@@ -708,7 +698,7 @@ def detect_place_fields(
 
         print(f"Detecting place fields for {tt}: {binF.shape[0]} cells × {binF.shape[1]} bins...")
 
-        pf = _detect_on_tuning_curves(binF, params, bin_size=bin_size_cm)
+        pf = _detect_on_tuning_curves(binF, params, signal_type, bin_size=bin_size_cm)
 
         result.fields[tt] = pf
         result.is_place_cell[tt] = pf.has_place_field
@@ -723,9 +713,8 @@ def validate_place_fields(
     df: pl.DataFrame,
     config: dict,
     result: PlaceFieldResult | None = None,
-    signal_col: str = 'multi_day_spikes',
+    signal_col: str = 'multi_day_dff',
     bin_size_cm: int = 5,
-    min_speed_cm_s: float = 2.0,
     params: DetectionParams | None = None,
     seed: int = 42,
 ) -> PlaceFieldResult:
@@ -747,7 +736,6 @@ def validate_place_fields(
         result: Existing PlaceFieldResult to update. If None, runs detection first.
         signal_col: Column containing neural signals.
         bin_size_cm: Spatial bin size in cm.
-        min_speed_cm_s: Filter by minimum speed in cm/s.
         params: Detection parameters. Uses result.params or defaults if None.
         seed: Random seed for reproducibility.
 
@@ -757,11 +745,14 @@ def validate_place_fields(
     if params is None:
         params = result.params if result is not None else DetectionParams()
 
-    if min_speed_cm_s is not None and 'speed_cm_s' in df.columns:
+    # Infer signal type from column name
+    signal_type = 'spikes' if 'spikes' in signal_col else 'dff'
+
+    if params.min_speed_cm_s is not None and 'speed_cm_s' in df.columns:
         n_before = len(df)
-        df = df.filter(pl.col('speed_cm_s') >= min_speed_cm_s)
+        df = df.filter(pl.col('speed_cm_s') >= params.min_speed_cm_s)
         print(f"Speed filter: {n_before - len(df)}/{n_before} frames removed "
-              f"(< {min_speed_cm_s} cm/s)")
+              f"(< {params.min_speed_cm_s} cm/s)")
 
     # Run detection if not provided
     if result is None:
@@ -825,7 +816,7 @@ def validate_place_fields(
 
             # Re-bin and detect
             shuffled_binF = _bin_signals(shuffled_signals, mask, n_bins)
-            shuf_pf = _detect_on_tuning_curves(shuffled_binF, params, bin_size=bin_size_cm)
+            shuf_pf = _detect_on_tuning_curves(shuffled_binF, params, signal_type, bin_size=bin_size_cm)
             shuffle_counts += shuf_pf.has_place_field.astype(int)
 
             if (i + 1) % 100 == 0:
@@ -1318,15 +1309,19 @@ if __name__ == '__main__':
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     # ── Single-day detection ──
-    date = '2025-09-10'
+    date = '2025-09-16'
 
     session_dir = find_session_dir(mouse_dir, date)
     session_data, exp_config = load_session_context(session_dir)
     paths = get_session_paths(session_dir, session_data)
     data, meta = load_processed_session(paths['parquet'])
 
+    signals = data.get_column('multi_day_dff').to_list()
+    flat = np.concatenate(signals)
+    print(f"min={flat.min():.2f}, median={np.median(flat):.2f}, "
+          f"mean={flat.mean():.2f}, 95th={np.percentile(flat, 95):.2f}, max={flat.max():.2f}")
 
-    params = DetectionParams(signal_type='dff', signal_threshold=.5, min_peak=.1)
+    params = DetectionParams(signal_threshold=.5)
     result = detect_place_fields(data, exp_config, signal_col='multi_day_dff',
                                  bin_size_cm=meta['bin_size_cm'], params=params)
     print(result.summary())
@@ -1334,26 +1329,27 @@ if __name__ == '__main__':
 
 # sanity check; plot the PF distribution
     # TODO add cue bar
-    pf = result.fields['ABC']
+    for tt in ['ABC', 'ABDC']:
+        pf = result.fields[tt]
 
-    thres_count = (pf.label_im > 0).sum(axis=1)
-    print(f"bins with field per cell: median={np.median(thres_count):.0f}, max={thres_count.max()}")
-    print(f"cells with field at BOTH edges: {((pf.label_im[:, 0] > 0) & (pf.label_im[:, -1] > 0)).sum()}")
+        thres_count = (pf.label_im > 0).sum(axis=1)
+        print(f"bins with field per cell: median={np.median(thres_count):.0f}, max={thres_count.max()}")
+        print(f"cells with field at BOTH edges: {((pf.label_im[:, 0] > 0) & (pf.label_im[:, -1] > 0)).sum()}")
 
-    props = regionprops(pf.label_im, pf.binF, cache=False)
-    widths = [p['bbox'][3] - p['bbox'][1] for p in props]
-    print(f"field widths: min={min(widths)}, median={np.median(widths):.0f}, max={max(widths)}")
-    print(f"fields wider than half track: {sum(w > 18 for w in widths)} / {len(widths)}")
+        props = regionprops(pf.label_im, pf.binF, cache=False)
+        widths = [p['bbox'][3] - p['bbox'][1] for p in props]
+        print(f"field widths: min={min(widths)}, median={np.median(widths):.0f}, max={max(widths)}")
+        print(f"fields wider than half track: {sum(w > 18 for w in widths)} / {len(widths)}")
 
-    print(f"centers range: {pf.centers[:, 1].min():.1f} to {pf.centers[:, 1].max():.1f}")
-    print(f"num_bins: {pf.binF.shape[1]}")
-    centers = pf.centers[:,1] * meta['bin_size_cm']
+        print(f"centers range: {pf.centers[:, 1].min():.1f} to {pf.centers[:, 1].max():.1f}")
+        print(f"num_bins: {pf.binF.shape[1]}")
+        centers = pf.centers[:,1] * meta['bin_size_cm']
 
-    plt.hist(centers, bins=36)
-    plt.xlabel('Field center (cm)')
-    plt.ylabel('Count')
-    plt.title('Place field center distribution - {} - {}'.format(mouse_id, date))
-    plt.show()
+        plt.hist(centers, bins=36)
+        plt.xlabel('Field center (cm)')
+        plt.ylabel('Count')
+        plt.title('Place field center distribution - {} - {}'.format(mouse_id, date))
+        plt.show()
 
 
 
@@ -1372,6 +1368,8 @@ if __name__ == '__main__':
 
     # All place cells, sorted by ABC field position
     plot_combined_heatmap(result, exp_config, session_data)
+
+
 
 
     # ── Multiday detection ──
@@ -1402,4 +1400,4 @@ if __name__ == '__main__':
 
     # Multiday comparison for top place cells
     for i in multiday.union_indices[:5]:
-        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_spikes')
+        plot_multiday_comparison(sessions, cell_idx=i, signal_col='multi_day_dff')
