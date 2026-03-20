@@ -34,10 +34,6 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
-
 from df_processing import get_track_length, get_cue_regions
 import plot_utils as pfmt
 
@@ -48,10 +44,12 @@ def _extract_lick_positions(
     df: pl.DataFrame,
     trial_type: str | None = None,
 ) -> pl.DataFrame:
-    """Extract lick event positions and trial numbers from a processed session df.
+    """Extracts lick event positions and trial numbers from a processed session DataFrame.
 
-    Filters to frames where lick == 1, optionally filtered by trial type.
-    Renumbers trials to sequential 0-indexed for plotting.
+    Pulls every frame where the lick sensor fired (lick == 1) and pairs the track position
+    with a zero-indexed trial counter. Trial indices are renumbered sequentially so that
+    filtered subsets (e.g. a single trial type) still produce a contiguous y-axis in raster
+    plots. The output is ready to scatter directly as x=position, y=trial_idx.
 
     Args:
         df: Processed frame-level DataFrame with 'lick', 'position', 'trial',
@@ -94,10 +92,13 @@ def _add_cue_bar_top(
     bar_width: float = 0.04,
     font_scale: float = 1.0,
 ):
-    """Add a color-coded cue bar at the TOP of an axes.
+    """Adds a color-coded cue bar at the top of an axes.
 
-    Unlike plot_utils.add_cue_bar which places at bottom (ymin=0), this
-    places above the axes (ymin=1) to avoid x-tick overlap.
+    Draws a thin horizontal strip above the plot area where each segment is colored
+    according to its cue identity, with letter labels (A, B, C, ...) centered inside.
+    Unlike plot_utils.add_cue_bar which places the bar at the bottom (ymin=0), this
+    version renders above the axes (ymin=1) so it does not overlap with x-tick labels
+    on raster-style plots where the x-axis sits at the bottom.
 
     Args:
         ax: Matplotlib Axes.
@@ -145,12 +146,16 @@ def plot_lick_raster(
     show_ylabel: bool = True,
     font_scale: float = 1.0,
 ) -> tuple[Figure, Axes]:
-    """Plot lick positions vs trial number as a scatter raster with cue shading.
+    """Plots lick positions vs trial number as a scatter raster with cue shading.
 
-    Each dot is one lick event. Background shows cue region colors.
-    Optionally shows reward zone boundaries and a cue color bar at top.
-    This is the single-panel building block — use plot_session_lick_raster()
-    as the main entry point.
+    Each dot represents a single lick event, positioned at its track location (x-axis)
+    and the trial it occurred in (y-axis). Background color bands show cue region
+    identities so the viewer can immediately see where the animal is licking relative
+    to the cue structure. Dashed lines mark the reward zone boundaries when enabled.
+    In a well-trained animal, lick dots should cluster tightly around the reward zone
+    and possibly at learned cue transitions, while naive animals will show scattered
+    or uniformly distributed licks. This is the single-panel building block; use
+    plot_session_lick_raster() as the main entry point for multi-panel figures.
 
     Args:
         df: Processed frame-level DataFrame.
@@ -226,18 +231,8 @@ def plot_lick_raster(
         _add_cue_bar_top(ax, config, trial_type, bar_width=.03, font_scale=font_scale)
 
     # X-ticks at cue boundaries
-    ts = config.get('trial_structures', {}).get(trial_type, {})
-    cue_sequence = ts.get('cue_sequence', [])
-    cue_widths_map = config.get('cue_map', {})
-    ticks = [0.0]
-    for cue_id in cue_sequence:
-        ticks.append(ticks[-1] + cue_widths_map.get(cue_id, 30.0))
-    if ticks[-1] != track_length:
-        ticks.append(track_length)
-    ticks = sorted(set(int(t) for t in ticks))
-
-    ax.set_xticks(ticks)
-    ax.set_xticklabels([str(t) for t in ticks], fontsize=7 * font_scale)
+    pfmt.set_cue_boundary_ticks(ax, config, trial_type)
+    ax.tick_params(axis='x', labelsize=7 * font_scale)
 
     # Axis formatting
     ax.set_xlim(0, track_length)
@@ -262,6 +257,8 @@ def plot_lick_raster(
 def plot_session_lick_raster(
     df: pl.DataFrame,
     config: dict,
+    animal_id: str,
+    date: str,
     label: str | None = None,
     dot_size: float = 4.0,
     dot_alpha: float = 0.5,
@@ -269,15 +266,20 @@ def plot_session_lick_raster(
     font_scale: float = 1.0,
     **kwargs,
 ) -> tuple[Figure, list[Axes]]:
-    """Plot lick rasters for all trial types in a session.
+    """Plots lick rasters for all trial types in a session, side by side.
 
-    Auto-detects trial types from the DataFrame and creates one subplot
-    per trial type, side by side. Use this as the primary entry point
-    for single-session lick raster plots.
+    Auto-detects the trial types present in the DataFrame and creates one subplot
+    per type. Dots are lick events across position. This is the primary entry point for single-session lick raster
+    visualization. Comparing panels reveals whether the animal discriminates between
+    trial types: a trained animal should show spatially focused licking near the
+    reward zone on rewarded trial types and suppressed or absent licking on
+    unrewarded types.
 
     Args:
         df: Processed frame-level DataFrame.
         config: Experiment configuration dict.
+        animal_id: Animal identifier for figure suptitle.
+        date: Session date for figure suptitle.
         label: Base title for the figure (trial type is appended per panel).
         dot_size: Scatter point size.
         dot_alpha: Scatter point transparency.
@@ -298,7 +300,7 @@ def plot_session_lick_raster(
         1, n_panels,
         figsize=(fig_width, fig_height),
         squeeze=False,
-        constrained_layout=True,
+        constrained_layout={'w_pad': 0.15, 'h_pad': 0.15},
     )
     axes = axes[0]  # flatten from (1, n) to (n,)
 
@@ -318,11 +320,17 @@ def plot_session_lick_raster(
             **kwargs,
         )
 
+    fig.suptitle(
+        pfmt.build_title('Lick Raster', animal_id=animal_id, date=date),
+        fontsize=13 * font_scale, fontweight='bold',
+    )
+
     return fig, list(axes)
 
 
 def plot_multiday_lick_raster(
     sessions: dict[str, dict],
+    animal_id: str,
     dot_size: float = 4.0,
     dot_alpha: float = 0.5,
     figsize_per_panel: tuple[float, float] = (2.5, 3.0),
@@ -332,11 +340,15 @@ def plot_multiday_lick_raster(
     font_scale: float = 1.0,
     **kwargs,
 ) -> Figure:
-    """Plot a multi-day lick raster grid, auto-detecting trial types per session.
+    """Plots a multi-day lick raster grid, auto-detecting trial types per session.
 
     Derives the grid layout from the data: one row per unique trial type found
     across all sessions, one column per session day. Panels where a trial type
-    doesn't exist in a session are left blank with a 'No X trials' message.
+    does not exist in a session are left blank. Reading left to right shows how
+    lick behavior evolves over training days. Early columns should show diffuse
+    licking across the track, while later columns should show progressive
+    tightening of lick clusters around the reward zone as the animal learns the
+    cue-reward association.
 
     Args:
         sessions: Dict from load_multiday_sessions(), keyed by date string,
@@ -344,6 +356,7 @@ def plot_multiday_lick_raster(
         dot_size: Scatter point size.
         dot_alpha: Scatter point transparency.
         figsize_per_panel: (width, height) per subplot panel.
+        animal_id: Animal identifier for suptitle.
         labels: Manually add labels for different days (i.e. Base 1, Extended day 1; or even just day 2, day 4)
             overrides label_format if provided
         suptitle: Figure super-title. Auto-generated if None.
@@ -373,7 +386,7 @@ def plot_multiday_lick_raster(
         n_rows, n_cols,
         figsize=(fig_width, fig_height),
         squeeze=False,
-        constrained_layout=True,
+        constrained_layout={'w_pad': 0.3, 'h_pad': 0.4},
     )
 
     for col, date in enumerate(sorted_dates):
@@ -442,7 +455,7 @@ def plot_multiday_lick_raster(
         )
 
     if suptitle is None:
-        suptitle = f"Lick Raster — {n_cols} Sessions"
+        suptitle = pfmt.build_title(f"Lick Raster — {n_cols} Sessions", animal_id=animal_id)
     fig.suptitle(suptitle, fontsize=13 * font_scale, fontweight='bold')
 
     return fig
@@ -451,6 +464,7 @@ def plot_multiday_lick_raster(
 def plot_lick_raster_grid(
     sessions: list[tuple[pl.DataFrame, dict, str]],
     trial_types: list[str],
+    animal_id: str,
     n_cols: int | None = None,
     dot_size: float = 0.8,
     dot_alpha: float = 0.5,
@@ -459,15 +473,15 @@ def plot_lick_raster_grid(
     row_labels: list[str] | None = None,
     font_scale: float = 1.0,
 ) -> Figure:
-    """Plot a multi-day, multi-trial-type lick raster grid.
+    """Plots a multi-day, multi-trial-type lick raster grid with explicit layout control.
 
-    Creates a grid where each column is one session/day and each row is one
-    trial type. Useful for comparing lick behavior across learning stages.
-
-    Example layout (3 rows × 7 cols):
-        Row 0: Days 1-7, trial_type='ABC'
-        Row 1: Days 8-14, trial_type='ABC'
-        Row 2: Days 8-14, trial_type='ABDC'
+    Creates a grid where each column is one session/day and each row is one trial type,
+    with the caller specifying exactly which sessions fill which slots. This is useful
+    when the experiment has distinct training phases (e.g. baseline then extended) that
+    require different row structures, or when sessions need to be reordered or grouped
+    manually rather than auto-detected. Comparing rows reveals whether the animal
+    generalizes or discriminates between trial types, while comparing columns within
+    a row tracks learning progression.
 
     Args:
         sessions: List of (DataFrame, config_dict, label_str) tuples,
@@ -477,8 +491,9 @@ def plot_lick_raster_grid(
         n_cols: Number of columns per row. Defaults to len(sessions) / n_rows.
         dot_size: Scatter point size.
         dot_alpha: Scatter point transparency.
+        animal_id: Animal identifier for suptitle.
         figsize: Figure size (width, height). Auto-scaled if None.
-        suptitle: Figure super-title.
+        suptitle: Figure super-title. Auto-generated if None.
         row_labels: Labels for each row (shown on left side). Defaults to
             trial type names.
         font_scale: Scale factor for all font sizes.
@@ -497,7 +512,7 @@ def plot_lick_raster_grid(
         n_rows, n_cols,
         figsize=figsize,
         squeeze=False,
-        constrained_layout=True,
+        constrained_layout={'w_pad': 0.3, 'h_pad': 0.4},
     )
 
     if row_labels is None:
@@ -560,16 +575,15 @@ def plot_lick_raster_grid(
                 rotation=90,
             )
 
-    if suptitle:
-        fig.suptitle(suptitle, fontsize=13 * font_scale, fontweight='bold')
+    if suptitle is None:
+        suptitle = pfmt.build_title('Lick Raster Grid', animal_id=animal_id)
+    fig.suptitle(suptitle, fontsize=13 * font_scale, fontweight='bold')
 
     return fig
 
 
-# ══════════════════════════════════════════════════════════════════════
-# SPEED PROFILES
-# ══════════════════════════════════════════════════════════════════════
 
+# SPEED PROFILES
 
 def _compute_speed_by_position(
     df: pl.DataFrame,
@@ -577,7 +591,12 @@ def _compute_speed_by_position(
     trial_type: str,
     bin_size_cm: int = 5,
 ) -> dict:
-    """Compute mean and SEM of running speed at each spatial bin for one trial type.
+    """Computes mean and SEM of running speed at each spatial bin for one trial type.
+
+    Groups frame-level speed measurements into spatial bins along the track, averages
+    within each trial to get a per-trial speed profile, then computes the cross-trial
+    mean and SEM at each bin. The resulting arrays drive both the speed profile line
+    plots (mean +/- SEM) and the speed raster heatmaps (per-trial matrix).
 
     Args:
         df: Processed frame-level DataFrame with 'speed_cm_s', 'distance_bin',
@@ -623,26 +642,31 @@ def _compute_speed_by_position(
         'n_trials': n_trials,
     }
 
-# TODO not using the right position axis, cant plot both trials
+# TODO not using the right position axis, shouldnt plot both trials
 def plot_speed_profile(
     df: pl.DataFrame,
     config: dict,
+    animal_id: str,
+    date: str,
     bin_size_cm: int = 5,
-    animal_id: str | None = None,
-    date: str | None = None,
     figsize: tuple[float, float] = (10, 4),
     show: bool = True,
 ) -> Figure:
-    """Plot mean running speed vs position for each trial type, overlaid.
+    """Plots mean running speed vs position for each trial type, overlaid on one axes.
 
-    Shows mean ± SEM speed profile with cue shading and reward zones.
+    Shows the trial-averaged speed as a function of track position with a shaded SEM
+    envelope, cue region coloring, and reward zone highlights. Each trial type is drawn
+    as a separate colored trace. In a well-trained animal, the speed profile should dip
+    near the reward zone (anticipatory slowing) and may show acceleration or deceleration
+    at cue transitions. Flat or noisy profiles indicate the animal has not yet learned
+    the spatial structure of the task. Look for reduced speed at intro of D cue
 
     Args:
         df: Processed frame-level DataFrame.
         config: Experiment configuration dict.
-        bin_size_cm: Spatial bin size in cm.
         animal_id: Animal identifier for plot title.
         date: Session date for plot title.
+        bin_size_cm: Spatial bin size in cm.
         figsize: Figure size.
         show: Call plt.show().
 
@@ -689,6 +713,7 @@ def plot_speed_profile(
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_xlim(0, get_track_length(config, longest_tt))
+    pfmt.set_cue_boundary_ticks(ax, config, longest_tt)
 
     plt.tight_layout()
     if show:
@@ -697,7 +722,6 @@ def plot_speed_profile(
 
 
 # ── SPEED RASTER ─────────────────────────────────────────────────────
-
 
 def plot_speed_raster(
     df: pl.DataFrame,
@@ -715,10 +739,15 @@ def plot_speed_raster(
     show_ylabel: bool = True,
     font_scale: float = 1.0,
 ) -> tuple[Figure, Axes]:
-    """Plot a trial × position heatmap of running speed.
+    """Plots a trial-by-position heatmap of running speed.
 
-    Each row is one trial, columns are spatial bins, color is mean speed
-    in that trial/bin. Analogous to lick raster but continuous-valued.
+    Each row is one trial, each column is a spatial bin, and color encodes the mean
+    speed within that trial and bin. This is the continuous-valued analog of the lick
+    raster: instead of binary dot presence, color intensity reveals the full speed
+    landscape. Look for horizontal bands of low speed (cool colors) near the reward
+    zone that strengthen across trials as the animal learns. Vertical streaks of
+    uniform color across all trials indicate consistent behavior at particular track
+    positions, such as always slowing at a cue boundary.
 
     Args:
         df: Processed frame-level DataFrame.
@@ -778,6 +807,7 @@ def plot_speed_raster(
         _add_cue_bar_top(ax, config, trial_type, bar_width=0.03, font_scale=font_scale)
 
     ax.set_xlim(0, track_length)
+    pfmt.set_cue_boundary_ticks(ax, config, trial_type)
     if show_xlabel:
         ax.set_xlabel('Position (cm)', fontsize=9 * font_scale)
     if show_ylabel:
@@ -796,17 +826,27 @@ def plot_speed_raster(
 def plot_session_speed_raster(
     df: pl.DataFrame,
     config: dict,
+    animal_id: str,
+    date: str,
     bin_size_cm: int = 5,
     label: str | None = None,
     figsize_per_panel: tuple[float, float] = (5, 6),
     font_scale: float = 1.0,
     **kwargs,
 ) -> tuple[Figure, list[Axes]]:
-    """Plot speed rasters for all trial types in a session, side by side.
+    """Plots speed rasters for all trial types in a session, side by side.
+
+    Creates one speed heatmap panel per trial type found in the data. Placing them
+    adjacent makes it easy to compare speed modulation between rewarded and unrewarded
+    trial types within the same session. A trained animal should show a clear cool
+    band near the reward zone on rewarded trials that is absent or weaker on
+    unrewarded trials.
 
     Args:
         df: Processed frame-level DataFrame.
         config: Experiment configuration dict.
+        animal_id: Animal identifier for figure suptitle.
+        date: Session date for figure suptitle.
         bin_size_cm: Spatial bin size in cm.
         label: Base title for the figure.
         figsize_per_panel: (width, height) per subplot panel.
@@ -823,7 +863,7 @@ def plot_session_speed_raster(
         1, n_panels,
         figsize=(figsize_per_panel[0] * n_panels, figsize_per_panel[1]),
         squeeze=False,
-        constrained_layout=True,
+        constrained_layout={'w_pad': 0.15, 'h_pad': 0.15},
     )
     axes = axes[0]
 
@@ -835,34 +875,42 @@ def plot_session_speed_raster(
             show_ylabel=(i == 0), font_scale=font_scale, **kwargs,
         )
 
+    fig.suptitle(
+        pfmt.build_title('Speed Raster', animal_id=animal_id, date=date),
+        fontsize=13 * font_scale, fontweight='bold',
+    )
+
     return fig, list(axes)
 
 
 # ── SPEED LEARNING CURVES (MULTIDAY) ────────────────────────────────
 
-
 def plot_multiday_speed_profile(
     sessions: dict[str, dict],
+    animal_id: str,
     bin_size_cm: int = 5,
     labels: list[str] | None = None,
     label_format: str = 'day_number',
-    animal_id: str | None = None,
     figsize_per_panel: tuple[float, float] = (3.5, 3.0),
     font_scale: float = 1.0,
     show: bool = True,
 ) -> Figure:
-    """Plot speed profiles across sessions, one column per day, one row per trial type.
+    """Plots speed profiles across sessions, one column per day, one row per trial type.
 
-    Shows how spatial speed profile evolves with learning. Early sessions
-    should show relatively uniform speed; late sessions should show
-    anticipatory slowing near reward zones.
+    Arranges mean +/- SEM speed-vs-position traces in a grid so that each column is a
+    training day and each row is a trial type. All panels share the same y-axis scale
+    for direct visual comparison. This is the primary plot for tracking the emergence
+    of anticipatory slowing: early columns should show relatively flat speed profiles,
+    while later columns should develop a clear dip near the reward zone. If the animal
+    discriminates trial types, the dip should appear on rewarded rows but remain absent
+    on unrewarded rows.
 
     Args:
         sessions: Dict from load_multiday_sessions().
+        animal_id: Animal identifier for suptitle.
         bin_size_cm: Spatial bin size in cm.
         labels: Manual column labels. Overrides label_format.
         label_format: 'day_number' or 'date'.
-        animal_id: Animal identifier for suptitle.
         figsize_per_panel: (width, height) per panel.
         font_scale: Scale factor for all font sizes.
         show: Call plt.show().
@@ -882,7 +930,7 @@ def plot_multiday_speed_profile(
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(figsize_per_panel[0] * n_cols, figsize_per_panel[1] * n_rows),
-        squeeze=False, constrained_layout=True,
+        squeeze=False, constrained_layout={'w_pad': 0.3, 'h_pad': 0.4},
     )
 
     # Compute global y-max across all sessions for consistent scaling
@@ -954,6 +1002,7 @@ def plot_multiday_speed_profile(
 
             track_length = get_track_length(session_config, tt)
             ax.set_xlim(0, track_length)
+            pfmt.set_cue_boundary_ticks(ax, session_config, tt)
             ax.set_ylim(0, global_max_speed * 1.05)
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
@@ -996,10 +1045,14 @@ def compute_reward_metrics(
     df: pl.DataFrame,
     config: dict,
 ) -> pl.DataFrame:
-    """Compute per-trial reward metrics: whether reward was collected and water volume.
+    """Computes per-trial reward metrics from frame-level data.
 
-    A trial counts as 'rewarded' if any frame has reward == 'yes'.
-    Water consumed per trial is max(water_uL) - min(water_uL) within that trial.
+    Groups the DataFrame by trial and extracts three quantities: whether the animal
+    collected a reward (any frame with reward == 'yes'), how much water was dispensed
+    (max minus min of the cumulative water_uL column within the trial), and trial
+    duration in seconds. These per-trial metrics feed into the reward and duration
+    plots and are also aggregated by compute_session_reward_summary() for cross-session
+    comparisons.
 
     Args:
         df: Processed frame-level DataFrame with 'reward', 'water_uL',
@@ -1026,7 +1079,13 @@ def compute_session_reward_summary(
     df: pl.DataFrame,
     config: dict,
 ) -> dict[str, dict]:
-    """Compute session-level reward summary stats per trial type.
+    """Computes session-level reward summary statistics per trial type.
+
+    Aggregates per-trial reward metrics into session-wide hit rate, mean and total
+    water consumed, and trial counts for each trial type. These summary numbers
+    are the data behind the multiday reward bar charts and are also useful for
+    quick programmatic checks (e.g. verifying that the animal reached criterion
+    hit rate before advancing to the next training phase).
 
     Args:
         df: Processed frame-level DataFrame.
@@ -1059,17 +1118,22 @@ def compute_session_reward_summary(
 def plot_reward_metrics(
     df: pl.DataFrame,
     config: dict,
-    animal_id: str | None = None,
-    date: str | None = None,
+    animal_id: str,
+    date: str,
     figsize: tuple[float, float] = (10, 8),
     show: bool = True,
 ) -> Figure:
-    """Plot per-trial reward metrics: hit rate, water per trial, cumulative water.
+    """Plots per-trial reward metrics across a single session in three stacked panels.
 
-    Three panels:
-        1. Hit rate (rolling fraction of rewarded trials)
-        2. Water consumed per trial
-        3. Cumulative water over trials
+    The top panel shows a rolling hit rate (fraction of trials rewarded over a sliding
+    window of 10 trials, with an expanding window for the first few trials so the trace
+    starts at trial 1). This reveals whether the animal is consistently finding the
+    reward zone or only succeeding sporadically. The middle panel scatters water
+    dispensed per trial, useful for spotting hardware issues (zero-water trials) or
+    unusual consumption patterns. The bottom panel plots cumulative water over trials,
+    giving a quick read on total fluid intake for the session. All three panels are
+    colored by trial type so differences in reward collection between trial types are
+    immediately visible.
 
     Args:
         df: Processed frame-level DataFrame.
@@ -1094,12 +1158,20 @@ def plot_reward_metrics(
         rewarded = sub['rewarded'].to_numpy().astype(float)
         water = sub['water_consumed_uL'].to_numpy()
 
-        # Rolling hit rate (window=10 or n_trials, whichever smaller)
+        # Expanding-then-rolling hit rate so the line starts at trial 1.
+        # Uses an expanding window for the first few trials, then switches to a
+        # fixed window once enough trials are available.
         window = min(10, len(rewarded))
-        if window > 0:
-            rolling_hit = np.convolve(rewarded, np.ones(window) / window, mode='valid')
-            x_rolling = trials[window - 1:]
-            ax_hit.plot(x_rolling, rolling_hit, color=color, linewidth=1.5, label=tt)
+        if len(rewarded) > 0:
+            cumulative_sum = np.cumsum(rewarded)
+            rolling_hit = np.empty_like(rewarded)
+            for i in range(len(rewarded)):
+                current_window = min(window, i + 1)
+                if i < window:
+                    rolling_hit[i] = cumulative_sum[i] / (i + 1)
+                else:
+                    rolling_hit[i] = (cumulative_sum[i] - cumulative_sum[i - window]) / window
+            ax_hit.plot(trials, rolling_hit, color=color, linewidth=1.5, label=tt)
 
         # Water per trial
         ax_water.scatter(trials, water, color=color, s=12, alpha=0.6, label=tt)
@@ -1136,23 +1208,29 @@ def plot_reward_metrics(
 
 def plot_multiday_reward_summary(
     sessions: dict[str, dict],
+    animal_id: str,
     labels: list[str] | None = None,
     label_format: str = 'day_number',
-    animal_id: str | None = None,
     figsize: tuple[float, float] = (10, 6),
     font_scale: float = 1.0,
     show: bool = True,
 ) -> Figure:
-    """Plot reward hit rate and total water across sessions.
+    """Plots reward hit rate and total water consumption across sessions.
 
-    Two panels: hit rate per session and total water per session,
-    separated by trial type.
+    Two stacked bar chart panels summarize reward performance over training days.
+    The top panel shows hit rate (fraction of trials where the animal collected a
+    reward) per session, grouped by trial type. A rising trend toward 1.0 indicates
+    the animal is learning to locate the reward zone. The bottom panel shows total
+    water consumed per session, which should increase with hit rate and serves as a
+    welfare check (animals that are not drinking enough may need supplemental water).
+    Bars are grouped by trial type so that differential learning across rewarded vs
+    unrewarded conditions is easy to assess.
 
     Args:
         sessions: Dict from load_multiday_sessions().
+        animal_id: Animal identifier for suptitle.
         labels: Manual x-axis labels. Overrides label_format.
         label_format: 'day_number' or 'date'.
-        animal_id: Animal identifier for suptitle.
         figsize: Figure size.
         font_scale: Scale factor.
         show: Call plt.show().
@@ -1243,12 +1321,20 @@ def plot_multiday_reward_summary(
 def plot_trial_duration(
     df: pl.DataFrame,
     config: dict,
-    animal_id: str | None = None,
-    date: str | None = None,
+    animal_id: str,
+    date: str,
     figsize: tuple[float, float] = (10, 4),
     show: bool = True,
 ) -> Figure:
-    """Plot trial duration across trials, colored by trial type.
+    """Plots trial duration across trials within a single session, colored by trial type.
+
+    Scatter points show the duration of each trial with a smoothed rolling-median
+    trend line overlaid. Trial duration reflects how long the animal takes to
+    traverse the virtual track. A decreasing trend over trials suggests the animal
+    is becoming more comfortable running, while unusually long trials may indicate
+    the animal stopped or disengaged. Comparing trial types reveals whether the
+    animal runs differently on rewarded vs unrewarded tracks (e.g. slower on
+    rewarded trials due to anticipatory licking near the reward zone).
 
     Args:
         df: Processed frame-level DataFrame.
@@ -1299,22 +1385,28 @@ def plot_trial_duration(
 
 def plot_multiday_trial_duration(
     sessions: dict[str, dict],
+    animal_id: str,
     labels: list[str] | None = None,
     label_format: str = 'day_number',
-    animal_id: str | None = None,
     figsize: tuple[float, float] = (10, 5),
     font_scale: float = 1.0,
     show: bool = True,
 ) -> Figure:
-    """Plot mean trial duration per session across days, by trial type.
+    """Plots mean trial duration per session across training days, grouped by trial type.
 
-    Shows box-like summary (mean ± std) for each session/trial type combination.
+    Bar height is the mean duration across all trials in that session, with error bars
+    showing +/- one standard deviation. Over the course of training, mean duration
+    typically decreases as the animal learns the task and runs more confidently. Large
+    standard deviations suggest high trial-to-trial variability, which can indicate
+    intermittent disengagement. Comparing trial types reveals whether the animal
+    consistently spends more time on certain track configurations, which may reflect
+    differential familiarity or reward-seeking behavior.
 
     Args:
         sessions: Dict from load_multiday_sessions().
+        animal_id: Animal identifier for suptitle.
         labels: Manual x-axis labels.
         label_format: 'day_number' or 'date'.
-        animal_id: Animal identifier for suptitle.
         figsize: Figure size.
         font_scale: Scale factor.
         show: Call plt.show().
@@ -1389,6 +1481,120 @@ def plot_multiday_trial_duration(
     return fig
 
 
+def plot_behavior_analysis(
+    data: pl.DataFrame,
+    exp_config: dict,
+    animal_id: str,
+    date: str,
+    show: bool = True,
+) -> list[Figure]:
+    """Plots all single-day behavioral analyses for one session.
+
+    Generates the full set of within-session behavioral figures: lick raster (spatial
+    lick pattern per trial type), speed profile (mean speed vs position), speed raster
+    (trial-by-position speed heatmap), reward metrics (hit rate, water per trial,
+    cumulative water), and trial duration. Together these provide a comprehensive
+    snapshot of the animal's behavioral state on a given day, covering spatial
+    discrimination, locomotor strategy, reward collection, and engagement.
+
+    Args:
+        data: Processed frame-level DataFrame.
+        exp_config: Experiment configuration dict.
+        animal_id: Animal identifier for plot titles.
+        date: Session date for plot titles.
+        show: Determines whether to call plt.show() after each figure.
+
+    Returns:
+        List of generated matplotlib Figures.
+    """
+    figures = []
+
+    fig_lick, _ = plot_session_lick_raster(data, exp_config, animal_id=animal_id, date=date)
+    figures.append(fig_lick)
+
+    fig_speed = plot_speed_profile(data, exp_config, animal_id=animal_id, date=date, show=False)
+    figures.append(fig_speed)
+
+    fig_speed_raster, _ = plot_session_speed_raster(
+        data, exp_config, animal_id=animal_id, date=date,
+    )
+    figures.append(fig_speed_raster)
+
+    fig_reward = plot_reward_metrics(data, exp_config, animal_id=animal_id, date=date, show=False)
+    figures.append(fig_reward)
+
+    fig_duration = plot_trial_duration(data, exp_config, animal_id=animal_id, date=date, show=False)
+    figures.append(fig_duration)
+
+    if show:
+        plt.show()
+
+    return figures
+
+
+def plot_multiday_behavior_analysis(
+    sessions: dict[str, dict],
+    animal_id: str,
+    labels: list[str] | None = None,
+    label_format: str = 'day_number',
+    font_scale: float = 1.0,
+    show: bool = True,
+) -> list[Figure]:
+    """Plots all multiday behavioral analyses across sessions.
+
+    Generates the full set of cross-session behavioral figures: multiday lick raster
+    (lick spatial pattern evolution over days), multiday speed profile (emergence of
+    anticipatory slowing), reward summary (hit rate and water intake trends), and
+    trial duration (engagement over training). Together these track the arc of
+    learning from naive to trained, making it easy to identify when the animal
+    reached criterion, when a new trial type was introduced, or when performance
+    plateaued or regressed.
+
+    Args:
+        sessions: Dict from load_multiday_sessions(), keyed by date string,
+            each value containing 'data' and 'config' keys.
+        animal_id: Animal identifier for plot titles.
+        labels: Manual day labels. Overrides label_format if provided.
+        label_format: 'day_number' for 'Day 1', 'Day 2', etc.
+            'date' for the session date string (MM-DD).
+        font_scale: Scale factor for all font sizes.
+        show: Determines whether to call plt.show() after all figures.
+
+    Returns:
+        List of generated matplotlib Figures.
+    """
+    figures = []
+
+    fig_lick = plot_multiday_lick_raster(
+        sessions, animal_id=animal_id, labels=labels,
+        label_format=label_format, font_scale=font_scale,
+    )
+    figures.append(fig_lick)
+
+    fig_speed = plot_multiday_speed_profile(
+        sessions, animal_id=animal_id, labels=labels,
+        label_format=label_format, font_scale=font_scale, show=False,
+    )
+    figures.append(fig_speed)
+
+    fig_reward = plot_multiday_reward_summary(
+        sessions, animal_id=animal_id, labels=labels,
+        label_format=label_format, font_scale=font_scale, show=False,
+    )
+    figures.append(fig_reward)
+
+    fig_duration = plot_multiday_trial_duration(
+        sessions, animal_id=animal_id, labels=labels,
+        label_format=label_format, font_scale=font_scale, show=False,
+    )
+    figures.append(fig_duration)
+
+    if show:
+        plt.show()
+
+    return figures
+
+
 # HELPERS
 
 def sessions_to_raster_input(
@@ -1396,7 +1602,13 @@ def sessions_to_raster_input(
     label_format: str = 'day_number',
     day_offset: int = 0,
 ) -> list[tuple[pl.DataFrame, dict, str]]:
-    """Convert load_multiday_sessions() output to plot_lick_raster_grid input.
+    """Converts load_multiday_sessions() output to plot_lick_raster_grid input format.
+
+    Transforms the date-keyed sessions dictionary into a flat list of
+    (DataFrame, config, label) tuples sorted chronologically. This adapter is
+    needed because plot_lick_raster_grid takes an explicit ordered list (allowing
+    the caller to control which sessions map to which grid slots), whereas the
+    multiday loader returns a dictionary keyed by date string.
 
     Args:
         sessions: Dict from load_multiday_sessions(), keyed by date string,
@@ -1427,7 +1639,7 @@ if __name__ == '__main__':
                                load_session_context, load_multiday_sessions)
 
     mouse_id = '26'
-    date = '2025-09-08'
+    date = '2025-08-25'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1437,21 +1649,10 @@ if __name__ == '__main__':
     data, meta = load_processed_session(paths['parquet'])
 
     # Single session (auto-splits trial types)
-    fig, axes = plot_session_lick_raster(data, exp_config, label=date)
-    plt.show()
+    figs = plot_behavior_analysis(data, exp_config, animal_id=mouse_id, date=date)
 
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-02', '2025-09-08'), auto_process=False,
+        mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False,
     )
-    fig = plot_multiday_lick_raster(sessions)
-    plt.show()
-
-    fig2 = plot_speed_profile(data, exp_config)
-    plt.show()
-
-    fig3 = plot_speed_raster(data, exp_config, trial_type = 'ABC')
-    plt.show()
-
-    fig4 = plot_session_speed_raster(data, exp_config)
-    plt.show()
+    multiday_figs = plot_multiday_behavior_analysis(sessions, animal_id=mouse_id)
 
