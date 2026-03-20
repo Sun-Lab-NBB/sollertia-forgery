@@ -704,13 +704,18 @@ def plot_condition_heatmaps(
         if config is not None:
             trial_type = condition.split("_")[0]
             if divergence_cm is not None:
-                boundaries = pfmt.get_cue_boundaries(config=config, trial_type=trial_type)
-                x_max = next(b for b in boundaries if b > divergence_cm + 1e-6)
+                x_max = divergence_cm + 10
             else:
                 x_max = x_extent
             axis.set_xlim(0, x_max)
             pfmt.add_cue_bar(ax=axis, config=config, trial_type=trial_type, axis='x', max_cm=x_max)
             pfmt.set_cue_boundary_ticks(ax=axis, config=config, trial_type=trial_type, max_cm=x_max)
+
+            # Draw vertical lines at cue boundaries.
+            boundaries = pfmt.get_cue_boundaries(config=config, trial_type=trial_type, max_cm=x_max)
+            for boundary in boundaries[1:]:
+                axis.axvline(x=boundary, color="white", linewidth=0.8, alpha=0.7)
+
             if divergence_cm is not None:
                 axis.axvline(
                     x=divergence_cm,
@@ -773,12 +778,7 @@ def plot_pv_correlation_panels(
 
         if config is not None:
             trial_type = condition_a.split("_")[0]
-            pos, x_max = 0.0, divergence_cm
-            for cue_id in config.get("trial_structures", {}).get(trial_type, {}).get("cue_sequence", []):
-                pos += config.get("cue_map", {}).get(cue_id, 0.0)
-                if pos > divergence_cm + 1e-6:
-                    x_max = pos
-                    break
+            x_max = divergence_cm + 10
             axis.set_xlim(0, x_max)
             pfmt.add_cue_bar(ax=axis, config=config, trial_type=trial_type, max_cm=x_max)
             pfmt.set_cue_boundary_ticks(ax=axis, config=config, trial_type=trial_type, max_cm=x_max)
@@ -838,7 +838,7 @@ def plot_spatial_correlation_panels(
 
 
 
-_VARIANCE_COLORS: list[str] = ["#6A0572", "#E84855"]
+_VARIANCE_COLORS: list[str] = ["#6A0572", "#DAA520"]
 
 
 def plot_variance_overlay(
@@ -866,8 +866,7 @@ def plot_variance_overlay(
     # Compute x_max once for the shared axis.
     x_max: float | None = None
     if config is not None and divergence_cm is not None:
-        boundaries = pfmt.get_cue_boundaries(config=config, trial_type=trial_type)
-        x_max = next((b for b in boundaries if b > divergence_cm + 1e-6), divergence_cm)
+        x_max = divergence_cm + 10
         pfmt.add_cue_shading(ax=axis, config=config, trial_type=trial_type, max_cm=x_max)
 
     for color, condition in zip(_VARIANCE_COLORS, conditions_to_plot):
@@ -907,11 +906,10 @@ def plot_history_dependent_remapping(
     animal_id: str,
     date: str,
     save_path_maps: Path | None = None,
-    save_path_prior: Path | None = None,
-    save_path_current: Path | None = None,
+    save_path_metrics: Path | None = None,
     show: bool = True,
-) -> tuple[Figure, Figure, Figure, Figure]:
-    """Plots a four-figure summary of history-dependent remapping for one session.
+) -> tuple[Figure, Figure, Figure]:
+    """Plots a three-figure summary of history-dependent remapping for one session.
 
     Figure 1 (maps) shows session-averaged tuning curve heatmaps. Row 0 has the ABC
     session average and its two history conditions; row 1 has the same for ABDC. Cells
@@ -920,12 +918,10 @@ def plot_history_dependent_remapping(
     Figure 2 (variance) shows mean per-bin variance profiles. Row 0 has the two ABC
     history conditions; row 1 has the two ABDC history conditions.
 
-    Figure 3 (prior effect) shows PV correlation (row 0) and per-cell spatial correlation
-    distributions (row 1) for comparisons that hold current trial type fixed and vary the
-    previous trial type.
-
-    Figure 4 (current effect) shows the same layout for comparisons that hold previous
-    trial type fixed and vary the current trial type.
+    Figure 3 (metrics) is a 2x2 grid. Top row shows PV correlation vs position with
+    prior-effect comparisons overlaid on the left and current-effect comparisons on the
+    right. Bottom row shows the corresponding per-cell spatial correlation histograms.
+    Each comparison is colored by its trial type using the standard trial type palette.
 
     Args:
         results: Output dictionary from compute_history_dependent_remapping().
@@ -933,12 +929,11 @@ def plot_history_dependent_remapping(
         animal_id: Animal identifier string for figure titles.
         date: Session date string for figure titles.
         save_path_maps: If provided, saves the maps figure to this path.
-        save_path_prior: If provided, saves the prior-effect figure to this path.
-        save_path_current: If provided, saves the current-effect figure to this path.
+        save_path_metrics: If provided, saves the combined metrics figure to this path.
         show: Determines whether to call plt.show() after rendering each figure.
 
     Returns:
-        Tuple of (maps_figure, variance_figure, prior_figure, current_figure).
+        Tuple of (maps_figure, variance_figure, metrics_figure).
     """
     conditions = results["conditions"]
     core_conditions = [c for c in conditions if _START_LABEL not in c]
@@ -979,7 +974,12 @@ def plot_history_dependent_remapping(
 
     # Figure 1: heatmaps. 2 rows × 4 cols.
     # Each row: [session avg | hist cond 1 | hist cond 2 | cond1 − cond2 difference].
-    fig_maps, axes_maps = plt.subplots(nrows=2, ncols=4, figsize=(17, 8))
+    fig_maps, axes_maps = plt.subplots(
+        nrows=2,
+        ncols=4,
+        figsize=(17, 8),
+        gridspec_kw={"width_ratios": [1, 1, 1, 1], "wspace": 0.4},
+    )
 
     fig_maps.suptitle(f"{title_base} — heatmaps", fontsize=13, fontweight="bold")
 
@@ -997,7 +997,7 @@ def plot_history_dependent_remapping(
             divergence_cm=results["divergence_cm"],
         )
         if last_im is not None:
-            cbar = fig_maps.colorbar(last_im, ax=list(axes_maps[row_index, :len(panels)]), fraction=0.02, pad=0.02)
+            cbar = fig_maps.colorbar(last_im, ax=axes_maps[row_index, 2], fraction=0.046, pad=0.04)
             cbar.set_label("Norm. activity", fontsize=7)
             cbar.ax.tick_params(labelsize=7)
 
@@ -1047,14 +1047,16 @@ def plot_history_dependent_remapping(
             diff_ax.spines["top"].set_visible(False)
             diff_ax.spines["right"].set_visible(False)
             if config is not None:
-                boundaries = pfmt.get_cue_boundaries(config=config, trial_type=trial_type)
-                x_max = next(
-                    (b for b in boundaries if b > results["divergence_cm"] + 1e-6),
-                    x_extent,
-                )
+                x_max = results["divergence_cm"] + 10
                 diff_ax.set_xlim(0, x_max)
                 pfmt.add_cue_bar(ax=diff_ax, config=config, trial_type=trial_type, axis='x', max_cm=x_max)
                 pfmt.set_cue_boundary_ticks(ax=diff_ax, config=config, trial_type=trial_type, max_cm=x_max)
+
+                # Draw vertical lines at cue boundaries.
+                boundaries = pfmt.get_cue_boundaries(config=config, trial_type=trial_type, max_cm=x_max)
+                for boundary in boundaries[1:]:
+                    diff_ax.axvline(x=boundary, color="white", linewidth=0.8, alpha=0.7)
+
                 diff_ax.axvline(
                     x=results["divergence_cm"],
                     color="black",
@@ -1079,7 +1081,7 @@ def plot_history_dependent_remapping(
 
     # Figure 2: variance profiles. 1 row × 2 cols, one panel per trial type with
     # both history conditions overlaid.
-    fig_variance, axes_variance = plt.subplots(nrows=1, ncols=2, figsize=(10, 4))
+    fig_variance, axes_variance = plt.subplots(nrows=1, ncols=2, figsize=(10, 4), sharey=True)
 
     fig_variance.suptitle(f"{title_base} — Variance", fontsize=13, fontweight="bold")
 
@@ -1095,15 +1097,15 @@ def plot_history_dependent_remapping(
             divergence_cm=results["divergence_cm"],
         )
 
-    # Single legend anchored outside the right edge of the last axis.
-    all_handles, all_labels = [], []
+    # Single deduplicated legend anchored outside the right edge of the last axis.
+    seen: dict[str, object] = {}
     for ax in axes_variance:
-        h, l = ax.get_legend_handles_labels()
-        all_handles.extend(h)
-        all_labels.extend(l)
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            if label not in seen:
+                seen[label] = handle
     axes_variance[-1].legend(
-        all_handles,
-        all_labels,
+        seen.values(),
+        seen.keys(),
         loc="upper left",
         bbox_to_anchor=(1.02, 1.0),
         frameon=False,
@@ -1121,52 +1123,95 @@ def plot_history_dependent_remapping(
     prior_comparisons = [c for c in comparisons if c[2].startswith("History effect")]
     current_comparisons = [c for c in comparisons if c[2].startswith("Remapping after")]
 
-    def _make_metrics_figure(
-        subset: list[tuple[str, str, str]],
-        subtitle: str,
-        save_path: Path | None,
-    ) -> Figure:
-        n_cols = max(len(subset), 1)
-        fig, axes = plt.subplots(nrows=2, ncols=n_cols, figsize=(4.5 * n_cols, 8))
-        if n_cols == 1:
-            axes = axes.reshape(2, 1)
-        fig.suptitle(f"{title_base} — {subtitle}", fontsize=13, fontweight="bold")
-        plot_pv_correlation_panels(
-            axes=list(axes[0, :len(subset)]),
-            pv_correlations=results["pv_correlations"],
-            comparisons=subset,
-            bin_size_cm=bin_size_cm,
-            divergence_cm=results["divergence_cm"],
-            config=config,
-        )
-        plot_spatial_correlation_panels(
-            axes=list(axes[1, :len(subset)]),
-            spatial_correlations=results["spatial_correlations"],
-            comparisons=subset,
-        )
-        for extra_col in range(len(subset), n_cols):
-            axes[0, extra_col].set_visible(False)
-            axes[1, extra_col].set_visible(False)
-        fig.tight_layout(rect=[0, 0, 1, 0.96])
-        if save_path is not None:
-            fig.savefig(save_path, dpi=150, bbox_inches="tight")
-            console.echo(message=f"Saved {subtitle} figure to {save_path}.")
-        if show:
-            plt.show()
-        return fig
+    # Get trial-type colors from the standard palette.
+    light_colors, dark_colors = pfmt.get_trial_type_colors(config=config)
 
-    fig_prior = _make_metrics_figure(
-        subset=prior_comparisons,
-        subtitle="Prior Effect",
-        save_path=save_path_prior,
-    )
-    fig_current = _make_metrics_figure(
-        subset=current_comparisons,
-        subtitle="Current Effect",
-        save_path=save_path_current,
-    )
+    # Combined metrics figure: 2x2 grid.
+    # Top row: PV correlation vs position (left = prior effect, right = current effect).
+    # Bottom row: per-cell spatial correlation histograms (same column layout).
+    fig_metrics, axes_metrics = plt.subplots(nrows=2, ncols=2, figsize=(12, 8))
+    fig_metrics.suptitle(f"{title_base} — Metrics", fontsize=13, fontweight="bold")
 
-    return fig_maps, fig_variance, fig_prior, fig_current
+    for col_index, (subset, subtitle) in enumerate([
+        (prior_comparisons, "Prior Effect"),
+        (current_comparisons, "Current Effect"),
+    ]):
+        pv_ax = axes_metrics[0, col_index]
+        hist_ax = axes_metrics[1, col_index]
+
+        for condition_a, condition_b, label in subset:
+            # Color by the current trial type (first part of condition_a).
+            current_type = condition_a.split("_")[0]
+            color = dark_colors.get(current_type, "#333333")
+
+            # PV correlation overlay.
+            if label in results["pv_correlations"]:
+                pv_corr = results["pv_correlations"][label]
+                positions_cm = np.arange(len(pv_corr)) * bin_size_cm + bin_size_cm / 2
+                pv_ax.plot(positions_cm, pv_corr, color=color, linewidth=1.5, label=current_type)
+
+            # Spatial correlation histogram overlay.
+            if label in results["spatial_correlations"]:
+                valid_corrs = results["spatial_correlations"][label]
+                valid_corrs = valid_corrs[~np.isnan(valid_corrs)]
+                median_val = float(np.median(valid_corrs)) if len(valid_corrs) > 0 else np.nan
+                hist_ax.hist(
+                    valid_corrs,
+                    bins=np.linspace(-1.0, 1.0, 41),
+                    color=color,
+                    alpha=0.5,
+                    edgecolor="white",
+                    linewidth=0.5,
+                    label=f"{current_type} (med={median_val:.3f})",
+                )
+                hist_ax.axvline(x=median_val, color=color, linewidth=1.5, linestyle="--")
+
+        # Format PV axis.
+        pv_ax.axhline(y=0.0, color="gray", linewidth=0.8, linestyle="--", alpha=0.5)
+        pv_ax.axvline(
+            x=results["divergence_cm"],
+            color="black",
+            linewidth=1.0,
+            linestyle=":",
+            alpha=0.7,
+        )
+        pv_ax.set_ylim(0.5, 1.0)
+        pv_ax.set_xlabel("Position (cm)", fontsize=9)
+        pv_ax.set_ylabel("PV correlation (r)", fontsize=9)
+        pv_ax.set_title(subtitle, fontsize=10, fontweight="bold")
+        pv_ax.tick_params(labelsize=8)
+        pv_ax.spines["top"].set_visible(False)
+        pv_ax.spines["right"].set_visible(False)
+        pv_ax.legend(frameon=False, fontsize=8)
+
+        if config is not None:
+            # Use the first trial type for cue bar in prior, second in current.
+            ref_type = trial_types[0] if col_index == 0 else trial_types[-1]
+            x_max = results["divergence_cm"] + 10
+            pv_ax.set_xlim(0, x_max)
+            pfmt.add_cue_bar(ax=pv_ax, config=config, trial_type=ref_type, max_cm=x_max)
+            pfmt.set_cue_boundary_ticks(ax=pv_ax, config=config, trial_type=ref_type, max_cm=x_max)
+
+        # Format histogram axis.
+        hist_ax.axvline(x=0.0, color="gray", linewidth=0.8, alpha=0.5)
+        hist_ax.set_xlabel("Spatial correlation (r)", fontsize=9)
+        hist_ax.set_ylabel("Cells", fontsize=9)
+        hist_ax.set_title(subtitle, fontsize=10, fontweight="bold")
+        hist_ax.tick_params(labelsize=8)
+        hist_ax.spines["top"].set_visible(False)
+        hist_ax.spines["right"].set_visible(False)
+        hist_ax.legend(frameon=False, fontsize=8)
+
+    fig_metrics.tight_layout(rect=[0, 0, 1, 0.96])
+
+    if save_path_metrics is not None:
+        fig_metrics.savefig(save_path_metrics, dpi=150, bbox_inches="tight")
+        console.echo(message=f"Saved metrics figure to {save_path_metrics}.")
+
+    if show:
+        plt.show()
+
+    return fig_maps, fig_variance, fig_metrics
 
 
 # SESSION WRAPPERS
@@ -1288,12 +1333,12 @@ def analyze_session(
     n_shuffles: int = 500,
 
     output_directory: Path | None = None,
-) -> tuple[dict, tuple[Figure, Figure, Figure, Figure]]:
+) -> tuple[dict, tuple[Figure, Figure, Figure]]:
     """Computes and plots history-dependent remapping for a single session.
 
     Convenience wrapper that calls compute_history_dependent_remapping() followed
     by plot_history_dependent_remapping(). If output_directory is provided, saves
-    all four figures using the standard naming convention.
+    all three figures using the standard naming convention.
 
     Args:
         df: Frame-level DataFrame from process_session().
@@ -1308,10 +1353,10 @@ def analyze_session(
         n_shuffles: Number of shuffle iterations when run_shuffle is True.
         animal_id: Animal identifier used in the figure title and filename.
         date: Session date used in the figure title and filename.
-        output_directory: If provided, saves all four figures to this directory.
+        output_directory: If provided, saves all three figures to this directory.
 
     Returns:
-        Tuple of (results_dict, (maps_figure, variance_figure, prior_figure, current_figure)).
+        Tuple of (results_dict, (maps_figure, variance_figure, metrics_figure)).
         results_dict contains all computed metrics as returned by
         compute_history_dependent_remapping().
     """
@@ -1329,13 +1374,11 @@ def analyze_session(
     print_session_summary(results=results, animal_id=animal_id, date=date)
 
     save_path_maps: Path | None = None
-    save_path_prior: Path | None = None
-    save_path_current: Path | None = None
+    save_path_metrics: Path | None = None
     if output_directory is not None and animal_id is not None and date is not None:
         prefix = Path(output_directory) / f"{animal_id}_{date}_history_dependent_remapping"
         save_path_maps = Path(f"{prefix}_maps.pdf")
-        save_path_prior = Path(f"{prefix}_prior_effect.pdf")
-        save_path_current = Path(f"{prefix}_current_effect.pdf")
+        save_path_metrics = Path(f"{prefix}_metrics.pdf")
 
     figures = plot_history_dependent_remapping(
         results=results,
@@ -1343,8 +1386,7 @@ def analyze_session(
         animal_id=animal_id,
         date=date,
         save_path_maps=save_path_maps,
-        save_path_prior=save_path_prior,
-        save_path_current=save_path_current,
+        save_path_metrics=save_path_metrics,
         show=True,
     )
 
@@ -1564,7 +1606,7 @@ if __name__ == '__main__':
 
     mouse_id = '26'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
-    date = '2025-09-10'
+    date = '2025-09-08'
 
     # Load session
     session_dir = find_session_dir(mouse_dir, date)
