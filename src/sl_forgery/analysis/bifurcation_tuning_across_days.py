@@ -14,13 +14,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-import sys
-sys.path.insert(0, '/Users/cs963/Desktop/sun_lab/sl-forgery/src/sl_forgery/analysis/')
-
 from df_processing import get_cue_regions, load_multiday_sessions
-from place_field_detection import (
-    detect_place_fields, PlaceFieldResult, PlaceFields1d, DetectionParams,
-)
+from place_field_detection import PlaceFieldResult, PlaceFields1d, DetectionParams
 from cross_correlation_1 import get_mean_tuning_curves
 import plot_utils as pfmt
 
@@ -299,13 +294,16 @@ if __name__ == '__main__':
     from pathlib import Path
     from multiday_place_field_comparison import detect_fields_multiday
 
-    mouse_id = '14'
+    mouse_id = '26'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-08-18', '2025-08-22'), auto_process=False,
+        mouse_dir, dates=['2025-09-02', '2025-09-03',
+                          '2025-09-08', '2025-09-10',
+                          '2025-09-12', '2025-09-16'], auto_process=False,
         signal_cols=['multi_day_dff'],
     )
+    #date_range=('2025-08-01', '2025-09-16')
 
     params = DetectionParams(signal_type='dff', signal_threshold=.5, min_peak=.1)
     pf_results = detect_fields_multiday(sessions, params=params)
@@ -315,6 +313,6 @@ if __name__ == '__main__':
                 sessions, pf_results,
                 trial_type=type,
                 cell_selection='center',        #could also use overlap but more liberal
-                introduction_day='2025-08-22',
+                introduction_day='2025-09-08',
                 animal_id=mouse_id,
             )

@@ -822,7 +822,7 @@ if __name__ == "__main__":
 
     #process and save the offset-corrected df
     processed_df, meta = process_session(behavior_df, experiment_config)
-    save_processed_session(processed_df, session_dir, session_data, meta)  #.parent gets session folder
+    save_processed_session(processed_df, session_dir, session_data, meta)
 
     #load it back to check
     frame_df, meta = load_processed_session(paths['parquet'])
