@@ -149,6 +149,7 @@ def _extract_per_bin_trial_vectors(
     signal_col: str,
     trial_type: str,
     bin_idx: int,
+    trial_half: str | None = None,
 ) -> np.ndarray:
     """Extract population vector at a single bin for each trial.
 
@@ -157,6 +158,8 @@ def _extract_per_bin_trial_vectors(
         signal_col: Column containing neural signals.
         trial_type: Filter to this trial type.
         bin_idx: Spatial bin index.
+        trial_half: 'first' or 'second' to use only that half of trials
+            (sorted by trial number). None uses all trials.
 
     Returns:
         Shape (n_trials, n_cells).
@@ -170,7 +173,16 @@ def _extract_per_bin_trial_vectors(
 
     trials = sub['trial'].to_numpy()
     signals = np.vstack(sub[signal_col].to_list())
-    unique_trials = np.unique(trials)
+    unique_trials = np.sort(np.unique(trials))
+
+    if trial_half is not None:
+        mid = len(unique_trials) // 2
+        if trial_half == 'first':
+            unique_trials = unique_trials[:mid]
+        else:
+            unique_trials = unique_trials[mid:]
+        if len(unique_trials) == 0:
+            return np.empty((0, 0))
 
     n_cells = signals.shape[1]
     pvs = np.zeros((len(unique_trials), n_cells))
@@ -192,6 +204,7 @@ def sliding_decoder(
     n_splits: int = 5,
     n_shuffles: int = 100,  #really should be 500 but 100 for testing; for 14 this takes forever bc she has >300 trials
     seed: int = 42,
+    trial_half: str | None = None,
 ) -> dict:
     """Decode current trial type at each spatial bin using cross-validated SVM.
     Asks: Can the neural population distinguish between trial types at this spatial bin?
@@ -214,10 +227,12 @@ def sliding_decoder(
         n_splits: Stratified K-fold splits.
         n_shuffles: Number of label shuffles for chance distribution.
         seed: Random seed.
+        trial_half: 'first' or 'second' to decode using only that half of
+            trials (by trial number). None uses all trials.
 
     Returns:
         Dict with keys: 'bin_centers', 'accuracy', 'chance_mean', 'chance_95',
-        'n_shared_bins', 'trial_types'.
+        'n_shared_bins', 'trial_types', 'trial_half'.
     """
     from sklearn.model_selection import StratifiedKFold
     from sklearn.svm import SVC
@@ -234,7 +249,7 @@ def sliding_decoder(
     type_a, type_b = trial_types[0], trial_types[1]
 
     # Shared bins
-    n_shared = get_shared_bins(config, type_a, type_b, metadata)
+    _, n_shared = get_shared_bins(config, type_a, type_b, metadata)
 
     # Also decode a few bins past divergence for comparison
     max_bins_a = int(get_track_length(config, type_a) / bin_size_cm)
@@ -247,8 +262,8 @@ def sliding_decoder(
 
     #find population vectors for bin
     for b in range(n_total_bins):
-        pv_a = _extract_per_bin_trial_vectors(df, signal_col, type_a, b)
-        pv_b = _extract_per_bin_trial_vectors(df, signal_col, type_b, b)
+        pv_a = _extract_per_bin_trial_vectors(df, signal_col, type_a, b, trial_half=trial_half)
+        pv_b = _extract_per_bin_trial_vectors(df, signal_col, type_b, b, trial_half=trial_half)
 
         if pv_a.shape[0] < 3 or pv_b.shape[0] < 3:
             continue
@@ -308,6 +323,7 @@ def sliding_decoder(
         'chance_95': chance_95,
         'n_shared_bins': n_shared,
         'trial_types': (type_a, type_b),
+        'trial_half': trial_half,
     }
 
 
@@ -365,9 +381,11 @@ def plot_sliding_decoder(
                label=f'Tracks diverge ({diverge_cm:.0f} cm)')
     ax.axvspan(diverge_cm, x.max() + bin_size_cm, alpha=0.06, color='red', zorder=0)
 
-    # Cue shading
+    # Cue shading — colored up to divergence, gray after (tracks differ)
     if config and trial_type_for_cues:
-        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.15)
+        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.15, max_cm=diverge_cm)
+        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.08,
+                             min_cm=diverge_cm, override_color='gray')
 
     ax.set_xlabel('Position (cm)', fontsize=11)
     ax.set_ylabel('Decoder Accuracy', fontsize=11)
@@ -388,6 +406,115 @@ def plot_sliding_decoder(
     if show:
         plt.show()
     return fig
+
+
+def plot_sliding_decoder_by_half(
+    df: pl.DataFrame,
+    config: dict,
+    metadata: dict,
+    signal_col: str = 'multi_day_spikes',
+    classifier: str = 'svm',
+    n_splits: int = 5,
+    n_shuffles: int = 100,
+    seed: int = 42,
+    trial_type_for_cues: str | None = None,
+    animal_id: str | None = None,
+    date: str | None = None,
+    figsize: tuple = (10, 5),
+    show: bool = True,
+) -> tuple[Figure, dict, dict]:
+    """Run the sliding decoder on first vs second half of trials and overlay results.
+
+    Runs sliding_decoder twice (once per half) and plots both accuracy curves
+    on a single figure so you can see whether discrimination improves over
+    the session.
+
+    Args:
+        df: Frame-level DataFrame with distance_bin column.
+        config: Experiment configuration dict.
+        metadata: Metadata from the processed dataframe, contains 'bin_size_cm' value.
+        signal_col: Column containing neural signals.
+        classifier: 'svm' or 'logistic'.
+        n_splits: Stratified K-fold splits.
+        n_shuffles: Number of label shuffles for chance distribution.
+        seed: Random seed.
+        trial_type_for_cues: Which trial type's cue layout to shade.
+        animal_id: Animal identifier for plot title.
+        date: Session date for plot title.
+        figsize: Figure size.
+        show: Call plt.show().
+
+    Returns:
+        Tuple of (Figure, first_half_result, second_half_result).
+    """
+    print("Running sliding decoder — first half...")
+    result_first = sliding_decoder(
+        df, config, metadata, signal_col=signal_col, classifier=classifier,
+        n_splits=n_splits, n_shuffles=n_shuffles, seed=seed, trial_half='first',
+    )
+    print("Running sliding decoder — second half...")
+    result_second = sliding_decoder(
+        df, config, metadata, signal_col=signal_col, classifier=classifier,
+        n_splits=n_splits, n_shuffles=n_shuffles, seed=seed, trial_half='second',
+    )
+
+    x = result_first['bin_centers']
+    n_shared = result_first['n_shared_bins']
+    type_a, type_b = result_first['trial_types']
+    bin_size_cm = get_bin_size(metadata, df)
+    diverge_cm = n_shared * bin_size_cm
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Chance band (average of both halves)
+    chance_95_avg = np.nanmean(
+        np.vstack([result_first['chance_95'], result_second['chance_95']]), axis=0,
+    )
+    ax.fill_between(x, 0.5, chance_95_avg, alpha=0.15, color='gray', label='95% shuffle')
+    ax.axhline(0.5, color='gray', linewidth=0.5, alpha=0.5)
+
+    # First half
+    acc_1 = result_first['accuracy']
+    valid_1 = ~np.isnan(acc_1)
+    ax.plot(x[valid_1], acc_1[valid_1], color='#2E86AB', linewidth=2, zorder=4, label='First half')
+    ax.scatter(x[valid_1], acc_1[valid_1], color='#2E86AB', s=20, zorder=5)
+
+    # Second half
+    acc_2 = result_second['accuracy']
+    valid_2 = ~np.isnan(acc_2)
+    ax.plot(x[valid_2], acc_2[valid_2], color='#E63946', linewidth=2, zorder=4, label='Second half')
+    ax.scatter(x[valid_2], acc_2[valid_2], color='#E63946', s=20, zorder=5)
+
+    # Divergence line
+    ax.axvline(diverge_cm, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
+               label=f'Tracks diverge ({diverge_cm:.0f} cm)')
+    ax.axvspan(diverge_cm, x.max() + bin_size_cm, alpha=0.06, color='red', zorder=0)
+
+    # Cue shading — colored up to divergence, gray after (tracks differ)
+    if config and trial_type_for_cues:
+        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.15, max_cm=diverge_cm)
+        pfmt.add_cue_shading(ax, config, trial_type_for_cues, alpha=0.08,
+                             min_cm=diverge_cm, override_color='gray')
+
+    ax.set_xlabel('Position (cm)', fontsize=11)
+    ax.set_ylabel('Decoder Accuracy', fontsize=11)
+    ax.set_title(
+        pfmt.build_title(f'Trial Type Decoder by Half — {type_a} vs {type_b}',
+                     animal_id=animal_id, date=date),
+        fontsize=13, fontweight='bold',
+    )
+    ax.set_xlim(0, x.max() + bin_size_cm)
+    ax.set_ylim(0.3, 1.05)
+    ax.legend(frameon=False, fontsize=10, loc='upper left')
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(alpha=0.2, axis='y')
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+    return fig, result_first, result_second
 
 
 # TRIAL-BY-TRIAL PV DISTANCE
@@ -969,8 +1096,8 @@ def run_decoding_analysis(
         n_shuffles=n_shuffles_decoder,
     )
     results['decoder'] = dec
-    fig = plot_sliding_decoder(
-        dec, df, config=config, trial_type_for_cues=trial_types[0],
+    fig = plot_sliding_decoder_by_half(
+        df, config=config, trial_type_for_cues=trial_types[0],
         metadata=metadata, animal_id=animal_id, date=date, show=show,
     )
     figs['decoder'] = fig
@@ -1013,7 +1140,7 @@ def run_decoding_analysis(
 
     results['figures'] = figs
 
-    print(data.filter(pl.col('trial_type') == 'ABC')
+    print(df.filter(pl.col('trial_type') == 'ABC')
           .group_by('cue_id')
           .agg(pl.col('distance_bin').min().alias('min_bin'), pl.col('distance_bin').max().alias('max_bin'))
           .sort('min_bin'))
@@ -1033,8 +1160,8 @@ def run_decoding_analysis(
 if __name__ == "__main__":
     from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
 
-    mouse_id = '14'
-    date = '2025-08-27'
+    mouse_id = '26'
+    date = '2025-09-08'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
