@@ -165,7 +165,7 @@ def _parse_session_date(session_name: str, *, utc_timezone: bool = True) -> date
         if utc_timezone:
             return utc_dt
         return utc_dt.astimezone(ZoneInfo("America/New_York"))
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return None
 
 

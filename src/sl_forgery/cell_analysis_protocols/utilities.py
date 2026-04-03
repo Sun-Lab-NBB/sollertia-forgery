@@ -1,11 +1,17 @@
 """Provides utility functions for computing track geometry and session metadata from feather files."""
 
+from __future__ import annotations
+
 import math
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from numpy.typing import NDArray
 
 
 def compute_track_length(session_path: Path, trial_type: str) -> float:
@@ -36,7 +42,7 @@ def compute_track_length(session_path: Path, trial_type: str) -> float:
 
 
 def compute_within_trial_position(
-    distance: NDArray[np.float64],
+    distance: NDArray[np.float32],
     trial_ids: NDArray[np.int32],
 ) -> NDArray[np.float32]:
     """Computes within-trial position by subtracting each trial's starting distance.
@@ -80,7 +86,7 @@ def compute_reward_position(session_path: Path, track_length: float, trial_type:
     if trial_type is not None:
         df = df.filter(pl.col("trial_type") == trial_type)
 
-    distance = df["distance_cm"].to_numpy().astype(np.float64)
+    distance = df["distance_cm"].to_numpy().astype(np.float32)
     trial_ids = df["trial"].to_numpy().astype(np.int32)
     in_reward_zone = df["in_reward_zone"].to_numpy().astype(np.uint8)
 

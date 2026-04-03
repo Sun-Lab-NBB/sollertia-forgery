@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 from numba import njit, prange
 import numpy as np
@@ -13,8 +13,8 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
-from sl_forgery.analysis.utilities import compute_within_trial_position
-from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
+from sl_forgery.cell_analysis_protocols.utilities import compute_within_trial_position
+from sl_forgery.cell_analysis_protocols.place_cell_analysis import _bin_fluorescence_by_position
 
 
 @dataclass
@@ -385,9 +385,9 @@ class RewardCellDetector:
             df = df.filter(pl.col("trial_type") == trial_type)
 
         # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        self.fluorescence = np.vstack(df[fluorescence_column].to_list()).T.astype(np.float32)
+        self.fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
 
-        distance = df["distance_cm"].to_numpy().astype(np.float64)
+        distance = df["distance_cm"].to_numpy().astype(np.float32)
         self.trial_ids = df["trial"].to_numpy().astype(np.int32)
 
         # Computes within-trial position to avoid inter-trial drift from global modulo.
@@ -570,9 +570,8 @@ class RewardCellDetector:
             )
             return shuffled_information
 
-        # Runs shuffle iterations in parallel.
         worker_count = max(1, os.cpu_count() - 4)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
             shuffled_results = list(executor.map(run_single_shuffle, range(configuration.shuffle_count)))
 
         # Stacks shuffled information and computes p-values as the fraction of shuffles exceeding observed.
@@ -947,7 +946,8 @@ class RewardCellDetector:
         plot_bin_size: float = 2.0,
         plot_sigma: float = 5.0,
     ) -> plt.Figure:
-        """Plots mean population fluorescence by track position, comparing reward-predictive cells against all spatially modulated cells.
+        """Plots mean population fluorescence by track position, comparing reward-predictive cells against all spatially
+        modulated cells.
 
         Args:
             results: The RewardCellResults from a completed detect() call.
@@ -1161,7 +1161,8 @@ class RewardCellDetector:
         position_sigma: float = 3.0,
         slowing_threshold_cm_s: float = 10.0,
     ) -> plt.Figure:
-        """Plots per-trial activity heatmaps for an example reward-predictive and place cell, with slowing onset markers overlaid.
+        """Plots per-trial activity heatmaps for an example reward-predictive and place cell, with slowing onset markers
+        overlaid.
 
         Args:
             results: The RewardCellResults from a completed detect() call.

@@ -10,6 +10,7 @@ from pathlib import Path
 from dataclasses import field, dataclass
 from concurrent.futures import ThreadPoolExecutor
 
+from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
 import polars as pl
@@ -781,7 +782,7 @@ class PlaceFieldDetector:
             df = df.filter(pl.col("trial_type") == trial_type)
 
         # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        self.fluorescence = np.vstack(df[fluorescence_column].to_list()).T.astype(np.float32)
+        self.fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
 
         # Converts the cumulative distance to track position using modulus to wrap within a single lap.
         self.position = df["distance_cm"].to_numpy().astype(np.float32) % track_length
@@ -850,16 +851,19 @@ class PlaceFieldDetector:
             worker_count = max(1, os.cpu_count() - 4)
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            shuffled_results = list(
-                executor.map(
-                    lambda i: self._run_detection(
-                        fluorescence=self._shuffle(data=fluorescence, iteration=i),
-                        position=self.position,
-                        speed=speed,
-                    ).has_place_field,
-                    range(repeat_count),
+            futures = [
+                executor.submit(
+                    lambda i=i: (
+                        self._run_detection(
+                            fluorescence=self._shuffle(data=fluorescence, iteration=i),
+                            position=self.position,
+                            speed=speed,
+                        ).has_place_field
+                    ),
                 )
-            )
+                for i in range(repeat_count)
+            ]
+            shuffled_results = [future.result() for future in tqdm(futures, desc="Shuffle significance", unit="iter")]
 
         shuffled_results = np.vstack(shuffled_results).T
 
