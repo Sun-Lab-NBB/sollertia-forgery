@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from sollertia_shared_assets import MesoscopeHardwareState
 
-from ..shared_assets import interpolate_data
+from ataraxis_data_structures import interpolate_data
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray

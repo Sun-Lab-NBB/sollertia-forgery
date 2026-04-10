@@ -11,6 +11,7 @@ from datetime import datetime
 import pytz
 import polars as pl
 from filelock import FileLock
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     SessionData,
     SessionTypes,
@@ -26,7 +27,6 @@ from sollertia_shared_assets import (
     transfer_directory,
     calculate_directory_checksum,
 )
-from ataraxis_base_utilities import LogLevel, console
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -364,8 +364,9 @@ def generate_project_manifest(
                     manifest["notes"].append(descriptor.experimenter_notes)
                     is_complete = not descriptor.incomplete
                 elif session_data.session_type == SessionTypes.WINDOW_CHECKING:
-                    # sollertia-experiment version 3.0.0 added session descriptors to Window Checking runtimes. Since the file
-                    # does not exist in prior versions, this section is written to statically handle the discrepancy.
+                    # sollertia-experiment version 3.0.0 added session descriptors to Window Checking
+                    # runtimes. Since the file does not exist in prior versions, this section is written to
+                    # statically handle the discrepancy.
                     try:
                         descriptor: WindowCheckingDescriptor = WindowCheckingDescriptor.from_yaml(
                             file_path=session_data.raw_data.session_descriptor_path

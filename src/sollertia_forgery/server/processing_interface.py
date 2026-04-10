@@ -18,13 +18,8 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from . import Job, Server, ProcessingPipeline, get_remote_job_work_directory
 from .managing_interface import resolve_project_manifest
-from ..shared_assets import ProjectManifest
-from ..shared_assets import (
-    SessionMetadata,
-    delay_terminal,
-    execute_pipelines,
-    check_session_eligibility,
-)
+from ..shared_assets import ProjectManifest, SessionMetadata, delay_terminal
+from .pipeline import execute_pipelines, check_session_eligibility
 
 if TYPE_CHECKING:
     from pathlib import Path

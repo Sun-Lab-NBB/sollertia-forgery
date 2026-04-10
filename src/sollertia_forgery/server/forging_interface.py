@@ -25,7 +25,8 @@ from ataraxis_base_utilities import LogLevel, console
 from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
 from .managing_interface import resolve_project_manifest
 from ..shared_assets import ProjectManifest
-from ..shared_assets import delay_timer, delay_terminal, filter_sessions, execute_pipelines, check_session_eligibility
+from ..shared_assets import delay_timer, delay_terminal, filter_sessions
+from .pipeline import execute_pipelines, check_session_eligibility
 
 if TYPE_CHECKING:
     from pathlib import Path

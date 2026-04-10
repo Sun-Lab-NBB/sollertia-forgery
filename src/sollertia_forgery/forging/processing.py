@@ -7,6 +7,7 @@ Notes:
 
 from typing import TYPE_CHECKING
 
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     DatasetData,
     SessionData,
@@ -16,7 +17,6 @@ from sollertia_shared_assets import (
     ProcessingTracker,
     ProcessingPipelines,
 )
-from ataraxis_base_utilities import LogLevel, console
 
 from .data_assembly import DatasetTypes, assemble_report_dataset, assemble_session_dataset
 

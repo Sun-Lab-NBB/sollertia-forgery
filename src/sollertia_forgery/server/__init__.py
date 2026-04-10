@@ -4,7 +4,7 @@ from sollertia_shared_assets import DatasetTrackers, ManagingTrackers, Processin
 
 from .job import Job, JupyterJob
 from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
-from .pipeline import ProcessingPipeline
+from .pipeline import ProcessingPipeline, check_session_eligibility, execute_pipelines
 from .managing_interface import adopt_project, manage_project_data, resolve_project_manifest
 from .processing_interface import process_project_data
 from .forging_interface import forge_dataset, generate_report_datasets
@@ -19,6 +19,8 @@ __all__ = [
     "ProcessingPipeline",
     "ProcessingTrackers",
     "Server",
+    "check_session_eligibility",
+    "execute_pipelines",
     "adopt_project",
     "forge_dataset",
     "generate_report_datasets",

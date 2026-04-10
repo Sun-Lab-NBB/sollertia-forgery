@@ -19,7 +19,8 @@ _CAMERA_OUTPUT_NAMES: dict[int, str] = {
     51: "face_camera_timestamps.feather",
     62: "body_camera_timestamps.feather",
 }
-"""Maps camera source IDs to their output feather filenames, matching the naming convention used by sollertia-forgery processing."""
+"""Maps camera source IDs to their output feather filenames, matching the naming convention used by
+sollertia-forgery processing."""
 
 
 def find_camera_feathers(data_directory: Path, source_id: int | None = None) -> list[Path]:

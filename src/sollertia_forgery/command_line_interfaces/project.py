@@ -8,8 +8,8 @@ Notes:
 from pathlib import Path
 
 import click
-from sollertia_shared_assets import get_server_configuration
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import get_server_configuration
 
 from ..server import Server, adopt_project, resolve_project_manifest
 from ..managing import generate_project_manifest

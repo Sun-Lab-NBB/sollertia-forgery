@@ -2,8 +2,8 @@
 
 import click
 from tabulate import tabulate
-from sollertia_shared_assets import get_server_configuration
 from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import get_server_configuration
 
 from ..server import Server
 

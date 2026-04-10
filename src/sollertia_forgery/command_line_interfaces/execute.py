@@ -1,8 +1,8 @@
 """Provides CLIs for executing management, processing, and analysis workflows on adopted project sessions."""
 
 import click
-from sollertia_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import get_working_directory, get_server_configuration
 
 from ..server import (
     Server,

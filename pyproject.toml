@@ -177,8 +177,6 @@ warn_unused_ignores = true   # Warns against using 'type: ignore' for packages w
 
 exclude = [
     "sollertia-forgery-\\d+",  # Ignores temporary folder created by setuptools when building the sdist
-    "src/sollertia_forgery/analysis/*",   # Ignores analysis files pending style compliance
-    "src/sollertia_forgery/server/*",     # Ignores server files pending style compliance
     "venv.*/",                 # Ignores virtual environments
     "build/",                  # Ignores the sdist directory
     "dist/",                   # Ignores the wheel directory
@@ -187,6 +185,10 @@ exclude = [
     "recipe/",                 # Ignores recipe directory (grayskull output target)
     "tests/",                  # Ignores the test directory.
 ]
+
+[[tool.mypy.overrides]]
+module = ["sollertia_forgery.server.*", "sollertia_forgery.analysis.*"]
+ignore_errors = true
 
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
 [tool.coverage.paths]

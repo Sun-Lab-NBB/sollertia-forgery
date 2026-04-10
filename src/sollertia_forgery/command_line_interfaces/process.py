@@ -8,8 +8,8 @@ Notes:
 from pathlib import Path
 
 import click
-from sollertia_shared_assets import DatasetData
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import DatasetData
 
 from ..shared_assets import SessionMetadata
 from ..forging.processing import define_dataset, assemble_dataset, assemble_report_data
