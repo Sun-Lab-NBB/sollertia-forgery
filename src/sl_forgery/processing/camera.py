@@ -4,9 +4,8 @@ ataraxis-video-system library.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import shutil
+from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
@@ -32,7 +31,7 @@ def find_camera_feathers(data_directory: Path, source_id: int | None = None) -> 
 
     Args:
         data_directory: The path to the root directory to search. The directory is searched recursively, so feather
-            files may be nested at any depth below this path.
+            files may be nested at any depth below this path.console
         source_id: The numeric source ID of the camera to match. When provided, restricts discovery to the specific
             source ID and enforces that exactly one matching file exists. When omitted, discovers all camera timestamp
             feather files.
@@ -55,10 +54,7 @@ def find_camera_feathers(data_directory: Path, source_id: int | None = None) -> 
             console.error(message=message, error=FileNotFoundError)
         return []
 
-    if source_id is not None:
-        pattern = f"camera_{source_id}_timestamps.feather"
-    else:
-        pattern = _CAMERA_FEATHER_PATTERN
+    pattern = f"camera_{source_id}_timestamps.feather" if source_id is not None else _CAMERA_FEATHER_PATTERN
     matches = sorted(data_directory.rglob(pattern))
 
     if source_id is not None:

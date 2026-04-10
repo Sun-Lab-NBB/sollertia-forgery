@@ -20,7 +20,7 @@ from sl_shared_assets import (
 )
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
-from ..server import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
+from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
 from ..shared_assets import (
     ProjectManifest,
     SessionMetadata,

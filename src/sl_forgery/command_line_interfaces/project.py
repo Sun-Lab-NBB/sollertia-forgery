@@ -11,8 +11,8 @@ import click
 from sl_shared_assets import get_server_configuration
 from ataraxis_base_utilities import console
 
-from ..server import Server
-from ..managing import adopt_project, resolve_project_manifest, generate_project_manifest
+from ..server import Server, adopt_project, resolve_project_manifest
+from ..managing import generate_project_manifest
 from ..shared_assets import ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
@@ -140,7 +140,7 @@ def print_project_manifest_data(
 
     # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
-        project_name = project if project else project_path.stem
+        project_name = project or project_path.stem
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
             f"target project '{project_name}'."

@@ -16,8 +16,9 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from ..server import Job, Server, ProcessingPipeline, get_remote_job_work_directory
-from ..managing import ProjectManifest, resolve_project_manifest
+from . import Job, Server, ProcessingPipeline, get_remote_job_work_directory
+from .managing_interface import resolve_project_manifest
+from ..shared_assets import ProjectManifest
 from ..shared_assets import (
     SessionMetadata,
     delay_terminal,

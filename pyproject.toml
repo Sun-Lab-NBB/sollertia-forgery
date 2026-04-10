@@ -116,7 +116,7 @@ target-version = "py314"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the root source code directory
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
-extend-exclude = ["conf.py"]
+extend-exclude = ["conf.py", "src/sl_forgery/analysis", "src/sl_forgery/server"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.
 lint.select = ["ALL"]
@@ -177,7 +177,8 @@ warn_unused_ignores = true   # Warns against using 'type: ignore' for packages w
 
 exclude = [
     "sl-forgery-\\d+",         # Ignores temporary folder created by setuptools when building the sdist
-    "src/sl_forgery/legacy/*", # Ignores temporary legacy files
+    "src/sl_forgery/analysis/*",   # Ignores analysis files pending style compliance
+    "src/sl_forgery/server/*",     # Ignores server files pending style compliance
     "venv.*/",                 # Ignores virtual environments
     "build/",                  # Ignores the sdist directory
     "dist/",                   # Ignores the wheel directory

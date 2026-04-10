@@ -303,7 +303,7 @@ class _SlurmScript:
         _commands: The list of shell command lines appended to the script body.
     """
 
-    __slots__ = ("_directives", "_commands")
+    __slots__ = ("_commands", "_directives")
 
     def __init__(
         self,

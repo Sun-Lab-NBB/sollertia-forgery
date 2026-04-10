@@ -5,9 +5,7 @@ Notes:
 """
 
 from .pipeline import run_behavior_processing_pipeline
-from .interface import process_project_data
 
 __all__ = [
-    "process_project_data",
     "run_behavior_processing_pipeline",
 ]

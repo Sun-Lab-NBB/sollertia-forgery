@@ -4,10 +4,14 @@ import click
 from sl_shared_assets import get_working_directory, get_server_configuration
 from ataraxis_base_utilities import console
 
-from ..server import Server
-from ..forging import forge_dataset, generate_report_datasets
-from ..managing import manage_project_data, resolve_project_manifest
-from ..processing import process_project_data
+from ..server import (
+    Server,
+    forge_dataset,
+    manage_project_data,
+    process_project_data,
+    generate_report_datasets,
+    resolve_project_manifest,
+)
 from ..shared_assets import ProjectManifest, SessionMetadata, filter_sessions
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.

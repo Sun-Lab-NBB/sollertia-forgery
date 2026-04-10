@@ -793,9 +793,7 @@ def assemble_session_dataset(
         if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
             # First assembles the fluorescence data, which is needed to generate the reference time vector for other
             # datasets
-            with console.progress(
-                total=3, description=f"Assembling session {session_data_path.stem} datasets"
-            ) as pbar:
+            with console.progress(total=3, description=f"Assembling session {session_data_path.stem} datasets") as pbar:
                 fluorescence_data = _assemble_2p_fluorescence_dataset(
                     session_data_path=session_data_path, multiday_data_path=session_multiday_path
                 )
@@ -854,9 +852,7 @@ def assemble_session_dataset(
 
             # Assembles and saves the behavior dataset to disk as an uncompressed .feather file (to support
             # memory-mapping).
-            with console.progress(
-                total=1, description=f"Assembling session {session_data_path.stem} datasets"
-            ) as pbar:
+            with console.progress(total=1, description=f"Assembling session {session_data_path.stem} datasets") as pbar:
                 behavior_data = _assemble_behavior_dataset(
                     session_data_path=session_data_path, reference_time=reference_time
                 )

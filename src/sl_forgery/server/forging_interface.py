@@ -22,8 +22,9 @@ from sl_shared_assets import (
 )
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
-from ..managing import ProjectManifest, resolve_project_manifest
+from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
+from .managing_interface import resolve_project_manifest
+from ..shared_assets import ProjectManifest
 from ..shared_assets import delay_timer, delay_terminal, filter_sessions, execute_pipelines, check_session_eligibility
 
 if TYPE_CHECKING:

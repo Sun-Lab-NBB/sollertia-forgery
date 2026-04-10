@@ -40,67 +40,56 @@ _DISTANCE_SNAPSHOT_CODE: int = 5
 """The message code for distance snapshot data logged when VR wall cue sequence changes."""
 
 
-def find_log_archive(data_directory: Path, source_id: str) -> Path:
-    """Searches for a single log archive matching the target source ID under the data directory.
+def find_log_archives(data_directory: Path, source_id: str | None = None) -> list[Path]:
+    """Discovers log archives under the data directory.
 
-    Recursively searches the data_directory and all subdirectories for an archive file matching the
-    ``{source_id}_log.npz`` naming convention. Expects exactly one match per source ID within the directory tree.
+    Recursively searches the data_directory for .npz log archives matching the ``*_log.npz`` naming convention.
+    When a source_id is provided, narrows the search to the specific ``{source_id}_log.npz`` file and validates
+    that exactly one match exists.
 
     Args:
         data_directory: The path to the root directory to search. The directory is searched recursively, so archives
             may be nested at any depth below this path.
-        source_id: The source ID string to match. Corresponds to the filename prefix before the ``_log.npz`` suffix.
+        source_id: The source ID string to match. When provided, restricts discovery to the specific source ID and
+            enforces that exactly one matching file exists. When omitted, discovers all log archives.
 
     Returns:
-        The path to the discovered log archive.
+        A sorted list of paths to the discovered log archives. Returns an empty list when no source_id filter is
+        applied and no files are found.
 
     Raises:
-        FileNotFoundError: If the data_directory does not exist, is not a directory, or no archive matching the
-            source ID is found.
-        ValueError: If multiple archives matching the source ID are found under the data directory.
+        FileNotFoundError: If a source_id is specified and the data_directory does not exist, is not a directory, or
+            no archive matching the source ID is found.
+        ValueError: If a source_id is specified and multiple archives matching the source ID are found.
     """
     if not data_directory.exists() or not data_directory.is_dir():
-        message = (
-            f"Unable to find log archive for source '{source_id}' in '{data_directory}'. The path does not exist or "
-            f"is not a directory."
-        )
-        console.error(message=message, error=FileNotFoundError)
-
-    pattern = f"{source_id}{_LOG_ARCHIVE_SUFFIX}"
-    matches = sorted(data_directory.rglob(pattern))
-
-    if not matches:
-        message = (
-            f"Unable to find log archive for source '{source_id}' in '{data_directory}'. No file matching "
-            f"'{pattern}' was found."
-        )
-        console.error(message=message, error=FileNotFoundError)
-
-    if len(matches) > 1:
-        message = (
-            f"Unable to find log archive for source '{source_id}' in '{data_directory}'. Multiple files matching "
-            f"'{pattern}' were found: {[str(match) for match in matches]}. Expected exactly one match."
-        )
-        console.error(message=message, error=ValueError)
-
-    return matches[0]
-
-
-def find_log_archives(data_directory: Path) -> list[Path]:
-    """Discovers all log archives under the data directory.
-
-    Recursively searches the data_directory for .npz log archives matching the ``*_log.npz`` naming convention.
-
-    Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively.
-
-    Returns:
-        A sorted list of paths to all discovered log archives. Returns an empty list if no archives are found.
-    """
-    if not data_directory.exists() or not data_directory.is_dir():
+        if source_id is not None:
+            message = (
+                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. The path does not exist "
+                f"or is not a directory."
+            )
+            console.error(message=message, error=FileNotFoundError)
         return []
 
-    return sorted(data_directory.rglob(f"*{_LOG_ARCHIVE_SUFFIX}"))
+    pattern = f"{source_id}{_LOG_ARCHIVE_SUFFIX}" if source_id is not None else f"*{_LOG_ARCHIVE_SUFFIX}"
+    matches = sorted(data_directory.rglob(pattern))
+
+    if source_id is not None:
+        if not matches:
+            message = (
+                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. No file matching "
+                f"'{pattern}' was found."
+            )
+            console.error(message=message, error=FileNotFoundError)
+
+        if len(matches) > 1:
+            message = (
+                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. Multiple files matching "
+                f"'{pattern}' were found: {[str(match) for match in matches]}. Expected exactly one match."
+            )
+            console.error(message=message, error=ValueError)
+
+    return matches
 
 
 def extract_log_source_id(archive_path: Path) -> str:
@@ -125,9 +114,9 @@ def process_runtime_data(
     """Extracts acquisition system and runtime task data from a Mesoscope-VR .npz log archive.
 
     Notes:
-        Specifically designed to process the data logged by the Mesoscope-VR data acquisition system. Uses
-        LogArchiveReader from ataraxis-data-structures to efficiently read the archive with automatic onset timestamp
-        resolution and memory-mapped access.
+        Uses LogArchiveReader from ataraxis-data-structures to read the archive with automatic onset timestamp
+        resolution. The reader handles onset discovery and provides absolute UTC timestamps for each message,
+        eliminating the need for manual timestamp offset calculations.
 
     Args:
         log_path: The path to the .npz archive containing the Mesoscope-VR acquisition system data to extract.
@@ -137,122 +126,114 @@ def process_runtime_data(
     """
     console.echo(message=f"Extracting runtime data from '{log_path.name}'...")
 
-    _extract_mesoscope_vr_data(
-        log_path=log_path,
-        output_directory=output_directory,
-        experiment_configuration=experiment_configuration,
-    )
+    # Creates a LogArchiveReader to efficiently iterate through the archive with automatic onset resolution.
+    reader = LogArchiveReader(archive_path=log_path)
+
+    # Pre-creates the variables used to store extracted data.
+    system_states: list[np.uint8] = []
+    system_timestamps: list[np.uint64] = []
+    runtime_states: list[np.uint8] = []
+    runtime_timestamps: list[np.uint64] = []
+    reinforcing_guidance_states: list[np.uint8] = []
+    reinforcing_guidance_timestamps: list[np.uint64] = []
+    aversive_guidance_states: list[np.uint8] = []
+    aversive_guidance_timestamps: list[np.uint64] = []
+    cue_sequences: list[NDArray[np.uint8]] = []
+    distance_snapshots: list[np.float64] = []
+
+    # Iterates through all messages in the archive. LogArchiveReader handles onset discovery and provides absolute
+    # UTC timestamps automatically.
+    for message in reader.iter_messages():
+        timestamp = message.timestamp_us
+        payload = message.payload
+
+        # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences.
+        if len(payload) > _CUE_SEQUENCE_MIN_LENGTH and experiment_configuration is not None:
+            cue_sequences.append(payload.view(dtype=np.uint8).astype(np.uint8))
+
+        elif payload[0] == _SYSTEM_STATE_CODE:
+            system_states.append(np.uint8(payload[1]))
+            system_timestamps.append(timestamp)
+
+        elif payload[0] == _RUNTIME_STATE_CODE:
+            runtime_states.append(np.uint8(payload[1]))
+            runtime_timestamps.append(timestamp)
+
+        elif payload[0] == _REINFORCING_GUIDANCE_STATE_CODE:
+            reinforcing_guidance_states.append(np.uint8(payload[1]))
+            reinforcing_guidance_timestamps.append(timestamp)
+
+        elif payload[0] == _AVERSIVE_GUIDANCE_STATE_CODE:
+            aversive_guidance_states.append(np.uint8(payload[1]))
+            aversive_guidance_timestamps.append(timestamp)
+
+        elif payload[0] == _DISTANCE_SNAPSHOT_CODE:
+            distance_bytes = payload[1:9]
+            traveled_distance = np.float64(distance_bytes.view(dtype="<f8")[0])
+            distance_snapshots.append(traveled_distance)
+
+    # Ensures the output directory exists.
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    # Exports system state data.
+    system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
+    system_dataframe.write_ipc(file=output_directory / "system_state_data.feather", compression="uncompressed")
+
+    # Exports runtime state data.
+    runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
+    runtime_dataframe.write_ipc(file=output_directory / "runtime_state_data.feather", compression="uncompressed")
+
+    # Exports experiment-specific data only for experiment sessions.
+    if experiment_configuration is not None:
+        # Exports reinforcing guidance state data if present.
+        if reinforcing_guidance_states:
+            reinforcing_dataframe = pl.DataFrame(
+                {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
+            )
+            reinforcing_dataframe.write_ipc(
+                file=output_directory / "reinforcing_guidance_state_data.feather", compression="uncompressed"
+            )
+
+        # Exports aversive guidance state data if present.
+        if aversive_guidance_states:
+            aversive_dataframe = pl.DataFrame(
+                {"time_us": aversive_guidance_timestamps, "aversive_guidance_state": aversive_guidance_states}
+            )
+            aversive_dataframe.write_ipc(
+                file=output_directory / "aversive_guidance_state_data.feather", compression="uncompressed"
+            )
+
+        # Decomposes cue sequences into trials, handling single or multiple sequences.
+        trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+            experiment_configuration=experiment_configuration,
+            cue_sequences=cue_sequences,
+            distance_breakpoints=distance_snapshots,
+        )
+
+        # Processes the trial sequence to extract cue, trigger zone, and trial start metadata.
+        cue_sequence, distance_sequence, trigger_start, trigger_end, trial_start = _process_trial_sequence(
+            experiment_configuration=experiment_configuration,
+            trial_types=trial_types,
+            trial_distances=trial_distances,
+        )
+
+        # Exports VR cue-distance mapping.
+        cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
+        cue_dataframe.write_ipc(file=output_directory / "vr_cue_data.feather", compression="uncompressed")
+
+        # Exports trigger zone boundaries.
+        trigger_zone_dataframe = pl.DataFrame(
+            {"trigger_zone_start_cm": trigger_start, "trigger_zone_end_cm": trigger_end}
+        )
+        trigger_zone_dataframe.write_ipc(
+            file=output_directory / "vr_trigger_zone_data.feather", compression="uncompressed"
+        )
+
+        # Exports trial type and start distance data.
+        trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
+        trial_dataframe.write_ipc(file=output_directory / "trial_data.feather", compression="uncompressed")
 
     console.echo(message="Runtime data processing: Complete.", level=LogLevel.SUCCESS)
-
-
-def _prepare_motif_data(
-    trial_motifs: list[NDArray[np.uint8]], trial_distances: list[float]
-) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
-    """Prepares the flattened motif data for faster cue sequence-to-trial decomposition.
-
-    Args:
-        trial_motifs: The trial motifs (wall cue sequences) to decompose.
-        trial_distances: The trial motif distances, in centimeters.
-
-    Returns:
-        A tuple with five elements. The first element is the flattened array that stores all motifs. The second
-        element is the array that stores the starting indices of each motif in the flattened array. The third
-        element is the array that stores the length of each motif, in cues. The fourth element is the array
-        that stores the original indices of motifs before sorting. The fifth element is the array of trial distances
-        in centimeters.
-    """
-    # Sorts motifs by length (longest first) for greedy matching optimization.
-    motif_data: list[tuple[int, NDArray[np.uint8], int]] = [
-        (i, motif, len(motif)) for i, motif in enumerate(trial_motifs)
-    ]
-    motif_data.sort(key=lambda x: x[2], reverse=True)
-
-    # Calculates total size needed to represent all motifs in a single array.
-    total_size: int = sum(len(motif) for motif in trial_motifs)
-    motif_count: int = len(trial_motifs)
-
-    # Creates arrays with specified dtypes.
-    motifs_flat: NDArray[np.uint8] = np.zeros(total_size, dtype=np.uint8)
-    motif_starts: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
-    motif_lengths: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
-    motif_indices: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
-
-    # Fills the arrays with sorted motif data.
-    current_position: int = 0
-    for i, (original_index, motif, length) in enumerate(motif_data):
-        motif_uint8 = motif.astype(np.uint8) if motif.dtype != np.uint8 else motif
-        motifs_flat[current_position : current_position + length] = motif_uint8
-        motif_starts[i] = current_position
-        motif_lengths[i] = length
-        motif_indices[i] = original_index
-        current_position += length
-
-    distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32)
-
-    return motifs_flat, motif_starts, motif_lengths, motif_indices, distances_array
-
-
-@njit(cache=True)
-def _decompose_sequence_numba_flat(
-    cue_sequence: NDArray[np.uint8],
-    motifs_flat: NDArray[np.uint8],
-    motif_starts: NDArray[np.int32],
-    motif_lengths: NDArray[np.int32],
-    motif_indices: NDArray[np.int32],
-    max_trials: int,
-) -> tuple[NDArray[np.int32], int]:
-    """Decomposes a long sequence of Virtual Reality wall cues into individual trial motifs.
-
-    Notes:
-        Uses numba-acceleration to speed up decomposition. Longer motifs are matched preferentially over shorter
-        ones to prevent partial matches.
-
-    Args:
-        cue_sequence: The full Virtual Reality environment cue sequence to decompose.
-        motifs_flat: All trial type motifs concatenated into a single 1D array, sorted by length.
-        motif_starts: The starting index of each unique motif in the motifs_flat array.
-        motif_lengths: The length of each unique motif in the motifs_flat array.
-        motif_indices: The original trial type motif indices before sorting.
-        max_trials: The maximum number of trials that can make up the entire cue sequence.
-
-    Returns:
-        A tuple of two elements. The first element is the array of trial-type indices decoded from the cue
-        sequence. The second element is the total number of trials extracted, or -1 if decomposition failed.
-    """
-    trial_indices: NDArray[np.int32] = np.zeros(max_trials, dtype=np.int32)
-    trial_count = 0
-    sequence_position = 0
-    sequence_length = len(cue_sequence)
-    num_motifs = len(motif_lengths)
-
-    # Decomposes the sequence into trial motifs using greedy matching.
-    while sequence_position < sequence_length and trial_count < max_trials:
-        motif_found = False
-
-        for i in range(num_motifs):
-            motif_length = motif_lengths[i]
-
-            if sequence_position + motif_length <= sequence_length:
-                motif_start = motif_starts[i]
-
-                match = True
-                for j in range(motif_length):
-                    if cue_sequence[sequence_position + j] != motifs_flat[motif_start + j]:
-                        match = False
-                        break
-
-                if match:
-                    trial_indices[trial_count] = motif_indices[i]
-                    trial_count += 1
-                    sequence_position += motif_length
-                    motif_found = True
-                    break
-
-        if not motif_found:
-            return trial_indices, -1
-
-    return trial_indices[:trial_count], trial_count
 
 
 def _decompose_multiple_cue_sequences_into_trials(
@@ -299,7 +280,8 @@ def _decompose_multiple_cue_sequences_into_trials(
     trials: list[WaterRewardTrial | GasPuffTrial] = list(experiment_configuration.trial_structures.values())
 
     # Extracts trial motifs and their corresponding distances in centimeters.
-    trial_motifs: list[NDArray[np.uint8]] = [np.array(trial.cue_sequence, dtype=np.uint8) for trial in trials]
+    # noinspection PyTypeChecker
+    trial_motifs: list[NDArray[np.uint8]] = [np.asarray(trial.cue_sequence).astype(np.uint8) for trial in trials]
     trial_distances: list[float] = [float(trial.trial_length_cm) for trial in trials]
 
     # Prepares the flattened motif data for numba-accelerated decomposition.
@@ -353,16 +335,16 @@ def _decompose_multiple_cue_sequences_into_trials(
             trial_distance = distances_array[trial_index]
             new_cumulative_distance = cumulative_distance + trial_distance
 
+            # Handles breakpoint-based truncation for non-final sequences.
             if sequence_index < len(cue_sequences) - 1:
                 breakpoint_distance = distance_breakpoints[sequence_index]
 
-                # Truncates the sequence at the breakpoint if the trial extends beyond it.
                 if new_cumulative_distance > breakpoint_distance:
                     truncated_distance = breakpoint_distance - cumulative_distance
 
                     if truncated_distance > 0:
                         all_trial_indices.append(trial_index)
-                        all_trial_distances.append(breakpoint_distance)
+                        all_trial_distances.append(float(breakpoint_distance))
 
                         message = (
                             f"Sequence {sequence_index + 1}, Trial {trial_index}: truncated. Full trial should "
@@ -374,47 +356,124 @@ def _decompose_multiple_cue_sequences_into_trials(
                     cumulative_distance = breakpoint_distance
                     break
 
-                all_trial_indices.append(trial_index)
-                all_trial_distances.append(new_cumulative_distance)
-                cumulative_distance = new_cumulative_distance
-            else:
-                all_trial_indices.append(trial_index)
-                all_trial_distances.append(new_cumulative_distance)
-                cumulative_distance = new_cumulative_distance
+            all_trial_indices.append(trial_index)
+            all_trial_distances.append(float(new_cumulative_distance))
+            cumulative_distance = new_cumulative_distance
 
-    trial_type_sequence = np.array(all_trial_indices, dtype=np.int32)
-    trial_distance_sequence = np.array(all_trial_distances, dtype=np.float64)
+    trial_type_sequence: NDArray[np.int32] = np.array(all_trial_indices, dtype=np.int32).astype(np.int32)
+    trial_distance_sequence: NDArray[np.float64] = np.array(all_trial_distances, dtype=np.float64).astype(np.float64)
 
     return trial_type_sequence, trial_distance_sequence
 
 
-def _decompose_cue_sequence_into_trials(
-    experiment_configuration: MesoscopeExperimentConfiguration,
-    cue_sequence: NDArray[np.uint8],
-) -> tuple[NDArray[np.int32], NDArray[np.float64]]:
-    """Decomposes a single Virtual Reality environment cue sequence into a sequence of trials.
-
-    Notes:
-        Convenience wrapper around _decompose_multiple_cue_sequences_into_trials() for runtimes that only used a
-        single wall cue sequence. Since multiple sequences are only present in runtimes that encountered issues,
-        this function is typically used during most data processing runtimes.
+def _prepare_motif_data(
+    trial_motifs: list[NDArray[np.uint8]], trial_distances: list[float]
+) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
+    """Prepares the flattened motif data for faster cue sequence-to-trial decomposition.
 
     Args:
-        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session.
-        cue_sequence: The Virtual Reality environment cue sequence to decompose into trials.
+        trial_motifs: The trial motifs (wall cue sequences) to decompose.
+        trial_distances: The trial motif distances, in centimeters.
 
     Returns:
-        A tuple of two elements. The first element is an array of trial type indices stored in the order encountered
-        during runtime. The second element is an array of cumulative distances at the end of each trial.
-
-    Raises:
-        RuntimeError: If the function is unable to fully decompose the cue sequence.
+        A tuple with five elements. The first element is the flattened array that stores all motifs. The second
+        element is the array that stores the starting indices of each motif in the flattened array. The third
+        element is the array that stores the length of each motif, in cues. The fourth element is the array
+        that stores the original indices of motifs before sorting. The fifth element is the array of trial distances
+        in centimeters.
     """
-    return _decompose_multiple_cue_sequences_into_trials(
-        experiment_configuration=experiment_configuration,
-        cue_sequences=[cue_sequence],
-        distance_breakpoints=[],
-    )
+    # Sorts motifs by length (longest first) for greedy matching optimization.
+    motif_data: list[tuple[int, NDArray[np.uint8], int]] = [
+        (i, motif, len(motif)) for i, motif in enumerate(trial_motifs)
+    ]
+    motif_data.sort(key=lambda x: x[2], reverse=True)
+
+    # Calculates total size needed to represent all motifs in a single array.
+    total_size: int = sum(len(motif) for motif in trial_motifs)
+    motif_count: int = len(trial_motifs)
+
+    # Creates arrays with specified dtypes.
+    motifs_flat: NDArray[np.uint8] = np.zeros(total_size, dtype=np.uint8).astype(np.uint8)
+    motif_starts: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
+    motif_lengths: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
+    motif_indices: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
+
+    # Fills the arrays with sorted motif data.
+    current_position: int = 0
+    for i, (original_index, motif, length) in enumerate(motif_data):
+        motif_uint8 = motif.astype(np.uint8) if motif.dtype != np.uint8 else motif
+        motifs_flat[current_position : current_position + length] = motif_uint8
+        motif_starts[i] = current_position
+        motif_lengths[i] = length
+        motif_indices[i] = original_index
+        current_position += length
+
+    distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32).astype(np.float32)
+
+    return motifs_flat, motif_starts, motif_lengths, motif_indices, distances_array
+
+
+@njit(cache=True)
+def _decompose_sequence_numba_flat(
+    cue_sequence: NDArray[np.uint8],
+    motifs_flat: NDArray[np.uint8],
+    motif_starts: NDArray[np.int32],
+    motif_lengths: NDArray[np.int32],
+    motif_indices: NDArray[np.int32],
+    max_trials: int,
+) -> tuple[NDArray[np.int32], int]:
+    """Decomposes a long sequence of Virtual Reality wall cues into individual trial motifs.
+
+    Notes:
+        Uses numba-acceleration to speed up decomposition. Longer motifs are matched preferentially over shorter
+        ones to prevent partial matches.
+
+    Args:
+        cue_sequence: The full Virtual Reality environment cue sequence to decompose.
+        motifs_flat: All trial type motifs concatenated into a single 1D array, sorted by length.
+        motif_starts: The starting index of each unique motif in the motifs_flat array.
+        motif_lengths: The length of each unique motif in the motifs_flat array.
+        motif_indices: The original trial type motif indices before sorting.
+        max_trials: The maximum number of trials that can make up the entire cue sequence.
+
+    Returns:
+        A tuple of two elements. The first element is the array of trial-type indices decoded from the cue
+        sequence. The second element is the total number of trials extracted, or -1 if decomposition failed.
+    """
+    # noinspection PyTypeChecker
+    trial_indices: NDArray[np.int32] = np.zeros(max_trials, dtype=np.int32)
+    trial_count = 0
+    sequence_position = 0
+    sequence_length = len(cue_sequence)
+    num_motifs = len(motif_lengths)
+
+    # Decomposes the sequence into trial motifs using greedy matching.
+    while sequence_position < sequence_length and trial_count < max_trials:
+        motif_found = False
+
+        for i in range(num_motifs):
+            motif_length = motif_lengths[i]
+
+            if sequence_position + motif_length <= sequence_length:
+                motif_start = motif_starts[i]
+
+                match = True
+                for j in range(motif_length):
+                    if cue_sequence[sequence_position + j] != motifs_flat[motif_start + j]:
+                        match = False
+                        break
+
+                if match:
+                    trial_indices[trial_count] = motif_indices[i]
+                    trial_count += 1
+                    sequence_position += motif_length
+                    motif_found = True
+                    break
+
+        if not motif_found:
+            return trial_indices, -1
+
+    return trial_indices[:trial_count], trial_count
 
 
 def _process_trial_sequence(
@@ -500,152 +559,23 @@ def _process_trial_sequence(
         trigger_end_absolute = previous_trial_end_distance + trigger_end_relative
 
         if trigger_start_absolute <= trial_distances[index]:
+            # noinspection PyTypeChecker
             trigger_zone_starts_list.append(trigger_start_absolute)
 
             if trigger_end_absolute <= trial_distances[index]:
+                # noinspection PyTypeChecker
                 trigger_zone_ends_list.append(trigger_end_absolute)
             else:
-                # noinspection PyTypeChecker
-                trigger_zone_ends_list.append(trial_distances[index])
+                trigger_zone_ends_list.append(np.float64(trial_distances[index]))
 
         previous_trial_end_distance = trial_distances[index]
 
-    distances = np.array(distances_list, dtype=np.float64)
-    cues = np.array(cues_list, dtype=np.uint8)
-    trigger_zone_starts = np.array(trigger_zone_starts_list, dtype=np.float64)
-    trigger_zone_ends = np.array(trigger_zone_ends_list, dtype=np.float64)
-    trial_start_distances = np.array(trial_start_distances_list, dtype=np.float64)
+    distances: NDArray[np.float64] = np.array(distances_list, dtype=np.float64).astype(np.float64)
+    cues: NDArray[np.uint8] = np.array(cues_list, dtype=np.uint8).astype(np.uint8)
+    trigger_zone_starts: NDArray[np.float64] = np.array(trigger_zone_starts_list, dtype=np.float64).astype(np.float64)
+    trigger_zone_ends: NDArray[np.float64] = np.array(trigger_zone_ends_list, dtype=np.float64).astype(np.float64)
+    trial_start_distances: NDArray[np.float64] = np.array(trial_start_distances_list, dtype=np.float64).astype(
+        np.float64
+    )
 
     return cues, distances, trigger_zone_starts, trigger_zone_ends, trial_start_distances
-
-
-def _extract_mesoscope_vr_data(
-    log_path: Path,
-    output_directory: Path,
-    experiment_configuration: MesoscopeExperimentConfiguration | None = None,
-) -> None:
-    """Extracts acquisition system and runtime task data from the Mesoscope-VR .npz log file.
-
-    Notes:
-        Uses LogArchiveReader from ataraxis-data-structures to read the archive with automatic onset timestamp
-        resolution. The reader handles onset discovery and provides absolute UTC timestamps for each message,
-        eliminating the need for manual timestamp offset calculations.
-
-    Args:
-        log_path: The path to the .npz archive containing the Mesoscope-VR acquisition system data to parse.
-        output_directory: The path to the directory where to save the extracted data as uncompressed .feather files.
-        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
-            required if the processed session is an experiment session.
-    """
-    # Creates a LogArchiveReader to efficiently iterate through the archive with automatic onset resolution.
-    reader = LogArchiveReader(archive_path=log_path)
-
-    # Pre-creates the variables used to store extracted data.
-    system_states: list[np.uint8] = []
-    system_timestamps: list[np.uint64] = []
-    runtime_states: list[np.uint8] = []
-    runtime_timestamps: list[np.uint64] = []
-    reinforcing_guidance_states: list[np.uint8] = []
-    reinforcing_guidance_timestamps: list[np.uint64] = []
-    aversive_guidance_states: list[np.uint8] = []
-    aversive_guidance_timestamps: list[np.uint64] = []
-    cue_sequences: list[NDArray[np.uint8]] = []
-    distance_snapshots: list[np.float64] = []
-
-    # Iterates through all messages in the archive. LogArchiveReader handles onset discovery and provides absolute
-    # UTC timestamps automatically.
-    for message in reader.iter_messages():
-        timestamp = message.timestamp_us
-        payload = message.payload
-
-        # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences.
-        if len(payload) > _CUE_SEQUENCE_MIN_LENGTH and experiment_configuration is not None:
-            cue_sequences.append(payload.view(np.uint8).copy())
-
-        elif payload[0] == _SYSTEM_STATE_CODE:
-            system_states.append(np.uint8(payload[1]))
-            system_timestamps.append(timestamp)
-
-        elif payload[0] == _RUNTIME_STATE_CODE:
-            runtime_states.append(np.uint8(payload[1]))
-            runtime_timestamps.append(timestamp)
-
-        elif payload[0] == _REINFORCING_GUIDANCE_STATE_CODE:
-            reinforcing_guidance_states.append(np.uint8(payload[1]))
-            reinforcing_guidance_timestamps.append(timestamp)
-
-        elif payload[0] == _AVERSIVE_GUIDANCE_STATE_CODE:
-            aversive_guidance_states.append(np.uint8(payload[1]))
-            aversive_guidance_timestamps.append(timestamp)
-
-        elif payload[0] == _DISTANCE_SNAPSHOT_CODE:
-            distance_bytes = payload[1:9]
-            traveled_distance = distance_bytes.view(dtype="<f8")[0]
-            # noinspection PyTypeChecker
-            distance_snapshots.append(traveled_distance)
-
-    # Ensures the output directory exists.
-    output_directory.mkdir(parents=True, exist_ok=True)
-
-    # Exports system state data.
-    system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
-    system_dataframe.write_ipc(file=output_directory / "system_state_data.feather", compression="uncompressed")
-
-    # Exports runtime state data.
-    runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
-    runtime_dataframe.write_ipc(file=output_directory / "runtime_state_data.feather", compression="uncompressed")
-
-    # Exports experiment-specific data only for experiment sessions.
-    if experiment_configuration is not None:
-        # Exports reinforcing guidance state data if present.
-        if reinforcing_guidance_states:
-            reinforcing_dataframe = pl.DataFrame(
-                {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
-            )
-            reinforcing_dataframe.write_ipc(
-                file=output_directory / "reinforcing_guidance_state_data.feather", compression="uncompressed"
-            )
-
-        # Exports aversive guidance state data if present.
-        if aversive_guidance_states:
-            aversive_dataframe = pl.DataFrame(
-                {"time_us": aversive_guidance_timestamps, "aversive_guidance_state": aversive_guidance_states}
-            )
-            aversive_dataframe.write_ipc(
-                file=output_directory / "aversive_guidance_state_data.feather", compression="uncompressed"
-            )
-
-        # Decomposes cue sequences into trials, handling single or multiple sequences.
-        if len(cue_sequences) > 1:
-            trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
-                experiment_configuration=experiment_configuration,
-                cue_sequences=cue_sequences,
-                distance_breakpoints=distance_snapshots,
-            )
-        else:
-            trial_types, trial_distances = _decompose_cue_sequence_into_trials(
-                experiment_configuration=experiment_configuration, cue_sequence=cue_sequences.pop()
-            )
-
-        # Processes the trial sequence to extract cue, trigger zone, and trial start metadata.
-        cue_sequence, distance_sequence, trigger_start, trigger_end, trial_start = _process_trial_sequence(
-            experiment_configuration=experiment_configuration,
-            trial_types=trial_types,
-            trial_distances=trial_distances,
-        )
-
-        # Exports VR cue-distance mapping.
-        cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
-        cue_dataframe.write_ipc(file=output_directory / "vr_cue_data.feather", compression="uncompressed")
-
-        # Exports trigger zone boundaries.
-        trigger_zone_dataframe = pl.DataFrame(
-            {"trigger_zone_start_cm": trigger_start, "trigger_zone_end_cm": trigger_end}
-        )
-        trigger_zone_dataframe.write_ipc(
-            file=output_directory / "vr_trigger_zone_data.feather", compression="uncompressed"
-        )
-
-        # Exports trial type and start distance data.
-        trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
-        trial_dataframe.write_ipc(file=output_directory / "trial_data.feather", compression="uncompressed")
