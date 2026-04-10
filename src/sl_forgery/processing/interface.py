@@ -7,17 +7,14 @@ Notes:
 
 from typing import TYPE_CHECKING
 
-from sl_shared_assets import (
+from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import (
     SessionTypes,
-    ProcessingStatus,
-    ProcessingTracker,
     AcquisitionSystems,
-    ProcessingTrackers,
-    ProcessingPipelines,
     get_working_directory,
     get_server_configuration,
 )
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from ..server import Job, Server, ProcessingPipeline, get_remote_job_work_directory
 from ..managing import ProjectManifest, resolve_project_manifest
@@ -30,6 +27,18 @@ from ..shared_assets import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+_BEHAVIOR_PIPELINE_NAME: str = "behavior"
+"""The pipeline identifier for the behavior data processing pipeline."""
+
+_SUITE2P_PIPELINE_NAME: str = "suite2p"
+"""The pipeline identifier for the single-day suite2p data processing pipeline."""
+
+_BEHAVIOR_TRACKER_FILENAME: str = "behavior_processing_tracker.yaml"
+"""The filename for the behavior processing tracker YAML file."""
+
+_SUITE2P_TRACKER_FILENAME: str = "suite2p_processing_tracker.yaml"
+"""The filename for the suite2p processing tracker YAML file."""
 
 
 def _construct_behavior_processing_pipeline(
@@ -74,7 +83,7 @@ def _construct_behavior_processing_pipeline(
     exclusion_reason = check_session_eligibility(
         manifest=manifest,
         session=session,
-        pipeline=ProcessingPipelines.BEHAVIOR,
+        pipeline=_BEHAVIOR_PIPELINE_NAME,
         server=server,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
@@ -95,9 +104,9 @@ def _construct_behavior_processing_pipeline(
 
         # Runtime data processing job
         job_name = f"{session}_runtime_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -114,9 +123,9 @@ def _construct_behavior_processing_pipeline(
 
         # Face camera processing job
         job_name = f"{session}_face_camera_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -133,9 +142,9 @@ def _construct_behavior_processing_pipeline(
 
         # Body camera processing job
         job_name = f"{session}_body_camera_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -152,9 +161,9 @@ def _construct_behavior_processing_pipeline(
 
         # Actor microcontroller data processing job
         job_name = f"{session}_actor_microcontroller_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -171,9 +180,9 @@ def _construct_behavior_processing_pipeline(
 
         # Sensor microcontroller data processing job
         job_name = f"{session}_sensor_microcontroller_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -190,9 +199,9 @@ def _construct_behavior_processing_pipeline(
 
         # Encoder microcontroller data processing job
         job_name = f"{session}_encoder_microcontroller_processing"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR
+            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
         )
         job = Job(
             job_name=job_name,
@@ -209,13 +218,13 @@ def _construct_behavior_processing_pipeline(
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = server.shared_storage_root.joinpath(
-        project, animal, session, "tracking_data", ProcessingTrackers.BEHAVIOR
+        project, animal, session, "tracking_data", _BEHAVIOR_TRACKER_FILENAME
     )
-    local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", ProcessingTrackers.BEHAVIOR)
+    local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", _BEHAVIOR_TRACKER_FILENAME)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
-        pipeline=ProcessingPipelines.BEHAVIOR,
+        pipeline=_BEHAVIOR_PIPELINE_NAME,
         server=server,
         data_path=remote_session_path,
         jobs={1: tuple(stage_1)},
@@ -275,7 +284,7 @@ def _construct_suite2p_processing_pipeline(
     exclusion_reason = check_session_eligibility(
         manifest=manifest,
         session=session,
-        pipeline=ProcessingPipelines.SUITE2P,
+        pipeline=_SUITE2P_PIPELINE_NAME,
         server=server,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
@@ -295,9 +304,9 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 1: Binarization
     job_name = f"{session}_ss2p_binarization"
-    job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+        server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
     )
     job = Job(
         job_name=job_name,
@@ -315,9 +324,9 @@ def _construct_suite2p_processing_pipeline(
     # Stage 2: Plane processing
     for plane in range(plane_count):
         job_name = f"{session}_ss2p_processing_plane_{plane}"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+            server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
         )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
@@ -337,9 +346,9 @@ def _construct_suite2p_processing_pipeline(
 
     # Stage 3: Combination
     job_name = f"{session}_ss2p_combination"
-    job_id = ProcessingTracker.generate_job_id(session_path=remote_session_path, job_name=job_name)
+    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.SUITE2P
+        server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
     )
     server.create(remote_path=working_directory, is_dir=True)
     job = Job(
@@ -357,15 +366,15 @@ def _construct_suite2p_processing_pipeline(
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = server.shared_storage_root.joinpath(
-        project, animal, session, "tracking_data", ProcessingTrackers.SUITE2P
+        project, animal, session, "tracking_data", _SUITE2P_TRACKER_FILENAME
     )
     local_tracker_path = local_working_directory.joinpath(
-        project, f"{session}_ss2p_sd_processing", ProcessingTrackers.SUITE2P
+        project, f"{session}_ss2p_sd_processing", _SUITE2P_TRACKER_FILENAME
     )
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
-        pipeline=ProcessingPipelines.SUITE2P,
+        pipeline=_SUITE2P_PIPELINE_NAME,
         server=server,
         data_path=remote_session_path,
         jobs={1: tuple(stage_1), 2: tuple(stage_2), 3: tuple(stage_3)},
