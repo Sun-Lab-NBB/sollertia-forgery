@@ -7,7 +7,6 @@ Notes:
 
 from typing import TYPE_CHECKING
 
-from tqdm import tqdm
 from natsort_rs import natsort
 from sl_shared_assets import (
     DatasetData,
@@ -458,8 +457,8 @@ def forge_dataset(
             animal_sessions.setdefault(session_meta.animal, []).append(session_meta.session)
 
         # For each animal, constructs the multi-day pipeline.
-        for animal, animal_session_list in tqdm(
-            animal_sessions.items(), desc="Resolving the multi-day processing graph", unit="animal"
+        for animal, animal_session_list in console.track(
+            animal_sessions.items(), description="Resolving the multi-day processing graph", unit="animal"
         ):
             result = _construct_suite2p_multiday_pipeline(
                 manifest=manifest,
@@ -695,7 +694,7 @@ def generate_report_datasets(
     exclusions: dict[str, tuple[SessionMetadata, str]] = {}
 
     # Constructs pipelines for each session.
-    for session_metadata in tqdm(sessions, desc="Resolving report pipelines", unit="session"):
+    for session_metadata in console.track(sessions, description="Resolving report pipelines", unit="session"):
         result = _construct_report_pipeline(
             manifest=manifest,
             project=project,

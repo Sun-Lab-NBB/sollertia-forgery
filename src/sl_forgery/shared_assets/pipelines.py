@@ -2,13 +2,13 @@
 
 from typing import TYPE_CHECKING
 
-from tqdm import tqdm
 from sl_shared_assets import (
     SessionTypes,
     ProcessingStatus,
     AcquisitionSystems,
     ProcessingPipelines,
 )
+from ataraxis_base_utilities import console
 
 from .utilities import delay_timer
 
@@ -187,7 +187,9 @@ def execute_pipelines(
         indexed_pipelines[i : i + effective_batch_size] for i in range(0, len(indexed_pipelines), effective_batch_size)
     ]
 
-    with tqdm(total=len(pipelines), desc=f"Executing {stage_name} pipelines", unit="pipeline") as pbar:
+    with console.progress(
+        total=len(pipelines), description=f"Executing {stage_name} pipelines", unit="pipeline"
+    ) as pbar:
         for batch in batches:
             batch_complete = False
 

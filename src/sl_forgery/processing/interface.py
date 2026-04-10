@@ -7,7 +7,6 @@ Notes:
 
 from typing import TYPE_CHECKING
 
-from tqdm import tqdm
 from sl_shared_assets import (
     SessionTypes,
     ProcessingStatus,
@@ -451,7 +450,7 @@ def process_project_data(
     processing_pipelines: list[ProcessingPipeline] = []
     processing_exclusions: dict[str, tuple[SessionMetadata, str]] = {}  # Maps session names to (metadata, reason)
 
-    for session_metadata in tqdm(sessions, desc="Resolving the data processing graph", unit="session"):
+    for session_metadata in console.track(sessions, description="Resolving the data processing graph", unit="session"):
         # Behavior pipeline
         if process_behavior:
             result = _construct_behavior_processing_pipeline(

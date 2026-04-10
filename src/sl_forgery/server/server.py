@@ -275,12 +275,10 @@ class Server:
                     f"{self._configuration.username} user."
                 )
                 console.error(message, PermissionError)
-                raise PermissionError(message) from None  # Fallback to appease mypy, should not be reachable
             except Exception:
                 if attempt == _maximum_connection_attempts:
                     message = f"Could not connect to {self._configuration.host} after 30 attempts. Aborting runtime."
                     console.error(message, ConnectionError)
-                    raise ConnectionError(message) from None  # Fallback to appease mypy, should not be reachable
 
                 console.echo(
                     message=f"Could not SSH into {self._configuration.host}, retrying after a 2-second delay...",
@@ -449,9 +447,7 @@ class Server:
         if "Submitted batch job" not in job_output:
             message = f"Failed to submit the '{job.job_name}' job to the remote compute server."
             console.error(message, RuntimeError)
-
-            # Fallback to appease mypy, should not be reachable
-            raise RuntimeError(message)
+            raise RuntimeError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
 
         # Otherwise, extracts the job id assigned to the job by SLURM from the response and writes it to the processed
         # Job object
@@ -512,7 +508,7 @@ class Server:
                     f"busy running other jobs, this job has been cancelled."
                 )
                 console.error(message, TimeoutError)
-                raise TimeoutError(message)  # Fallback to appease mypy
+                raise TimeoutError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
 
         if verbose:
             console.echo(message=f"{job.job_name} job: Submitted to {self.host}.", level=LogLevel.SUCCESS)

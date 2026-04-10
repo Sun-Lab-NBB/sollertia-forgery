@@ -149,8 +149,6 @@ def _execute_session_data_assembly(
                 f"sessions '{dataset.session_type}'."
             )
             console.error(message=message, error=ValueError)
-            # Fallback to appease mypy, should not be reachable.
-            raise ValueError(message)  # pragma: no cover  # noqa: TRY301
 
         # Runs the session's data assembly pipeline.
         assemble_session_dataset(

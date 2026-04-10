@@ -7,7 +7,6 @@ Notes:
 
 from typing import TYPE_CHECKING
 
-from tqdm import tqdm
 from sl_shared_assets import (
     SessionTypes,
     ManagingTrackers,
@@ -208,8 +207,8 @@ def _discover_adoption_candidates(project: str, server: Server) -> tuple[Session
 
     # Builds a list of SessionMetadata instances for all discovered sessions
     discovered_sessions: list[SessionMetadata] = []
-    for animal_dir in tqdm(
-        server.list_directory(remote_path=project_path), desc="Evaluating animal directories", unit="directory"
+    for animal_dir in console.track(
+        server.list_directory(remote_path=project_path), description="Evaluating animal directories", unit="directory"
     ):
         animal_path = project_path.joinpath(animal_dir)
 
@@ -261,7 +260,7 @@ def _execute_adoption_jobs(
     """
     results: list[tuple[SessionMetadata, JobStatus]] = []
 
-    with tqdm(total=len(sessions), desc="Executing session adoption jobs", unit="session") as pbar:
+    with console.progress(total=len(sessions), description="Executing session adoption jobs", unit="session") as pbar:
         for session_metadata in sessions:
             # Resolves the source and destination paths. Limits the adoption process to the raw_data directory.
             source_path = server.shared_storage_root.joinpath(
@@ -340,7 +339,7 @@ def _delete_remote_session_data(
     """
     results: list[tuple[SessionMetadata, JobStatus]] = []
 
-    with tqdm(total=len(sessions), desc="Executing session deletion jobs", unit="session") as pbar:
+    with console.progress(total=len(sessions), description="Executing session deletion jobs", unit="session") as pbar:
         for session_metadata in sessions:
             # Resolves the path to the session directory using the manifest.
             animal = manifest.get_animal_for_session(session=session_metadata.session)
@@ -414,7 +413,9 @@ def _delete_sessions_for_readoption(
     """
     results: list[tuple[SessionMetadata, JobStatus]] = []
 
-    with tqdm(total=len(sessions), desc="Executing pre-adoption deletion jobs", unit="session") as pbar:
+    with console.progress(
+        total=len(sessions), description="Executing pre-adoption deletion jobs", unit="session"
+    ) as pbar:
         for session_metadata in sessions:
             # Resolves the path to the session directory using the session metadata directly.
             session_path = server.user_working_root.joinpath(project, session_metadata.animal, session_metadata.session)
@@ -597,7 +598,7 @@ def adopt_project(
     sessions_to_adopt: list[SessionMetadata] = []
     sessions_to_readopt: list[SessionMetadata] = []
     skipped_sessions: list[SessionMetadata] = []
-    for session_metadata in tqdm(discovered_sessions, desc="Resolving adoption tasks", unit="task"):
+    for session_metadata in console.track(discovered_sessions, description="Resolving adoption tasks", unit="task"):
         # Checks if the session has already been adopted by verifying the presence of the session's data and the
         # integrity checksum file in the user's working directory. A session is considered adopted if the
         # ax_checksum.txt file exists in the user's directory.
@@ -901,7 +902,9 @@ def manage_project_data(
     checksum_pipelines: list[ProcessingPipeline] = []
     checksum_exclusions: dict[str, tuple[SessionMetadata, str]] = {}  # Maps session names to (metadata, reason)
 
-    for session_metadata in tqdm(sessions, desc="Resolving the checksum processing graph", unit="session"):
+    for session_metadata in console.track(
+        sessions, description="Resolving the checksum processing graph", unit="session"
+    ):
         result = _construct_checksum_resolution_pipeline(
             manifest=manifest,
             project=project,
