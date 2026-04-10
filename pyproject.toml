@@ -9,7 +9,7 @@ name = "sl-forgery"
 version = "1.0.0rc3"
 description = "Provides tools for processing and managing the data acquired in the Sun (NeuroAI) lab."
 readme = "README.md"
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.14,<3.15"
 authors = [
