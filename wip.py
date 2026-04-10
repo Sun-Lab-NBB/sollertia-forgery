@@ -1,4 +1,4 @@
-from sl_forgery.processing import process_project_data
+from sollertia_forgery.processing import process_project_data
 
 process_project_data(
     project="StateSpaceOdyssey",
@@ -10,7 +10,7 @@ process_project_data(
     recalculate_checksum=False,
     prepare_sessions=False,
     process_behavior=True,
-    process_suite2p=False,
+    process_cindra=False,
     reset_trackers=False,
     processing_batch_size=10,
 )

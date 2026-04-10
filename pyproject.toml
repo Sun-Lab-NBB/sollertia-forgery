@@ -5,9 +5,9 @@ build-backend = "hatchling.build"
 
 # Project metadata section. Provides the general ID information about the project.
 [project]
-name = "sl-forgery"
+name = "sollertia-forgery"
 version = "1.0.0rc3"
-description = "Provides tools for processing and managing the data acquired in the Sun (NeuroAI) lab."
+description = "Provides tools for processing and managing the data acquired using the Sollertia data acquisition platform."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -22,7 +22,7 @@ maintainers = [
 ]
 
 # The list of keywords that describe the project
-keywords = ["sunlab", "dataset", "data", "processing"]
+keywords = ["sollertia", "dataset", "data", "processing"]
 
 # Additional classifiers used by PIP to group repositories.
 classifiers = [
@@ -41,7 +41,7 @@ classifiers = [
 
 # Runtime project dependencies.
 dependencies = [
-    # Sun Lab Libraries
+    # Sollertia Libraries
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
@@ -73,15 +73,15 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Sun-Lab-NBB/sl-forgery"
-Documentation = "https://sl-forgery-api-docs.netlify.app/"
+Homepage = "https://github.com/Sun-Lab-NBB/sollertia-forgery"
+Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 
 # CLI interfaces.
 [project.scripts]
-sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
-sl-process = "sl_forgery.command_line_interfaces.process:process_cli"
-sl-execute = "sl_forgery.command_line_interfaces.execute:execute_cli"
-sl-server = "sl_forgery.command_line_interfaces.server:server_cli"
+sl-project = "sollertia_forgery.command_line_interfaces.project:project_cli"
+sl-process = "sollertia_forgery.command_line_interfaces.process:process_cli"
+sl-execute = "sollertia_forgery.command_line_interfaces.execute:execute_cli"
+sl-server = "sollertia_forgery.command_line_interfaces.server:server_cli"
 
 # Development dependencies (PEP 735). Not published to PyPI.
 [dependency-groups]
@@ -106,7 +106,7 @@ exclude = [".github", "recipe"]
 
 # Specifies the library structure.
 [tool.hatch.build.targets.wheel]
-packages = ["src/sl_forgery"]
+packages = ["src/sollertia_forgery"]
 
 # Ruff Configuration.
 [tool.ruff]
@@ -116,7 +116,7 @@ target-version = "py314"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the root source code directory
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
-extend-exclude = ["conf.py", "src/sl_forgery/analysis", "src/sl_forgery/server"]
+extend-exclude = ["conf.py", "src/sollertia_forgery/analysis", "src/sollertia_forgery/server"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.
 lint.select = ["ALL"]
@@ -176,9 +176,9 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
 
 exclude = [
-    "sl-forgery-\\d+",         # Ignores temporary folder created by setuptools when building the sdist
-    "src/sl_forgery/analysis/*",   # Ignores analysis files pending style compliance
-    "src/sl_forgery/server/*",     # Ignores server files pending style compliance
+    "sollertia-forgery-\\d+",  # Ignores temporary folder created by setuptools when building the sdist
+    "src/sollertia_forgery/analysis/*",   # Ignores analysis files pending style compliance
+    "src/sollertia_forgery/server/*",     # Ignores server files pending style compliance
     "venv.*/",                 # Ignores virtual environments
     "build/",                  # Ignores the sdist directory
     "dist/",                   # Ignores the wheel directory

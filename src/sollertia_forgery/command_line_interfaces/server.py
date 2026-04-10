@@ -1,0 +1,370 @@
+"""Provides CLIs for directly interacting with the remote compute server."""
+
+import click
+from tabulate import tabulate
+from sollertia_shared_assets import get_server_configuration
+from ataraxis_base_utilities import LogLevel, console
+
+from ..server import Server
+
+# Ensures that displayed CLICK help messages are formatted according to the lab standard.
+CONTEXT_SETTINGS = {"max_content_width": 120}
+
+# Hardcoded SLURM output formats
+SACCT_FORMAT = "JobID,JobName%50,ReqMem,MaxRSS,AveRSS,MaxVMSize,NCPUS,AveCPU,Elapsed,State"
+"""The format for the slurm accounting 'sacct' command used to display and evaluate completed job's efficiency."""
+SACCT_HEADERS = ["JobID", "JobName", "ReqMem", "MaxRSS", "AveRSS", "MaxVMSize", "NCPUS", "AveCPU", "Elapsed", "State"]
+"""The headers corresponding to SACCT_FORMAT, used for display after merging rows."""
+SQUEUE_FORMAT = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.12L"
+"""The format for the slurm queue 'squeue' command used to display running and pending jobs."""
+
+# Minimum number of rows required for valid sacct output (header + at least one data row).
+_MINIMUM_SACCT_ROWS: int = 2
+
+# Number of columns expected in sacct output based on SACCT_FORMAT.
+_SACCT_COLUMN_COUNT: int = 10
+
+
+def _format_slurm_output(raw_output: str) -> str:
+    """Formats raw SLURM command output strings into nicely formatted tables.
+
+    Notes:
+        This worker function is used to format the output of the SLURM's 'squeue' and 'sacct' commands.
+
+    Args:
+        raw_output: The raw output string from the SLURM 'squeue' or 'sacct' commands.
+
+    Returns:
+        A formatted string representation of the SLURM's output.
+    """
+    lines = raw_output.strip().split("\n")
+    if not lines:
+        return "No data available."
+
+    # Parses header and data rows, skipping separator lines (lines with only dashes and spaces)
+    rows = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not all(c in "- " for c in stripped):
+            rows.append(stripped.split())
+    if not rows:
+        return "No data available."
+
+    # Uses 'tabulate' to format the output, with the first row as headers
+    headers = rows[0]
+    data = rows[1:]
+
+    return tabulate(data, headers=headers, tablefmt="simple", colalign=["center"] * len(headers))
+
+
+def _format_sacct_output(raw_output: str) -> str:
+    """Formats raw 'sacct' output (parsable format) into a nicely formatted table with merged rows.
+
+    This function parses pipe-delimited sacct output and merges job rows that share the same base JobID. This
+    handles both standard jobs (where parent rows are followed by .batch step rows) and bash jobs (where multiple
+    rows share the same JobID).
+
+    Args:
+        raw_output: The raw output string from the 'sacct' command with the --parsable2 flag.
+
+    Returns:
+        A formatted string representation of the merged job data.
+    """
+    lines = raw_output.strip().split("\n")
+    if not lines:
+        return "No data available."
+
+    # Parses pipe-delimited rows.
+    rows = [line.split("|") for line in lines if line.strip()]
+    if len(rows) < _MINIMUM_SACCT_ROWS:
+        return "No data available."
+
+    # Skips the header row from sacct, uses predefined headers
+    data = rows[1:]
+
+    # Merges rows by base JobID
+    merged_data: list[list[str]] = []
+    parent_jobs: dict[str, list[str]] = {}
+
+    for row in data:
+        if len(row) < _SACCT_COLUMN_COUNT:
+            continue
+
+        job_id = row[0]
+
+        # Skips extern step rows
+        if ".extern" in job_id:
+            continue
+
+        # Extracts the base job ID (without .batch suffix if present)
+        base_job_id = job_id.split(".")[0]
+
+        if base_job_id in parent_jobs:
+            # Merges this row's non-empty fields into the existing parent row
+            parent_row = parent_jobs[base_job_id]
+            for i in range(len(row[:_SACCT_COLUMN_COUNT])):
+                if row[i] and not parent_row[i]:
+                    parent_row[i] = row[i]
+        else:
+            # First occurrence of this job ID - creates a new entry
+            merged_row = list(row[:_SACCT_COLUMN_COUNT])
+            parent_jobs[base_job_id] = merged_row
+            merged_data.append(merged_row)
+
+    if not merged_data:
+        return "No data available."
+
+    return tabulate(merged_data, headers=SACCT_HEADERS, tablefmt="simple", colalign=["center"] * len(SACCT_HEADERS))
+
+
+@click.group("server", context_settings=CONTEXT_SETTINGS)
+def server_cli() -> None:
+    """Provides commands for interacting with the remote Sollertia compute server.
+
+    This CLI group provides commands for managing non-standardized server interactions, including starting interactive
+    Jupyter sessions and viewing SLURM job information. All data workflow interactions available through sl-project and
+    sl-execute command groups must be carried out through those groups, rather than the commands exposed by this CLI.
+    """
+
+
+@server_cli.command("jupyter")
+@click.option(
+    "-e",
+    "--environment",
+    type=str,
+    required=True,
+    help=(
+        "The name of the conda environment to use for running the Jupyter notebook session. The environment "
+        "must contain the 'jupyterlab' and the 'notebook' Python packages. Note, the user whose credentials are used "
+        "to connect to the server must have a configured conda / mamba shell that exposes the target environment for "
+        "the job to run as expected."
+    ),
+)
+@click.option(
+    "-c",
+    "--cores",
+    type=int,
+    default=2,
+    show_default=True,
+    help="The number of CPU cores to allocate to the Jupyter session.",
+)
+@click.option(
+    "-m",
+    "--memory",
+    type=int,
+    default=32,
+    show_default=True,
+    help="The memory (RAM), in Gigabytes, to allocate to the Jupyter session.",
+)
+@click.option(
+    "-t",
+    "--time",
+    type=int,
+    default=120,
+    show_default=True,
+    help="The maximum uptime duration for the Jupyter session, in minutes.",
+)
+@click.option(
+    "-p",
+    "--port",
+    type=int,
+    default=0,
+    show_default=True,
+    help=(
+        "The port to use for communicating with the Jupyter session. Valid port values are from 8888 to 9999. Most "
+        "use contexts should leave this set to the default value (0), which randomly selects one of the valid ports. "
+        "Using random selection minimizes the chance of colliding with other interactive jupyter sessions."
+    ),
+)
+def start_jupyter_server(environment: str, cores: int, memory: int, time: int, port: int) -> None:
+    """Starts the interactive Jupyter notebook session on the remote compute server.
+
+    Calling this command initializes a SLURM job that runs the interactive Jupyter notebook session. Since this session
+    directly competes for resources with all other headless jobs running on the server, it is imperative that each
+    jupyter runtime uses the minimum amount of resources necessary to support its runtime. Jupyter sessions are intended
+    for lightweight data exploration and visualization tasks and should not be used for resource-intensive data
+    processing tasks. Those tasks should be executed using the headless processing pipeline classes from this library.
+    """
+    # Initializes server connection
+    configuration = get_server_configuration()
+    server = Server(configuration=configuration)
+
+    try:
+        # Launches the Jupyter server. This method establishes an SSH tunnel, prints connection info, blocks until
+        # the user terminates the session, and handles job cleanup automatically.
+        server.launch_jupyter_server(
+            job_name="interactive_jupyter_server",
+            conda_environment=environment,
+            notebook_directory=server.user_working_root,
+            cpu_threads=cores,
+            ram=memory,
+            port=port,
+            time=time,
+        )
+
+    finally:
+        # Closes the server connection
+        server.close()
+
+
+@server_cli.command("print")
+@click.option(
+    "-j",
+    "--job-data",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to display the remote server's job accounting history (runtime statistics) using the "
+        "SLURM's 'sacct' command."
+    ),
+)
+@click.option(
+    "-q",
+    "--queue",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to display the remote server's job queue status using the SLURM's 'squeue' command.",
+)
+@click.option(
+    "-u",
+    "--user",
+    type=str,
+    default=None,
+    help=(
+        "Allows filtering the displayed queue and job data to only include the jobs submitted by the specified user. "
+        "Set to 'all' to display data for all users. Defaults to the username used for the server authentication."
+    ),
+)
+@click.option(
+    "-jid",
+    "--job-id",
+    type=str,
+    default=None,
+    help="Determines the job for which to display the accounting data. Bypasses user and date filtering options.",
+)
+@click.option(
+    "-st",
+    "--start-time",
+    type=str,
+    required=False,
+    help=(
+        "Allows filtering displayed job data to only include the jobs that started on or after this date "
+        "(format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)."
+    ),
+)
+@click.option(
+    "-et",
+    "--end-time",
+    type=str,
+    required=False,
+    help=(
+        "Allows filtering displayed job data to only include the jobs that ended on or before this date "
+        "(format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)."
+    ),
+)
+def print_slurm_info(
+    *,
+    job_data: bool,
+    queue: bool,
+    user: str | None,
+    job_id: str | None,
+    start_time: str | None,
+    end_time: str | None,
+) -> None:
+    """Displays remote server's SLURM queue status or job data as a formatted table."""
+    if not job_data and not queue:
+        message = (
+            "No data display options were selected when calling the command. Pass either the '--job-data' (-j), "
+            "'--queue' (-q), or both flags to display the requested remote server's SLURM information."
+        )
+        console.error(message=message, error=ValueError)
+
+    # Initializes communication with the server.
+    configuration = get_server_configuration()
+    server = Server(configuration=configuration)
+
+    # Resolves the username from the server configuration file if an explicit override is not provided.
+    if user is None:
+        user = configuration.username
+
+    # Determines whether to display data for all users
+    all_users = user.lower() == "all"
+
+    try:
+        # Displays sacct output if requested
+        if job_data:
+            # If a specific job ID is requested, bypasses user and date filtering
+            if job_id is not None:
+                cmd = f'sacct -j {job_id} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                console.echo(message=f"Fetching job accounting data for job ID '{job_id}'...", level=LogLevel.INFO)
+            else:
+                # Builds the command with optional user filtering
+                if all_users:
+                    cmd = f'sacct -a -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                else:
+                    cmd = f'sacct -u {user} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                if start_time:
+                    cmd += f" --starttime={start_time}"
+                if end_time:
+                    cmd += f" --endtime={end_time}"
+
+                if all_users:
+                    console.echo(message="Fetching job accounting data for all users...", level=LogLevel.INFO)
+                else:
+                    console.echo(message=f"Fetching job accounting data for the user '{user}'...", level=LogLevel.INFO)
+
+            result = server.execute_command(command=cmd)
+
+            if result.return_code != 0:
+                console.error(
+                    message=f"Failed to execute the sacct command on the remote server: {result.stderr}",
+                    error=RuntimeError,
+                )
+
+            if result.stdout.strip():
+                formatted_output = _format_sacct_output(result.stdout)
+                if job_id is not None:
+                    console.echo(message=f"Job accounting (sacct) data for job ID '{job_id}':")
+                elif all_users:
+                    console.echo(message="Job accounting (sacct) data for all users:")
+                else:
+                    console.echo(message=f"Job accounting (sacct) data for the user '{user}':")
+                click.echo(formatted_output)
+            else:
+                console.echo(
+                    message="No job accounting data found for the specified filtering criteria.", level=LogLevel.WARNING
+                )
+
+        # Displays squeue output if requested
+        if queue:
+            if all_users:
+                cmd = f'squeue -o "{SQUEUE_FORMAT}"'
+                console.echo(message="Fetching queue status for all users...", level=LogLevel.INFO)
+            else:
+                cmd = f'squeue -o "{SQUEUE_FORMAT}" -u {user}'
+                console.echo(message=f"Fetching queue status for user '{user}'...", level=LogLevel.INFO)
+
+            result = server.execute_command(command=cmd)
+
+            if result.return_code != 0:
+                console.error(
+                    message=f"Failed to execute the squeue command on the remote server: {result.stderr}",
+                    error=RuntimeError,
+                )
+
+            if result.stdout.strip():
+                formatted_output = _format_slurm_output(result.stdout)
+                if all_users:
+                    console.echo(message="Queue status (squeue) for all users:")
+                else:
+                    console.echo(message=f"Queue status (squeue) for the user '{user}':")
+                click.echo(formatted_output)
+            elif all_users:
+                console.echo(message="No jobs found in the queue.", level=LogLevel.WARNING)
+            else:
+                console.echo(message="No jobs found in the queue for the specified user.", level=LogLevel.WARNING)
+
+    finally:
+        server.close()

@@ -1,6 +1,6 @@
 from pathlib import Path
 from tqdm import tqdm
-from sl_forgery.forging import DatasetTypes, assemble_session_dataset
+from sollertia_forgery.forging import DatasetTypes, assemble_session_dataset
 
 data_root = Path(f"/home/cyberaxolotl/server/workdir/sun_data/Datasets/")
 
