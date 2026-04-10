@@ -16,7 +16,7 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from .camera import find_camera_feather, find_camera_feathers, extract_camera_source_id, process_camera_timestamps
+from .camera import find_camera_feathers, extract_camera_source_id, process_camera_timestamps
 from .runtime import find_log_archive, find_log_archives, process_runtime_data, extract_log_source_id
 from .microcontrollers import (
     is_module_eligible,
@@ -273,7 +273,9 @@ def _execute_job(
 
         elif job_name == BehaviorJobNames.CAMERA:
             camera_source_id = int(specifier)
-            feather_path = find_camera_feather(data_directory=session.processed_data_path, source_id=camera_source_id)
+            feather_path = find_camera_feathers(
+                data_directory=session.processed_data_path, source_id=camera_source_id,
+            )[0]
             process_camera_timestamps(
                 feather_path=feather_path, output_directory=output_directory, source_id=camera_source_id
             )
