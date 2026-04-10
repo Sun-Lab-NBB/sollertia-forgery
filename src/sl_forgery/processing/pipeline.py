@@ -272,8 +272,11 @@ def _execute_job(
             )
 
         elif job_name == BehaviorJobNames.CAMERA:
-            feather_path = find_camera_feather(data_directory=session.processed_data_path, source_id=int(specifier))
-            process_camera_timestamps(feather_path=feather_path, output_directory=output_directory)
+            camera_source_id = int(specifier)
+            feather_path = find_camera_feather(data_directory=session.processed_data_path, source_id=camera_source_id)
+            process_camera_timestamps(
+                feather_path=feather_path, output_directory=output_directory, source_id=camera_source_id
+            )
 
         elif job_name == BehaviorJobNames.MICROCONTROLLER:
             controller_id_str, module_type_str, module_id_str = specifier.split("-")

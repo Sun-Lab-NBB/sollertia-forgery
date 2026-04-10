@@ -15,6 +15,12 @@ if TYPE_CHECKING:
 _CAMERA_FEATHER_PATTERN: str = "camera_*_timestamps.feather"
 """The glob pattern used to discover camera timestamp feather files produced by ataraxis-video-system."""
 
+_CAMERA_OUTPUT_NAMES: dict[int, str] = {
+    51: "face_camera_timestamps.feather",
+    62: "body_camera_timestamps.feather",
+}
+"""Maps camera source IDs to their output feather filenames, matching the naming convention used by sl-behavior."""
+
 
 def find_camera_feather(data_directory: Path, source_id: int) -> Path:
     """Searches for a single camera timestamp feather file matching the target source ID under the data directory.
@@ -110,19 +116,32 @@ def extract_camera_source_id(feather_path: Path) -> int:
     return int(parts[1])
 
 
-def process_camera_timestamps(feather_path: Path, output_directory: Path) -> None:
+def process_camera_timestamps(feather_path: Path, output_directory: Path, source_id: int) -> None:
     """Reads a pre-extracted camera timestamp feather file and writes it to the behavior output directory.
 
     Notes:
         Camera timestamp feather files produced by ataraxis-video-system already contain the final ``frame_time_us``
-        column in the correct format. This function relocates the file to the behavior processing output directory
-        with uncompressed IPC format to support memory-mapping during downstream analysis.
+        column in the correct format. This function renames and relocates the file to the behavior processing output
+        directory using the legacy naming convention (e.g., ``face_camera_timestamps.feather``) with uncompressed IPC
+        format to support memory-mapping during downstream analysis.
 
     Args:
         feather_path: The path to the input camera timestamp feather file produced by ataraxis-video-system.
         output_directory: The path to the output directory where the processed feather file will be written.
+        source_id: The numeric camera source ID used to resolve the output filename.
+
+    Raises:
+        ValueError: If the source ID does not have a registered output name.
     """
-    console.echo(message=f"Processing camera timestamps from '{feather_path.name}'...")
+    if source_id not in _CAMERA_OUTPUT_NAMES:
+        message = (
+            f"Unable to process camera timestamps for source '{source_id}'. No output filename is registered for "
+            f"this source ID. Registered source IDs: {sorted(_CAMERA_OUTPUT_NAMES.keys())}."
+        )
+        console.error(message=message, error=ValueError)
+
+    output_filename = _CAMERA_OUTPUT_NAMES[source_id]
+    console.echo(message=f"Processing camera timestamps from '{feather_path.name}' -> '{output_filename}'...")
 
     # Reads the pre-extracted camera timestamp data.
     dataframe = pl.read_ipc(source=feather_path)
@@ -130,7 +149,7 @@ def process_camera_timestamps(feather_path: Path, output_directory: Path) -> Non
     # Ensures the output directory exists.
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    # Writes the data to the output directory using uncompressed feather format for memory-mapping support.
-    dataframe.write_ipc(file=output_directory / feather_path.name, compression="uncompressed")
+    # Writes the data to the output directory using the legacy naming convention and uncompressed feather format.
+    dataframe.write_ipc(file=output_directory / output_filename, compression="uncompressed")
 
-    console.echo(message=f"Camera timestamp processing for '{feather_path.name}': Complete.", level=LogLevel.SUCCESS)
+    console.echo(message=f"Camera timestamp processing for '{output_filename}': Complete.", level=LogLevel.SUCCESS)
