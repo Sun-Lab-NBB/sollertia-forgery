@@ -1,12 +1,12 @@
 """Provides Job and JupyterJob classes for SLURM-managed jobs on remote compute servers."""
 
+from __future__ import annotations
+
 import re
 from typing import TYPE_CHECKING
 import datetime
 from dataclasses import dataclass
 
-# noinspection PyProtectedMember
-from simple_slurm import Slurm
 from ataraxis_base_utilities import console
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ class Job:
         remote_script_path: The path to the job's script file on the remote compute server.
         job_id: The unique job identifier assigned by the SLURM manager to this job when it is accepted for execution.
         job_name: The descriptive name of the SLURM job.
-        _command: The SLURM command object used to assemble the job before it is translated into a shell script.
+        _command: The _SlurmScript instance used to assemble the job before it is translated into a shell script.
     """
 
     def __init__(
@@ -91,24 +91,24 @@ class Job:
         self.job_name: str = job_name  # Also stores the job name to support more informative terminal prints
 
         # Builds the slurm command object filled with configuration information
-        self._command: Slurm = Slurm(
+        self._command: _SlurmScript = _SlurmScript(
             cpus_per_task=cpu_threads,
             job_name=job_name,
             output=str(output_log),
             error=str(error_log),
-            mem=f"{ram}G",
+            memory=f"{ram}G",
             time=datetime.timedelta(minutes=time),
         )
 
         # Conda shell initialization commands
-        self._command.add_cmd("eval $(conda shell.bash hook)")
-        self._command.add_cmd("conda init bash")
+        self._command.add_command("eval $(conda shell.bash hook)")
+        self._command.add_command("conda init bash")
 
         # Activates the target conda environment for the command.
-        self._command.add_cmd(f"source activate {conda_environment}")  # Need to use old syntax for our server.
+        self._command.add_command(f"source activate {conda_environment}")  # Need to use old syntax for our server.
 
     def __repr__(self) -> str:
-        """Returns the string representation of the instance."""
+        """Returns the string representation of the Job instance."""
         return f"Job(name={self.job_name}, id={self.job_id})"
 
     def add_command(self, command: str) -> None:
@@ -122,7 +122,7 @@ class Job:
         Args:
             command: The command string to append to the job's command sequence, e.g.: 'python main.py --input 1'.
         """
-        self._command.add_cmd(command)
+        self._command.add_command(command)
 
     @property
     def command_script(self) -> str:
@@ -133,14 +133,10 @@ class Job:
             executed by the remote compute server. Do not call this method directly.
         """
         # Appends the command to clean up (remove) the temporary script file after processing runtime is over
-        self._command.add_cmd(f"rm -f {self.remote_script_path}")
+        self._command.add_command(f"rm -f {self.remote_script_path}")
 
-        # Translates the command to string format
-        script_content = str(self._command)
-
-        # Replaces escaped $ (/$) with $. This is essential, as without this correction, things like conda
-        # initialization would not work as expected. Returns the finalized script content to the caller.
-        return script_content.replace("\\$", "$")
+        # Translates the command to string format and returns the finalized script content to the caller.
+        return self._command.render()
 
 
 class JupyterJob(Job):
@@ -166,7 +162,7 @@ class JupyterJob(Job):
         time: The maximum period of time to run the job, in minutes.
         port: The connection port to use for the Jupyter server communication.
         notebook_directory: The remote compute server's directory where to run the Jupyter notebook.
-        jupyter_arguments: Stores additional arguments to pass to the jupyter notebook initialization command.
+        jupyter_arguments: Stores additional arguments to pass to the Jupyter notebook initialization command.
 
     Attributes:
         port: The communication port for the managed Jupyter server.
@@ -177,7 +173,7 @@ class JupyterJob(Job):
         user: The username used to connect with the remote server.
         connection_info_file: The absolute path to the file on the remote compute server that contains the connection
             information for the initialized Jupyter notebook session.
-        _command: The SLURM command object used to assemble the job before it is translated into a shell script.
+        _command: The _SlurmScript instance used to assemble the job before it is translated into a shell script.
     """
 
     def __init__(
@@ -289,3 +285,68 @@ class JupyterJob(Job):
             port=int(port_match.group(1)),
             token=token_match.group(1).strip(),
         )
+
+
+class _SlurmScript:
+    """Builds a SLURM batch script from resource parameters and shell commands.
+
+    Args:
+        cpus_per_task: The number of CPU threads allocated to the job.
+        job_name: The descriptive name of the SLURM job.
+        output: The absolute path to the stdout log file on the compute server.
+        error: The absolute path to the stderr log file on the compute server.
+        memory: The memory allocation string in SLURM format, e.g. ``"10G"``.
+        time: The maximum wall-time for the job.
+
+    Attributes:
+        _directives: The list of ``#SBATCH`` directive lines for the script header.
+        _commands: The list of shell command lines appended to the script body.
+    """
+
+    __slots__ = ("_directives", "_commands")
+
+    def __init__(
+        self,
+        cpus_per_task: int,
+        job_name: str,
+        output: str,
+        error: str,
+        memory: str,
+        time: datetime.timedelta,
+    ) -> None:
+        self._directives: list[str] = [
+            f"#SBATCH --cpus-per-task={cpus_per_task}",
+            f"#SBATCH --job-name={job_name}",
+            f"#SBATCH --output={output}",
+            f"#SBATCH --error={error}",
+            f"#SBATCH --mem={memory}",
+            f"#SBATCH --time={self._format_time(time)}",
+        ]
+        self._commands: list[str] = []
+
+    @staticmethod
+    def _format_time(time_delta: datetime.timedelta) -> str:
+        """Formats a timedelta as a SLURM-compatible time string (``[D-]HH:MM:SS``)."""
+        total_seconds = int(time_delta.total_seconds())
+        days, remainder = divmod(total_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if days > 0:
+            return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def add_command(self, command: str) -> None:
+        """Appends a shell command to the script body.
+
+        Args:
+            command: The shell command string to append.
+        """
+        self._commands.append(command)
+
+    def render(self) -> str:
+        """Renders the complete batch script as a string."""
+        lines = ["#!/bin/bash"]
+        lines.extend(self._directives)
+        lines.append("")
+        lines.extend(self._commands)
+        return "\n".join(lines) + "\n"

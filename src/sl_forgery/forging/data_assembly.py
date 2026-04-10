@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from tqdm import tqdm
 from numba import njit
 import numpy as np
 import polars as pl
@@ -782,78 +781,101 @@ def assemble_session_dataset(
     # Ensures that the output directory exists.
     ensure_directory_exists(output_path)
 
-    # Experiment dataset.
-    if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
-        # First assembles the fluorescence data, which is needed to generate the reference time vector for other
-        # datasets
-        with tqdm(total=3, desc=f"Assembling session {session_data_path.stem} datasets", disable=not progress) as pbar:
-            fluorescence_data = _assemble_2p_fluorescence_dataset(
-                session_data_path=session_data_path, multiday_data_path=session_multiday_path
-            )
-            pbar.update(1)
-
-            # Extracts reference time to assembled other datasets in parallel
-            reference_time = fluorescence_data["time_us"].to_numpy()
-
-            # Defines tasks for parallel execution
-            tasks = {
-                "behavior": partial(
-                    _assemble_behavior_dataset,
-                    session_data_path=session_data_path,
-                    reference_time=reference_time,
-                    drop_time_columns=True,
-                ),
-                "experiment": partial(
-                    _assemble_experiment_dataset, session_data_path=session_data_path, reference_time=reference_time
-                ),
-            }
-
-            # Executes the processing in parallel
-            results = {}
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_name = {executor.submit(task): name for name, task in tasks.items()}
-
-                for future in as_completed(future_to_name):
-                    name = future_to_name[future]
-                    results[name] = future.result()
-                    pbar.update(1)
-
-            # Extracts processing results
-            behavior_data = results["behavior"]
-            experiment_data = results["experiment"]
-
-        # Concatenates all dataframes into the unified dataset
-        result = pl.concat([fluorescence_data, behavior_data, experiment_data], how="horizontal")
-
-        # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
-        result = _mask_non_run_experiment_data(result)
-
-        # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
-        result.write_ipc(file=output_path)
-
-    # Behavior-only training dataset.
-    elif dataset_type in (DatasetTypes.MESOSCOPE_VR_LICK_TRAINING, DatasetTypes.MESOSCOPE_VR_RUN_TRAINING):
-        # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
-        # timepoints from the face camera timestamp data.
-        face_camera_path = session_data_path.joinpath("processed_data", "camera_data", "face_camera_timestamps.feather")
-        face_camera_df = pl.read_ipc(face_camera_path, memory_map=True)
-        reference_time = face_camera_df["frame_time_us"].to_numpy()
-
-        # Assembles and saves the behavior dataset to disk as an uncompressed.feather file (to support memory-mapping).
-        with tqdm(total=1, desc=f"Assembling session {session_data_path.stem} datasets", disable=not progress) as pbar:
-            behavior_data = _assemble_behavior_dataset(
-                session_data_path=session_data_path, reference_time=reference_time
-            )
-            behavior_data.write_ipc(file=output_path)
-            pbar.update(1)
-
-    # If the input dataset type is not supported, raises a ValueError.
+    # Configures progress bar visibility based on the progress parameter.
+    _prior_progress = console.progress_enabled
+    if progress:
+        console.enable_progress()
     else:
-        message = (
-            f"Unsupported dataset type '{dataset_type}' encountered when assembling the dataset for the session "
-            f"{session_data_path.stem}. Use one of the valid DatasetTypes enumeration members."
-        )
-        console.error(message=message, error=ValueError)
+        console.disable_progress()
+
+    try:
+        # Experiment dataset.
+        if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
+            # First assembles the fluorescence data, which is needed to generate the reference time vector for other
+            # datasets
+            with console.progress(
+                total=3, description=f"Assembling session {session_data_path.stem} datasets"
+            ) as pbar:
+                fluorescence_data = _assemble_2p_fluorescence_dataset(
+                    session_data_path=session_data_path, multiday_data_path=session_multiday_path
+                )
+                pbar.update(1)
+
+                # Extracts reference time to assembled other datasets in parallel
+                reference_time = fluorescence_data["time_us"].to_numpy()
+
+                # Defines tasks for parallel execution
+                tasks = {
+                    "behavior": partial(
+                        _assemble_behavior_dataset,
+                        session_data_path=session_data_path,
+                        reference_time=reference_time,
+                        drop_time_columns=True,
+                    ),
+                    "experiment": partial(
+                        _assemble_experiment_dataset,
+                        session_data_path=session_data_path,
+                        reference_time=reference_time,
+                    ),
+                }
+
+                # Executes the processing in parallel
+                results = {}
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    future_to_name = {executor.submit(task): name for name, task in tasks.items()}
+
+                    for future in as_completed(future_to_name):
+                        name = future_to_name[future]
+                        results[name] = future.result()
+                        pbar.update(1)
+
+                # Extracts processing results
+                behavior_data = results["behavior"]
+                experiment_data = results["experiment"]
+
+            # Concatenates all dataframes into the unified dataset
+            result = pl.concat([fluorescence_data, behavior_data, experiment_data], how="horizontal")
+
+            # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
+            result = _mask_non_run_experiment_data(result)
+
+            # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
+            result.write_ipc(file=output_path)
+
+        # Behavior-only training dataset.
+        elif dataset_type in (DatasetTypes.MESOSCOPE_VR_LICK_TRAINING, DatasetTypes.MESOSCOPE_VR_RUN_TRAINING):
+            # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
+            # timepoints from the face camera timestamp data.
+            face_camera_path = session_data_path.joinpath(
+                "processed_data", "camera_data", "face_camera_timestamps.feather"
+            )
+            face_camera_df = pl.read_ipc(face_camera_path, memory_map=True)
+            reference_time = face_camera_df["frame_time_us"].to_numpy()
+
+            # Assembles and saves the behavior dataset to disk as an uncompressed .feather file (to support
+            # memory-mapping).
+            with console.progress(
+                total=1, description=f"Assembling session {session_data_path.stem} datasets"
+            ) as pbar:
+                behavior_data = _assemble_behavior_dataset(
+                    session_data_path=session_data_path, reference_time=reference_time
+                )
+                behavior_data.write_ipc(file=output_path)
+                pbar.update(1)
+
+        # If the input dataset type is not supported, raises a ValueError.
+        else:
+            message = (
+                f"Unsupported dataset type '{dataset_type}' encountered when assembling the dataset for the session "
+                f"{session_data_path.stem}. Use one of the valid DatasetTypes enumeration members."
+            )
+            console.error(message=message, error=ValueError)
+    finally:
+        # Restores the previous progress bar visibility state.
+        if _prior_progress:
+            console.enable_progress()
+        else:
+            console.disable_progress()
 
 
 def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
@@ -887,7 +909,7 @@ def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
         f"sources are supported: {','.join(source[0].name for source in timestamp_sources)}."
     )
     console.error(message=message, error=FileNotFoundError)
-    raise FileNotFoundError(message)  # Fallback to appease static analysis, should not be reachable
+    raise FileNotFoundError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
 
 
 def assemble_report_dataset(
@@ -909,48 +931,62 @@ def assemble_report_dataset(
     # Resolves the paths to the root data directories.
     camera_data_path = session_data_path.joinpath("processed_data", "camera_data")
 
-    with tqdm(
-        total=2, desc=f"Assembling session {session_data_path.stem} report datasets", disable=not progress
-    ) as pbar:
-        # Uses the timestamp source with the lowest FPS as the reference time vector.
-        reference_time = _get_reference_time(session_data_path=session_data_path)
+    # Configures progress bar visibility based on the progress parameter.
+    _prior_progress = console.progress_enabled
+    if progress:
+        console.enable_progress()
+    else:
+        console.disable_progress()
 
-        aligned_data = {}
+    try:
+        with console.progress(
+            total=2, description=f"Assembling session {session_data_path.stem} report datasets"
+        ) as pbar:
+            # Uses the timestamp source with the lowest FPS as the reference time vector.
+            reference_time = _get_reference_time(session_data_path=session_data_path)
 
-        # Recursively finds all camera timestamps in the camera_data directory.
-        if camera_data_path.exists():
-            for camera in sorted(camera_data_path.rglob("*_timestamps.feather")):
-                camera_df = pl.read_ipc(camera, use_pyarrow=True, memory_map=True)
+            aligned_data = {}
 
-                column_name = camera.stem
+            # Recursively finds all camera timestamps in the camera_data directory.
+            if camera_data_path.exists():
+                for camera in sorted(camera_data_path.rglob("*_timestamps.feather")):
+                    camera_df = pl.read_ipc(camera, use_pyarrow=True, memory_map=True)
 
-                aligned_data[column_name] = interpolate_data(
-                    source_coordinates=camera_df["frame_time_us"].to_numpy(),
-                    source_values=camera_df["frame_time_us"].to_numpy(),
-                    target_coordinates=reference_time,
-                    is_discrete=False,
-                )
+                    column_name = camera.stem
 
-        # Assembles and saves the behavior and experiment datasets to disk as an uncompressed.feather file (to support
-        # memory-mapping).
-        behavior_data = _assemble_behavior_dataset(
-            session_data_path=session_data_path,
-            reference_time=reference_time,
-            drop_time_columns=False,
-        )
-        pbar.update(1)
+                    aligned_data[column_name] = interpolate_data(
+                        source_coordinates=camera_df["frame_time_us"].to_numpy(),
+                        source_values=camera_df["frame_time_us"].to_numpy(),
+                        target_coordinates=reference_time,
+                        is_discrete=False,
+                    )
 
-        experiment_data = _assemble_experiment_dataset(
-            session_data_path=session_data_path, reference_time=reference_time
-        )
-        pbar.update(1)
+            # Assembles and saves the behavior and experiment datasets to disk as an uncompressed .feather file (to
+            # support memory-mapping).
+            behavior_data = _assemble_behavior_dataset(
+                session_data_path=session_data_path,
+                reference_time=reference_time,
+                drop_time_columns=False,
+            )
+            pbar.update(1)
 
-    # Combines the aligned camera data with the behavior and experiment data
-    camera_data = pl.DataFrame(aligned_data) if aligned_data else pl.DataFrame()
-    result = pl.concat([behavior_data, experiment_data, camera_data], how="horizontal")
+            experiment_data = _assemble_experiment_dataset(
+                session_data_path=session_data_path, reference_time=reference_time
+            )
+            pbar.update(1)
 
-    # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
-    result = _mask_non_run_experiment_data(result)
+        # Combines the aligned camera data with the behavior and experiment data
+        camera_data = pl.DataFrame(aligned_data) if aligned_data else pl.DataFrame()
+        result = pl.concat([behavior_data, experiment_data, camera_data], how="horizontal")
 
-    # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
-    result.write_ipc(file=output_path)
+        # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
+        result = _mask_non_run_experiment_data(result)
+
+        # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
+        result.write_ipc(file=output_path)
+    finally:
+        # Restores the previous progress bar visibility state.
+        if _prior_progress:
+            console.enable_progress()
+        else:
+            console.disable_progress()

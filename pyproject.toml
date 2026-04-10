@@ -1,65 +1,74 @@
 # Defines the build system used for the project.
 [build-system]
-requires = ["hatchling==1.28.0"]
+requires = ["hatchling>=1,<2"]
 build-backend = "hatchling.build"
 
-# Project metdata section. Provides the genral ID information about the project.
+# Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sl-forgery"
-version = "1.0.0rc2"
+version = "1.0.0rc3"
 description = "Provides tools for processing and managing the data acquired in the Sun (NeuroAI) lab."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.14,<3.15"
 authors = [
     { name = "Ivan Kondratyev" },
+    { name = "Natalie Yeung" },
     { name = "Kushaan Gupta" },
 ]
 maintainers = [
     { name = "Ivan Kondratyev", email = "ik278@cornell.edu" },
 ]
 
+# The list of keywords that describe the project
 keywords = ["sunlab", "dataset", "data", "processing"]
 
+# Additional classifiers used by PIP to group repositories.
 classifiers = [
     # Development status
     "Development Status :: 5 - Production/Stable",
     # Intended audience and project topic
-    "Intended Audience :: Developers",
-    "Topic :: Scientific/Engineering :: Bio-Informatics",
-    # License
-    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering",
     # Supported Python Versions
     "Programming Language :: Python :: 3.14",
-    # Supported OS systems
+    # Supported Operating Systems
     "Operating System :: OS Independent",
     # Typing
-    "Typing :: Typed"
+    "Typing :: Typed",
 ]
 
 # Runtime project dependencies.
 dependencies = [
-    "ataraxis-time>=5,<6",
-    "ataraxis-base-utilities>=5,<6",
-    "ataraxis-data-structures>=5,<6",
-    "sl-shared-assets>=6.2.0rc1,<7",
+    # Sun Lab Libraries
+    "ataraxis-time>=6,<7",
+    "ataraxis-base-utilities>=6,<7",
+    "ataraxis-data-structures>=6,<7",
+    "sollertia-shared-assets>=8.0.0rc1,<9",
+
+    # Data Processing
     "polars>=1,<2",
-    "pyarrow>=22,<23",
+    "pyarrow>=23,<24",
     "numpy>=2,<3",
     "numba>=0.63,<1",
     "scipy>=1,<2",
+
+    # Visualization
     "matplotlib>=3,<4",
-    "PyQt6>=6,<7",
-    "tqdm>=4,<5",
-    "appdirs>=1,<2",
+    "PySide6>=6,<7",  # Qt backend for matplotlib interactive plots
     "plotly>=6,<7",
-    "umap-learn>=0.5.9.post2,<1",
-    "pytz>=2025,<2026",
-    "filelock>=3,<4",
+
+    # Machine Learning
+    "umap-learn>=0,<1",
+
+    # Remote Execution
     "paramiko>=4,<5",
-    "simple-slurm>=0,<1",
+
+    # Utilities
+    "pytz>=2026,<2027",
+    "filelock>=3,<4",
     "natsort-rs>=0,<1",
-    "xxhash>=3,<4",
     "tabulate>=0,<1",
 ]
 
@@ -67,10 +76,15 @@ dependencies = [
 Homepage = "https://github.com/Sun-Lab-NBB/sl-forgery"
 Documentation = "https://sl-forgery-api-docs.netlify.app/"
 
-# Specifies additional dependencies that can be installed alongside the main library.
-[project.optional-dependencies]
+# CLI interfaces.
+[project.scripts]
+sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
+sl-process = "sl_forgery.command_line_interfaces.process:process_cli"
+sl-execute = "sl_forgery.command_line_interfaces.execute:execute_cli"
+sl-server = "sl_forgery.command_line_interfaces.server:server_cli"
 
-# Dependencies that support developing this project.
+# Development dependencies (PEP 735). Not published to PyPI.
+[dependency-groups]
 dev = [
     # Tox
     "tox>=4,<5",
@@ -78,22 +92,13 @@ dev = [
     "tox-uv>=1,<2",
 
     # Development Automation
-    "ataraxis-automation>=7,<8",
+    "ataraxis-automation>=8,<9",
 
     # Types
-    "types-appdirs>=1,<2",
-    "types-tqdm>=4,<5",
     "types-filelock>=3,<4",
-    "types-pytz>=2025,<2026",
+    "types-pytz>=2026,<2027",
     "types-tabulate>=0,<1",
 ]
-
-# Exports CLIs upon library installation into an environment
-[project.scripts]
-sl-project = "sl_forgery.command_line_interfaces.project:project_cli"
-sl-process = "sl_forgery.command_line_interfaces.process:process_cli"
-sl-execute = "sl_forgery.command_line_interfaces.execute:execute_cli"
-sl-server = "sl_forgery.command_line_interfaces.server:server_cli"
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
 [tool.hatch.build.targets.sdist]
@@ -105,10 +110,10 @@ packages = ["src/sl_forgery"]
 
 # Ruff Configuration.
 [tool.ruff]
-line-length = 120         # The maximum column length is set to 120 for this project.
+line-length = 120         # Deviates from the commonly used '80' standard.
 indent-width = 4          # Same as black, indents are 4 spaces
 target-version = "py314"  # Targets the lowest supported version of python
-src = ["src"]             # The name of the source directory
+src = ["src"]             # The name of the root source code directory
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
 extend-exclude = ["conf.py"]
@@ -118,22 +123,22 @@ lint.select = ["ALL"]
 
 # General ignore directives
 lint.ignore = [
-    "W291",  # Conflicts with docstring formatting.
-    "W293",  # Conflicts with UI style formatting.
-    "C901",  # Sometimes complex functions are necessary
-    "PLR0913",  # Sometimes complex functions are necessary
-    "PLR0912",  # Sometimes complex functions are necessary
-    "PLR0915",  # Sometimes complex type defenitions are necessary
+    "W291",    # Conflicts with docstring formatting
+    "W293",    # Conflicts with UI style formatting
+    "C901",    # Sometimes complex functions are necessary
+    "PLR0913", # Sometimes complex functions are necessary
+    "PLR0912", # Sometimes complex functions are necessary
+    "PLR0915", # Sometimes complex type definitions are necessary
     "PLR0911", # Sometimes complex return graphs are necessary
-    "TID252", # Conflicts with the project's import management strategy
-    "BLE001",  # Catching blind exceptions is necessary for the functioning of this library.
-    "COM812", # Conflicts with the formatter
-    "ISC001", # Conflicts with the formatter
-    "PT001", # https://github.com/astral-sh/ruff/issues/8796#issuecomment-182590771
-    "PT023", # https://github.com/astral-sh/ruff/issues/8796#issuecomment-1825907715
-    "D107", # Project-specific, __init__ is documented inside the main class docstring where applicable
-    "D205", # Bugs out for file descriptions
-    "PLW0603", # While global statement usage is not ideal, it greatly streamlines certain development patterns
+    "TID252",  # Conflicts with the project's import management strategy
+    "BLE001",  # Catching blind exceptions is necessary for the functioning of this library
+    "COM812",  # Conflicts with the formatter
+    "ISC001",  # Conflicts with the formatter
+    "PT001",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-182590771
+    "PT023",   # https://github.com/astral-sh/ruff/issues/8796#issuecomment-1825907715
+    "D107",    # __init__ is documented inside the main class docstring where applicable
+    "D205",    # Bugs out for file descriptions
+    "PLW0603", # While global statement usage is not ideal, it streamlines certain development patterns
 ]
 
 # Additional formatting configurations
@@ -168,17 +173,18 @@ length-sort = true                 # Places shorter imports first
 # MyPy configuration section.
 [tool.mypy]
 disallow_untyped_defs = true # Enforces function annotation
-warn_unused_ignores = true   # Warns against using 'type: ignore' for packages that have type stubs available.
+warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
+
 exclude = [
-    "sl-forgery-\\d+", # Ignores temporary folder created by setuptools when building the sdist
-    "src/sl_forgery/legacy/*",    # Ignores temporary legacy files
-    "venv.*/",         # Ignores virtual environments
-    "build/",          # Ignores the sdist directory
-    "dist/",           # Ignores the wheel directory
-    "docs/",           # Ignores the sphinx / doxygen directory
-    "stubs/",          # Ignores stubs directory (stubgen output target)
-    "recipe/",         # Ignores recipe directory (grayskull output target)
-    "tests/",          # Ignores the test directory.
+    "sl-forgery-\\d+",         # Ignores temporary folder created by setuptools when building the sdist
+    "src/sl_forgery/legacy/*", # Ignores temporary legacy files
+    "venv.*/",                 # Ignores virtual environments
+    "build/",                  # Ignores the sdist directory
+    "dist/",                   # Ignores the wheel directory
+    "docs/",                   # Ignores the sphinx / doxygen directory
+    "stubs/",                  # Ignores stubs directory (stubgen output target)
+    "recipe/",                 # Ignores recipe directory (grayskull output target)
+    "tests/",                  # Ignores the test directory.
 ]
 
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
@@ -190,3 +196,15 @@ source = ["src/", ".tox/*/lib/python*/site-packages/"]
 # Same as above, specifies the output directory for the coverage .html report
 [tool.coverage.html]
 directory = "reports/coverage_html"
+
+# Specifies additional ignore directives
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "def __del__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+]

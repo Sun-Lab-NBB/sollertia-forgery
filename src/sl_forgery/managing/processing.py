@@ -384,8 +384,6 @@ def generate_project_manifest(
                         f"{tuple(SessionTypes)}."
                     )
                     console.error(message=message, error=ValueError)
-                    # Fallback to appease mypy, should not be reachable
-                    raise ValueError(message)  # noqa: TRY301
 
                 # Marks the session as complete based on the descriptor's incomplete field.
                 manifest["complete"].append(is_complete)
