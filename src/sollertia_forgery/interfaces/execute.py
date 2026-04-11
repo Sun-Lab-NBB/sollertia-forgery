@@ -9,7 +9,6 @@ from ..server import (
     forge_dataset,
     manage_project_data,
     process_project_data,
-    generate_report_datasets,
     resolve_project_manifest,
 )
 from ..shared_assets import ProjectManifest, SessionMetadata, filter_sessions
@@ -402,34 +401,3 @@ def forge_command(
     )
 
 
-# noinspection PyUnresolvedReferences
-@execute_cli.command("report")
-@click.option(
-    "-bs",
-    "--batch-size",
-    type=int,
-    default=4,
-    show_default=True,
-    help="The number of report generation pipelines that can be submitted to the remote compute server at a time.",
-)
-@click.pass_context
-def report_command(ctx: click.Context, *, batch_size: int) -> None:
-    """Generates report datasets for the selected sessions.
-
-    This command generates behavior report datasets for each eligible session on the remote compute server.
-    Report datasets contain synchronized camera timestamps, behavior data, and experiment data.
-    """
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    manifest_path = ctx.obj["manifest_path"]
-    sessions = ctx.obj["sessions"]
-    keep_job_logs = ctx.obj["keep_job_logs"]
-
-    # Executes the report generation operation.
-    generate_report_datasets(
-        manifest_path=manifest_path,
-        project=project,
-        sessions=sessions,
-        keep_job_logs=keep_job_logs,
-        processing_batch_size=batch_size,
-    )

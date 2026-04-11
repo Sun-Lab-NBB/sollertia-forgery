@@ -7,7 +7,7 @@ from .server import Server, JobStatus, CommandResult, get_remote_job_work_direct
 from .pipeline import ProcessingPipeline, check_session_eligibility, execute_pipelines
 from .managing_interface import adopt_project, manage_project_data, resolve_project_manifest
 from .processing_interface import process_project_data
-from .forging_interface import forge_dataset, generate_report_datasets
+from .forging_interface import forge_dataset
 
 __all__ = [
     "CommandResult",
@@ -23,7 +23,6 @@ __all__ = [
     "execute_pipelines",
     "adopt_project",
     "forge_dataset",
-    "generate_report_datasets",
     "get_remote_job_work_directory",
     "manage_project_data",
     "process_project_data",

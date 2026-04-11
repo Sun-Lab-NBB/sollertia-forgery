@@ -12,7 +12,7 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData
 
 from ..shared_assets import SessionMetadata
-from ..forging.processing import define_dataset, assemble_dataset, assemble_report_data
+from ..forging.processing import define_dataset, assemble_dataset
 from ..managing.processing import resolve_checksum, transfer_session, generate_project_manifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
@@ -242,32 +242,3 @@ def assemble_dataset_command(
     )
 
 
-@process_cli.command("report")
-@click.option(
-    "-sp",
-    "--session-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The absolute path to the session's data directory.",
-)
-@click.option(
-    "-id",
-    "--job-id",
-    type=str,
-    default=None,
-    help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs in remote mode using a "
-        "pre-generated tracker. If not provided, runs in local mode with automatic tracker management."
-    ),
-)
-def report_command(session_path: Path, job_id: str | None) -> None:
-    """Assembles a report dataset for the specified session.
-
-    This command generates a behavior report dataset containing synchronized camera timestamps, behavior data, and
-    experiment data for the target session.
-    """
-    assemble_report_data(
-        session_path=session_path,
-        job_id=job_id,
-        progress=True,
-    )
