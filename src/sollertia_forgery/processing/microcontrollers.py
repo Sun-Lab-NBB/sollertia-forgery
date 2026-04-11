@@ -4,7 +4,7 @@ produced by the ataraxis-communication-interface library.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,10 +18,6 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import MesoscopeHardwareState
-
-_ScalarT = TypeVar("_ScalarT", bound=np.generic)
-"""Type variable for the output dtype of _get_event_data()."""
-
 
 _MODULE_FEATHER_PATTERN: str = "controller_*_module_*.feather"
 """The glob pattern used to discover microcontroller module feather files produced by ataraxis-communication-interface.
@@ -231,11 +227,11 @@ def _get_event_timestamps(partition: dict[int, pl.DataFrame], event_code: int) -
     return event_dataframe["timestamp_us"].to_numpy().astype(np.uint64)
 
 
-def _get_event_data(
+def _get_event_data[ScalarT: np.generic](
     partition: dict[int, pl.DataFrame],
     event_code: int,
-    values_dtype: type[_ScalarT],
-) -> tuple[NDArray[np.uint64], NDArray[_ScalarT]]:
+    values_dtype: type[ScalarT],
+) -> tuple[NDArray[np.uint64], NDArray[ScalarT]]:
     """Returns timestamps and vectorized-reconstructed data values for a given event code.
 
     Notes:
@@ -262,17 +258,17 @@ def _get_event_data(
     data_list = event_dataframe["data"].to_list()
     dtype_list = event_dataframe["dtype"].to_list()
     payload_dtype = dtype_list[0]
-    values: NDArray[_ScalarT] = np.frombuffer(b"".join(data_list), dtype=payload_dtype).astype(values_dtype)
+    values: NDArray[ScalarT] = np.frombuffer(b"".join(data_list), dtype=payload_dtype).astype(values_dtype)
 
     return timestamps, values
 
 
-def _merge_event_streams(
+def _merge_event_streams[ScalarT: np.generic](
     timestamps_a: NDArray[np.uint64],
-    values_a: NDArray[_ScalarT],
+    values_a: NDArray[ScalarT],
     timestamps_b: NDArray[np.uint64],
-    values_b: NDArray[_ScalarT],
-) -> tuple[NDArray[np.uint64], NDArray[_ScalarT]]:
+    values_b: NDArray[ScalarT],
+) -> tuple[NDArray[np.uint64], NDArray[ScalarT]]:
     """Merges two chronologically-sorted event streams into a single timestamp-sorted stream.
 
     Notes:
@@ -584,6 +580,14 @@ def _parse_lick_data(
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration providing the lick detection threshold.
     """
+    if hardware_state.lick_threshold is None:
+        message = (
+            "Unable to parse lick sensor module data. The 'lick_threshold' field is not configured on the "
+            "hardware state, but _parse_lick_data was invoked. This indicates a mismatch between the module "
+            "eligibility filter and the parser registry."
+        )
+        console.error(message=message, error=ValueError)
+
     lick_threshold = np.uint16(hardware_state.lick_threshold)
 
     # Extracts voltage change events (event 51 only, preserving uint16 resolution).

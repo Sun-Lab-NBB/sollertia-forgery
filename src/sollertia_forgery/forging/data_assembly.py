@@ -37,7 +37,8 @@ def _add_sls2p_fluorescence_column(
     data_path: Path,
     filename: str,
     column_name: str,
-    cell_mask: None | bool | NDArray[np.bool] = None,  # noqa: FBT001 - Union type accepts bool, array, or None for mask filtering.
+    *,
+    cell_mask: None | bool | NDArray[np.bool] = None,
 ) -> pl.DataFrame:
     """Updates the input dataframe to include a column storing the fluorescence data loaded from the specified
     cindra .npy file.
@@ -202,7 +203,7 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
     ]
     for filename, column_name in single_day_files:
         frame_aligned_data = _add_sls2p_fluorescence_column(
-            frame_aligned_data, single_day_data, filename, column_name, is_cell_mask
+            frame_aligned_data, single_day_data, filename, column_name, cell_mask=is_cell_mask
         )
 
     # Same as above, but adds the multi-day fluorescence data to each frame.
@@ -387,20 +388,12 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
 
     # Loads all experiment data sources.
     encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
-    reward_zones_df = pl.read_ipc(
-        behavior_data_path.joinpath("vr_reward_zone_data.feather"), memory_map=True
-    )
+    reward_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_reward_zone_data.feather"), memory_map=True)
     cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
     trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
-    experiment_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("experiment_state_data.feather"), memory_map=True
-    )
-    guidance_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("guidance_state_data.feather"), memory_map=True
-    )
-    system_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("system_state_data.feather"), memory_map=True
-    )
+    experiment_state_df = pl.read_ipc(behavior_data_path.joinpath("experiment_state_data.feather"), memory_map=True)
+    guidance_state_df = pl.read_ipc(behavior_data_path.joinpath("guidance_state_data.feather"), memory_map=True)
+    system_state_df = pl.read_ipc(behavior_data_path.joinpath("system_state_data.feather"), memory_map=True)
 
     # Adds a trial number column to the trials dataframe.
     trial_df = trial_df.with_columns(pl.int_range(start=1, end=len(trial_df) + 1, dtype=pl.UInt32).alias("trial"))
@@ -554,9 +547,7 @@ def _assemble_behavior_dataset(
 
     # Loads the core behavior data present for all session types.
     valve_df = pl.read_ipc(behavior_data_path.joinpath("valve_data.feather"), memory_map=True)
-    system_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("system_state_data.feather"), memory_map=True
-    )
+    system_state_df = pl.read_ipc(behavior_data_path.joinpath("system_state_data.feather"), memory_map=True)
     lick_df = pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 
