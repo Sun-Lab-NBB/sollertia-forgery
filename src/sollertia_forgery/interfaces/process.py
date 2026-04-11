@@ -9,9 +9,9 @@ from pathlib import Path
 
 import click
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import DatasetData
+from sollertia_shared_assets import DatasetData, DatasetSession
 
-from ..shared_assets import SessionMetadata
+from ..processing import run_behavior_processing_pipeline
 from ..forging.processing import define_dataset, assemble_dataset
 from ..managing.processing import resolve_checksum, transfer_session, generate_project_manifest
 
@@ -21,12 +21,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
 
 @click.group("process", context_settings=CONTEXT_SETTINGS)
 def process_cli() -> None:
-    """Executes local data management, processing, and analysis pipelines.
-
-    This CLI is intended to run on the Sollertia remote compute server(s) and should not be called by the end-user
-    directly. Instead, these commands are called by other library components to execute the requested data processing
-    tasks.
-    """
+    """Executes data management, processing, or forging pipeline on the local machine."""
 
 
 @process_cli.command("manifest")
@@ -164,8 +159,8 @@ def define_dataset_command(
     session: tuple[str, ...],
 ) -> None:
     """Defines a new analysis dataset by creating its data hierarchy and metadata files."""
-    # Parses the session specifications into SessionMetadata instances.
-    sessions: list[SessionMetadata] = []
+    # Parses the session specifications into DatasetSession instances.
+    sessions: list[DatasetSession] = []
     expected_parts = 2
     for session_spec in session:
         parts = session_spec.split(":")
@@ -176,13 +171,69 @@ def define_dataset_command(
                 f"format."
             )
             console.error(message=message, error=ValueError)
-        sessions.append(SessionMetadata(session=parts[0], animal=parts[1]))
+        sessions.append(DatasetSession(session=parts[0], animal=parts[1]))
 
     # Creates the dataset hierarchy and metadata files.
     define_dataset(
         name=dataset_name,
         sessions=tuple(sessions),
         project_root=project_root,
+    )
+
+
+@process_cli.command("behavior")
+@click.option(
+    "-sp",
+    "--session-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The absolute path to the session root directory to process.",
+)
+@click.option(
+    "-id",
+    "--job-id",
+    type=str,
+    default=None,
+    help=(
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching "
+        "job (remote mode). If not provided, discovers and runs every available job for the session "
+        "(local mode)."
+    ),
+)
+@click.option(
+    "-w",
+    "--workers",
+    type=int,
+    default=-1,
+    show_default=True,
+    help=(
+        "The number of worker processes to use for parallel processing. Set to -1 for automatic "
+        "resolution via 'resolve_worker_count'. Set to 1 for sequential execution without spawning "
+        "worker processes. Ignored when '--job-id' is provided (remote mode runs the single job "
+        "in-process)."
+    ),
+)
+@click.option(
+    "-pr",
+    "--progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to display a progress bar during processing. Only meaningful in local mode.",
+)
+def run_behavior_pipeline_command(
+    session_path: Path,
+    job_id: str | None,
+    workers: int,
+    *,
+    progress: bool,
+) -> None:
+    """Runs the behavior processing pipeline on the target session."""
+    run_behavior_processing_pipeline(
+        session_path=session_path,
+        job_id=job_id,
+        workers=workers,
+        display_progress=progress,
     )
 
 
@@ -240,5 +291,3 @@ def assemble_dataset_command(
         target_session=target_session,
         progress=True,
     )
-
-

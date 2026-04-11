@@ -15,18 +15,12 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     SessionData,
     SessionTypes,
-    ManagingTrackers,
-    ProcessingTracker,
-    ProcessingTrackers,
-    ProcessingPipelines,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
     MesoscopeExperimentDescriptor,
-    delete_directory,
-    transfer_directory,
-    calculate_directory_checksum,
 )
+from ataraxis_data_structures import delete_directory, transfer_directory, calculate_directory_checksum
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -61,7 +61,6 @@ class BehaviorJobNames(StrEnum):
 
 def run_behavior_processing_pipeline(
     session_path: Path,
-    output_directory: Path,
     job_id: str | None = None,
     *,
     workers: int = -1,
@@ -78,10 +77,10 @@ def run_behavior_processing_pipeline(
         discovered. In remote mode (job_id is provided), only the job matching the provided ID is executed
         in-process without any worker pool.
 
+        This pipeline saves all processed data under the session's /processed_data/behavior_data directory.
+
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
-        output_directory: The path to the root output directory. A ``behavior_data/`` subdirectory is created
-            automatically under this path, and all tracker and feather output files are written there.
         job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the job
             matching this ID is executed (remote mode). If not provided, all available jobs are distributed across
             the worker pool with automatic tracker management (local mode).
@@ -94,7 +93,8 @@ def run_behavior_processing_pipeline(
         ValueError: If the session type is not supported for behavior processing, if no processable jobs are
             discovered, or if the provided job_id does not match any discoverable job.
     """
-    # Loads and validates the session data.
+    # Loads and validates the session data. The session's ``processed_data_path`` is used as the static root for
+    # all behavior processing outputs, so the caller never passes an output directory.
     session = SessionData.load(session_path=session_path)
 
     if session.session_type not in PROCESSABLE_SESSION_TYPES:
@@ -136,8 +136,10 @@ def run_behavior_processing_pipeline(
 
     # Creates the output directory structure and tracker, then aligns the tracker's job registry with the
     # discovered jobs. The same regeneration strategy is applied in both local and remote modes so that stale
-    # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs.
-    data_path = output_directory / BEHAVIOR_DATA_DIRECTORY
+    # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs. The
+    # ``behavior_data/`` subdirectory is always placed under the session's ``processed_data_path``, co-located
+    # with the upstream ``camera_data/`` and ``microcontroller_data/`` produced by axvs and axci.
+    data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
     data_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=data_path / TRACKER_FILENAME)
     jobs = list(job_paths.keys())

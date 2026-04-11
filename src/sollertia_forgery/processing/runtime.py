@@ -10,7 +10,7 @@ from numba import njit  # type: ignore[import-untyped]
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba type introspection
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import console
 from ataraxis_data_structures import LogArchiveReader
 
 if TYPE_CHECKING:
@@ -96,8 +96,6 @@ def process_runtime_data(
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
     """
-    console.echo(message=f"Extracting runtime data from '{log_path.name}'...")
-
     # Creates a LogArchiveReader to efficiently iterate through the archive with automatic onset resolution.
     reader = LogArchiveReader(archive_path=log_path)
 
@@ -204,8 +202,6 @@ def process_runtime_data(
         # Exports trial type and start distance data.
         trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
         trial_dataframe.write_ipc(file=output_directory / "trial_data.feather", compression="uncompressed")
-
-    console.echo(message="Runtime data processing: Complete.", level=LogLevel.SUCCESS)
 
 
 def _decompose_multiple_cue_sequences_into_trials(
@@ -317,13 +313,6 @@ def _decompose_multiple_cue_sequences_into_trials(
                     if truncated_distance > 0:
                         all_trial_indices.append(trial_index)
                         all_trial_distances.append(float(breakpoint_distance))
-
-                        message = (
-                            f"Sequence {sequence_index + 1}, Trial {trial_index}: truncated. Full trial should "
-                            f"have ended at {new_cumulative_distance:.1f} cm, but the sequence was interrupted at "
-                            f"{breakpoint_distance:.1f} cm"
-                        )
-                        console.echo(message=message, level=LogLevel.WARNING)
 
                     cumulative_distance = breakpoint_distance
                     break

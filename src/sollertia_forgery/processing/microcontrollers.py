@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
 if TYPE_CHECKING:
@@ -104,8 +104,6 @@ def process_microcontroller_data(
 
     specification = _MODULE_REGISTRY[module_key]
 
-    console.echo(message=f"Processing module ({module_type}, {module_id}) from '{feather_path.name}'...")
-
     # Reads the pre-extracted module data via memory mapping (supported because all module feather writes use
     # uncompressed IPC), so the file is backed by the OS page cache rather than a full copy in private RAM.
     # Then partitions it by event code in a single pass, so parse functions can resolve their per-event lookups
@@ -123,8 +121,6 @@ def process_microcontroller_data(
         output_file=output_file,
         hardware_state=hardware_state,
     )
-
-    console.echo(message=f"Module ({module_type}, {module_id}) processing: Complete.", level=LogLevel.SUCCESS)
 
 
 def is_module_eligible(module_type: int, module_id: int, hardware_state: MesoscopeHardwareState) -> bool:

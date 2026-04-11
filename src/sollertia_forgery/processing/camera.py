@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
+from ataraxis_base_utilities import console, ensure_directory_exists
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,11 +98,8 @@ def process_camera_timestamps(feather_path: Path, output_directory: Path) -> Non
         console.error(message=message, error=ValueError)
 
     output_filename = _CAMERA_OUTPUT_NAMES[source_id]
-    console.echo(message=f"Processing camera timestamps from '{feather_path.name}' -> '{output_filename}'...")
 
     ensure_directory_exists(path=output_directory)
     output_path = output_directory / output_filename
     output_path.unlink(missing_ok=True)
     os.link(src=feather_path, dst=output_path)
-
-    console.echo(message=f"Camera timestamp processing for '{output_filename}': Complete.", level=LogLevel.SUCCESS)

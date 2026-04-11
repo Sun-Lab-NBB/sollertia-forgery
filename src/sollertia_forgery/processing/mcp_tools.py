@@ -46,17 +46,17 @@ class _BehaviorPendingJob(PendingJob):  # pragma: no cover
     """Describes a single behavior processing job queued for background execution.
 
     Extends the shared :class:`PendingJob` base with the session-level metadata required by the behavior worker
-    callable: the session root path, the session's human-readable name, the per-session output directory, and
-    the ``(job_name, specifier)`` pair that identifies the atomic unit of work inside the session's
-    :class:`ProcessingTracker` registry.
+    callable: the session root path, the session's human-readable name, and the ``(job_name, specifier)`` pair
+    that identifies the atomic unit of work inside the session's :class:`ProcessingTracker` registry. The per-job
+    output directory is not stored on the descriptor because behavior outputs always live under
+    ``{session.processed_data_path}/behavior_data/``; the worker resolves that path from ``session_path`` at
+    dispatch time via :class:`SessionData`.
     """
 
     session_path: Path
     """The path to the session root directory containing the session data hierarchy."""
     session_name: str
     """The human-readable session name used for logging and status reporting."""
-    output_directory: Path
-    """The path to the per-session output root. A ``behavior_data/`` subdirectory is created under this path."""
     job_name: str
     """The behavior job type name (one of ``runtime_processing``, ``camera_processing``, or
     ``microcontroller_processing``)."""
@@ -83,9 +83,11 @@ def discover_behavior_sessions_tool(root_directory: str) -> dict[str, Any]:  # p
 
     Returns:
         A dictionary containing a 'sessions' list where each entry has 'session_path', 'session_name',
-        'animal_id', 'session_type', 'raw_data_path', 'processed_data_path', 'output_directory', and
-        'eligible' keys, a flat 'session_paths' list of eligible session roots for batch processing, and aggregate
-        counts. Sessions that fail to load produce entries with 'session_path', 'eligible=False', and 'error'.
+        'animal_id', 'session_type', 'raw_data_path', 'processed_data_path', and 'eligible' keys, a flat
+        'session_paths' list of eligible session roots for batch processing, and aggregate counts. Sessions
+        that fail to load produce entries with 'session_path', 'eligible=False', and 'error'. Behavior outputs
+        always live under ``{processed_data_path}/behavior_data/`` — the caller never chooses an output
+        location.
     """
     root_path = Path(root_directory)
 
@@ -128,7 +130,6 @@ def discover_behavior_sessions_tool(root_directory: str) -> dict[str, Any]:  # p
             "session_type": str(session.session_type),
             "raw_data_path": str(session.raw_data_path),
             "processed_data_path": str(session.processed_data_path),
-            "output_directory": str(session.processed_data_path),
             "eligible": eligible,
         }
 
@@ -148,46 +149,35 @@ def discover_behavior_sessions_tool(root_directory: str) -> dict[str, Any]:  # p
 @mcp.tool()  # pragma: no cover
 def prepare_behavior_processing_batch_tool(  # pragma: no cover
     session_paths: list[str],
-    output_directories: list[str],
 ) -> dict[str, Any]:
     """Prepares an execution manifest for batch behavior processing without starting execution.
 
-    Accepts session paths and output directories from the caller, discovers the behavior jobs available for each
-    session via :func:`discover_behavior_jobs`, and initializes a :class:`ProcessingTracker` under each session's
-    ``behavior_data/`` subdirectory. Idempotent: if a tracker already exists, returns its current job registry
-    and status instead of reinitializing. Requires prior session discovery -- the caller must provide confirmed
-    session root paths rather than relying on implicit discovery.
+    Accepts confirmed session paths from the caller, discovers the behavior jobs available for each session via
+    :func:`discover_behavior_jobs`, and initializes a :class:`ProcessingTracker` under each session's
+    ``{processed_data_path}/behavior_data/`` subdirectory. The output location is static — behavior outputs
+    always live under the session's ``processed_data_path`` and the caller never chooses where they go.
+    Idempotent: if a tracker already exists, returns its current job registry and status instead of
+    reinitializing.
 
     Important:
-        The AI agent calling this tool MUST run :func:`discover_behavior_sessions_tool` first to obtain session
-        root paths. The agent MUST ask the user to confirm the output directory for each session before calling
-        this tool. Do not assume or guess session paths or output directories.
+        The AI agent calling this tool MUST run :func:`discover_behavior_sessions_tool` first to obtain
+        confirmed session root paths. Do not assume or guess session paths. The output directory is resolved
+        statically from the session's :class:`SessionData` marker — there is no user-selectable output location.
 
     Args:
         session_paths: The list of absolute paths to session root directories. Accepts paths from the
             ``session_paths`` list returned by :func:`discover_behavior_sessions_tool`.
-        output_directories: The list of absolute paths for per-session output. Must match the length of
-            ``session_paths``. Each output directory receives a ``behavior_data/`` subdirectory containing the
-            processing tracker and output files. When the caller passes the session's ``processed_data_path``,
-            the tracker lives under the session's processed data hierarchy.
 
     Returns:
         A dictionary containing per-session manifests in ``sessions`` with tracker paths and job lists, total
-        counts, and any invalid session paths.
+        counts, and any invalid session paths. Each per-session entry carries a ``data_path`` field that
+        identifies where ``behavior_data/`` was created under the session's processed data hierarchy.
     """
-    if len(output_directories) != len(session_paths):
-        return {
-            "error": (
-                f"Length mismatch: {len(session_paths)} session paths but "
-                f"{len(output_directories)} output directories."
-            ),
-        }
-
     result_sessions: dict[str, Any] = {}
     invalid_paths: list[str] = []
     total_jobs = 0
 
-    for index, session_path_str in enumerate(session_paths):
+    for session_path_str in session_paths:
         session_path = Path(session_path_str)
 
         if not session_path.exists() or not session_path.is_dir():
@@ -215,10 +205,11 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
             }
             continue
 
-        # Resolves the per-session output directory and creates the behavior_data subdirectory for the tracker
-        # and output files.
-        output_path = Path(output_directories[index])
-        data_path = output_path / BEHAVIOR_DATA_DIRECTORY
+        # Resolves the static output location. The ``behavior_data/`` subdirectory always lives under the
+        # session's ``processed_data_path``, co-located with the upstream ``camera_data/`` and
+        # ``microcontroller_data/`` produced by axvs and axci. The caller does not choose where behavior
+        # outputs go.
+        data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
         data_path.mkdir(parents=True, exist_ok=True)
         tracker_path = data_path / TRACKER_FILENAME
 
@@ -249,7 +240,6 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
                         "specifier": specifier,
                         "session_path": session_path_str,
                         "session_name": session.session_name,
-                        "output_directory": str(output_path),
                         "tracker_path": str(tracker_path),
                     }
                 )
@@ -257,7 +247,6 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
             result_sessions[session_path_str] = {
                 "tracker_path": str(tracker_path),
                 "data_path": str(data_path),
-                "output_directory": str(output_path),
                 "session_name": session.session_name,
                 "jobs": enriched_jobs,
                 "summary": tracker_status.get("summary", {}),
@@ -279,7 +268,6 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
                 "status": ProcessingStatus.SCHEDULED.name,
                 "session_path": session_path_str,
                 "session_name": session.session_name,
-                "output_directory": str(output_path),
                 "tracker_path": str(tracker_path),
             }
             for job_name, specifier in discovered_jobs
@@ -288,7 +276,6 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
         result_sessions[session_path_str] = {
             "tracker_path": str(tracker_path),
             "data_path": str(data_path),
-            "output_directory": str(output_path),
             "session_name": session.session_name,
             "jobs": jobs,
             "summary": {
@@ -335,8 +322,9 @@ def execute_behavior_processing_jobs_tool(  # pragma: no cover
 
     Args:
         jobs: The list of job descriptors from :func:`prepare_behavior_processing_batch_tool`. Each dictionary
-            must have 'session_path', 'output_directory', 'tracker_path', 'job_id', 'job_name', and 'specifier'
-            keys.
+            must have 'session_path', 'tracker_path', 'job_id', 'job_name', and 'specifier' keys. The output
+            location is not part of the descriptor — workers resolve it from the session's
+            :class:`SessionData` marker at dispatch time.
         worker_budget: The total number of CPU cores available for the execution session. Directly controls
             memory footprint. Set to -1 for automatic resolution via
             :func:`ataraxis_base_utilities.resolve_worker_count`.
@@ -355,7 +343,7 @@ def execute_behavior_processing_jobs_tool(  # pragma: no cover
         return {"error": "An execution session is already active. Cancel it first or wait for completion."}
 
     # Validates and builds pending jobs.
-    required_keys = {"session_path", "output_directory", "tracker_path", "job_id", "job_name", "specifier"}
+    required_keys = {"session_path", "tracker_path", "job_id", "job_name", "specifier"}
     pending: list[_BehaviorPendingJob] = []
     all_jobs: dict[tuple[str, str], _BehaviorPendingJob] = {}
     invalid_jobs: list[dict[str, Any]] = []
@@ -376,7 +364,6 @@ def execute_behavior_processing_jobs_tool(  # pragma: no cover
             job_id=job_dict["job_id"],
             session_path=Path(job_dict["session_path"]),
             session_name=str(job_dict.get("session_name", Path(job_dict["session_path"]).name)),
-            output_directory=Path(job_dict["output_directory"]),
             job_name=job_dict["job_name"],
             specifier=job_dict["specifier"],
         )
@@ -728,8 +715,9 @@ def reset_behavior_processing_jobs_tool(  # pragma: no cover
 def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
     """Discovers and summarizes behavior processing status for all sessions under a root directory.
 
-    Recursively searches for ``behavior_processing_tracker.yaml`` files and aggregates their status. Each tracker
-    corresponds to a single session's behavior processing output directory.
+    Recursively searches for ``behavior_processing_tracker.yaml`` files and aggregates their status. Each
+    tracker lives at ``{session_root}/processed_data/behavior_data/behavior_processing_tracker.yaml``, so
+    walking up three parents from each tracker yields the session root.
 
     Args:
         root_directory: The absolute path to the root directory to search for tracker files.
@@ -752,10 +740,12 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
     aggregate_scheduled = 0
 
     for found_tracker_path in sorted(root_path.rglob(TRACKER_FILENAME)):
-        # The tracker lives under ``<session_output>/behavior_data/``, so walking up two parents yields the
-        # session-level output root that was passed to prepare_behavior_processing_batch_tool.
+        # The tracker lives at ``{session_root}/processed_data/behavior_data/<tracker>``, so walking up three
+        # parents yields the session root. The caller can feed that path back into ``/session-setup`` or
+        # ``/behavior-processing`` without further resolution.
         data_path = found_tracker_path.parent
-        output_directory = data_path.parent
+        processed_data_path = data_path.parent
+        session_root = processed_data_path.parent
         try:
             status = read_tracker_status(tracker_path=found_tracker_path)
             summary = status.get("summary", {})
@@ -769,7 +759,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
 
             session_statuses.append(
                 {
-                    "output_directory": str(output_directory),
+                    "session_path": str(session_root),
                     "data_path": str(data_path),
                     "tracker_path": str(found_tracker_path),
                     "status": dir_status,
@@ -779,7 +769,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
         except Exception:
             session_statuses.append(
                 {
-                    "output_directory": str(output_directory),
+                    "session_path": str(session_root),
                     "data_path": str(data_path),
                     "tracker_path": str(found_tracker_path),
                     "status": "error",
@@ -800,37 +790,42 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
 
 
 @mcp.tool()  # pragma: no cover
-def verify_behavior_processing_output_tool(output_directory: str) -> dict[str, Any]:  # pragma: no cover
+def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:  # pragma: no cover
     """Verifies the completeness of processed behavior data output for a single session.
 
-    Scans the ``behavior_data/`` subdirectory under the specified output directory for feather files produced by
-    the behavior processing pipeline. Each feather file is loaded to confirm it is readable and to report its
-    row and column counts. The processing tracker is also read to report per-job statuses alongside the output
-    file inventory.
+    Loads the session's :class:`SessionData` marker to resolve ``processed_data_path``, then scans the
+    ``behavior_data/`` subdirectory for feather files produced by the behavior processing pipeline. Each
+    feather file is loaded to confirm it is readable and to report its row and column counts. The processing
+    tracker is also read to report per-job statuses alongside the output file inventory.
 
     Args:
-        output_directory: The absolute path to the per-session output directory containing a ``behavior_data/``
-            subdirectory with processed output. Matches the ``output_directory`` value used when calling
-            :func:`prepare_behavior_processing_batch_tool` for this session.
+        session_path: The absolute path to the session root directory. The session's ``processed_data_path``
+            is resolved from :class:`SessionData`, and verification inspects
+            ``{processed_data_path}/behavior_data/``.
 
     Returns:
         A dictionary containing a 'verified' flag, per-file results in 'files' (each with path, readability,
         row count, and column names), tracker status in 'tracker', and aggregate counts.
     """
-    output_path = Path(output_directory)
+    session_root = Path(session_path)
 
-    if not output_path.exists():
-        return {"error": f"Directory does not exist: {output_directory}"}
+    if not session_root.exists():
+        return {"error": f"Directory does not exist: {session_path}"}
 
-    if not output_path.is_dir():
-        return {"error": f"Path is not a directory: {output_directory}"}
+    if not session_root.is_dir():
+        return {"error": f"Path is not a directory: {session_path}"}
 
-    data_path = output_path / BEHAVIOR_DATA_DIRECTORY
+    try:
+        session = SessionData.load(session_path=session_root)
+    except Exception as error:
+        return {"error": f"Unable to load session: {error}"}
+
+    data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
 
     if not data_path.exists():
         return {
             "error": (
-                f"No '{BEHAVIOR_DATA_DIRECTORY}' subdirectory found under '{output_directory}'. "
+                f"No '{BEHAVIOR_DATA_DIRECTORY}' subdirectory found under '{session.processed_data_path}'. "
                 f"Processing may not have been run yet."
             ),
         }
@@ -869,7 +864,7 @@ def verify_behavior_processing_output_tool(output_directory: str) -> dict[str, A
 
     return {
         "verified": all_valid and bool(feather_files),
-        "output_directory": output_directory,
+        "session_path": str(session_root),
         "data_path": str(data_path),
         "files": file_results,
         "total_files": len(file_results),
@@ -906,29 +901,55 @@ def query_behavior_data_tool(  # pragma: no cover
 
 
 @mcp.tool()  # pragma: no cover
-def clean_behavior_processing_output_tool(output_directories: list[str]) -> dict[str, Any]:  # pragma: no cover
-    """Deletes the behavior_data subdirectory under one or more output directories.
+def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str, Any]:  # pragma: no cover
+    """Deletes the behavior_data subdirectory under one or more sessions' processed_data directories.
 
-    Removes each ``behavior_data/`` subdirectory and all of its contents, including processed feather files and
-    the processing tracker. Uses :func:`ataraxis_data_structures.delete_directory` for parallel file deletion with
-    platform-safe retry logic. After cleanup, the output directories can be passed to
+    For each session, loads :class:`SessionData` to resolve ``processed_data_path``, then removes
+    ``{processed_data_path}/behavior_data/`` and all of its contents (processed feather files plus the
+    processing tracker). Uses :func:`ataraxis_data_structures.delete_directory` for parallel file deletion
+    with platform-safe retry logic. After cleanup, the same session paths can be passed back to
     :func:`prepare_behavior_processing_batch_tool` to reinitialize from scratch.
 
     Args:
-        output_directories: The list of absolute paths to per-session output directories containing
-            ``behavior_data/`` subdirectories to delete.
+        session_paths: The list of absolute paths to session root directories whose behavior processing
+            output should be deleted.
 
     Returns:
-        A dictionary containing a 'results' list with per-directory outcomes (each with 'output_directory',
+        A dictionary containing a 'results' list with per-session outcomes (each with 'session_path',
         'cleaned' flag, and either 'data_path' or 'error') and a 'total_cleaned' count.
     """
-    results = [
-        clean_output_subdirectory(output_directory=directory, subdirectory_name=BEHAVIOR_DATA_DIRECTORY)
-        for directory in output_directories
-    ]
+    results: list[dict[str, Any]] = []
+
+    for session_path_str in session_paths:
+        session_path = Path(session_path_str)
+
+        if not session_path.exists() or not session_path.is_dir():
+            results.append(
+                {"session_path": session_path_str, "cleaned": False, "error": "Session path does not exist."}
+            )
+            continue
+
+        try:
+            session = SessionData.load(session_path=session_path)
+        except Exception as error:
+            results.append(
+                {"session_path": session_path_str, "cleaned": False, "error": f"Unable to load session: {error}"}
+            )
+            continue
+
+        outcome = clean_output_subdirectory(
+            output_directory=str(session.processed_data_path),
+            subdirectory_name=BEHAVIOR_DATA_DIRECTORY,
+        )
+        # Rewrites the helper's ``output_directory`` key into ``session_path`` so that the MCP surface
+        # consistently identifies each entry by its session root.
+        outcome.pop("output_directory", None)
+        outcome = {"session_path": session_path_str, **outcome}
+        results.append(outcome)
+
     total_cleaned = sum(1 for result in results if result.get("cleaned", False))
 
-    return {"results": results, "total_cleaned": total_cleaned, "total_directories": len(results)}
+    return {"results": results, "total_cleaned": total_cleaned, "total_sessions": len(results)}
 
 
 def _run_behavior_job(job: _BehaviorPendingJob) -> None:  # pragma: no cover
@@ -936,8 +957,9 @@ def _run_behavior_job(job: _BehaviorPendingJob) -> None:  # pragma: no cover
 
     Serves as the picklable worker callable stored on :class:`JobExecutionState` and dispatched to the batch
     manager's :class:`ProcessPoolExecutor`. Delegates to :func:`run_behavior_processing_pipeline` with the job's
-    session path and output directory in remote mode so that only the single ``(job_name, specifier)`` pair
-    identified by ``job.job_id`` is executed against the session.
+    session path in remote mode so that only the single ``(job_name, specifier)`` pair identified by
+    ``job.job_id`` is executed against the session. The output location is resolved inside
+    :func:`run_behavior_processing_pipeline` from the session's :class:`SessionData` marker.
 
     Args:
         job: The pending job descriptor produced by :func:`prepare_behavior_processing_batch_tool` and attached
@@ -945,6 +967,5 @@ def _run_behavior_job(job: _BehaviorPendingJob) -> None:  # pragma: no cover
     """
     run_behavior_processing_pipeline(
         session_path=job.session_path,
-        output_directory=job.output_directory,
         job_id=job.job_id,
     )
