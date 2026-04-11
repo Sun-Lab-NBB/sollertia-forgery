@@ -30,24 +30,25 @@ from .microcontrollers import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-_BEHAVIOR_DATA_DIRECTORY: str = "behavior_data"
+BEHAVIOR_DATA_DIRECTORY: str = "behavior_data"
 """The name of the subdirectory created under the output path for behavior processing results. All tracker files and
 processed feather outputs are written into this subdirectory."""
 
-_TRACKER_FILENAME: str = "behavior_processing_tracker.yaml"
+TRACKER_FILENAME: str = "behavior_processing_tracker.yaml"
 """The filename for the processing tracker placed in the behavior data output directory."""
 
-_PROCESSABLE_SESSION_TYPES: frozenset[SessionTypes] = frozenset(
+PROCESSABLE_SESSION_TYPES: frozenset[SessionTypes] = frozenset(
     {
         SessionTypes.LICK_TRAINING,
         SessionTypes.RUN_TRAINING,
         SessionTypes.MESOSCOPE_EXPERIMENT,
     }
 )
-"""The set of session types that are eligible for behavior data processing."""
+"""The set of session types that are eligible for behavior data processing. Exposed so that external tools (such as
+the MCP batch preparation helpers) can filter discovered sessions without duplicating the eligibility rules."""
 
 
-class _BehaviorJobNames(StrEnum):
+class BehaviorJobNames(StrEnum):
     """Defines the job type names used by the behavior processing pipeline."""
 
     RUNTIME = "runtime_processing"
@@ -96,11 +97,11 @@ def run_behavior_processing_pipeline(
     # Loads and validates the session data.
     session = SessionData.load(session_path=session_path)
 
-    if session.session_type not in _PROCESSABLE_SESSION_TYPES:
+    if session.session_type not in PROCESSABLE_SESSION_TYPES:
         message = (
             f"Unable to process behavior data for session '{session.session_name}'. The session type "
             f"'{session.session_type}' is not supported for behavior processing. Supported session types: "
-            f"{sorted(str(session_type) for session_type in _PROCESSABLE_SESSION_TYPES)}."
+            f"{sorted(str(session_type) for session_type in PROCESSABLE_SESSION_TYPES)}."
         )
         console.error(message=message, error=ValueError)
 
@@ -136,9 +137,9 @@ def run_behavior_processing_pipeline(
     # Creates the output directory structure and tracker, then aligns the tracker's job registry with the
     # discovered jobs. The same regeneration strategy is applied in both local and remote modes so that stale
     # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs.
-    data_path = output_directory / _BEHAVIOR_DATA_DIRECTORY
+    data_path = output_directory / BEHAVIOR_DATA_DIRECTORY
     data_path.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=data_path / _TRACKER_FILENAME)
+    tracker = ProcessingTracker(file_path=data_path / TRACKER_FILENAME)
     jobs = list(job_paths.keys())
     _prepare_tracker(tracker=tracker, jobs=jobs)
 
@@ -194,6 +195,44 @@ def run_behavior_processing_pipeline(
             )
 
     console.echo(message="All behavior processing jobs completed successfully.", level=LogLevel.SUCCESS)
+
+
+def discover_behavior_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]]]:
+    """Discovers all processable behavior jobs for the target session.
+
+    Loads the session, verifies its type is eligible for behavior processing, loads the session's hardware state,
+    and returns the ordered list of discovered ``(job_name, specifier)`` tuples. Factors out the discovery logic
+    shared by :func:`run_behavior_processing_pipeline` and the MCP batch-preparation tools so that external callers
+    can inspect the job set without triggering execution or tracker initialization.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of (session, jobs) where ``session`` is the loaded :class:`SessionData` instance and ``jobs`` is
+        the ordered list of ``(job_name, specifier)`` tuples yielded by discovery.
+
+    Raises:
+        ValueError: If the session type is not in :data:`PROCESSABLE_SESSION_TYPES`.
+    """
+    session = SessionData.load(session_path=session_path)
+
+    if session.session_type not in PROCESSABLE_SESSION_TYPES:
+        message = (
+            f"Unable to discover behavior jobs for session '{session.session_name}'. The session type "
+            f"'{session.session_type}' is not supported for behavior processing. Supported session types: "
+            f"{sorted(str(session_type) for session_type in PROCESSABLE_SESSION_TYPES)}."
+        )
+        console.error(message=message, error=ValueError)
+
+    hardware_state = _load_hardware_state(session=session)
+    job_paths = _discover_jobs(
+        raw_data_path=session.raw_data_path,
+        processed_data_path=session.processed_data_path,
+        hardware_state=hardware_state,
+    )
+
+    return session, list(job_paths.keys())
 
 
 def _load_hardware_state(session: SessionData) -> MesoscopeHardwareState:
@@ -273,12 +312,12 @@ def _discover_jobs(
     # runtime DataLogger always writes to a fixed source ID, so there is at most one archive per session.
     archive_path = find_log_archive(data_directory=raw_data_path)
     if archive_path is not None:
-        job_paths[(_BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)] = archive_path
+        job_paths[(BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)] = archive_path
 
     # Discovers camera processing jobs from pre-extracted camera timestamp feather files.
     job_paths.update(
         {
-            (_BehaviorJobNames.CAMERA, str(extract_camera_source_id(feather_path=feather_path))): feather_path
+            (BehaviorJobNames.CAMERA, str(extract_camera_source_id(feather_path=feather_path))): feather_path
             for feather_path in find_camera_feathers(data_directory=processed_data_path)
         }
     )
@@ -290,7 +329,7 @@ def _discover_jobs(
         if not is_module_eligible(module_type=module_type, module_id=module_id, hardware_state=hardware_state):
             continue
         specifier = f"{controller_id}-{module_type}-{module_id}"
-        job_paths[(_BehaviorJobNames.MICROCONTROLLER, specifier)] = feather_path
+        job_paths[(BehaviorJobNames.MICROCONTROLLER, specifier)] = feather_path
 
     return job_paths
 
@@ -542,17 +581,17 @@ def _run_job(
     Raises:
         ValueError: If the ``job_name`` does not match any known behavior processing job type.
     """
-    if job_name == _BehaviorJobNames.RUNTIME:
+    if job_name == BehaviorJobNames.RUNTIME:
         process_runtime_data(
             log_path=input_path,
             output_directory=output_directory,
             experiment_configuration=experiment_configuration,
         )
 
-    elif job_name == _BehaviorJobNames.CAMERA:
+    elif job_name == BehaviorJobNames.CAMERA:
         process_camera_timestamps(feather_path=input_path, output_directory=output_directory)
 
-    elif job_name == _BehaviorJobNames.MICROCONTROLLER:
+    elif job_name == BehaviorJobNames.MICROCONTROLLER:
         process_microcontroller_data(
             feather_path=input_path,
             output_directory=output_directory,
@@ -560,7 +599,7 @@ def _run_job(
         )
 
     else:
-        valid_names = sorted(str(name) for name in _BehaviorJobNames)
+        valid_names = sorted(str(name) for name in BehaviorJobNames)
         message = (
             f"Unable to dispatch processing job with name '{job_name}'. The input name does not match any known "
             f"behavior processing job type. Valid names: {valid_names}."

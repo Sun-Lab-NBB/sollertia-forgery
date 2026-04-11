@@ -4,7 +4,7 @@ ataraxis-video-system library.
 
 from __future__ import annotations
 
-import shutil
+import os
 from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
@@ -70,13 +70,15 @@ def extract_camera_source_id(feather_path: Path) -> int:
 
 
 def process_camera_timestamps(feather_path: Path, output_directory: Path) -> None:
-    """Copies a pre-extracted camera timestamp feather file to the behavior output directory under the legacy name.
+    """Hardlinks a pre-extracted camera timestamp feather file into the behavior output directory under the legacy name.
 
     Notes:
         Camera timestamp feather files produced by ataraxis-video-system already contain the final ``frame_time_us``
-        column in the correct format. This function copies the file to the behavior processing output directory using
-        the legacy naming convention (e.g., ``face_camera_timestamps.feather``) without modifying its contents. The
-        camera source ID is recovered from the input filename, which already encodes it per the
+        column in the correct format. This function creates a hardlink to the file inside the behavior processing
+        output directory using the legacy naming convention (e.g., ``face_camera_timestamps.feather``) without
+        modifying its contents or duplicating bytes on disk. The original ``camera_{source_id}_timestamps.feather``
+        remains in place so that ataraxis-video-system discovery tools continue to locate it. The camera source ID
+        is recovered from the input filename, which already encodes it per the
         ``camera_{source_id}_timestamps.feather`` convention.
 
     Args:
@@ -99,6 +101,8 @@ def process_camera_timestamps(feather_path: Path, output_directory: Path) -> Non
     console.echo(message=f"Processing camera timestamps from '{feather_path.name}' -> '{output_filename}'...")
 
     ensure_directory_exists(path=output_directory)
-    shutil.copy2(src=feather_path, dst=output_directory / output_filename)
+    output_path = output_directory / output_filename
+    output_path.unlink(missing_ok=True)
+    os.link(src=feather_path, dst=output_path)
 
     console.echo(message=f"Camera timestamp processing for '{output_filename}': Complete.", level=LogLevel.SUCCESS)

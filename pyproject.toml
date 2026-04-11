@@ -64,6 +64,9 @@ dependencies = [
     # Remote Execution
     "paramiko>=4,<5",
 
+    # Model Context Protocol
+    "mcp[cli]>=1,<2",
+
     # Utilities
     "pytz>=2026,<2027",
     "filelock>=3,<4",
@@ -77,10 +80,11 @@ Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 
 # CLI interfaces.
 [project.scripts]
-sl-project = "sollertia_forgery.command_line_interfaces.project:project_cli"
-sl-process = "sollertia_forgery.command_line_interfaces.process:process_cli"
-sl-execute = "sollertia_forgery.command_line_interfaces.execute:execute_cli"
-sl-server = "sollertia_forgery.command_line_interfaces.server:server_cli"
+sl-project = "sollertia_forgery.interfaces.project:project_cli"
+sl-process = "sollertia_forgery.interfaces.process:process_cli"
+sl-execute = "sollertia_forgery.interfaces.execute:execute_cli"
+sl-server = "sollertia_forgery.interfaces.server:server_cli"
+sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
 
 # Development dependencies (PEP 735). Not published to PyPI.
 [dependency-groups]
