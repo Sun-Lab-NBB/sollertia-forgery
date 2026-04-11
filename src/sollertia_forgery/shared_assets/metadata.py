@@ -187,7 +187,7 @@ class ProjectManifest:
 
     def __init__(self, manifest_file: Path) -> None:
         # Reads the data from the target manifest file into the class attribute.
-        self._data: pl.DataFrame = pl.read_ipc(source=manifest_file, use_pyarrow=True, memory_map=True)
+        self._data: pl.DataFrame = pl.read_ipc(source=manifest_file, memory_map=True)
 
         # Determines whether animal IDs are stored as strings or as numbers.
         self._animal_string = False

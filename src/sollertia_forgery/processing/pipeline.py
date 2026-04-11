@@ -17,11 +17,10 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 
 from .camera import find_camera_feathers, extract_camera_source_id, process_camera_timestamps
-from .runtime import find_log_archives, process_runtime_data, extract_log_source_id
+from .runtime import RUNTIME_SOURCE_ID, find_log_archive, process_runtime_data
 from .microcontrollers import (
     is_module_eligible,
-    find_module_feather,
-    find_all_module_feathers,
+    find_module_feathers,
     parse_module_feather_name,
     process_microcontroller_data,
 )
@@ -114,8 +113,9 @@ def run_behavior_processing_pipeline(
     # Loads experiment configuration for experiment sessions (required for runtime data extraction).
     experiment_configuration = _load_experiment_configuration(session=session)
 
-    # Discovers all available processing jobs based on files present in the session directory.
-    jobs = _discover_jobs(
+    # Discovers all available processing jobs based on files present in the session directory. The path map
+    # caches the feather file already resolved for each job, so _execute_job can skip a second rglob pass.
+    jobs, job_paths = _discover_jobs(
         raw_data_path=session.raw_data_path,
         processed_data_path=session.processed_data_path,
         hardware_state=hardware_state,
@@ -147,7 +147,8 @@ def run_behavior_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
 
-        job_name, specifier = id_to_job[job_id]
+        job_key = id_to_job[job_id]
+        job_name, specifier = job_key
         _execute_job(
             job_name=job_name,
             specifier=specifier,
@@ -157,6 +158,7 @@ def run_behavior_processing_pipeline(
             tracker=tracker,
             hardware_state=hardware_state,
             experiment_configuration=experiment_configuration,
+            input_path=job_paths[job_key],
         )
     else:
         # Local mode: initializes the tracker and runs all discovered jobs sequentially. The tracker generates
@@ -164,7 +166,8 @@ def run_behavior_processing_pipeline(
         console.echo(message=f"Initializing processing tracker for {len(jobs)} job(s)...")
         returned_job_ids = tracker.initialize_jobs(jobs=jobs)
 
-        for (job_name, specifier), current_job_id in zip(jobs, returned_job_ids, strict=True):
+        for job_key, current_job_id in zip(jobs, returned_job_ids, strict=True):
+            job_name, specifier = job_key
             _execute_job(
                 job_name=job_name,
                 specifier=specifier,
@@ -174,6 +177,7 @@ def run_behavior_processing_pipeline(
                 tracker=tracker,
                 hardware_state=hardware_state,
                 experiment_configuration=experiment_configuration,
+                input_path=job_paths[job_key],
             )
 
     console.echo(message="All behavior processing jobs completed successfully.", level=LogLevel.SUCCESS)
@@ -183,7 +187,7 @@ def _discover_jobs(
     raw_data_path: Path,
     processed_data_path: Path,
     hardware_state: MesoscopeHardwareState,
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], dict[tuple[str, str], Path]]:
     """Discovers all available processing jobs based on files present in the session directories.
 
     Args:
@@ -193,22 +197,31 @@ def _discover_jobs(
         hardware_state: The hardware configuration used to filter microcontroller modules by eligibility.
 
     Returns:
-        A list of (job_name, specifier) tuples representing all discoverable and eligible jobs.
+        A tuple of (jobs, job_paths). The jobs list contains (job_name, specifier) tuples representing all
+        discoverable and eligible jobs. The job_paths dictionary maps each (job_name, specifier) tuple to the
+        absolute input file path resolved during discovery, so _execute_job can reuse it instead of running a
+        second recursive glob over the session directory.
     """
     jobs: list[tuple[str, str]] = []
+    job_paths: dict[tuple[str, str], Path] = {}
 
-    # Discovers runtime processing jobs from system log NPZ archives.
-    for archive_path in find_log_archives(data_directory=raw_data_path):
-        source_id = extract_log_source_id(archive_path=archive_path)
-        jobs.append((BehaviorJobNames.RUNTIME, source_id))
+    # Discovers the single runtime processing job, if a runtime log archive is present. The Mesoscope-VR
+    # runtime DataLogger always writes to a fixed source ID, so there is at most one archive per session.
+    archive_path = find_log_archive(data_directory=raw_data_path)
+    if archive_path is not None:
+        job_key = (BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)
+        jobs.append(job_key)
+        job_paths[job_key] = archive_path
 
     # Discovers camera processing jobs from pre-extracted camera timestamp feather files.
     for feather_path in find_camera_feathers(data_directory=processed_data_path):
         source_id = str(extract_camera_source_id(feather_path=feather_path))
-        jobs.append((BehaviorJobNames.CAMERA, source_id))
+        job_key = (BehaviorJobNames.CAMERA, source_id)
+        jobs.append(job_key)
+        job_paths[job_key] = feather_path
 
     # Discovers microcontroller processing jobs from pre-extracted module feather files.
-    for feather_path in find_all_module_feathers(data_directory=processed_data_path):
+    for feather_path in find_module_feathers(data_directory=processed_data_path):
         controller_id, module_type, module_id = parse_module_feather_name(feather_path=feather_path)
 
         # Filters out modules whose hardware parameters are not configured.
@@ -216,9 +229,11 @@ def _discover_jobs(
             continue
 
         specifier = f"{controller_id}-{module_type}-{module_id}"
-        jobs.append((BehaviorJobNames.MICROCONTROLLER, specifier))
+        job_key = (BehaviorJobNames.MICROCONTROLLER, specifier)
+        jobs.append(job_key)
+        job_paths[job_key] = feather_path
 
-    return jobs
+    return jobs, job_paths
 
 
 def _generate_job_ids(jobs: list[tuple[str, str]]) -> dict[tuple[str, str], str]:
@@ -240,11 +255,12 @@ def _execute_job(
     job_name: str,
     specifier: str,
     job_id: str,
-    session: SessionData,
+    session: SessionData,  # noqa: ARG001
     output_directory: Path,
     tracker: ProcessingTracker,
     hardware_state: MesoscopeHardwareState,
     experiment_configuration: MesoscopeExperimentConfiguration | None,
+    input_path: Path,
 ) -> None:
     """Executes a single processing job with tracker state management.
 
@@ -252,52 +268,34 @@ def _execute_job(
         job_name: The job type name (runtime_processing, camera_processing, or microcontroller_processing).
         specifier: The job-specific specifier (system ID, camera source ID, or controller-type-id triple).
         job_id: The unique hexadecimal job identifier.
-        session: The loaded SessionData instance.
+        session: The loaded SessionData instance. Retained for interface stability; input paths are now
+            threaded through input_path.
         output_directory: The path to the behavior data output directory.
         tracker: The ProcessingTracker instance for recording job state transitions.
         hardware_state: The hardware configuration for microcontroller module processing.
         experiment_configuration: The experiment configuration for runtime data extraction, or None for
             non-experiment sessions.
+        input_path: The input file path resolved by _discover_jobs. Reusing the cached path avoids a second
+            recursive glob over the session directory.
     """
     console.echo(message=f"Running '{job_name}' job with specifier '{specifier}' (ID: {job_id})...")
     tracker.start_job(job_id=job_id)
 
     try:
         if job_name == BehaviorJobNames.RUNTIME:
-            log_path = find_log_archives(data_directory=session.raw_data_path, source_id=specifier)[0]
             process_runtime_data(
-                log_path=log_path,
+                log_path=input_path,
                 output_directory=output_directory,
                 experiment_configuration=experiment_configuration,
             )
 
         elif job_name == BehaviorJobNames.CAMERA:
-            camera_source_id = int(specifier)
-            feather_path = find_camera_feathers(
-                data_directory=session.processed_data_path,
-                source_id=camera_source_id,
-            )[0]
-            process_camera_timestamps(
-                feather_path=feather_path, output_directory=output_directory, source_id=camera_source_id
-            )
+            process_camera_timestamps(feather_path=input_path, output_directory=output_directory)
 
         elif job_name == BehaviorJobNames.MICROCONTROLLER:
-            controller_id_str, module_type_str, module_id_str = specifier.split("-")
-            controller_id = int(controller_id_str)
-            module_type = int(module_type_str)
-            module_id = int(module_id_str)
-
-            feather_path = find_module_feather(
-                data_directory=session.processed_data_path,
-                controller_id=controller_id,
-                module_type=module_type,
-                module_id=module_id,
-            )
             process_microcontroller_data(
-                feather_path=feather_path,
+                feather_path=input_path,
                 output_directory=output_directory,
-                module_type=module_type,
-                module_id=module_id,
                 hardware_state=hardware_state,
             )
 

@@ -114,7 +114,7 @@ def _assemble_2p_fluorescence_dataset(session_data_path: Path, multiday_data_pat
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during session's
     # data acquisition.
     mesoscope_frame_data = pl.read_ipc(
-        behavior_data.joinpath("mesoscope_frame_data.feather"), use_pyarrow=True, memory_map=True, rechunk=True
+        behavior_data.joinpath("mesoscope_frame_data.feather"), memory_map=True, rechunk=True
     )
 
     # Sorts by time to ensure the correct order
@@ -386,20 +386,20 @@ def _assemble_experiment_dataset(session_data_path: Path, reference_time: NDArra
     experiment_state_enum_dtype = pl.Enum(list(experiment_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), use_pyarrow=True, memory_map=True)
+    encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
     reward_zones_df = pl.read_ipc(
-        behavior_data_path.joinpath("vr_reward_zone_data.feather"), use_pyarrow=True, memory_map=True
+        behavior_data_path.joinpath("vr_reward_zone_data.feather"), memory_map=True
     )
-    cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), use_pyarrow=True, memory_map=True)
-    trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), use_pyarrow=True, memory_map=True)
+    cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
+    trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
     experiment_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("experiment_state_data.feather"), use_pyarrow=True, memory_map=True
+        behavior_data_path.joinpath("experiment_state_data.feather"), memory_map=True
     )
     guidance_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("guidance_state_data.feather"), use_pyarrow=True, memory_map=True
+        behavior_data_path.joinpath("guidance_state_data.feather"), memory_map=True
     )
     system_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("system_state_data.feather"), use_pyarrow=True, memory_map=True
+        behavior_data_path.joinpath("system_state_data.feather"), memory_map=True
     )
 
     # Adds a trial number column to the trials dataframe.
@@ -553,11 +553,11 @@ def _assemble_behavior_dataset(
     state_enum = pl.Enum(list(state_mapping.keys()))
 
     # Loads the core behavior data present for all session types.
-    valve_df = pl.read_ipc(behavior_data_path.joinpath("valve_data.feather"), use_pyarrow=True, memory_map=True)
+    valve_df = pl.read_ipc(behavior_data_path.joinpath("valve_data.feather"), memory_map=True)
     system_state_df = pl.read_ipc(
-        behavior_data_path.joinpath("system_state_data.feather"), use_pyarrow=True, memory_map=True
+        behavior_data_path.joinpath("system_state_data.feather"), memory_map=True
     )
-    lick_df = pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), use_pyarrow=True, memory_map=True)
+    lick_df = pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 
     # Creates the aligned data dictionary using the reference time vector and interpolating all other dat sources to
@@ -594,7 +594,7 @@ def _assemble_behavior_dataset(
 
     # Encoder data. Is not present for lick training.
     if behavior_data_path.joinpath("encoder_data.feather").exists():
-        encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), use_pyarrow=True, memory_map=True)
+        encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
         encoder_time = encoder_df["time_us"].to_numpy()
         encoder_distance = encoder_df["traveled_distance_cm"].to_numpy()
 
@@ -621,7 +621,7 @@ def _assemble_behavior_dataset(
 
     # Screen data. Only present for mesoscope experiments.
     if behavior_data_path.joinpath("screen_data.feather").exists():
-        screen_df = pl.read_ipc(behavior_data_path.joinpath("screen_data.feather"), use_pyarrow=True, memory_map=True)
+        screen_df = pl.read_ipc(behavior_data_path.joinpath("screen_data.feather"), memory_map=True)
         aligned_data["screens"] = interpolate_data(
             source_coordinates=screen_df["time_us"].to_numpy(),
             source_values=screen_df["screen_state"].to_numpy(),
@@ -636,7 +636,7 @@ def _assemble_behavior_dataset(
     if not brake_file.exists():
         brake_file = behavior_data_path.joinpath("break_data.feather")  # Legacy fallback
     if brake_file.exists():
-        brake_df = pl.read_ipc(brake_file, use_pyarrow=True, memory_map=True)
+        brake_df = pl.read_ipc(brake_file, memory_map=True)
         # Supports both the correct column name and legacy typo
         brake_torque_col = "brake_torque_N_cm" if "brake_torque_N_cm" in brake_df.columns else "break_torque_N_cm"
         brake_torque = interpolate_data(
@@ -653,7 +653,7 @@ def _assemble_behavior_dataset(
 
     # Torque data. Is not present for run training.
     if behavior_data_path.joinpath("torque_data.feather").exists():
-        torque_df = pl.read_ipc(behavior_data_path.joinpath("torque_data.feather"), use_pyarrow=True, memory_map=True)
+        torque_df = pl.read_ipc(behavior_data_path.joinpath("torque_data.feather"), memory_map=True)
         aligned_data["torque_N_cm"] = interpolate_data(
             source_coordinates=torque_df["time_us"].to_numpy(),
             source_values=torque_df["torque_N_cm"].to_numpy(),
@@ -898,7 +898,7 @@ def _get_reference_time(session_data_path: Path) -> NDArray[np.uint64]:
 
     for path, column in timestamp_sources:
         if path.exists():
-            df = pl.read_ipc(path, memory_map=True, use_pyarrow=True)
+            df = pl.read_ipc(path, memory_map=True)
             return df[column].to_numpy()
 
     message = (
@@ -947,7 +947,7 @@ def assemble_report_dataset(
             # Recursively finds all camera timestamps in the camera_data directory.
             if camera_data_path.exists():
                 for camera in sorted(camera_data_path.rglob("*_timestamps.feather")):
-                    camera_df = pl.read_ipc(camera, use_pyarrow=True, memory_map=True)
+                    camera_df = pl.read_ipc(camera, memory_map=True)
 
                     column_name = camera.stem
 

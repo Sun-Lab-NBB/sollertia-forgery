@@ -18,8 +18,12 @@ if TYPE_CHECKING:
 
     from sollertia_shared_assets import GasPuffTrial, WaterRewardTrial, MesoscopeExperimentConfiguration
 
-_LOG_ARCHIVE_SUFFIX: str = "_log.npz"
-"""The naming convention suffix for log archives produced by DataLogger instances."""
+RUNTIME_SOURCE_ID: str = "1"
+"""The source ID used by the Mesoscope-VR runtime DataLogger for its log archive. Every processable session
+contains exactly one runtime archive, and it always uses this ID."""
+
+_LOG_ARCHIVE_NAME: str = f"{RUNTIME_SOURCE_ID}_log.npz"
+"""The expected filename for the runtime log archive."""
 
 _CUE_SEQUENCE_MIN_LENGTH: int = 500
 """The minimum length, in bytes, of a valid VR wall cue sequence message."""
@@ -40,70 +44,38 @@ _DISTANCE_SNAPSHOT_CODE: int = 5
 """The message code for distance snapshot data logged when VR wall cue sequence changes."""
 
 
-def find_log_archives(data_directory: Path, source_id: str | None = None) -> list[Path]:
-    """Discovers log archives under the data directory.
+def find_log_archive(data_directory: Path) -> Path | None:
+    """Discovers the runtime log archive under the data directory.
 
-    Recursively searches the data_directory for .npz log archives matching the ``*_log.npz`` naming convention.
-    When a source_id is provided, narrows the search to the specific ``{source_id}_log.npz`` file and validates
-    that exactly one match exists.
+    Recursively searches the data_directory for the single ``{RUNTIME_SOURCE_ID}_log.npz`` archive produced by the
+    Mesoscope-VR runtime DataLogger. The runtime DataLogger always writes to a fixed source ID, so at most one
+    archive is expected per session.
 
     Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively, so archives
-            may be nested at any depth below this path.
-        source_id: The source ID string to match. When provided, restricts discovery to the specific source ID and
-            enforces that exactly one matching file exists. When omitted, discovers all log archives.
+        data_directory: The path to the root directory to search. The directory is searched recursively, so the
+            archive may be nested at any depth below this path.
 
     Returns:
-        A sorted list of paths to the discovered log archives. Returns an empty list when no source_id filter is
-        applied and no files are found.
+        The path to the runtime log archive, or None if the directory does not exist or no archive is present.
 
     Raises:
-        FileNotFoundError: If a source_id is specified and the data_directory does not exist, is not a directory, or
-            no archive matching the source ID is found.
-        ValueError: If a source_id is specified and multiple archives matching the source ID are found.
+        ValueError: If more than one archive matching the expected name is found under the data directory.
     """
     if not data_directory.exists() or not data_directory.is_dir():
-        if source_id is not None:
-            message = (
-                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. The path does not exist "
-                f"or is not a directory."
-            )
-            console.error(message=message, error=FileNotFoundError)
-        return []
+        return None
 
-    pattern = f"{source_id}{_LOG_ARCHIVE_SUFFIX}" if source_id is not None else f"*{_LOG_ARCHIVE_SUFFIX}"
-    matches = sorted(data_directory.rglob(pattern))
+    matches = sorted(data_directory.rglob(_LOG_ARCHIVE_NAME))
+    if not matches:
+        return None
 
-    if source_id is not None:
-        if not matches:
-            message = (
-                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. No file matching "
-                f"'{pattern}' was found."
-            )
-            console.error(message=message, error=FileNotFoundError)
+    if len(matches) > 1:
+        message = (
+            f"Unable to resolve the runtime log archive in '{data_directory}'. Expected exactly one file named "
+            f"'{_LOG_ARCHIVE_NAME}', but found multiple: {[str(match) for match in matches]}."
+        )
+        console.error(message=message, error=ValueError)
 
-        if len(matches) > 1:
-            message = (
-                f"Unable to find log archive for source '{source_id}' in '{data_directory}'. Multiple files matching "
-                f"'{pattern}' were found: {[str(match) for match in matches]}. Expected exactly one match."
-            )
-            console.error(message=message, error=ValueError)
-
-    return matches
-
-
-def extract_log_source_id(archive_path: Path) -> str:
-    """Extracts the source ID string from a log archive filename.
-
-    Args:
-        archive_path: The path to the log archive file. The filename must follow the ``{source_id}_log.npz``
-            naming convention.
-
-    Returns:
-        The source ID string extracted from the filename.
-    """
-    # Strips the "_log.npz" suffix to recover the source ID. For example, "1_log.npz" -> "1".
-    return archive_path.name.removesuffix(_LOG_ARCHIVE_SUFFIX)
+    return matches[0]
 
 
 def process_runtime_data(
