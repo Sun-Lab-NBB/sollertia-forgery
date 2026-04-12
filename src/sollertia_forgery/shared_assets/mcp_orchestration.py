@@ -28,6 +28,13 @@ discovery helpers use this marker to locate session root directories under a pro
 _MINIMUM_ROWS_FOR_INTERVALS: int = 2
 """The minimum number of rows required in a feather file to compute inter-row timing intervals."""
 
+_TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp_us", "time_us", "frame_time_us")
+"""Column names, in priority order, that :func:`analyze_feather_file` recognizes as the canonical time axis
+when computing timing summaries. The first matching column present in the dataframe is used, which lets the
+helper cover every feather variant produced across the Sollertia stack: ``timestamp_us`` (raw axci module
+feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``frame_time_us`` (axvs camera
+timestamp feathers)."""
+
 
 @dataclass(slots=True)
 class PendingJob:
@@ -322,8 +329,9 @@ def analyze_feather_file(feather_file: str, max_sample_rows: int) -> dict[str, A
     summary: dict[str, Any] = {"total_rows": total_rows, "columns": dataframe.columns}
 
     inter_row_timing: dict[str, Any] = {}
-    if "timestamp_us" in dataframe.columns and total_rows >= _MINIMUM_ROWS_FOR_INTERVALS:
-        timestamps = dataframe["timestamp_us"].to_numpy().astype(np.int64)
+    time_column = next((name for name in _TIME_COLUMN_CANDIDATES if name in dataframe.columns), None)
+    if time_column is not None and total_rows >= _MINIMUM_ROWS_FOR_INTERVALS:
+        timestamps = dataframe[time_column].to_numpy().astype(np.int64)
         first_timestamp_us = int(timestamps[0])
         last_timestamp_us = int(timestamps[-1])
         duration_us = last_timestamp_us - first_timestamp_us

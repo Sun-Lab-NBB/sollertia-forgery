@@ -206,7 +206,7 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
             continue
 
         # Resolves the static output location. The ``behavior_data/`` subdirectory always lives under the
-        # session's ``processed_data_path``, co-located with the upstream ``camera_data/`` and
+        # session's ``processed_data_path``, co-located with the upstream ``camera_timestamps/`` and
         # ``microcontroller_data/`` produced by axvs and axci. The caller does not choose where behavior
         # outputs go.
         data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY

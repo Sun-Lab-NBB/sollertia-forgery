@@ -138,7 +138,7 @@ def run_behavior_processing_pipeline(
     # discovered jobs. The same regeneration strategy is applied in both local and remote modes so that stale
     # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs. The
     # ``behavior_data/`` subdirectory is always placed under the session's ``processed_data_path``, co-located
-    # with the upstream ``camera_data/`` and ``microcontroller_data/`` produced by axvs and axci.
+    # with the upstream ``camera_timestamps/`` and ``microcontroller_data/`` produced by axvs and axci.
     data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
     data_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=data_path / TRACKER_FILENAME)

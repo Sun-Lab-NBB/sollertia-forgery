@@ -789,7 +789,7 @@ def assemble_session_dataset(
             # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
             # timepoints from the face camera timestamp data.
             face_camera_path = session_data_path.joinpath(
-                "processed_data", "camera_data", "face_camera_timestamps.feather"
+                "processed_data", "behavior_data", "face_camera_timestamps.feather"
             )
             face_camera_df = pl.read_ipc(face_camera_path, memory_map=True)
             reference_time = face_camera_df["frame_time_us"].to_numpy()
