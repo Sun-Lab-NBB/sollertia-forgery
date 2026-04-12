@@ -1,8 +1,4 @@
-"""Provides tools for processing raw data into intermediate (processed) state.
-
-Notes:
-    Processed data can be integrated into an analysis dataset using tools from the 'forging' package.
-"""
+"""Provides tools for processing raw data into intermediate (processed) state."""
 
 from .pipeline import run_behavior_processing_pipeline
 

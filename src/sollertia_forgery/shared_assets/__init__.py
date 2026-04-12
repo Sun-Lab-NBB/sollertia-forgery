@@ -8,6 +8,7 @@ from .mcp_orchestration import (
     ActiveJob,
     PendingJob,
     JobExecutionState,
+    _validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,

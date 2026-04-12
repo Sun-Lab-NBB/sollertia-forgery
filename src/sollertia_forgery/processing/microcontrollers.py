@@ -24,6 +24,36 @@ _MODULE_FEATHER_PATTERN: str = "controller_*_module_*.feather"
 """
 
 
+@dataclass(frozen=True, slots=True)
+class _ModuleSpecification:
+    """Defines the processing specification for a single hardware module type."""
+
+    parse_function: Callable[..., None]
+    """The function that transforms raw axci event data into domain-specific feather output."""
+    output_filename: str
+    """The name of the output feather file."""
+    required_fields: tuple[str, ...]
+    """The MesoscopeHardwareState field names that must be configured for processing eligibility."""
+
+    def check_eligibility(self, hardware_state: MesoscopeHardwareState) -> bool:
+        """Determines whether the hardware state has all required fields configured for this module.
+
+        Args:
+            hardware_state: The MesoscopeHardwareState instance to validate against.
+
+        Returns:
+            True if all required fields are configured (not None and not False for boolean fields).
+        """
+        for field_name in self.required_fields:
+            value = getattr(hardware_state, field_name, None)
+            if value is None:
+                return False
+            # Handles boolean fields like delivered_gas_puffs and recorded_mesoscope_ttl.
+            if isinstance(value, bool) and not value:
+                return False
+        return True
+
+
 def find_module_feathers(data_directory: Path) -> list[Path]:
     """Discovers microcontroller module feather files under the data directory.
 
@@ -144,43 +174,6 @@ def is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosco
 
     specification = _MODULE_REGISTRY[module_key]
     return specification.check_eligibility(hardware_state=hardware_state)
-
-
-@dataclass(frozen=True, slots=True)
-class _ModuleSpecification:
-    """Defines the processing specification for a single hardware module type.
-
-    Args:
-        parse_function: The function that transforms raw axci event data into domain-specific feather output.
-        output_filename: The name of the output feather file.
-        required_fields: The MesoscopeHardwareState field names that must be configured for this module to be
-            eligible for processing.
-    """
-
-    parse_function: Callable[..., None]
-    """The function that transforms raw axci event data into domain-specific feather output."""
-    output_filename: str
-    """The name of the output feather file."""
-    required_fields: tuple[str, ...]
-    """The MesoscopeHardwareState field names that must be configured for processing eligibility."""
-
-    def check_eligibility(self, hardware_state: MesoscopeHardwareState) -> bool:
-        """Determines whether the hardware state has all required fields configured for this module.
-
-        Args:
-            hardware_state: The MesoscopeHardwareState instance to validate against.
-
-        Returns:
-            True if all required fields are configured (not None and not False for boolean fields).
-        """
-        for field_name in self.required_fields:
-            value = getattr(hardware_state, field_name, None)
-            if value is None:
-                return False
-            # Handles boolean fields like delivered_gas_puffs and recorded_mesoscope_ttl.
-            if isinstance(value, bool) and not value:
-                return False
-        return True
 
 
 def _partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
@@ -719,7 +712,6 @@ def _parse_screen_data(
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
 
 
-# Maps (module_type, module_id) pairs to their processing specifications.
 _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
     (2, 1): _ModuleSpecification(
         parse_function=_parse_encoder_data,

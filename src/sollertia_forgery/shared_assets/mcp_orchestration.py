@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Lock, Thread
 import contextlib
+from collections import deque
 from dataclasses import field, dataclass
 from concurrent.futures import Future, ProcessPoolExecutor
 
@@ -34,6 +35,21 @@ when computing timing summaries. The first matching column present in the datafr
 helper cover every feather variant produced across the Sollertia stack: ``timestamp_us`` (raw axci module
 feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``frame_time_us`` (axvs camera
 timestamp feathers)."""
+
+
+def _validate_directory(directory: str) -> str | None:
+    """Checks that *directory* is an existing directory and returns an error message if not.
+
+    Returns:
+        ``None`` when the path is a valid directory, or a human-readable error string suitable for inclusion in
+        an MCP tool response.
+    """
+    path = Path(directory)
+    if not path.exists():
+        return f"Directory does not exist: {directory}"
+    if not path.is_dir():
+        return f"Path is not a directory: {directory}"
+    return None
 
 
 @dataclass(slots=True)
@@ -89,7 +105,7 @@ class JobExecutionState[PendingJobT: PendingJob]:
     Must accept a single argument of the pending job subclass associated with this state."""
     all_jobs: dict[tuple[str, str], PendingJobT] = field(default_factory=dict)
     """All submitted jobs keyed by ``(tracker_path, job_id)`` dispatch key."""
-    pending_queue: list[PendingJobT] = field(default_factory=list)
+    pending_queue: deque[PendingJobT] = field(default_factory=deque)
     """Jobs awaiting dispatch."""
     active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
     """Jobs currently executing on the shared process pool."""
@@ -148,7 +164,7 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
                 if not state.canceled:
                     available = state.worker_budget - len(state.active_jobs)
                     while state.pending_queue and available > 0:
-                        job = state.pending_queue.pop(0)
+                        job = state.pending_queue.popleft()
                         future = pool.submit(state.worker, job)
                         state.active_jobs.append(ActiveJob(job=job, future=future))
                         available -= 1
@@ -269,15 +285,11 @@ def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> 
         A dictionary containing ``output_directory``, a ``cleaned`` flag, and either ``data_path`` (the path
         that was removed) or ``error`` (a human-readable failure description).
     """
-    output_path = Path(output_directory)
+    error = _validate_directory(output_directory)
+    if error is not None:
+        return {"output_directory": output_directory, "cleaned": False, "error": error}
 
-    if not output_path.exists():
-        return {"output_directory": output_directory, "cleaned": False, "error": "Directory does not exist."}
-
-    if not output_path.is_dir():
-        return {"output_directory": output_directory, "cleaned": False, "error": "Path is not a directory."}
-
-    data_path = output_path / subdirectory_name
+    data_path = Path(output_directory) / subdirectory_name
 
     if not data_path.exists():
         return {"output_directory": output_directory, "cleaned": True, "message": "Nothing to clean."}
@@ -362,9 +374,7 @@ def analyze_feather_file(feather_file: str, max_sample_rows: int) -> dict[str, A
     sample_count = min(max_sample_rows, total_rows)
     if sample_count > 0:
         sample_df = dataframe.head(sample_count)
-        binary_columns = {
-            column for column, dtype in zip(dataframe.columns, dataframe.dtypes, strict=True) if dtype == pl.Binary
-        }
+        binary_columns = {name for name, dtype in dataframe.schema.items() if dtype == pl.Binary}
 
         for row in sample_df.iter_rows(named=True):
             sample_entry: dict[str, Any] = {}

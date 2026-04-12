@@ -6,6 +6,7 @@ from typing import Any  # pragma: no cover
 from pathlib import Path  # pragma: no cover
 from threading import Thread  # pragma: no cover
 import contextlib  # pragma: no cover
+from collections import deque  # pragma: no cover
 from dataclasses import dataclass  # pragma: no cover
 
 from ataraxis_time import (  # pragma: no cover
@@ -32,6 +33,7 @@ from ..shared_assets import (  # pragma: no cover
     SESSION_MARKER_FILENAME,
     PendingJob,
     JobExecutionState,
+    _validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -89,13 +91,11 @@ def discover_behavior_sessions_tool(root_directory: str) -> dict[str, Any]:  # p
         always live under ``{processed_data_path}/behavior_data/`` — the caller never chooses an output
         location.
     """
+    error = _validate_directory(root_directory)
+    if error is not None:
+        return {"error": error}
+
     root_path = Path(root_directory)
-
-    if not root_path.exists():
-        return {"error": f"Directory does not exist: {root_directory}"}
-
-    if not root_path.is_dir():
-        return {"error": f"Path is not a directory: {root_directory}"}
 
     # Discovers session directories by locating session_data.yaml marker files. The marker file lives under
     # each session's ``raw_data/`` subdirectory, so the session root is two levels above the marker.
@@ -383,7 +383,7 @@ def execute_behavior_processing_jobs_tool(  # pragma: no cover
     _job_execution_state = JobExecutionState[_BehaviorPendingJob](
         worker=_run_behavior_job,
         all_jobs=all_jobs,
-        pending_queue=pending,
+        pending_queue=deque(pending),
         worker_budget=resolved_budget,
     )
 
@@ -725,14 +725,11 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
     Returns:
         A dictionary containing per-session status summaries and aggregate counts.
     """
+    error = _validate_directory(root_directory)
+    if error is not None:
+        return {"error": error}
+
     root_path = Path(root_directory)
-
-    if not root_path.exists():
-        return {"error": f"Directory does not exist: {root_directory}"}
-
-    if not root_path.is_dir():
-        return {"error": f"Path is not a directory: {root_directory}"}
-
     session_statuses: list[dict[str, Any]] = []
     aggregate_succeeded = 0
     aggregate_failed = 0
@@ -807,13 +804,11 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
         A dictionary containing a 'verified' flag, per-file results in 'files' (each with path, readability,
         row count, and column names), tracker status in 'tracker', and aggregate counts.
     """
+    error = _validate_directory(session_path)
+    if error is not None:
+        return {"error": error}
+
     session_root = Path(session_path)
-
-    if not session_root.exists():
-        return {"error": f"Directory does not exist: {session_path}"}
-
-    if not session_root.is_dir():
-        return {"error": f"Path is not a directory: {session_path}"}
 
     try:
         session = SessionData.load(session_path=session_root)
