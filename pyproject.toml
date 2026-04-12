@@ -68,7 +68,6 @@ dependencies = [
     "mcp[cli]>=1,<2",
 
     # Utilities
-    "pytz>=2026,<2027",
     "filelock>=3,<4",
     "natsort-rs>=0,<1",
     "tabulate>=0,<1",
@@ -99,7 +98,6 @@ dev = [
 
     # Types
     "types-filelock>=3,<4",
-    "types-pytz>=2026,<2027",
     "types-tabulate>=0,<1",
 ]
 
