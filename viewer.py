@@ -1,8 +1,8 @@
 from pathlib import Path
 import polars as pl
 
-dataset = Path("/home/cyberaxolotl/server/workdir/sun_data/Datasets/SSOData/26/2025-08-21-16-35-48-370149.feather")
-target = pl.read_ipc(dataset, memory_map=True, use_pyarrow=True)
+dataset = Path("/home/cyberaxolotl/Desktop/test/2025-08-15-12-00-55-872035/processed_data/behavior_data/runtime_state_data.feather")
+target = pl.read_ipc(dataset, memory_map=True)
 with pl.Config(
     set_fmt_table_cell_list_len=1,
     set_float_precision=2,
@@ -12,4 +12,4 @@ with pl.Config(
     set_tbl_formatting="ASCII_FULL_CONDENSED",
     set_tbl_hide_column_data_types=True,
 ):
-    print(target.slice(offset=30500, length=100))
+    print(target)
