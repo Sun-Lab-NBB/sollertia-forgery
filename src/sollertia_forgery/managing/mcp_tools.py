@@ -87,11 +87,6 @@ _transfer_execution_state: JobExecutionState[_TransferPendingJob] | None = None 
 """Stores the active execution state for batch transfer and deletion jobs."""
 
 
-# ------------------------------------------------------------------
-# Checksum tools
-# ------------------------------------------------------------------
-
-
 @mcp.tool()  # pragma: no cover
 def prepare_checksum_batch_tool(  # pragma: no cover
     session_paths: list[str],
@@ -350,6 +345,7 @@ def get_checksum_status_tool() -> dict[str, Any]:  # pragma: no cover
             )
             continue
 
+        # Resolves per-job status from the tracker and tallies outcomes for the aggregate summary.
         for job in path_jobs:
             if job.job_id in tracker.jobs:
                 job_state = tracker.jobs[job.job_id]
@@ -436,12 +432,14 @@ def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
                 "session_name": job.session_name,
             }
 
+            # Tracks the earliest start timestamp across all jobs for session-level elapsed time.
             if job_info.started_at is not None:
                 started_at_us = int(job_info.started_at)
                 entry["started_at"] = started_at_us
                 if earliest_start is None or started_at_us < earliest_start:
                     earliest_start = started_at_us
 
+            # Computes wall-clock elapsed seconds for jobs that are still running.
             if job_info.status == ProcessingStatus.RUNNING and job_info.started_at is not None:
                 elapsed_seconds = convert_time(
                     time=current_us - int(job_info.started_at),
@@ -451,6 +449,7 @@ def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
                 )
                 entry["elapsed_seconds"] = round(elapsed_seconds, 2)
 
+            # Computes total duration for jobs that have reached a terminal state.
             if job_info.completed_at is not None:
                 entry["completed_at"] = int(job_info.completed_at)
                 if job_info.started_at is not None:
@@ -469,6 +468,7 @@ def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
 
             job_timing.append(entry)
 
+    # Computes session-level elapsed time from the earliest job start to now.
     total_elapsed_seconds = 0.0
     if earliest_start is not None:
         total_elapsed_seconds = round(
@@ -490,6 +490,7 @@ def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
         "pending_count": len(state.all_jobs) - completed_count - failed_count - running_count,
     }
 
+    # Derives throughput as completed jobs per hour since the earliest start.
     if completed_count > 0 and earliest_start is not None:
         elapsed_hours = convert_time(
             time=current_us - earliest_start,
@@ -519,13 +520,14 @@ def cancel_checksum_tool() -> dict[str, Any]:  # pragma: no cover
 
     state = _checksum_execution_state
 
+    # Atomically halts dispatch and snapshots queue sizes before reading trackers.
     with state.lock:
         state.canceled = True
         cleared_count = len(state.pending_queue)
         state.pending_queue.clear()
         active_count = len(state.active_jobs)
 
-    # Counts final job statuses from tracker files.
+    # Reads tracker files to tally terminal outcomes for the final state report.
     succeeded = 0
     failed = 0
     tracker_paths: set[Path] = {job.tracker_path for job in state.all_jobs.values()}
@@ -636,6 +638,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
         raw_data_path = found_tracker_path.parent
         session_root = raw_data_path.parent
         try:
+            # Reads the tracker and accumulates per-session counts into the project-wide aggregate.
             status = read_tracker_status(tracker_path=found_tracker_path)
             summary = status.get("summary", {})
 
@@ -695,6 +698,7 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # 
     Returns:
         A dictionary containing a ``results`` list with per-session outcomes and a ``total_cleaned`` count.
     """
+    # Refuses to clean while an execution session is still writing to tracker files.
     if (
         _checksum_execution_state is not None
         and _checksum_execution_state.manager_thread is not None
@@ -721,10 +725,12 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # 
             )
             continue
 
+        # Resolves the tracker and lock file paths from the session's raw_data directory.
         tracker_file = session.raw_data_path / CHECKSUM_TRACKER_FILENAME
-        lock_file = Path(str(tracker_file) + ".lock")
+        lock_file = tracker_file.with_suffix(tracker_file.suffix + ".lock")
         deleted_files: list[str] = []
 
+        # Removes both the tracker YAML and its companion lock file if they exist.
         try:
             for target in (tracker_file, lock_file):
                 if target.exists():
@@ -746,11 +752,6 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # 
     total_cleaned = sum(1 for r in results if r.get("cleaned", False))
 
     return {"results": results, "total_cleaned": total_cleaned, "total_sessions": len(results)}
-
-
-# ------------------------------------------------------------------
-# Transfer tools
-# ------------------------------------------------------------------
 
 
 @mcp.tool()  # pragma: no cover
@@ -798,7 +799,7 @@ def prepare_transfer_batch_tool(  # pragma: no cover
             invalid_jobs.append({**job_dict, "error": "Missing required 'source_path' key."})
             continue
 
-        source_path = Path(source_path_str)
+        source_path = Path(str(source_path_str))
         if not source_path.exists() or not source_path.is_dir():
             invalid_jobs.append({**job_dict, "error": f"Source path does not exist: {source_path_str}"})
             continue
@@ -855,19 +856,14 @@ def prepare_transfer_batch_tool(  # pragma: no cover
             generated_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
             job_id_lookup[generated_id] = metadata
 
-        enriched_jobs: list[dict[str, Any]] = []
-        for tracker_entry in tracker_status.get("jobs", []):
-            entry_job_id = tracker_entry["job_id"]
-            if entry_job_id in job_id_lookup:
-                enriched_jobs.append(
-                    {
-                        **tracker_entry,
-                        **job_id_lookup[entry_job_id],
-                        "tracker_path": str(tracker_path),
-                    }
-                )
-            else:
-                enriched_jobs.append({**tracker_entry, "tracker_path": str(tracker_path)})
+        enriched_jobs: list[dict[str, Any]] = [
+            {
+                **tracker_entry,
+                **job_id_lookup.get(tracker_entry["job_id"], {}),
+                "tracker_path": str(tracker_path),
+            }
+            for tracker_entry in tracker_status.get("jobs", [])
+        ]
 
         result = {
             "tracker_path": str(tracker_path),
@@ -968,6 +964,7 @@ def execute_transfer_jobs_tool(  # pragma: no cover
             invalid_jobs.append({**job_dict, "error": f"Tracker file not found: {job_dict['tracker_path']}"})
             continue
 
+        # Resolves the optional destination and the remove_source flag from the string-typed job descriptor.
         destination_path_str = job_dict.get("destination_path")
         destination_path = Path(destination_path_str) if destination_path_str else None
         remove_source = str(job_dict["remove_source"]).lower() == "true"
@@ -1054,6 +1051,7 @@ def get_transfer_status_tool() -> dict[str, Any]:  # pragma: no cover
             )
             continue
 
+        # Resolves per-job status from the tracker and tallies outcomes for the aggregate summary.
         for job in path_jobs:
             if job.job_id in tracker.jobs:
                 job_state = tracker.jobs[job.job_id]
@@ -1139,12 +1137,14 @@ def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
                 "session_name": job.session_name,
             }
 
+            # Tracks the earliest start timestamp across all jobs for session-level elapsed time.
             if job_info.started_at is not None:
                 started_at_us = int(job_info.started_at)
                 entry["started_at"] = started_at_us
                 if earliest_start is None or started_at_us < earliest_start:
                     earliest_start = started_at_us
 
+            # Computes wall-clock elapsed seconds for jobs that are still running.
             if job_info.status == ProcessingStatus.RUNNING and job_info.started_at is not None:
                 elapsed_seconds = convert_time(
                     time=current_us - int(job_info.started_at),
@@ -1154,6 +1154,7 @@ def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
                 )
                 entry["elapsed_seconds"] = round(elapsed_seconds, 2)
 
+            # Computes total duration for jobs that have reached a terminal state.
             if job_info.completed_at is not None:
                 entry["completed_at"] = int(job_info.completed_at)
                 if job_info.started_at is not None:
@@ -1172,6 +1173,7 @@ def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
 
             job_timing.append(entry)
 
+    # Computes session-level elapsed time from the earliest job start to now.
     total_elapsed_seconds = 0.0
     if earliest_start is not None:
         total_elapsed_seconds = round(
@@ -1193,6 +1195,7 @@ def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
         "pending_count": len(state.all_jobs) - completed_count - failed_count - running_count,
     }
 
+    # Derives throughput as completed jobs per hour since the earliest start.
     if completed_count > 0 and earliest_start is not None:
         elapsed_hours = convert_time(
             time=current_us - earliest_start,
@@ -1222,13 +1225,14 @@ def cancel_transfer_tool() -> dict[str, Any]:  # pragma: no cover
 
     state = _transfer_execution_state
 
+    # Atomically halts dispatch and snapshots queue sizes before reading trackers.
     with state.lock:
         state.canceled = True
         cleared_count = len(state.pending_queue)
         state.pending_queue.clear()
         active_count = len(state.active_jobs)
 
-    # Counts final job statuses from tracker files.
+    # Reads tracker files to tally terminal outcomes for the final state report.
     succeeded = 0
     failed = 0
     tracker_paths: set[Path] = {job.tracker_path for job in state.all_jobs.values()}
@@ -1278,12 +1282,17 @@ def reset_transfer_jobs_tool(  # pragma: no cover
     except Exception as error:
         return {"error": f"Unable to read tracker: {error}"}
 
+    # Identifies which job IDs to reset. When the caller does not specify a filter, every job in the tracker
+    # is reset. Otherwise, the filter is intersected with the tracker's job registry so that stale or unknown
+    # IDs are silently ignored.
     tracker_ids = set(tracker.jobs.keys())
     target_ids = tracker_ids if job_ids is None else tracker_ids & set(job_ids)
 
     if not target_ids:
         return {"reset": False, "message": "No matching jobs found to reset."}
 
+    # Collects (job_name, specifier) tuples for the jobs to reset, then rebuilds the tracker registry so that
+    # every reset entry returns to SCHEDULED state with cleared timing and error metadata.
     reset_jobs: list[tuple[str, str]] = [
         (tracker.jobs[job_id].job_name, tracker.jobs[job_id].specifier) for job_id in target_ids
     ]
@@ -1331,7 +1340,7 @@ def clean_transfer_tracker_tool(tracker_path: str) -> dict[str, Any]:  # pragma:
         return {"error": "A transfer execution session is still active. Wait for completion or cancel first."}
 
     path = Path(tracker_path)
-    lock_path = Path(str(path) + ".lock")
+    lock_path = path.with_suffix(path.suffix + ".lock")
 
     if not path.exists() and not lock_path.exists():
         return {"cleaned": True, "tracker_path": tracker_path, "message": "Tracker and lock files already absent."}
@@ -1349,11 +1358,6 @@ def clean_transfer_tracker_tool(tracker_path: str) -> dict[str, Any]:  # pragma:
         return {"error": f"Unable to delete: {delete_error}", "tracker_path": tracker_path}
 
     return {"cleaned": True, "tracker_path": tracker_path, "deleted_files": deleted_files}
-
-
-# ------------------------------------------------------------------
-# Manifest tools
-# ------------------------------------------------------------------
 
 
 @mcp.tool()  # pragma: no cover
@@ -1380,10 +1384,12 @@ def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:  #
     if error is not None:
         return {"error": error}
 
+    # Resolves expected output paths so they can be reported in the response even on failure.
     project_path = Path(project_directory)
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
     tracker_file = project_path / MANIFEST_TRACKER_FILENAME
 
+    # Delegates to the pipeline function which handles tracker lifecycle, session scanning, and feather output.
     try:
         generate_project_manifest(project_directory=project_path)
     except Exception as generation_error:
@@ -1458,14 +1464,16 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pr
     if error is not None:
         return {"error": error}
 
+    # Resolves paths for all manifest artifacts: tracker, data file, and their companion lock files.
     project_path = Path(project_directory)
     tracker_file = project_path / MANIFEST_TRACKER_FILENAME
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
-    manifest_lock = Path(str(manifest_file) + ".lock")
-    tracker_lock = Path(str(tracker_file) + ".lock")
+    manifest_lock = manifest_file.with_suffix(manifest_file.suffix + ".lock")
+    tracker_lock = tracker_file.with_suffix(tracker_file.suffix + ".lock")
 
     deleted_files: list[str] = []
 
+    # Removes each artifact if present, accumulating the list of deleted filenames for the response.
     try:
         for target in (tracker_file, tracker_lock, manifest_file, manifest_lock):
             if target.exists():
@@ -1479,11 +1487,6 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pr
         }
 
     return {"cleaned": True, "project_directory": project_directory, "deleted_files": deleted_files}
-
-
-# ------------------------------------------------------------------
-# Worker functions
-# ------------------------------------------------------------------
 
 
 def _run_checksum_job(job: _ChecksumPendingJob) -> None:  # pragma: no cover
@@ -1518,6 +1521,8 @@ def _run_transfer_job(job: _TransferPendingJob) -> None:  # pragma: no cover
         job: The pending job descriptor produced by ``prepare_transfer_batch_tool`` and attached to the active
             ``JobExecutionState`` by ``execute_transfer_jobs_tool``.
     """
+    # Manually wraps transfer_session with tracker lifecycle because the function does not manage a tracker
+    # internally. Marks the job as running before the transfer and records the outcome after completion.
     tracker = ProcessingTracker(file_path=job.tracker_path)
     tracker.start_job(job_id=job.job_id)
     try:
