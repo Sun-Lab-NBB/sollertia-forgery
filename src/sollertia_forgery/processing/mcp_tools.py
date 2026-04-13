@@ -45,12 +45,12 @@ from ..shared_assets import (  # pragma: no cover
 class _BehaviorPendingJob(PendingJob):  # pragma: no cover
     """Describes a single behavior processing job queued for background execution.
 
-    Extends the shared :class:`PendingJob` base with the session-level metadata required by the behavior worker
+    Extends the shared ``PendingJob`` base with the session-level metadata required by the behavior worker
     callable: the session root path, the session's human-readable name, and the ``(job_name, specifier)`` pair
-    that identifies the atomic unit of work inside the session's :class:`ProcessingTracker` registry. The per-job
+    that identifies the atomic unit of work inside the session's ``ProcessingTracker`` registry. The per-job
     output directory is not stored on the descriptor because behavior outputs always live under
     ``{session.processed_data_path}/behavior_data/``; the worker resolves that path from ``session_path`` at
-    dispatch time via :class:`SessionData`.
+    dispatch time via ``SessionData``.
     """
 
     session_path: Path
@@ -873,15 +873,15 @@ def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str,
 def _run_behavior_job(job: _BehaviorPendingJob) -> None:  # pragma: no cover
     """Executes a single behavior processing job in-process via the pipeline's remote mode.
 
-    Serves as the picklable worker callable stored on :class:`JobExecutionState` and dispatched to the batch
-    manager's :class:`ProcessPoolExecutor`. Delegates to :func:`run_behavior_processing_pipeline` with the job's
+    Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch
+    manager's ``ProcessPoolExecutor``. Delegates to ``run_behavior_processing_pipeline`` with the job's
     session path in remote mode so that only the single ``(job_name, specifier)`` pair identified by
     ``job.job_id`` is executed against the session. The output location is resolved inside
-    :func:`run_behavior_processing_pipeline` from the session's :class:`SessionData` marker.
+    ``run_behavior_processing_pipeline`` from the session's ``SessionData`` marker.
 
     Args:
-        job: The pending job descriptor produced by :func:`prepare_behavior_processing_batch_tool` and attached
-            to the active :class:`JobExecutionState` by :func:`execute_behavior_processing_jobs_tool`.
+        job: The pending job descriptor produced by ``prepare_behavior_processing_batch_tool`` and attached
+            to the active ``JobExecutionState`` by ``execute_behavior_processing_jobs_tool``.
     """
     run_behavior_processing_pipeline(
         session_path=job.session_path,

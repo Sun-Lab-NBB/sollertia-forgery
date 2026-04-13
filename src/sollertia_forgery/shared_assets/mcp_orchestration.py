@@ -30,7 +30,7 @@ _MINIMUM_ROWS_FOR_INTERVALS: int = 2
 """The minimum number of rows required in a feather file to compute inter-row timing intervals."""
 
 _TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp_us", "time_us", "frame_time_us")
-"""Column names, in priority order, that :func:`analyze_feather_file` recognizes as the canonical time axis
+"""Column names, in priority order, that ``analyze_feather_file`` recognizes as the canonical time axis
 when computing timing summaries. The first matching column present in the dataframe is used, which lets the
 helper cover every feather variant produced across the Sollertia stack: ``timestamp_us`` (raw axci module
 feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``frame_time_us`` (axvs camera
@@ -39,7 +39,7 @@ timestamp feathers)."""
 
 @dataclass(slots=True)
 class PendingJob:
-    """Describes a single batch processing job tracked by a :class:`ProcessingTracker` file.
+    """Describes a single batch processing job tracked by a ``ProcessingTracker`` file.
 
     Notes:
         Packages subclass this dataclass with additional fields required by their domain-specific worker
@@ -48,7 +48,7 @@ class PendingJob:
     """
 
     tracker_path: Path
-    """The path to the :class:`ProcessingTracker` YAML file that tracks this job."""
+    """The path to the ``ProcessingTracker`` YAML file that tracks this job."""
     job_id: str
     """The unique hexadecimal identifier for this job in the tracker."""
 
@@ -62,12 +62,12 @@ class PendingJob:
 
 @dataclass(slots=True)
 class ActiveJob[PendingJobT: PendingJob]:
-    """Tracks a single pending job currently executing as a :class:`Future` on the shared process pool."""
+    """Tracks a single pending job currently executing as a ``Future`` on the shared process pool."""
 
     job: PendingJobT
     """The pending job descriptor associated with the running future."""
     future: Future[None]
-    """The future returned by :meth:`ProcessPoolExecutor.submit` for this job."""
+    """The future returned by ``ProcessPoolExecutor.submit`` for this job."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -77,16 +77,16 @@ class JobExecutionState[PendingJobT: PendingJob]:
     The state stores the pending and active job queues, the worker callable used to dispatch each job to a
     subprocess, the lock that serializes state mutations, and the cancellation flag consulted by the manager
     thread. Each package that exposes MCP batch tools keeps its own module-level state variable so that status
-    and cancel tools can read it directly. The manager owns a single :class:`ProcessPoolExecutor` sized to
+    and cancel tools can read it directly. The manager owns a single ``ProcessPoolExecutor`` sized to
     ``worker_budget`` and dispatches each pending job as an independent future.
 
-    The generic type parameter ``PendingJobT`` is the package-specific :class:`PendingJob` subclass. Subclasses
+    The generic type parameter ``PendingJobT`` is the package-specific ``PendingJob`` subclass. Subclasses
     carry fields such as session paths, output directories, and job specifiers that the worker callable needs
     at dispatch time.
     """
 
     worker: Callable[[PendingJobT], None]
-    """The picklable module-level function invoked by :meth:`ProcessPoolExecutor.submit` for each pending job.
+    """The picklable module-level function invoked by ``ProcessPoolExecutor.submit`` for each pending job.
     Must accept a single argument of the pending job subclass associated with this state."""
     all_jobs: dict[tuple[str, str], PendingJobT] = field(default_factory=dict)
     """All submitted jobs keyed by ``(tracker_path, job_id)`` dispatch key."""
@@ -124,14 +124,14 @@ def validate_directory(directory: str) -> str | None:
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
-    """Dispatches queued jobs against a shared :class:`ProcessPoolExecutor`.
+    """Dispatches queued jobs against a shared ``ProcessPoolExecutor``.
 
     Notes:
         Runs as a daemon thread for the lifetime of a single execution session. Each poll cycle collects
         completed futures, frees their budget, and dispatches new jobs from the pending queue while the number
         of active jobs stays below the worker budget. Exits when the queue is empty and no jobs remain in
         flight. Cancellation stops new dispatches but lets already-running futures finish naturally. The manager
-        calls ``state.worker`` via :meth:`ProcessPoolExecutor.submit`, so the worker must be a picklable
+        calls ``state.worker`` via ``ProcessPoolExecutor.submit``, so the worker must be a picklable
         module-level function that accepts a single pending-job argument.
 
     Args:
@@ -199,7 +199,7 @@ def read_tracker_status(tracker_path: Path) -> dict[str, Any]:
     """Reads a processing tracker file and returns structured per-job status information.
 
     Args:
-        tracker_path: The path to the :class:`ProcessingTracker` YAML file.
+        tracker_path: The path to the ``ProcessingTracker`` YAML file.
 
     Returns:
         A dictionary containing per-job status details in ``jobs`` and summary counts in ``summary``. Each job
@@ -276,7 +276,7 @@ def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> 
     """Deletes a named subdirectory under a single output directory.
 
     Removes the ``<output_directory>/<subdirectory_name>`` tree via
-    :func:`ataraxis_data_structures.delete_directory`, which performs parallel file deletion with platform-safe
+    ``ataraxis_data_structures.delete_directory``, which performs parallel file deletion with platform-safe
     retry logic. Returns structured outcome information suitable for inclusion in MCP tool responses.
 
     Args:
@@ -314,7 +314,7 @@ def analyze_feather_file(feather_file: str, max_sample_rows: int) -> dict[str, A
     """Reads a single feather file and computes generic summary statistics.
 
     Computes the total row count, the list of columns, inter-row timing statistics (when a ``timestamp_us``
-    column is present), and a configurable number of sample rows. Columns whose dtype is :class:`polars.Binary`
+    column is present), and a configurable number of sample rows. Columns whose dtype is ``polars.Binary``
     are replaced in the sample rows by a boolean ``<column>_has_data`` flag so the payload stays
     JSON-serializable.
 

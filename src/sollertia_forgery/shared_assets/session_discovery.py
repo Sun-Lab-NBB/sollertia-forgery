@@ -39,7 +39,7 @@ def get_session_root_from_marker(marker_path: Path) -> Path:
 def discover_sessions(root_path: Path) -> list[Path]:
     """Discovers session root directories under a root path by locating ``session_data.yaml`` markers.
 
-    Recursively searches for :data:`SESSION_MARKER_FILENAME` files and derives each session's root directory
+    Recursively searches for ``SESSION_MARKER_FILENAME`` files and derives each session's root directory
     from the marker location. Returns only the resolved paths without loading or validating session data,
     making this function suitable as a lightweight discovery primitive for both MCP tools and internal
     pipeline code.
