@@ -6,6 +6,7 @@ from typing import Literal  # pragma: no cover
 
 from ..processing import mcp_tools as _processing_mcp_tools  # noqa: F401  # pragma: no cover
 from .mcp_instance import mcp  # pragma: no cover
+from ..shared_assets import mcp_tools as _shared_mcp_tools  # noqa: F401  # pragma: no cover
 
 
 def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None:  # pragma: no cover

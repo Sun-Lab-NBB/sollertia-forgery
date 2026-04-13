@@ -20,6 +20,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
+from sollertia_forgery.shared_assets import discover_sessions
 
 from .checksum import CHECKSUM_TRACKER_FILENAME
 
@@ -84,7 +85,7 @@ def generate_project_manifest(project_directory: Path) -> None:
         console.error(message=message, error=FileNotFoundError)
 
     # Finds the root directories for all project's sessions.
-    session_directories = [directory.parents[1] for directory in project_directory.rglob("session_data.yaml")]
+    session_directories = discover_sessions(root_path=project_directory)
 
     if not session_directories:
         message = (
@@ -230,9 +231,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 behavior_tracker = _find_tracker(
                     search_root=session_data.processed_data_path, tracker_filename=BEHAVIOR_TRACKER_FILENAME
                 )
-                manifest["behavior"].append(
-                    behavior_tracker.complete if behavior_tracker is not None else False
-                )
+                manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
                 # Resolves DeepLabCut (video) processing status by searching processed_data for the tracker.
                 video_tracker = _find_tracker(

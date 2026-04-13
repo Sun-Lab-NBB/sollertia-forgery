@@ -23,17 +23,15 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker  # prag
 from .pipeline import (  # pragma: no cover
     TRACKER_FILENAME,
     BEHAVIOR_DATA_DIRECTORY,
-    PROCESSABLE_SESSION_TYPES,
     discover_behavior_jobs,
     run_behavior_processing_pipeline,
 )
 from ..interfaces import mcp  # pragma: no cover
 from ..shared_assets import (  # pragma: no cover
     RESERVED_CORES,
-    SESSION_MARKER_FILENAME,
     PendingJob,
     JobExecutionState,
-    _validate_directory,
+    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -69,81 +67,6 @@ class _BehaviorPendingJob(PendingJob):  # pragma: no cover
 
 _job_execution_state: JobExecutionState[_BehaviorPendingJob] | None = None  # pragma: no cover
 """Stores the active execution state for batch behavior processing jobs."""
-
-
-@mcp.tool()  # pragma: no cover
-def discover_behavior_sessions_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
-    """Discovers behavior processing sessions under a project root directory.
-
-    Recursively searches for ``session_data.yaml`` marker files to identify session root directories, loads each
-    session via :meth:`SessionData.load`, and returns metadata for sessions whose type is eligible for behavior
-    processing. Eligibility is determined by the :data:`PROCESSABLE_SESSION_TYPES` set exported by
-    :mod:`sollertia_forgery.processing.pipeline`.
-
-    Args:
-        root_directory: The absolute path to the root directory to search. Searched recursively.
-
-    Returns:
-        A dictionary containing a 'sessions' list where each entry has 'session_path', 'session_name',
-        'animal_id', 'session_type', 'raw_data_path', 'processed_data_path', and 'eligible' keys, a flat
-        'session_paths' list of eligible session roots for batch processing, and aggregate counts. Sessions
-        that fail to load produce entries with 'session_path', 'eligible=False', and 'error'. Behavior outputs
-        always live under ``{processed_data_path}/behavior_data/`` — the caller never chooses an output
-        location.
-    """
-    error = _validate_directory(root_directory)
-    if error is not None:
-        return {"error": error}
-
-    root_path = Path(root_directory)
-
-    # Discovers session directories by locating session_data.yaml marker files. The marker file lives under
-    # each session's ``raw_data/`` subdirectory, so the session root is two levels above the marker.
-    sessions_output: list[dict[str, Any]] = []
-    eligible_paths: list[str] = []
-
-    try:
-        marker_paths = sorted(root_path.rglob(SESSION_MARKER_FILENAME))
-    except PermissionError as error:
-        return {"error": f"Permission denied during search: {error}"}
-
-    for marker_path in marker_paths:
-        session_root = marker_path.parents[1]
-
-        try:
-            session = SessionData.load(session_path=session_root)
-        except Exception as error:
-            sessions_output.append(
-                {
-                    "session_path": str(session_root),
-                    "eligible": False,
-                    "error": f"Unable to load session: {error}",
-                }
-            )
-            continue
-
-        eligible = session.session_type in PROCESSABLE_SESSION_TYPES
-        entry: dict[str, Any] = {
-            "session_path": str(session_root),
-            "session_name": session.session_name,
-            "animal_id": session.animal_id,
-            "session_type": str(session.session_type),
-            "raw_data_path": str(session.raw_data_path),
-            "processed_data_path": str(session.processed_data_path),
-            "eligible": eligible,
-        }
-
-        if eligible:
-            eligible_paths.append(str(session_root))
-
-        sessions_output.append(entry)
-
-    return {
-        "sessions": sessions_output,
-        "session_paths": eligible_paths,
-        "total_sessions": len(sessions_output),
-        "total_eligible": len(eligible_paths),
-    }
 
 
 @mcp.tool()  # pragma: no cover
@@ -725,7 +648,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
     Returns:
         A dictionary containing per-session status summaries and aggregate counts.
     """
-    error = _validate_directory(root_directory)
+    error = validate_directory(root_directory)
     if error is not None:
         return {"error": error}
 
@@ -804,7 +727,7 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
         A dictionary containing a 'verified' flag, per-file results in 'files' (each with path, readability,
         row count, and column names), tracker status in 'tracker', and aggregate counts.
     """
-    error = _validate_directory(session_path)
+    error = validate_directory(session_path)
     if error is not None:
         return {"error": error}
 

@@ -1,6 +1,6 @@
 """Provides shared assets that support multiple library packages and modules."""
 
-from .metadata import ProjectManifest, filter_sessions
+from .metadata import ProjectManifest
 from .utilities import delay_timer, delay_terminal
 from .mcp_orchestration import (
     RESERVED_CORES,
@@ -8,7 +8,7 @@ from .mcp_orchestration import (
     ActiveJob,
     PendingJob,
     JobExecutionState,
-    _validate_directory,
+    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -16,6 +16,7 @@ from .mcp_orchestration import (
     job_execution_manager,
     clean_output_subdirectory,
 )
+from .session_discovery import filter_sessions, discover_sessions, get_session_root_from_marker
 
 __all__ = [
     "RESERVED_CORES",
@@ -29,8 +30,11 @@ __all__ = [
     "delay_terminal",
     "delay_timer",
     "derive_tracker_status",
+    "discover_sessions",
     "filter_sessions",
+    "get_session_root_from_marker",
     "group_jobs_by_tracker",
     "job_execution_manager",
     "read_tracker_status",
+    "validate_directory",
 ]

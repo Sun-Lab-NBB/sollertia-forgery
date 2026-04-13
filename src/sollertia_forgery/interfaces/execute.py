@@ -2,7 +2,7 @@
 
 import click
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import get_working_directory, get_server_configuration
+from sollertia_shared_assets import DatasetSession, get_working_directory, get_server_configuration
 
 from ..server import (
     Server,
@@ -11,7 +11,7 @@ from ..server import (
     process_project_data,
     resolve_project_manifest,
 )
-from ..shared_assets import ProjectManifest, SessionMetadata, filter_sessions
+from ..shared_assets import ProjectManifest, filter_sessions
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -131,10 +131,10 @@ def execute_cli(
     manifest = ProjectManifest(manifest_file=manifest_path)
 
     # Builds the set of all available sessions from the manifest.
-    all_sessions: set[SessionMetadata] = set()
+    all_sessions: set[DatasetSession] = set()
     for animal_id in manifest.animals:
         for session_name in manifest.get_sessions(animal=animal_id, exclude_incomplete=False):
-            all_sessions.add(SessionMetadata(session=session_name, animal=animal_id))
+            all_sessions.add(DatasetSession(session=session_name, animal=str(animal_id)))
 
     # Applies filtering based on the provided options.
     filtered_sessions = filter_sessions(
@@ -399,5 +399,3 @@ def forge_command(
         cindra_configuration_file=cindra_config,
         processing_batch_size=batch_size,
     )
-
-

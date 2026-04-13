@@ -70,6 +70,7 @@ dependencies = [
     # Utilities
     "filelock>=3,<4",
     "natsort-rs>=0,<1",
+    "python-dateutil>=2,<3",
     "tabulate>=0,<1",
 ]
 
@@ -98,6 +99,7 @@ dev = [
 
     # Types
     "types-filelock>=3,<4",
+    "types-python-dateutil>=2,<3",
     "types-tabulate>=0,<1",
 ]
 

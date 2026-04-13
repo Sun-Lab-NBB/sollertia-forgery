@@ -37,21 +37,6 @@ feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``fram
 timestamp feathers)."""
 
 
-def _validate_directory(directory: str) -> str | None:
-    """Checks that *directory* is an existing directory and returns an error message if not.
-
-    Returns:
-        ``None`` when the path is a valid directory, or a human-readable error string suitable for inclusion in
-        an MCP tool response.
-    """
-    path = Path(directory)
-    if not path.exists():
-        return f"Directory does not exist: {directory}"
-    if not path.is_dir():
-        return f"Path is not a directory: {directory}"
-    return None
-
-
 @dataclass(slots=True)
 class PendingJob:
     """Describes a single batch processing job tracked by a :class:`ProcessingTracker` file.
@@ -118,6 +103,24 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """Background execution manager thread reference."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
+
+
+def validate_directory(directory: str) -> str | None:
+    """Checks that the given directory path is an existing directory and returns an error message if not.
+
+    Args:
+        directory: The absolute path string to validate as an existing directory.
+
+    Returns:
+        ``None`` when the path is a valid directory, or a human-readable error string suitable for inclusion in
+        an MCP tool response.
+    """
+    path = Path(directory)
+    if not path.exists():
+        return f"Directory does not exist: {directory}"
+    if not path.is_dir():
+        return f"Path is not a directory: {directory}"
+    return None
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
@@ -285,7 +288,7 @@ def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> 
         A dictionary containing ``output_directory``, a ``cleaned`` flag, and either ``data_path`` (the path
         that was removed) or ``error`` (a human-readable failure description).
     """
-    error = _validate_directory(output_directory)
+    error = validate_directory(output_directory)
     if error is not None:
         return {"output_directory": output_directory, "cleaned": False, "error": error}
 

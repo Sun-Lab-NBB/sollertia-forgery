@@ -1,172 +1,14 @@
-"""Provides metadata assets for working with project data stored on remote compute servers."""
+"""Provides the ProjectManifest class for visualizing and querying project manifest .feather files."""
 
-from typing import TYPE_CHECKING
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
-from dateutil import parser
 from ataraxis_base_utilities import console
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from sollertia_shared_assets import SessionMetadata
-
-
-def filter_sessions(
-    sessions: set[SessionMetadata],
-    *,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    include_sessions: set[str] | None = None,
-    exclude_sessions: set[str] | None = None,
-    include_animals: set[str] | None = None,
-    exclude_animals: set[str] | None = None,
-    utc_timezone: bool = True,
-) -> set[SessionMetadata]:
-    """Filters the input set of sessions based on the specified date ranges and inclusion/exclusion criteria.
-
-    This function provides a general-purpose filtering mechanism for selecting a subset of all available sessions.
-    Animal filtering is carried out before the session filtering. Exclusion filtering takes precedence over inclusion
-    filtering.
-
-    Args:
-        sessions: The set of SessionMetadata instances representing the sessions to be filtered.
-        start_date: The start date for the date range filter. Sessions recorded on or after this date are included.
-            Accepts various date formats (e.g., 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS'). If None, no start date filter
-            is applied.
-        end_date: The end date for the date range filter. Sessions recorded on or before this date are included.
-            If only a date is provided (no time), the filter includes the entire day. If None, no end date filter
-            is applied.
-        include_sessions: A set of session names to include regardless of the date range. These sessions are included
-            even if they fall outside the start_date/end_date range, unless they are in exclude_sessions.
-        exclude_sessions: A set of session names to exclude from the results. This takes precedence over all other
-            inclusion criteria.
-        include_animals: A set of animal names to include. If specified, only sessions from these animals are
-            considered. If None, sessions from all animals are considered.
-        exclude_animals: A set of animal names to exclude. Sessions from these animals are removed from the results.
-            This takes precedence over include_animals.
-        utc_timezone: Determines whether to interpret date boundaries and session timestamps in UTC (True) or
-            America/New_York (False) timezone. Session names reflect the UTC timestamps, but when this is False,
-            the function converts them to America/New_York for comparison.
-
-    Returns:
-        A set of SessionMetadata instances that match the filtering criteria.
-    """
-    # Step 1: Applies animal exclusion filter (takes precedence over animal inclusion)
-    if exclude_animals:
-        sessions = {s for s in sessions if s.animal not in exclude_animals}
-
-    # Step 2: Applies animal inclusion filter
-    if include_animals:
-        sessions = {s for s in sessions if s.animal in include_animals}
-
-    # Step 3: Applies session exclusion filter (takes precedence over all session inclusion criteria)
-    if exclude_sessions:
-        sessions = {s for s in sessions if s.session not in exclude_sessions}
-
-    # Step 4: Applies date range and session inclusion filters
-    # Sessions are included if they fall within the date range OR are in include_sessions
-    if start_date is not None or end_date is not None or include_sessions:
-        # Parses date boundaries
-        parsed_start = (
-            _parse_date_boundary(start_date, is_end_date=False, utc_timezone=utc_timezone) if start_date else None
-        )
-        parsed_end = _parse_date_boundary(end_date, is_end_date=True, utc_timezone=utc_timezone) if end_date else None
-
-        filtered = set()
-        for session in sessions:
-            # Checks if the session is explicitly included
-            if include_sessions and session.session in include_sessions:
-                filtered.add(session)
-                continue
-
-            # Checks if the session falls within the date range
-            session_date = _parse_session_date(session.session, utc_timezone=utc_timezone)
-            if session_date is not None:
-                in_range = True
-                if parsed_start and session_date < parsed_start:
-                    in_range = False
-                if parsed_end and session_date > parsed_end:
-                    in_range = False
-                if in_range:
-                    filtered.add(session)
-
-        sessions = filtered
-
-    return sessions
-
-
-def _parse_date_boundary(date_string: str, *, is_end_date: bool = False, utc_timezone: bool = True) -> datetime:
-    """Parses the input date and time string preserving any time information provided.
-
-    Args:
-        date_string: A date and time string in various formats (YYYY-MM-DD or with time).
-        is_end_date: If True and only the date data is provided in the string, sets the time component to the
-            end of the day.
-        utc_timezone: If True, interprets the date string as UTC. If False, interprets it as America/New_York.
-
-    Returns:
-        The timezone-aware datetime object constructed from the input string's data.
-    """
-    parsed = parser.parse(date_string)
-
-    # Checks if only the date was provided (parser defaults to midnight)
-    date_only = "T" not in date_string and " " not in date_string and ":" not in date_string
-
-    if date_only and is_end_date:
-        # Makes end dates inclusive of the entire day
-        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
-
-    # Determines the target timezone based on the utc_timezone flag
-    target_tz = ZoneInfo("UTC") if utc_timezone else ZoneInfo("America/New_York")
-
-    # Ensures timezone awareness and returns the parsed data
-    return parsed.replace(tzinfo=target_tz) if parsed.tzinfo is None else parsed.astimezone(target_tz)
-
-
-# The number of hyphen-separated components in a valid session name (YYYY-MM-DD-HH-MM-SS-microseconds)
-_SESSION_NAME_COMPONENTS = 7
-
-
-def _parse_session_date(session_name: str, *, utc_timezone: bool = True) -> datetime | None:
-    """Parses the session name to extract its acquisition datetime.
-
-    Session names follow the format 'YYYY-MM-DD-HH-MM-SS-microseconds' and encode the session's acquisition
-    timestamp in the UTC timezone.
-
-    Args:
-        session_name: The unique identifier of the session.
-        utc_timezone: If True, returns the datetime in UTC. If False, converts to America/New_York timezone.
-
-    Returns:
-        The timezone-aware datetime object representing when the session was acquired, or None if the session name
-        does not follow the expected format.
-    """
-    parts = session_name.split("-")
-    if len(parts) != _SESSION_NAME_COMPONENTS:
-        return None
-
-    try:
-        year, month, day, hour, minute, second, microseconds = parts
-        # Session names always store UTC timestamps
-        utc_dt = datetime(
-            year=int(year),
-            month=int(month),
-            day=int(day),
-            hour=int(hour),
-            minute=int(minute),
-            second=int(second),
-            microsecond=int(microseconds),
-            tzinfo=ZoneInfo("UTC"),
-        )
-        # Returns in UTC or converts to America/New_York based on the flag
-        if utc_timezone:
-            return utc_dt
-        return utc_dt.astimezone(ZoneInfo("America/New_York"))
-    except ValueError, IndexError:
-        return None
 
 
 class ProjectManifest:
@@ -182,18 +24,11 @@ class ProjectManifest:
 
     Attributes:
         _data: The Polars DataFrame that stores the snapshot of the project's state.
-        _animal_string: Determines whether animal IDs are stored as strings or unsigned integers.
     """
 
     def __init__(self, manifest_file: Path) -> None:
         # Reads the data from the target manifest file into the class attribute.
         self._data: pl.DataFrame = pl.read_ipc(source=manifest_file, memory_map=True)
-
-        # Determines whether animal IDs are stored as strings or as numbers.
-        self._animal_string = False
-        schema = self._data.collect_schema()
-        if isinstance(schema["animal"], pl.String):
-            self._animal_string = True
 
     def print_data(self) -> None:
         """Prints the entire contents of the manifest file to the terminal."""
@@ -205,9 +40,9 @@ class ProjectManifest:
             set_tbl_width_chars=250,  # Sets table width to 250 characters
             set_fmt_str_lengths=600,  # Allows longer strings to display properly (default is 32)
         ):
-            print(self._data)  # noqa: T201
+            console.echo(message=str(self._data), raw=True)
 
-    def print_summary(self, animal: str | int | None = None) -> None:
+    def print_summary(self, animal: int | None = None) -> None:
         """Prints a summary view of the manifest file to the terminal, excluding the 'experimenter notes' data for
         each session.
 
@@ -229,6 +64,8 @@ class ProjectManifest:
             "cindra",
             "behavior",
             "video",
+            "multi_recording_datasets",
+            "multi_recording_complete",
         ]
 
         # Retrieves the data.
@@ -236,9 +73,7 @@ class ProjectManifest:
 
         # Optionally filters the data for the target animal.
         if animal is not None:
-            # Ensures that the 'animal' argument has the same type as the data inside the DataFrame.
-            animal = str(animal) if self._animal_string else int(animal)
-            df = df.filter(pl.col("animal") == animal)
+            df = df.filter(pl.col("animal") == int(animal))
 
         # Ensures the data displays properly.
         with pl.Config(
@@ -248,9 +83,9 @@ class ProjectManifest:
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="CENTER",
         ):
-            print(df)  # noqa: T201
+            console.echo(message=str(df), raw=True)
 
-    def print_notes(self, animal: str | int | None = None) -> None:
+    def print_notes(self, animal: int | None = None) -> None:
         """Prints the animal ID, session ID, and experimenter notes data for each project's session to the terminal.
 
         This data view is optimized for determining what data acquisition sessions have been carried out and checking
@@ -265,10 +100,7 @@ class ProjectManifest:
 
         # Optionally filters the data for the target animal.
         if animal is not None:
-            # Ensures that the 'animal' argument has the same type as the data inside the DataFrame.
-            animal = str(animal) if self._animal_string else int(animal)
-
-            df = df.filter(pl.col("animal") == animal)
+            df = df.filter(pl.col("animal") == int(animal))
 
         # Prints the extracted data.
         with pl.Config(
@@ -279,62 +111,16 @@ class ProjectManifest:
             set_tbl_width_chars=170,  # Wider columns for notes
             set_fmt_str_lengths=2000,  # Allows very long strings for notes
         ):
-            print(df)  # noqa: T201
+            console.echo(message=str(df), raw=True)
 
     @property
-    def animals(self) -> tuple[str, ...]:
+    def animals(self) -> tuple[int, ...]:
         """Returns the unique identifiers for each animal participating in the project."""
-        # If animal IDs are stored as integers, converts them to string to support consistent return types.
-        return tuple(
-            [str(animal) for animal in self._data.select("animal").unique().sort("animal").to_series().to_list()]
-        )
-
-    def _get_filtered_sessions(
-        self,
-        animal: str | int | None = None,
-        *,
-        exclude_incomplete: bool = True,
-    ) -> tuple[str, ...]:
-        """Builds a tuple of unique session identifiers with optional filtering.
-
-        Notes:
-            User-facing methods call this worker method under-the-hood to fetch the filtered tuple of session IDs.
-
-        Args:
-            animal: An optional animal identifier for which to retrieve the sessions. If set to None, the method
-                returns the session IDs for all animals participating in the project.
-            exclude_incomplete: Determines whether to exclude incomplete sessions from the output tuple.
-
-        Returns:
-            The tuple of unique session identifiers matching the filter criteria.
-
-        Raises:
-            ValueError: If the specified animal identifier is not found in the manifest file.
-        """
-        data = self._data
-
-        # Filters by animal if specified.
-        if animal is not None:
-            # Ensures that the 'animal' argument has the same type as the data inside the DataFrame.
-            animal = str(animal) if self._animal_string else int(animal)
-
-            if animal not in self.animals:
-                message = f"Animal ID '{animal}' not found in the project manifest. Available animals: {self.animals}."
-                console.error(message=message, error=ValueError)
-
-            data = data.filter(pl.col("animal") == animal)
-
-        # Optionally filters out incomplete sessions.
-        if exclude_incomplete:
-            data = data.filter(pl.col("complete") == 1)
-
-        # Formats and returns session IDs to the caller.
-        sessions = data.select("session").sort("session").to_series().to_list()
-        return tuple(sessions)
+        return tuple(self._data.select("animal").unique().sort("animal").to_series().to_list())
 
     def get_sessions(
         self,
-        animal: str | int | None = None,
+        animal: int | None = None,
         *,
         exclude_incomplete: bool = True,
     ) -> tuple[str, ...]:
@@ -364,12 +150,13 @@ class ProjectManifest:
             session: The unique identifier of the session for which to retrieve the data.
 
         Returns:
-            A Polars DataFrame with the following columns: 'animal', 'date', 'notes', 'session', 'type', 'system',
-            'complete', 'integrity', 'cindra', 'behavior', 'video'.
+            A Polars DataFrame containing all manifest columns for the specified session, including 'animal', 'date',
+            'session', 'type', 'system', 'notes', 'complete', 'integrity', 'cindra', 'behavior', 'video',
+            'multi_recording_datasets', and 'multi_recording_complete'.
         """
         return self._data.filter(pl.col("session").eq(session))
 
-    def get_animal_for_session(self, session: str) -> str:
+    def get_animal_for_session(self, session: str) -> int:
         """Returns the unique identifier of the animal that participated in the specified session.
 
         Args:
@@ -392,11 +179,8 @@ class ProjectManifest:
             )
             console.error(message=message, error=ValueError)
 
-        # Extracts the animal ID.
-        animal_id = df.select("animal").item()
-
-        # Returns the animal ID with the appropriate type.
-        return str(animal_id)
+        # Extracts and returns the animal ID.
+        return int(df.select("animal").item())
 
     def get_system_for_session(self, session: str) -> str:
         """Returns the data acquisition system used to acquire the specified session's data.
@@ -424,7 +208,127 @@ class ProjectManifest:
         # Extracts and returns the acquisition system used to acquire the session.
         return str(df.select("system").item())
 
+    def summarize(self) -> dict[str, Any]:
+        """Returns a structured summary of the project manifest for programmatic consumption.
+
+        Computes aggregate statistics across all sessions including per-pipeline completion counts and
+        multi-recording dataset membership. Designed for MCP tool responses where a structured dictionary is
+        more useful than a printed table.
+
+        Returns:
+            A dictionary containing ``total_sessions``, ``total_animals``, ``animals``, ``session_types``,
+            ``acquisition_systems``, per-pipeline completion counts, ``multi_recording_datasets`` summary,
+            ``columns``, and ``total_rows``.
+        """
+        data = self._data
+        total_rows = data.height
+
+        # Computes per-pipeline completion counts from the boolean (UInt8) status columns.
+        complete_count = int(data.filter(pl.col("complete") == 1).height)
+        integrity_count = int(data.filter(pl.col("integrity") == 1).height)
+        cindra_count = int(data.filter(pl.col("cindra") == 1).height)
+        behavior_count = int(data.filter(pl.col("behavior") == 1).height)
+        video_count = int(data.filter(pl.col("video") == 1).height)
+
+        # Computes session type distribution.
+        session_types: dict[str, int] = {}
+        for row in data.select("type").to_series().to_list():
+            session_types[str(row)] = session_types.get(str(row), 0) + 1
+
+        # Computes acquisition system distribution.
+        acquisition_systems: dict[str, int] = {}
+        for row in data.select("system").to_series().to_list():
+            acquisition_systems[str(row)] = acquisition_systems.get(str(row), 0) + 1
+
+        # Builds the multi-recording dataset summary by exploding the list columns and grouping by dataset
+        # name. Each dataset entry reports the number of sessions it spans and its completion status.
+        dataset_summary: dict[str, Any] = {"total_datasets": 0, "datasets": []}
+        if "multi_recording_datasets" in data.columns and "multi_recording_complete" in data.columns:
+            # Filters to rows that have at least one dataset entry, then explodes both list columns in
+            # parallel so each row represents a single (session, dataset, complete) triple.
+            has_datasets = data.filter(pl.col("multi_recording_datasets").list.len() > 0)
+            if has_datasets.height > 0:
+                exploded = has_datasets.select(
+                    "session", "multi_recording_datasets", "multi_recording_complete"
+                ).explode("multi_recording_datasets", "multi_recording_complete")
+
+                # Groups by dataset name to compute per-dataset session count and completion status.
+                grouped = exploded.group_by("multi_recording_datasets").agg(
+                    pl.col("session").count().alias("session_count"),
+                    pl.col("multi_recording_complete").max().alias("complete"),
+                )
+
+                datasets: list[dict[str, Any]] = [
+                    {
+                        "name": row["multi_recording_datasets"],
+                        "session_count": int(row["session_count"]),
+                        "complete": bool(row["complete"]),
+                    }
+                    for row in grouped.iter_rows(named=True)
+                ]
+
+                dataset_summary = {
+                    "total_datasets": len(datasets),
+                    "datasets": sorted(datasets, key=lambda d: d["name"]),
+                }
+
+        return {
+            "total_sessions": total_rows,
+            "total_animals": len(self.animals),
+            "animals": list(self.animals),
+            "session_types": session_types,
+            "acquisition_systems": acquisition_systems,
+            "complete_count": complete_count,
+            "integrity_verified_count": integrity_count,
+            "cindra_processed_count": cindra_count,
+            "behavior_processed_count": behavior_count,
+            "video_processed_count": video_count,
+            "multi_recording_datasets": dataset_summary,
+            "columns": data.columns,
+            "total_rows": total_rows,
+        }
+
     @property
     def data(self) -> pl.DataFrame:
         """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
         return self._data
+
+    def _get_filtered_sessions(
+        self,
+        animal: int | None = None,
+        *,
+        exclude_incomplete: bool = True,
+    ) -> tuple[str, ...]:
+        """Builds a tuple of unique session identifiers with optional filtering.
+
+        Notes:
+            User-facing methods call this worker method under-the-hood to fetch the filtered tuple of session IDs.
+
+        Args:
+            animal: An optional animal identifier for which to retrieve the sessions. If set to None, the method
+                returns the session IDs for all animals participating in the project.
+            exclude_incomplete: Determines whether to exclude incomplete sessions from the output tuple.
+
+        Returns:
+            The tuple of unique session identifiers matching the filter criteria.
+
+        Raises:
+            ValueError: If the specified animal identifier is not found in the manifest file.
+        """
+        data = self._data
+
+        # Filters by animal if specified.
+        if animal is not None:
+            if animal not in self.animals:
+                message = f"Animal ID '{animal}' not found in the project manifest. Available animals: {self.animals}."
+                console.error(message=message, error=ValueError)
+
+            data = data.filter(pl.col("animal") == animal)
+
+        # Optionally filters out incomplete sessions.
+        if exclude_incomplete:
+            data = data.filter(pl.col("complete") == 1)
+
+        # Formats and returns session IDs to the caller.
+        sessions = data.select("session").sort("session").to_series().to_list()
+        return tuple(sessions)

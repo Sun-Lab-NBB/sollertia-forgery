@@ -6,9 +6,9 @@ import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData, DatasetSession
 
+from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
 from ..forging.processing import define_dataset, assemble_dataset
-from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

@@ -60,7 +60,7 @@ def transfer_session(
             )
         return
 
-    elif destination_path is None:
+    if destination_path is None:
         message = (
             f"Unable to transfer the session '{session_data.session_name}' at '{session_root}'. No destination "
             f"path was provided and source removal was not requested. Provide a destination path to transfer the "

@@ -19,7 +19,7 @@ from sollertia_shared_assets import (
 )
 from ataraxis_base_utilities import console, ensure_directory_exists
 
-from ..shared_assets.utilities import delay_timer
+from ..shared_assets import delay_timer
 
 from .server import Server, JobStatus
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
     # noinspection PyUnusedImports
     from .job import Job
-    from ..shared_assets.metadata import ProjectManifest
+    from ..shared_assets import ProjectManifest
 
 # Type alias for the jobs' dictionary to improve readability
 JobsDict = dict[int, tuple[tuple["Job", "Path"], ...]]

@@ -18,12 +18,12 @@ file."""
 _CHECKSUM_TRACKER_LOCK_FILENAME: str = CHECKSUM_TRACKER_FILENAME + ".lock"
 """The lock filename associated with the checksum processing tracker."""
 
-_CHECKSUM_JOB_NAME: str = "checksum_resolution"
+CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name used to identify checksum resolution jobs in processing trackers."""
 
 _CHECKSUM_EXCLUDED_FILES: set[str] = {"ax_checksum.txt", CHECKSUM_TRACKER_FILENAME, _CHECKSUM_TRACKER_LOCK_FILENAME}
-"""The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing tracker,
-and its lock file to prevent the tracker presence from altering the checksum value."""
+"""The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
+tracker, and its lock file to prevent the tracker presence from altering the checksum value."""
 
 
 def resolve_checksum(
@@ -60,10 +60,8 @@ def resolve_checksum(
     session_data = SessionData.load(session_path=session_path)
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file.
-    tracker = ProcessingTracker(
-        file_path=session_data.raw_data_path.joinpath(CHECKSUM_TRACKER_FILENAME)
-    )
-    job_ids = tracker.initialize_jobs(jobs=[(_CHECKSUM_JOB_NAME, session_data.session_name)])
+    tracker = ProcessingTracker(file_path=session_data.raw_data_path.joinpath(CHECKSUM_TRACKER_FILENAME))
+    job_ids = tracker.initialize_jobs(jobs=[(CHECKSUM_JOB_NAME, session_data.session_name)])
     job_id = job_ids[0]
 
     # Marks the job as running.
