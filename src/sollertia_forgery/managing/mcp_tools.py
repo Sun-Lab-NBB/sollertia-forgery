@@ -16,7 +16,7 @@ from ataraxis_time import (  # pragma: no cover
     convert_time,
     get_timestamp,
 )
-from ataraxis_base_utilities import resolve_worker_count  # pragma: no cover
+from ataraxis_base_utilities import resolve_parallel_job_capacity, resolve_worker_count  # pragma: no cover
 from sollertia_shared_assets import SessionData  # pragma: no cover
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker  # pragma: no cover
 
@@ -45,13 +45,33 @@ TRANSFER_JOB_NAME: str = "session_transfer"  # pragma: no cover
 DELETION_JOB_NAME: str = "session_deletion"  # pragma: no cover
 """The job name used to identify session deletion jobs in processing trackers."""
 
+_CHECKSUM_MAX_WORKERS_PER_JOB: int = 20  # pragma: no cover
+"""The hard cap on CPU cores allocated to a single checksum job. Checksum computation shows no throughput benefit
+beyond this core count per session."""
+
+_CHECKSUM_PREFERRED_WORKERS_PER_JOB: int = 10  # pragma: no cover
+"""The preferred number of CPU cores per checksum job used by saturating allocation. The allocator attempts to run
+as many concurrent jobs as possible at this worker count before trading parallelism for per-job throughput."""
+
+_CHECKSUM_MINIMUM_WORKERS_PER_JOB: int = 5  # pragma: no cover
+"""The minimum acceptable workers per checksum job when running multiple jobs concurrently. If the budget cannot
+sustain this floor with more than one concurrent job, parallelism is reduced until each job meets the minimum."""
+
+_CHECKSUM_WORKER_MULTIPLE: int = 5  # pragma: no cover
+"""Worker counts are rounded down to the nearest multiple of this value for clean process-pool sizing."""
+
+_MAX_PARALLEL_TRANSFER_JOBS: int = 4  # pragma: no cover
+"""The hard cap on the number of concurrently executing transfer or deletion operations. Transfer throughput is
+limited by I/O bandwidth; more than four parallel transfers typically saturate network or disk links."""
+
 
 @dataclass(slots=True)  # pragma: no cover
 class _ChecksumPendingJob(PendingJob):  # pragma: no cover
     """Describes a single checksum resolution job queued for background execution.
 
-    Extends the shared ``PendingJob`` base with the session root path, the session's human-readable name, and the
-    flag controlling whether the checksum is verified against the stored value or regenerated.
+    Extends the shared ``PendingJob`` base with the session root path, the session's human-readable name, the
+    flag controlling whether the checksum is verified against the stored value or regenerated, and the resolved
+    per-job worker count for parallel checksum computation.
     """
 
     session_path: Path
@@ -60,6 +80,10 @@ class _ChecksumPendingJob(PendingJob):  # pragma: no cover
     """The human-readable session name used for logging and status reporting."""
     regenerate_checksum: bool
     """Determines whether to overwrite the stored checksum instead of verifying it."""
+    workers: int = 1
+    """The number of CPU cores allocated to this checksum job by the batch-level saturating resolver. Defaults to
+    1 so that jobs can be constructed before worker resolution; ``execute_checksum_jobs_tool`` overwrites this
+    value after resolving the saturating allocation."""
 
 
 @dataclass(slots=True)  # pragma: no cover
@@ -210,15 +234,19 @@ def prepare_checksum_batch_tool(  # pragma: no cover
 def execute_checksum_jobs_tool(  # pragma: no cover
     jobs: list[dict[str, str]],
     *,
-    worker_budget: int = -1,
+    workers_per_job: int = -1,
+    max_parallel_jobs: int = -1,
     regenerate_checksum: bool = False,
 ) -> dict[str, Any]:
-    """Dispatches checksum resolution jobs for background execution with budget-bounded concurrency.
+    """Dispatches checksum resolution jobs for background execution with saturating core allocation.
 
     Takes job descriptors from the manifest produced by :func:`prepare_checksum_batch_tool` and starts a
-    background execution manager that runs each job in a separate worker subprocess. Each job invokes
-    :func:`resolve_checksum` with ``workers=1`` so that parallelism is controlled at the batch level by the
-    worker budget rather than within each individual checksum computation.
+    background execution manager that runs each job in a separate worker subprocess. The CPU budget is
+    distributed across concurrent jobs using a saturating allocation strategy: the allocator maximizes
+    parallelism at a preferred per-job worker count, reduces parallelism when workers would drop below a
+    minimum floor, and enforces a hard cap of ``_CHECKSUM_MAX_WORKERS_PER_JOB`` cores per job. Each job's
+    resolved worker count is bound to its pending descriptor and forwarded to :func:`resolve_checksum` at
+    dispatch time.
 
     Important:
         Only one checksum execution session can be active at a time. Use :func:`cancel_checksum_tool` to cancel
@@ -227,14 +255,17 @@ def execute_checksum_jobs_tool(  # pragma: no cover
     Args:
         jobs: The list of job descriptors from :func:`prepare_checksum_batch_tool`. Each dictionary must have
             ``session_path``, ``tracker_path``, and ``job_id`` keys.
-        worker_budget: The total number of CPU cores available for the execution session. Directly controls
-            memory footprint. Set to -1 for automatic resolution via
-            :func:`ataraxis_base_utilities.resolve_worker_count`.
+        workers_per_job: The number of CPU cores to allocate to each individual checksum job. Set to -1 for
+            automatic resolution via saturating allocation. Capped at ``_CHECKSUM_MAX_WORKERS_PER_JOB``
+            regardless of the requested value.
+        max_parallel_jobs: The maximum number of checksum jobs to execute concurrently. Set to -1 for automatic
+            resolution based on the available CPU budget and the resolved per-job worker count.
         regenerate_checksum: Determines whether to overwrite the stored checksum instead of verifying it. Applies
             to all jobs in the batch.
 
     Returns:
-        A dictionary containing a ``started`` flag, ``total_jobs``, resolved worker budget, and any invalid jobs.
+        A dictionary containing a ``started`` flag, ``total_jobs``, ``workers_per_job``, ``max_parallel_jobs``,
+        and any invalid jobs.
     """
     global _checksum_execution_state
 
@@ -276,15 +307,48 @@ def execute_checksum_jobs_tool(  # pragma: no cover
     if not pending:
         return {"error": "No valid jobs to execute.", "invalid_jobs": invalid_jobs}
 
-    # Resolves the total worker budget.
-    resolved_budget = resolve_worker_count(requested_workers=worker_budget, reserved_cores=RESERVED_CORES)
+    # Resolves per-job worker count and maximum concurrent jobs using saturating allocation. The four resolution
+    # scenarios mirror the cindra pipeline pattern: fully automatic, fixed workers with automatic parallelism,
+    # automatic workers with fixed parallelism, and both explicitly specified.
+    budget = resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES)
+    total_jobs = max(1, len(pending))
 
-    # Creates the execution state and starts the shared manager thread.
+    if workers_per_job <= 0 and max_parallel_jobs <= 0:
+        actual_workers, actual_max_parallel = _resolve_checksum_saturating_allocation(
+            budget=budget, total_jobs=total_jobs
+        )
+    elif workers_per_job > 0 >= max_parallel_jobs:
+        actual_workers = min(
+            resolve_worker_count(requested_workers=workers_per_job, reserved_cores=RESERVED_CORES),
+            _CHECKSUM_MAX_WORKERS_PER_JOB,
+        )
+        actual_max_parallel = resolve_parallel_job_capacity(workers_per_job=actual_workers)
+    elif workers_per_job <= 0 < max_parallel_jobs:
+        raw_workers = budget // max_parallel_jobs
+        actual_workers = min(
+            max(1, (raw_workers // _CHECKSUM_WORKER_MULTIPLE) * _CHECKSUM_WORKER_MULTIPLE),
+            _CHECKSUM_MAX_WORKERS_PER_JOB,
+        )
+        actual_max_parallel = max_parallel_jobs
+    else:
+        actual_workers = min(
+            resolve_worker_count(requested_workers=workers_per_job, reserved_cores=RESERVED_CORES),
+            _CHECKSUM_MAX_WORKERS_PER_JOB,
+        )
+        actual_max_parallel = max_parallel_jobs
+
+    # Binds the resolved worker count to each pending job so the worker subprocess receives it at dispatch time.
+    for pending_job in pending:
+        pending_job.workers = actual_workers
+
+    # Creates the execution state and starts the shared manager thread. The worker_budget is set to the maximum
+    # number of concurrent jobs rather than total cores, since each job subprocess internally spawns its own
+    # worker pool sized to actual_workers.
     _checksum_execution_state = JobExecutionState[_ChecksumPendingJob](
         worker=_run_checksum_job,
         all_jobs=all_jobs,
         pending_queue=deque(pending),
-        worker_budget=resolved_budget,
+        worker_budget=actual_max_parallel,
     )
 
     manager = Thread(
@@ -298,7 +362,8 @@ def execute_checksum_jobs_tool(  # pragma: no cover
     result: dict[str, Any] = {
         "started": True,
         "total_jobs": len(pending),
-        "worker_budget": resolved_budget,
+        "workers_per_job": actual_workers,
+        "max_parallel_jobs": actual_max_parallel,
     }
 
     if invalid_jobs:
@@ -920,7 +985,8 @@ def execute_transfer_jobs_tool(  # pragma: no cover
     background execution manager that runs each job in a separate worker subprocess. Each job invokes
     :func:`transfer_session` with ``workers=1`` so that parallelism is controlled at the batch level by the
     worker budget. The worker wraps the transfer call with :class:`ProcessingTracker` lifecycle management to
-    record per-job outcomes.
+    record per-job outcomes. Concurrent operations are capped at ``_MAX_PARALLEL_TRANSFER_JOBS`` regardless
+    of the requested budget to prevent I/O bandwidth saturation.
 
     Important:
         Only one transfer execution session can be active at a time. Use :func:`cancel_transfer_tool` to cancel
@@ -930,12 +996,13 @@ def execute_transfer_jobs_tool(  # pragma: no cover
         jobs: The list of job descriptors from :func:`prepare_transfer_batch_tool`. Each dictionary must have
             ``source_path``, ``tracker_path``, ``job_id``, and ``remove_source`` keys. The ``destination_path``
             key is required for transfer jobs and absent for deletion jobs.
-        worker_budget: The total number of CPU cores available for the execution session. Directly controls
-            memory footprint. Set to -1 for automatic resolution via
-            :func:`ataraxis_base_utilities.resolve_worker_count`.
+        worker_budget: The maximum number of concurrent transfer operations. Capped at
+            ``_MAX_PARALLEL_TRANSFER_JOBS`` regardless of the requested value. Set to -1 for automatic
+            resolution via :func:`ataraxis_base_utilities.resolve_worker_count`.
 
     Returns:
-        A dictionary containing a ``started`` flag, ``total_jobs``, resolved worker budget, and any invalid jobs.
+        A dictionary containing a ``started`` flag, ``total_jobs``, ``worker_budget``, ``max_parallel_jobs``,
+        and any invalid jobs.
     """
     global _transfer_execution_state
 
@@ -983,8 +1050,13 @@ def execute_transfer_jobs_tool(  # pragma: no cover
     if not pending:
         return {"error": "No valid jobs to execute.", "invalid_jobs": invalid_jobs}
 
-    # Resolves the total worker budget.
-    resolved_budget = resolve_worker_count(requested_workers=worker_budget, reserved_cores=RESERVED_CORES)
+    # Caps concurrent transfer operations at the platform maximum regardless of the requested worker budget.
+    # Transfer throughput is I/O-bound; running more than _MAX_PARALLEL_TRANSFER_JOBS concurrent transfers
+    # saturates network or disk bandwidth without improving throughput.
+    resolved_budget = min(
+        resolve_worker_count(requested_workers=worker_budget, reserved_cores=RESERVED_CORES),
+        _MAX_PARALLEL_TRANSFER_JOBS,
+    )
 
     # Creates the execution state and starts the shared manager thread.
     _transfer_execution_state = JobExecutionState[_TransferPendingJob](
@@ -1006,6 +1078,7 @@ def execute_transfer_jobs_tool(  # pragma: no cover
         "started": True,
         "total_jobs": len(pending),
         "worker_budget": resolved_budget,
+        "max_parallel_jobs": resolved_budget,
     }
 
     if invalid_jobs:
@@ -1489,14 +1562,48 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pr
     return {"cleaned": True, "project_directory": project_directory, "deleted_files": deleted_files}
 
 
+def _resolve_checksum_saturating_allocation(budget: int, total_jobs: int) -> tuple[int, int]:  # pragma: no cover
+    """Resolves per-job worker count and maximum parallel job count for checksum batch execution.
+
+    Distributes the CPU budget across as many concurrent jobs as possible at the preferred worker count, then
+    reduces parallelism until each job meets the minimum worker floor. Worker counts are rounded down to the
+    nearest multiple of ``_CHECKSUM_WORKER_MULTIPLE`` and capped at ``_CHECKSUM_MAX_WORKERS_PER_JOB``.
+
+    Args:
+        budget: The total number of available CPU cores after reserving system cores.
+        total_jobs: The total number of checksum jobs to execute.
+
+    Returns:
+        A ``(workers_per_job, max_parallel_jobs)`` tuple.
+    """
+    max_at_preferred = max(1, budget // _CHECKSUM_PREFERRED_WORKERS_PER_JOB)
+    max_parallel = min(total_jobs, max_at_preferred)
+    raw_workers = budget // max_parallel
+    workers = min(
+        max(1, (raw_workers // _CHECKSUM_WORKER_MULTIPLE) * _CHECKSUM_WORKER_MULTIPLE),
+        _CHECKSUM_MAX_WORKERS_PER_JOB,
+    )
+
+    # Reduces parallelism until each job has at least the minimum worker count.
+    while workers < _CHECKSUM_MINIMUM_WORKERS_PER_JOB and max_parallel > 1:
+        max_parallel -= 1
+        raw_workers = budget // max_parallel
+        workers = min(
+            max(1, (raw_workers // _CHECKSUM_WORKER_MULTIPLE) * _CHECKSUM_WORKER_MULTIPLE),
+            _CHECKSUM_MAX_WORKERS_PER_JOB,
+        )
+
+    return workers, max_parallel
+
+
 def _run_checksum_job(job: _ChecksumPendingJob) -> None:  # pragma: no cover
     """Executes a single checksum resolution job in-process via ``resolve_checksum``.
 
     Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch
-    manager's ``ProcessPoolExecutor``. Delegates to ``resolve_checksum`` with the job's session path and
-    ``workers=1`` so that parallelism is controlled at the batch level rather than within each individual
-    checksum computation. The ``resolve_checksum`` function internally manages its own ``ProcessingTracker``
-    lifecycle (idempotent initialization, start, complete, or fail).
+    manager's ``ProcessPoolExecutor``. Delegates to ``resolve_checksum`` with the job's session path and the
+    resolved per-job worker count bound at dispatch time by ``execute_checksum_jobs_tool``. The
+    ``resolve_checksum`` function internally manages its own ``ProcessingTracker`` lifecycle (idempotent
+    initialization, start, complete, or fail).
 
     Args:
         job: The pending job descriptor produced by ``prepare_checksum_batch_tool`` and attached to the active
@@ -1505,7 +1612,7 @@ def _run_checksum_job(job: _ChecksumPendingJob) -> None:  # pragma: no cover
     resolve_checksum(
         session_path=job.session_path,
         regenerate_checksum=job.regenerate_checksum,
-        workers=1,
+        workers=job.workers,
     )
 
 
