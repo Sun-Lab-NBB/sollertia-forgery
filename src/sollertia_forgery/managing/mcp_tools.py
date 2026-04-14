@@ -35,14 +35,14 @@ from ..shared_assets import (  # pragma: no cover
     job_execution_manager,
 )
 
-TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"  # pragma: no cover
+_TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"  # pragma: no cover
 """The filename for the processing tracker created in the caller-specified directory to track transfer and deletion
 jobs. Placed outside the sessions being transferred or deleted so the tracker survives session removal."""
 
-TRANSFER_JOB_NAME: str = "session_transfer"  # pragma: no cover
+_TRANSFER_JOB_NAME: str = "session_transfer"  # pragma: no cover
 """The job name used to identify session transfer jobs in processing trackers."""
 
-DELETION_JOB_NAME: str = "session_deletion"  # pragma: no cover
+_DELETION_JOB_NAME: str = "session_deletion"  # pragma: no cover
 """The job name used to identify session deletion jobs in processing trackers."""
 
 _CHECKSUM_MAX_WORKERS_PER_JOB: int = 20  # pragma: no cover
@@ -814,7 +814,7 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # 
                 {"session_path": session_path_str, "cleaned": False, "error": f"Unable to delete: {delete_error}"}
             )
 
-    total_cleaned = sum(1 for r in results if r.get("cleaned", False))
+    total_cleaned = sum(1 for result in results if result.get("cleaned", False))
 
     return {"results": results, "total_cleaned": total_cleaned, "total_sessions": len(results)}
 
@@ -852,7 +852,7 @@ def prepare_transfer_batch_tool(  # pragma: no cover
     if error is not None:
         return {"error": error}
 
-    tracker_path = Path(tracker_directory) / TRANSFER_TRACKER_FILENAME
+    tracker_path = Path(tracker_directory) / _TRANSFER_TRACKER_FILENAME
 
     # Validates each job descriptor and builds the (job_name, specifier) tuples for tracker initialization.
     validated_jobs: list[tuple[str, str, dict[str, Any]]] = []
@@ -880,9 +880,9 @@ def prepare_transfer_batch_tool(  # pragma: no cover
 
         # Determines the job type based on whether a destination is provided.
         if destination_path_str is None and remove_source:
-            job_name = DELETION_JOB_NAME
+            job_name = _DELETION_JOB_NAME
         elif destination_path_str is not None:
-            job_name = TRANSFER_JOB_NAME
+            job_name = _TRANSFER_JOB_NAME
         else:
             invalid_jobs.append(
                 {**job_dict, "error": "No destination_path provided and remove_source is not 'true'."}

@@ -15,11 +15,11 @@ CHECKSUM_TRACKER_FILENAME: str = "checksum_processing_tracker.yaml"
 """The filename for the processing tracker placed in the session's raw_data directory alongside the ax_checksum.txt
 file."""
 
-_CHECKSUM_TRACKER_LOCK_FILENAME: str = CHECKSUM_TRACKER_FILENAME + ".lock"
-"""The lock filename associated with the checksum processing tracker."""
-
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name used to identify checksum resolution jobs in processing trackers."""
+
+_CHECKSUM_TRACKER_LOCK_FILENAME: str = CHECKSUM_TRACKER_FILENAME + ".lock"
+"""The lock filename associated with the checksum processing tracker."""
 
 _CHECKSUM_EXCLUDED_FILES: set[str] = {"ax_checksum.txt", CHECKSUM_TRACKER_FILENAME, _CHECKSUM_TRACKER_LOCK_FILENAME}
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
@@ -87,8 +87,8 @@ def resolve_checksum(
 
         # Loads the checksum stored inside the ax_checksum.txt file.
         checksum_path = session_data.raw_data_path.joinpath("ax_checksum.txt")
-        with checksum_path.open() as f:
-            stored_checksum = f.read().strip()
+        with checksum_path.open() as file:
+            stored_checksum = file.read().strip()
 
         # If the two checksums do not match, this indicates data corruption.
         if stored_checksum != calculated_checksum:

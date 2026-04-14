@@ -19,9 +19,8 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from sollertia_forgery.processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
-from sollertia_forgery.shared_assets import discover_sessions
-
+from ..processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
+from ..shared_assets import discover_sessions
 from .checksum import CHECKSUM_TRACKER_FILENAME
 
 if TYPE_CHECKING:
@@ -106,19 +105,25 @@ def generate_project_manifest(project_directory: Path) -> None:
     job_id = job_ids[0]
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
-    lock = FileLock(str(manifest_lock))
+    lock = FileLock(manifest_lock)
     with lock.acquire(timeout=20.0):
         # Marks the job as running.
         tracker.start_job(job_id=job_id)
         try:
             # Pre-creates the 'manifest' dictionary structure.
             manifest: dict[str, list] = {
-                "animal": [],  # Animal IDs.
-                "session": [],  # Session names.
-                "date": [],  # Session names stored as timezone-aware date-time objects in EST.
-                "type": [],  # Session types (e.g., mesoscope experiment, run training, etc.).
-                "system": [],  # The acquisition system used to acquire the session (e.g., mesoscope-vr, etc.).
-                "notes": [],  # The experimenter notes about the session.
+                # Animal IDs.
+                "animal": [],
+                # Session names.
+                "session": [],
+                # Session names stored as timezone-aware date-time objects in EST.
+                "date": [],
+                # Session types (e.g., mesoscope experiment, run training, etc.).
+                "type": [],
+                # The acquisition system used to acquire the session (e.g., mesoscope-vr, etc.).
+                "system": [],
+                # The experimenter notes about the session.
+                "notes": [],
                 # Determines whether the session's data is complete and ready for unsupervised processing.
                 "complete": [],
                 # Determines whether the session's data integrity has been verified.
@@ -277,7 +282,7 @@ def generate_project_manifest(project_directory: Path) -> None:
             # Sorts the DataFrame by animal and then session. Since animal IDs are monotonically increasing
             # according to Sollertia standards and session 'names' are based on acquisition timestamps, the
             # sort order is chronological.
-            sorted_manifest = manifest_frame.sort(["animal", "session"])
+            sorted_manifest = manifest_frame.sort(by=["animal", "session"])
 
             # Saves the generated manifest to the project-specific uncompressed .feather file to allow
             # memory-mapped reads.
