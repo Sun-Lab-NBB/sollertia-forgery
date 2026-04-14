@@ -2,7 +2,7 @@
 
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 
-delay_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+delay_timer: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 """The shared PrecisionTimer instance used across the library to delay the runtime's execution."""
 
 

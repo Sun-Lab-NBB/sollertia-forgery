@@ -58,11 +58,11 @@ def project_cli(ctx: click.Context, project: str | None, project_path: Path | No
 @click.option(
     "-a",
     "--animal",
-    type=str,
+    type=int,
     required=False,
     help=(
-        "The name of the animal for which to print the manifest data. If not provided, this command prints the data "
-        "for all animals participating in the target project."
+        "The identifier of the animal for which to print the manifest data. If not provided, this command prints "
+        "the data for all animals participating in the target project."
     ),
 )
 @click.option(
@@ -102,7 +102,7 @@ def project_cli(ctx: click.Context, project: str | None, project_path: Path | No
 def print_project_manifest_data(
     ctx: click.Context,
     *,
-    animal: str | None,
+    animal: int | None,
     notes: bool,
     summary: bool,
     regenerate: bool,

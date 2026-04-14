@@ -204,18 +204,18 @@ def discover_behavior_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
 
     Loads the session, verifies its type is eligible for behavior processing, loads the session's hardware state,
     and returns the ordered list of discovered ``(job_name, specifier)`` tuples. Factors out the discovery logic
-    shared by :func:`run_behavior_processing_pipeline` and the MCP batch-preparation tools so that external callers
+    shared by ``run_behavior_processing_pipeline`` and the MCP batch-preparation tools so that external callers
     can inspect the job set without triggering execution or tracker initialization.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of (session, jobs) where ``session`` is the loaded :class:`SessionData` instance and ``jobs`` is
+        A tuple of (session, jobs) where ``session`` is the loaded ``SessionData`` instance and ``jobs`` is
         the ordered list of ``(job_name, specifier)`` tuples yielded by discovery.
 
     Raises:
-        ValueError: If the session type is not in :data:`PROCESSABLE_SESSION_TYPES`.
+        ValueError: If the session type is not in ``PROCESSABLE_SESSION_TYPES``.
     """
     session = SessionData.load(session_path=session_path)
 

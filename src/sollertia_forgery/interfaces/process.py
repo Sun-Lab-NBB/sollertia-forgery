@@ -1,9 +1,4 @@
-"""Provides CLIs for executing data management, processing, and analysis pipelines on the remote compute server.
-
-Notes:
-    These CLIs are intended to be used exclusively by other library components and should not be called directly by
-    end-users.
-"""
+"""Provides CLIs for executing data management, processing, and analysis pipelines exposed by the library."""
 
 from pathlib import Path
 
@@ -11,9 +6,9 @@ import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData, DatasetSession
 
+from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
 from ..forging.processing import define_dataset, assemble_dataset
-from ..managing.processing import resolve_checksum, transfer_session, generate_project_manifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -21,7 +16,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
 
 @click.group("process", context_settings=CONTEXT_SETTINGS)
 def process_cli() -> None:
-    """Executes data management, processing, or forging pipeline on the local machine."""
+    """Executes data management, processing, or forging pipelines on the local machine."""
 
 
 @process_cli.command("manifest")
@@ -32,22 +27,9 @@ def process_cli() -> None:
     required=True,
     help="The absolute path to the project's root data directory.",
 )
-@click.option(
-    "-id",
-    "--job-id",
-    type=str,
-    default=None,
-    help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
-        "(remote mode)."
-    ),
-)
-def generate_manifest(project_path: Path, job_id: str | None) -> None:
+def generate_manifest(project_path: Path) -> None:
     """Generates the manifest .feather file that captures the snapshot of the target project's state."""
-    generate_project_manifest(
-        project_directory=project_path,
-        job_id=job_id,
-    )
+    generate_project_manifest(project_directory=project_path)
 
 
 @process_cli.command("checksum")
@@ -59,16 +41,6 @@ def generate_manifest(project_path: Path, job_id: str | None) -> None:
     help="The absolute path to the processed session's root data directory.",
 )
 @click.option(
-    "-id",
-    "--job-id",
-    type=str,
-    default=None,
-    help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
-        "(remote mode)."
-    ),
-)
-@click.option(
     "-rc",
     "--regenerate-checksum",
     is_flag=True,
@@ -77,7 +49,7 @@ def generate_manifest(project_path: Path, job_id: str | None) -> None:
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
     ),
 )
-def resolve_session_checksum(session_path: Path, job_id: str | None, *, regenerate_checksum: bool) -> None:
+def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
@@ -85,7 +57,6 @@ def resolve_session_checksum(session_path: Path, job_id: str | None, *, regenera
     """
     resolve_checksum(
         session_path=session_path,
-        job_id=job_id,
         regenerate_checksum=regenerate_checksum,
     )
 
