@@ -8,7 +8,7 @@ from sollertia_shared_assets import DatasetData, DatasetSession
 
 from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
-from ..forging.processing import define_dataset, assemble_dataset
+from ..forging.pipeline import define_dataset, run_forging_pipeline
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -254,11 +254,11 @@ def assemble_dataset_command(
     # Loads the dataset's metadata.
     dataset = DatasetData.load(dataset_path=dataset_path)
 
-    # Runs the assembly.
-    assemble_dataset(
+    # Runs the forging pipeline.
+    run_forging_pipeline(
         dataset=dataset,
         project_root=project_root,
         job_id=job_id,
         target_session=target_session,
-        progress=True,
+        display_progress=True,
     )

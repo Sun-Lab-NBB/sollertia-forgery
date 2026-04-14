@@ -8,6 +8,7 @@ Notes:
 from typing import TYPE_CHECKING
 
 from natsort_rs import natsort
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     DatasetData,
     SessionTypes,
@@ -20,13 +21,12 @@ from sollertia_shared_assets import (
     get_working_directory,
     get_server_configuration,
 )
-from ataraxis_base_utilities import LogLevel, console
 
 from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
-from .managing_interface import resolve_project_manifest
-from ..shared_assets import ProjectManifest
-from ..shared_assets import delay_timer, delay_terminal, filter_sessions
 from .pipeline import execute_pipelines, check_session_eligibility
+from ..shared_assets import ProjectManifest, delay_timer, delay_terminal, filter_sessions
+from ..forging.pipeline import FORGING_JOB_NAME
+from .managing_interface import resolve_project_manifest
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -313,7 +313,7 @@ def _construct_data_assembly_pipeline(
     # Creates an assembly job for each session.
     for session in session_names:
         job_name = f"{dataset.name}_{ProcessingPipelines.FORGING}_session_{session}"
-        job_id = ProcessingTracker.generate_job_id(session_path=remote_dataset_path, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
         working_directory = get_remote_job_work_directory(
             server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING
         )

@@ -19,9 +19,9 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from ..processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
-from ..shared_assets import discover_sessions
 from .checksum import CHECKSUM_TRACKER_FILENAME
+from ..processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
+from ..shared_assets import prepare_tracker, discover_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,10 +99,12 @@ def generate_project_manifest(project_directory: Path) -> None:
     manifest_path = project_directory.joinpath(f"{project_directory.stem}_manifest.feather")
     manifest_lock = manifest_path.with_suffix(manifest_path.suffix + ".lock")
 
-    # Initializes the processing tracker in the project directory alongside the manifest output.
+    # Initializes the processing tracker in the project directory alongside the manifest output. Applies stale
+    # entry detection so that foreign or outdated job entries are reset before the new job is registered.
     tracker = ProcessingTracker(file_path=project_directory.joinpath(MANIFEST_TRACKER_FILENAME))
-    job_ids = tracker.initialize_jobs(jobs=[(MANIFEST_JOB_NAME, project_directory.stem)])
-    job_id = job_ids[0]
+    jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
+    prepare_tracker(tracker=tracker, jobs=jobs)
+    job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(manifest_lock)

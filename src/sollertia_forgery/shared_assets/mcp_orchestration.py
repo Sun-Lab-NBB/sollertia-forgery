@@ -13,6 +13,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 import numpy as np
 import polars as pl
 from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
+from ataraxis_base_utilities import LogLevel, console
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 if TYPE_CHECKING:
@@ -121,6 +122,56 @@ def validate_directory(directory: str) -> str | None:
     if not path.is_dir():
         return f"Path is not a directory: {directory}"
     return None
+
+
+def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]]) -> None:
+    """Aligns a processing tracker's job registry with the expected set of ``(job_name, specifier)`` tuples.
+
+    Notes:
+        Applies a regeneration strategy that detects foreign or stale tracker entries and consistently resets them
+        instead of silently persisting across invocations. Foreign entries are treated as architectural drift (the
+        expected job set has changed since the tracker was last written) and surfaced through a warning before the
+        tracker is rebuilt.
+
+        If the tracker file does not yet exist on disk, the helper initializes it from scratch with the current
+        jobs. If the file exists and contains job IDs that are not part of the expected set, those entries are
+        classified as foreign and the helper emits a warning before resetting and reinitializing the tracker.
+        If the file already contains a strict subset of the expected IDs, the helper performs an additive
+        ``initialize_jobs`` call that registers the missing entries without clobbering any existing state for
+        previously-tracked jobs. If the file already contains exactly the expected ID set, the helper is a no-op,
+        which keeps ``initialize_jobs`` from emitting duplicate-entry warnings for the fully-aligned case.
+
+    Args:
+        tracker: The ProcessingTracker instance bound to the target directory.
+        jobs: The list of ``(job_name, specifier)`` tuples representing the expected job set.
+    """
+    expected_ids = {
+        ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier) for job_name, specifier in jobs
+    }
+
+    if not tracker.file_path.exists():
+        tracker.initialize_jobs(jobs=jobs)
+        return
+
+    existing_ids = set(tracker.find_jobs(job_name="").keys())
+    foreign_ids = existing_ids - expected_ids
+    missing_ids = expected_ids - existing_ids
+
+    if foreign_ids:
+        console.echo(
+            message=(
+                f"The processing tracker at '{tracker.file_path}' contains {len(foreign_ids)} job entries "
+                f"that are not part of the current job set. Resetting and reinitializing the tracker to "
+                f"match the discovered jobs. Foreign job IDs: {sorted(foreign_ids)}."
+            ),
+            level=LogLevel.WARNING,
+        )
+        tracker.reset()
+        tracker.initialize_jobs(jobs=jobs)
+        return
+
+    if missing_ids:
+        tracker.initialize_jobs(jobs=jobs)
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:

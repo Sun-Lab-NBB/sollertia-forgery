@@ -16,7 +16,7 @@ from ataraxis_time import (  # pragma: no cover
     convert_time,
     get_timestamp,
 )
-from ataraxis_base_utilities import resolve_parallel_job_capacity, resolve_worker_count  # pragma: no cover
+from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity  # pragma: no cover
 from sollertia_shared_assets import SessionData  # pragma: no cover
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker  # pragma: no cover
 
@@ -28,6 +28,7 @@ from ..shared_assets import (  # pragma: no cover
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
+    prepare_tracker,
     validate_directory,
     read_tracker_status,
     derive_tracker_status,
@@ -157,65 +158,39 @@ def prepare_checksum_batch_tool(  # pragma: no cover
             continue
 
         tracker_path = session.raw_data_path / CHECKSUM_TRACKER_FILENAME
+        expected_jobs: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, session.session_name)]
 
-        if tracker_path.exists():
-            # Idempotent path: returns existing tracker state without reinitializing.
-            try:
-                tracker_status = read_tracker_status(tracker_path=tracker_path)
-            except Exception:
-                tracker_status = {"jobs": [], "summary": {}}
-
-            # Augments each tracker entry with dispatch metadata so the caller can feed the manifest directly
-            # into execute_checksum_jobs_tool without re-deriving per-job fields.
-            enriched_jobs: list[dict[str, Any]] = [
-                {
-                    **tracker_entry,
-                    "session_path": session_path_str,
-                    "session_name": session.session_name,
-                    "tracker_path": str(tracker_path),
-                }
-                for tracker_entry in tracker_status.get("jobs", [])
-            ]
-
-            result_sessions[session_path_str] = {
-                "tracker_path": str(tracker_path),
-                "session_name": session.session_name,
-                "jobs": enriched_jobs,
-                "summary": tracker_status.get("summary", {}),
-            }
-            total_jobs += len(enriched_jobs)
-            continue
-
-        # Initializes a new tracker with the single checksum resolution job for this session.
+        # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries
+        # are detected and the tracker is reset before reinitializing with the expected job set. If the tracker
+        # does not exist, it is created from scratch with the expected jobs.
         tracker = ProcessingTracker(file_path=tracker_path)
-        tracker.initialize_jobs(jobs=[(CHECKSUM_JOB_NAME, session.session_name)])
+        prepare_tracker(tracker=tracker, jobs=expected_jobs)
 
-        job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
-        jobs: list[dict[str, Any]] = [
+        # Reads the (possibly just-repaired or freshly-created) tracker state to return to the caller.
+        try:
+            tracker_status = read_tracker_status(tracker_path=tracker_path)
+        except Exception:
+            tracker_status = {"jobs": [], "summary": {}}
+
+        # Augments each tracker entry with dispatch metadata so the caller can feed the manifest directly
+        # into execute_checksum_jobs_tool without re-deriving per-job fields.
+        enriched_jobs: list[dict[str, Any]] = [
             {
-                "job_id": job_id,
-                "job_name": CHECKSUM_JOB_NAME,
-                "specifier": session.session_name,
-                "status": ProcessingStatus.SCHEDULED.name,
+                **tracker_entry,
                 "session_path": session_path_str,
                 "session_name": session.session_name,
                 "tracker_path": str(tracker_path),
             }
+            for tracker_entry in tracker_status.get("jobs", [])
         ]
 
         result_sessions[session_path_str] = {
             "tracker_path": str(tracker_path),
             "session_name": session.session_name,
-            "jobs": jobs,
-            "summary": {
-                "total": 1,
-                "succeeded": 0,
-                "failed": 0,
-                "running": 0,
-                "scheduled": 1,
-            },
+            "jobs": enriched_jobs,
+            "summary": tracker_status.get("summary", {}),
         }
-        total_jobs += 1
+        total_jobs += len(enriched_jobs)
 
     result: dict[str, Any] = {
         "success": True,
@@ -884,9 +859,7 @@ def prepare_transfer_batch_tool(  # pragma: no cover
         elif destination_path_str is not None:
             job_name = _TRANSFER_JOB_NAME
         else:
-            invalid_jobs.append(
-                {**job_dict, "error": "No destination_path provided and remove_source is not 'true'."}
-            )
+            invalid_jobs.append({**job_dict, "error": "No destination_path provided and remove_source is not 'true'."})
             continue
 
         validated_jobs.append(
@@ -908,63 +881,38 @@ def prepare_transfer_batch_tool(  # pragma: no cover
             result["invalid_jobs"] = invalid_jobs
         return result
 
-    # Idempotent path: if the tracker already exists, returns existing state.
-    if tracker_path.exists():
-        try:
-            tracker_status = read_tracker_status(tracker_path=tracker_path)
-        except Exception:
-            tracker_status = {"jobs": [], "summary": {}}
-
-        # Builds a lookup from job_id to the validated metadata for enrichment.
-        job_id_lookup: dict[str, dict[str, Any]] = {}
-        for job_name, specifier, metadata in validated_jobs:
-            generated_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
-            job_id_lookup[generated_id] = metadata
-
-        enriched_jobs: list[dict[str, Any]] = [
-            {
-                **tracker_entry,
-                **job_id_lookup.get(tracker_entry["job_id"], {}),
-                "tracker_path": str(tracker_path),
-            }
-            for tracker_entry in tracker_status.get("jobs", [])
-        ]
-
-        result = {
-            "tracker_path": str(tracker_path),
-            "jobs": enriched_jobs,
-            "summary": tracker_status.get("summary", {}),
-        }
-        if invalid_jobs:
-            result["invalid_jobs"] = invalid_jobs
-        return result
-
-    # Initializes a new tracker with all validated transfer/deletion jobs.
+    # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries are
+    # detected and the tracker is reset before reinitializing with the expected job set. If the tracker does not
+    # exist, it is created from scratch with the validated jobs.
+    expected_jobs: list[tuple[str, str]] = [(job_name, specifier) for job_name, specifier, _ in validated_jobs]
     tracker = ProcessingTracker(file_path=tracker_path)
-    tracker.initialize_jobs(jobs=[(job_name, specifier) for job_name, specifier, _ in validated_jobs])
+    prepare_tracker(tracker=tracker, jobs=expected_jobs)
 
-    result_jobs: list[dict[str, Any]] = [
+    # Reads the (possibly just-repaired or freshly-created) tracker state to return to the caller.
+    try:
+        tracker_status = read_tracker_status(tracker_path=tracker_path)
+    except Exception:
+        tracker_status = {"jobs": [], "summary": {}}
+
+    # Builds a lookup from job_id to the validated metadata for enrichment.
+    job_id_lookup: dict[str, dict[str, Any]] = {}
+    for job_name, specifier, metadata in validated_jobs:
+        generated_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
+        job_id_lookup[generated_id] = metadata
+
+    enriched_jobs: list[dict[str, Any]] = [
         {
-            "job_id": ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier),
-            "job_name": job_name,
-            "specifier": specifier,
-            "status": ProcessingStatus.SCHEDULED.name,
+            **tracker_entry,
+            **job_id_lookup.get(tracker_entry["job_id"], {}),
             "tracker_path": str(tracker_path),
-            **metadata,
         }
-        for job_name, specifier, metadata in validated_jobs
+        for tracker_entry in tracker_status.get("jobs", [])
     ]
 
     result = {
         "tracker_path": str(tracker_path),
-        "jobs": result_jobs,
-        "summary": {
-            "total": len(result_jobs),
-            "succeeded": 0,
-            "failed": 0,
-            "running": 0,
-            "scheduled": len(result_jobs),
-        },
+        "jobs": enriched_jobs,
+        "summary": tracker_status.get("summary", {}),
     }
 
     if invalid_jobs:

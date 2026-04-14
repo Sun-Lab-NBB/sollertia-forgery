@@ -20,6 +20,7 @@ from ataraxis_data_structures import ProcessingTracker
 
 from .camera import find_camera_feathers, extract_camera_source_id, process_camera_timestamps
 from .runtime import RUNTIME_SOURCE_ID, find_log_archive, process_runtime_data
+from ..shared_assets import prepare_tracker
 from .microcontrollers import (
     is_module_eligible,
     find_module_feathers,
@@ -143,7 +144,7 @@ def run_behavior_processing_pipeline(
     data_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=data_path / TRACKER_FILENAME)
     jobs = list(job_paths.keys())
-    _prepare_tracker(tracker=tracker, jobs=jobs)
+    prepare_tracker(tracker=tracker, jobs=jobs)
 
     if job_id is not None:
         # Remote mode: resolves the (job_name, specifier) tuple for the requested job ID and executes that
@@ -334,57 +335,6 @@ def _discover_jobs(
         job_paths[(BehaviorJobNames.MICROCONTROLLER, specifier)] = feather_path
 
     return job_paths
-
-
-def _prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]]) -> None:
-    """Aligns the processing tracker's job registry with the jobs discovered for the current session.
-
-    Notes:
-        Applies the same regeneration strategy in local and remote modes so that foreign or stale tracker
-        entries consistently trigger a reset instead of silently persisting across invocations. Foreign entries
-        are treated as architectural drift (the session's job set has changed since the tracker was last
-        written) and surfaced through a warning before the tracker is rebuilt.
-
-        If the tracker file does not yet exist on disk, the helper initializes it from scratch with the current
-        jobs. If the file exists and contains job IDs that are not part of the current session's expected set,
-        those entries are classified as foreign and the helper emits a warning before resetting and
-        reinitializing the tracker. If the file already contains a strict subset of the expected IDs, the
-        helper performs an additive ``initialize_jobs`` call that registers the missing entries without
-        clobbering any existing state for previously-tracked jobs. If the file already contains exactly the
-        expected ID set, the helper is a no-op, which keeps ``initialize_jobs`` from emitting duplicate-entry
-        warnings for the fully-aligned case.
-
-    Args:
-        tracker: The ProcessingTracker instance bound to the session's output directory.
-        jobs: The list of (job_name, specifier) tuples discovered for the current session.
-    """
-    expected_ids = {
-        ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier) for job_name, specifier in jobs
-    }
-
-    if not tracker.file_path.exists():
-        tracker.initialize_jobs(jobs=jobs)
-        return
-
-    existing_ids = set(tracker.find_jobs(job_name="").keys())
-    foreign_ids = existing_ids - expected_ids
-    missing_ids = expected_ids - existing_ids
-
-    if foreign_ids:
-        console.echo(
-            message=(
-                f"The processing tracker at '{tracker.file_path}' contains {len(foreign_ids)} job entries "
-                f"that are not part of the current session's job set. Resetting and reinitializing the "
-                f"tracker to match the discovered jobs. Foreign job IDs: {sorted(foreign_ids)}."
-            ),
-            level=LogLevel.WARNING,
-        )
-        tracker.reset()
-        tracker.initialize_jobs(jobs=jobs)
-        return
-
-    if missing_ids:
-        tracker.initialize_jobs(jobs=jobs)
 
 
 def _execute_jobs_sequential(
