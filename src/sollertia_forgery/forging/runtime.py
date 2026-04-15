@@ -18,101 +18,6 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-@njit(cache=True)
-def _check_trigger_zones(
-    traversed_distance: NDArray[np.float64],
-    trigger_zone_starts: NDArray[np.float64],
-    trigger_zone_ends: NDArray[np.float64],
-) -> NDArray[np.uint8]:
-    """Uses the provided trigger zone boundary data to determine which portion of the processed runtime data corresponds
-    to the animal traversing a trigger zone.
-
-    Args:
-        traversed_distance: The NumPy array containing the cumulative distance traveled by the animal during the
-            experiment at each sampling time-point.
-        trigger_zone_starts: The NumPy array containing the trigger zone start boundaries for each sequential
-            experiment trial.
-        trigger_zone_ends: The NumPy array containing the trigger zone end boundaries for each sequential experiment
-            trial.
-
-    Returns:
-        A NumPy array that stores whether each distance-point corresponds to a trigger zone (1) or not (0).
-    """
-    # Pre-allocates the output boolean array.
-    distance_value_count = len(traversed_distance)
-    trigger_zone_count = len(trigger_zone_starts)
-    # noinspection PyTypeChecker
-    in_zone: NDArray[np.uint8] = np.zeros(distance_value_count, dtype=np.uint8)
-
-    # If no trigger zones are defined, returns the binary array set to 0 everywhere.
-    if trigger_zone_count == 0:
-        return in_zone
-
-    # Tracks the current zone being checked
-    zone_index = 0
-
-    # Determines whether each distance-point falls into a trigger zone. Note, this relies on the distance and trigger
-    # zone data being sorted and monotonically increasing.
-    for i in range(distance_value_count):
-        evaluated_distance = traversed_distance[i]
-
-        # Moves the zone_index backward if needed (handles slight non-monotonicity in the distance data).
-        while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
-            zone_index -= 1
-
-        # Checks zone boundaries starting from the current position (evaluated_distance) onward.
-        while zone_index < trigger_zone_count:
-            # If the checked distance is less than the start of the next trigger zone, the distance is not within a
-            # trigger zone.
-            if evaluated_distance < trigger_zone_starts[zone_index]:
-                break
-
-            # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
-            if evaluated_distance <= trigger_zone_ends[zone_index]:
-                in_zone[i] = 1
-                break
-
-            # If the distance is past the evaluated trigger zone, moves to the next zone.
-            zone_index += 1
-
-    return in_zone
-
-
-def _mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
-    """Masks cue, trial, and trial_type column values for non-run system states.
-
-    When the system is in a non-run state (idle or rest), the cue, trial, and trial_type values are not meaningful.
-    This function replaces them with the maximum value of each column's unsigned integer dtype (255 for cue's UInt8,
-    65535 for trial's UInt16). These sentinels sit outside the range of legitimate cue codes and trial IDs, so sessions
-    with many hundreds of trials can still be masked unambiguously. For trial_type, the value is set to the "undefined"
-    Enum member.
-
-    Args:
-        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
-
-    Returns:
-        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
-    """
-    # Extracts the Enum dtypes to ensure type consistency.
-    trial_type_dtype = experiment_data.schema["trial_type"]
-    system_state_dtype = experiment_data.schema["system_state"]
-
-    # Defines the non-run system states that should trigger masking, cast to the Enum type.
-    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
-
-    # Creates a boolean mask for rows where the system state is not "run".
-    is_non_run = pl.col("system_state").is_in(non_run_states)
-
-    return experiment_data.with_columns(
-        pl.when(is_non_run).then(pl.lit(255, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
-        pl.when(is_non_run).then(pl.lit(65535, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
-        pl.when(is_non_run)
-        .then(pl.lit("undefined").cast(trial_type_dtype))
-        .otherwise(pl.col("trial_type"))
-        .alias("trial_type"),
-    )
-
-
 def assemble_runtime_dataset(
     behavior_data_path: Path, raw_data_path: Path, reference_time: NDArray[np.uint64]
 ) -> pl.DataFrame:
@@ -125,23 +30,23 @@ def assemble_runtime_dataset(
         reference_time: The reference time vector to which to align the assembled dataset.
 
     Returns:
-        The Polars DataFrame that contains the assembled experiment metadata.
+        The assembled experiment metadata aligned to the reference time vector.
     """
     # Loads experiment configuration early to have mappings ready.
-    experiment_config = MesoscopeExperimentConfiguration.from_yaml(
+    experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
         raw_data_path.joinpath("experiment_configuration.yaml")
     )
 
     # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
     # descriptive names. Adds "undefined" as a special value for masking non-run experiment states.
-    trial_type_mapping = dict(enumerate(experiment_config.trial_structures.keys()))
-    trial_type_categories = [*list(trial_type_mapping.values()), "undefined"]
+    trial_type_mapping = dict(enumerate(experiment_configuration.trial_structures.keys()))
+    trial_type_categories = [*trial_type_mapping.values(), "undefined"]
     trial_enum_dtype = pl.Enum(trial_type_categories)
     runtime_state_mapping = {
-        state_config.experiment_state_code: state_name
-        for state_name, state_config in experiment_config.experiment_states.items()
+        state_configuration.experiment_state_code: state_name
+        for state_name, state_configuration in experiment_configuration.experiment_states.items()
     }
-    runtime_state_mapping[0] = "idle"  # Adds the default system state
+    runtime_state_mapping[0] = "idle"  # Adds the default system state.
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
@@ -151,9 +56,11 @@ def assemble_runtime_dataset(
     trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
     runtime_state_df = pl.read_ipc(behavior_data_path.joinpath("runtime_state_data.feather"), memory_map=True)
 
-    # Adds a trial number column to the trials dataframe.
-    trial_df = trial_df.with_columns(pl.int_range(start=1, end=len(trial_df) + 1, dtype=pl.UInt32).alias("trial"))
+    # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
+    # intermediate Polars DataFrame since both are only consumed by interpolate_data.
     trial_distance = trial_df["traveled_distance_cm"].to_numpy()
+    # noinspection PyTypeChecker
+    trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_df) + 1, dtype=np.uint32)
 
     # Interpolates the traveled distance first as it's used as a reference for other interpolations.
     reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
@@ -170,10 +77,10 @@ def assemble_runtime_dataset(
 
     # Aligns all data sources to the reference time (or distance) and builds an aligned data dictionary.
     aligned_data: dict[str, NDArray[Any]] = {
-        # Distance-based interpolations
+        # Distance-based interpolations.
         "trial": interpolate_data(
             source_coordinates=trial_distance,
-            source_values=trial_df["trial"].to_numpy(),
+            source_values=trial_numbers,
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
@@ -194,7 +101,7 @@ def assemble_runtime_dataset(
             trigger_zone_starts=trigger_zones_df["trigger_zone_start_cm"].to_numpy(),
             trigger_zone_ends=trigger_zones_df["trigger_zone_end_cm"].to_numpy(),
         ),
-        # Time-based interpolations
+        # Time-based interpolations.
         "runtime_state": interpolate_data(
             source_coordinates=runtime_state_df["time_us"].to_numpy(),
             source_values=runtime_state_df["runtime_state"].to_numpy(),
@@ -226,11 +133,102 @@ def assemble_runtime_dataset(
     # Creates the aligned dataframe, replaces categorical data with Polars Enum types and optimizes how the data is
     # stored in memory by casting some columns to preferred types.
     return pl.DataFrame(aligned_data).with_columns(
-        [
-            # Converts trial_type and runtime_state to Enum types
-            pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype),
-            pl.col("runtime_state").replace_strict(runtime_state_mapping).cast(runtime_state_enum_dtype),
-            # Optimizes the trial column's datatype
-            pl.col("trial").cast(pl.UInt16),
-        ]
+        # Converts trial_type and runtime_state to Enum types.
+        pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype),
+        pl.col("runtime_state").replace_strict(runtime_state_mapping).cast(runtime_state_enum_dtype),
+        # Optimizes the trial column's datatype.
+        pl.col("trial").cast(pl.UInt16),
+    )
+
+
+@njit(cache=True)
+def _check_trigger_zones(
+    traversed_distance: NDArray[np.float64],
+    trigger_zone_starts: NDArray[np.float64],
+    trigger_zone_ends: NDArray[np.float64],
+) -> NDArray[np.uint8]:
+    """Uses the provided trigger zone boundary data to determine which portion of the processed runtime data corresponds
+    to the animal traversing a trigger zone.
+
+    Args:
+        traversed_distance: The cumulative distance traveled by the animal during the experiment at each sampling
+            time-point.
+        trigger_zone_starts: The trigger zone start boundaries for each sequential experiment trial.
+        trigger_zone_ends: The trigger zone end boundaries for each sequential experiment trial.
+
+    Returns:
+        Whether each distance-point falls within a trigger zone, encoded as 1 (inside) or 0 (outside).
+    """
+    # Pre-allocates the output boolean array.
+    distance_value_count = len(traversed_distance)
+    trigger_zone_count = len(trigger_zone_starts)
+    # noinspection PyTypeChecker
+    in_zone: NDArray[np.uint8] = np.zeros(distance_value_count, dtype=np.uint8)
+
+    # If no trigger zones are defined, returns the binary array set to 0 everywhere.
+    if trigger_zone_count == 0:
+        return in_zone
+
+    # Tracks the current zone being checked.
+    zone_index = 0
+
+    # Determines whether each distance-point falls into a trigger zone. This relies on the distance and trigger zone
+    # data being sorted and monotonically increasing.
+    for i in range(distance_value_count):
+        evaluated_distance = traversed_distance[i]
+
+        # Moves the zone_index backward if needed (handles slight non-monotonicity in the distance data).
+        while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
+            zone_index -= 1
+
+        # Checks zone boundaries starting from the current position (evaluated_distance) onward.
+        while zone_index < trigger_zone_count:
+            # If the checked distance is less than the start of the next trigger zone, the distance is not within a
+            # trigger zone.
+            if evaluated_distance < trigger_zone_starts[zone_index]:
+                break
+
+            # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
+            if evaluated_distance <= trigger_zone_ends[zone_index]:
+                in_zone[i] = 1
+                break
+
+            # If the distance is past the evaluated trigger zone, moves to the next zone.
+            zone_index += 1
+
+    return in_zone
+
+
+def _mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
+    """Masks cue, trial, and trial_type column values for non-run system states.
+
+    When the system is in a non-run state (idle or rest), the cue, trial, and trial_type values are not meaningful.
+    Replaces them with the maximum value of each column's unsigned integer dtype (255 for cue's UInt8, 65535 for
+    trial's UInt16). These sentinels sit outside the range of legitimate cue codes and trial IDs, so sessions with
+    many hundreds of trials can still be masked unambiguously. For trial_type, the value is set to the "undefined"
+    Enum member.
+
+    Args:
+        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
+
+    Returns:
+        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
+    """
+    # Extracts the Enum dtypes to ensure type consistency.
+    trial_type_dtype = experiment_data.schema["trial_type"]
+    system_state_dtype = experiment_data.schema["system_state"]
+
+    # Defines the non-run system states that should trigger masking, cast to the Enum type.
+    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
+
+    # Creates a boolean mask for rows where the system state is not "run".
+    is_non_run = pl.col("system_state").is_in(non_run_states)
+
+    return experiment_data.with_columns(
+        pl.when(is_non_run).then(pl.lit(255, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
+        pl.when(is_non_run).then(pl.lit(65535, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
+        pl.when(is_non_run)
+        .then(pl.lit("undefined").cast(trial_type_dtype))
+        .otherwise(pl.col("trial_type"))
+        .alias("trial_type"),
     )

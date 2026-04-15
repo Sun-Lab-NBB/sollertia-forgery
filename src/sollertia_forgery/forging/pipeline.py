@@ -428,7 +428,8 @@ def _resolve_dataset_type(session_type: str | SessionTypes) -> DatasetTypes:
     console.error(message=message, error=ValueError)
 
     # Unreachable: console.error always raises when given an error class. Explicit raise satisfies the linter.
-    raise ValueError(message)
+    # noinspection PyUnreachableCode
+    raise ValueError(message)  # pragma: no cover
 
 
 def _resolve_session_paths(session_data_path: Path, dataset_name: str, dataset_type: DatasetTypes) -> SessionPaths:
