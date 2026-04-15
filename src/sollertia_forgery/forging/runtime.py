@@ -1,5 +1,5 @@
-"""Provides assets for assembling runtime and experiment datasets from processed session data, including experiment
-state, trial, cue, reward zone, and guidance state data sources.
+"""Provides assets for assembling runtime and experiment datasets from processed session data, including runtime
+state, trial, cue, trigger zone, and guidance state data sources.
 """
 
 from __future__ import annotations
@@ -19,59 +19,59 @@ if TYPE_CHECKING:
 
 
 @njit(cache=True)
-def _check_reward_zones(
+def _check_trigger_zones(
     traversed_distance: NDArray[np.float64],
-    reward_zone_starts: NDArray[np.float64],
-    reward_zone_ends: NDArray[np.float64],
+    trigger_zone_starts: NDArray[np.float64],
+    trigger_zone_ends: NDArray[np.float64],
 ) -> NDArray[np.uint8]:
-    """Uses the provided reward zone boundary data to determine which portion of the processed runtime data corresponds
-    to the animal traversing the reward zone.
+    """Uses the provided trigger zone boundary data to determine which portion of the processed runtime data corresponds
+    to the animal traversing a trigger zone.
 
     Args:
         traversed_distance: The NumPy array containing the cumulative distance traveled by the animal during the
             experiment at each sampling time-point.
-        reward_zone_starts: The NumPy array containing the reward zone start boundaries for each sequential
+        trigger_zone_starts: The NumPy array containing the trigger zone start boundaries for each sequential
             experiment trial.
-        reward_zone_ends: The NumPy array containing the reward zone end boundaries for each sequential experiment
+        trigger_zone_ends: The NumPy array containing the trigger zone end boundaries for each sequential experiment
             trial.
 
     Returns:
-        A NumPy array that stores whether each distance-point corresponds to a reward zone (1) or not (0).
+        A NumPy array that stores whether each distance-point corresponds to a trigger zone (1) or not (0).
     """
     # Pre-allocates the output boolean array.
     distance_value_count = len(traversed_distance)
-    reward_zone_count = len(reward_zone_starts)
+    trigger_zone_count = len(trigger_zone_starts)
     in_zone = np.zeros(distance_value_count, dtype=np.uint8)
 
-    # If no reward zones are defined, returns the binary array set to 0 everywhere.
-    if reward_zone_count == 0:
+    # If no trigger zones are defined, returns the binary array set to 0 everywhere.
+    if trigger_zone_count == 0:
         return in_zone
 
     # Tracks the current zone being checked
     zone_index = 0
 
-    # Determines whether each distance-point falls into a reward zone. Note, this relies on the distance and reward zone
-    # data being sorted and monotonically increasing.
+    # Determines whether each distance-point falls into a trigger zone. Note, this relies on the distance and trigger
+    # zone data being sorted and monotonically increasing.
     for i in range(distance_value_count):
         evaluated_distance = traversed_distance[i]
 
         # Moves the zone_index backward if needed (handles slight non-monotonicity in the distance data).
-        while zone_index > 0 and reward_zone_ends[zone_index - 1] >= evaluated_distance:
+        while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
             zone_index -= 1
 
         # Checks zone boundaries starting from the current position (evaluated_distance) onward.
-        while zone_index < reward_zone_count:
-            # If the checked distance less than the start of the next reward zone, the distance is not within a reward
-            # zone.
-            if evaluated_distance < reward_zone_starts[zone_index]:
+        while zone_index < trigger_zone_count:
+            # If the checked distance is less than the start of the next trigger zone, the distance is not within a
+            # trigger zone.
+            if evaluated_distance < trigger_zone_starts[zone_index]:
                 break
 
-            # If the distance falls within the reward zone, marks the corresponding mask point as 1 (in reward zone).
-            if evaluated_distance <= reward_zone_ends[zone_index]:
+            # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
+            if evaluated_distance <= trigger_zone_ends[zone_index]:
                 in_zone[i] = 1
                 break
 
-            # If the distance is past the evaluated reward zone, moves to the next zone.
+            # If the distance is past the evaluated trigger zone, moves to the next zone.
             zone_index += 1
 
     return in_zone
@@ -132,25 +132,24 @@ def assemble_runtime_dataset(session_data_path: Path, reference_time: NDArray[np
         source_data_path.joinpath("experiment_configuration.yaml")
     )
 
-    # Uses the experiment configuration file to map the integer trial type codes and experiment state codes to
+    # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
     # descriptive names. Adds "undefined" as a special value for masking non-run experiment states.
     trial_type_mapping = dict(enumerate(experiment_config.trial_structures.keys()))
     trial_type_categories = [*list(trial_type_mapping.values()), "undefined"]
     trial_enum_dtype = pl.Enum(trial_type_categories)
-    experiment_state_mapping = {
+    runtime_state_mapping = {
         state_config.experiment_state_code: state_name
         for state_name, state_config in experiment_config.experiment_states.items()
     }
-    experiment_state_mapping[0] = "idle"  # Adds the default system state
-    experiment_state_enum_dtype = pl.Enum(list(experiment_state_mapping.values()))
+    runtime_state_mapping[0] = "idle"  # Adds the default system state
+    runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
     encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
-    reward_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_reward_zone_data.feather"), memory_map=True)
+    trigger_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_trigger_zone_data.feather"), memory_map=True)
     cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
     trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
-    experiment_state_df = pl.read_ipc(behavior_data_path.joinpath("experiment_state_data.feather"), memory_map=True)
-    guidance_state_df = pl.read_ipc(behavior_data_path.joinpath("guidance_state_data.feather"), memory_map=True)
+    runtime_state_df = pl.read_ipc(behavior_data_path.joinpath("runtime_state_data.feather"), memory_map=True)
 
     # Adds a trial number column to the trials dataframe.
     trial_df = trial_df.with_columns(pl.int_range(start=1, end=len(trial_df) + 1, dtype=pl.UInt32).alias("trial"))
@@ -163,6 +162,11 @@ def assemble_runtime_dataset(session_data_path: Path, reference_time: NDArray[np
         target_coordinates=reference_time,
         is_discrete=False,
     )
+
+    # Loads guidance state data. The processing pipeline produces separate reinforcing and aversive guidance files,
+    # each conditional on whether the corresponding events were recorded during the session.
+    reinforcing_guidance_file = behavior_data_path.joinpath("reinforcing_guidance_state_data.feather")
+    aversive_guidance_file = behavior_data_path.joinpath("aversive_guidance_state_data.feather")
 
     # Aligns all data sources to the reference time (or distance) and builds an aligned data dictionary.
     aligned_data: dict[str, NDArray[Any]] = {
@@ -185,33 +189,47 @@ def assemble_runtime_dataset(session_data_path: Path, reference_time: NDArray[np
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
-        "in_reward_zone": _check_reward_zones(
+        "in_trigger_zone": _check_trigger_zones(
             traversed_distance=reference_distance,
-            reward_zone_starts=reward_zones_df["reward_zone_start_cm"].to_numpy(),
-            reward_zone_ends=reward_zones_df["reward_zone_end_cm"].to_numpy(),
+            trigger_zone_starts=trigger_zones_df["trigger_zone_start_cm"].to_numpy(),
+            trigger_zone_ends=trigger_zones_df["trigger_zone_end_cm"].to_numpy(),
         ),
         # Time-based interpolations
-        "experiment_state": interpolate_data(
-            source_coordinates=experiment_state_df["time_us"].to_numpy(),
-            source_values=experiment_state_df["experiment_state"].to_numpy(),
-            target_coordinates=reference_time,
-            is_discrete=True,
-        ),
-        "guided": interpolate_data(
-            source_coordinates=guidance_state_df["time_us"].to_numpy(),
-            source_values=guidance_state_df["lick_guidance_state"].to_numpy().astype(np.uint8),
+        "runtime_state": interpolate_data(
+            source_coordinates=runtime_state_df["time_us"].to_numpy(),
+            source_values=runtime_state_df["runtime_state"].to_numpy(),
             target_coordinates=reference_time,
             is_discrete=True,
         ),
     }
 
-    # Creates the aligned dataframe, replaced categorical data with Polars Enum types and optimizes how the data is
+    # Adds reinforcing guidance state if the file was produced by the processing pipeline.
+    if reinforcing_guidance_file.exists():
+        reinforcing_df = pl.read_ipc(reinforcing_guidance_file, memory_map=True)
+        aligned_data["reinforcing_guided"] = interpolate_data(
+            source_coordinates=reinforcing_df["time_us"].to_numpy(),
+            source_values=reinforcing_df["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
+            target_coordinates=reference_time,
+            is_discrete=True,
+        )
+
+    # Adds aversive guidance state if the file was produced by the processing pipeline.
+    if aversive_guidance_file.exists():
+        aversive_df = pl.read_ipc(aversive_guidance_file, memory_map=True)
+        aligned_data["aversive_guided"] = interpolate_data(
+            source_coordinates=aversive_df["time_us"].to_numpy(),
+            source_values=aversive_df["aversive_guidance_state"].to_numpy().astype(np.uint8),
+            target_coordinates=reference_time,
+            is_discrete=True,
+        )
+
+    # Creates the aligned dataframe, replaces categorical data with Polars Enum types and optimizes how the data is
     # stored in memory by casting some columns to preferred types.
     return pl.DataFrame(aligned_data).with_columns(
         [
-            # Converts trial_type and experiment_state to Enum types
+            # Converts trial_type and runtime_state to Enum types
             pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype),
-            pl.col("experiment_state").replace_strict(experiment_state_mapping).cast(experiment_state_enum_dtype),
+            pl.col("runtime_state").replace_strict(runtime_state_mapping).cast(runtime_state_enum_dtype),
             # Optimizes the trial column's datatype
             pl.col("trial").cast(pl.UInt16),
         ]
