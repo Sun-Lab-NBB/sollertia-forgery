@@ -16,10 +16,9 @@ from sollertia_shared_assets import (
     DatasetData,
     SessionData,
     SessionTypes,
-    DatasetTrackers,
-    SessionMetadata,
-    ProcessingTracker,
+    DatasetSession,
 )
+from ataraxis_data_structures import ProcessingTracker
 
 from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
@@ -41,7 +40,7 @@ class DatasetTypes(IntEnum):
     """Mesoscope-VR acquisition system + Mesoscope Experiment session type."""
 
 
-TRACKER_FILENAME: str = DatasetTrackers.FORGING
+TRACKER_FILENAME: str = "forging.yaml"
 """The filename for the processing tracker placed in the dataset directory."""
 
 FORGING_JOB_NAME: str = "session_assembly"
@@ -50,7 +49,7 @@ FORGING_JOB_NAME: str = "session_assembly"
 
 def define_dataset(
     name: str,
-    sessions: tuple[SessionMetadata, ...],
+    sessions: tuple[DatasetSession, ...],
     project_root: Path,
 ) -> DatasetData:
     """Creates a new analysis dataset and initializes its data hierarchy.
@@ -62,7 +61,7 @@ def define_dataset(
 
     Args:
         name: The unique name for the dataset.
-        sessions: The SessionMetadata instances representing the sessions to include in the dataset.
+        sessions: The DatasetSession instances representing the sessions to include in the dataset.
         project_root: The path to the project's root directory where the dataset hierarchy should be created.
 
     Returns:
@@ -476,7 +475,7 @@ def _execute_jobs_parallel(
             session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
             session_data_path = project_root.joinpath(session_metadata.animal, session_name)
             multiday_path = session_data_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset.name)
-            output_path = dataset.get_session_data(animal=session_metadata.animal, session=session_name).data_path
+            output_path = session_metadata.session_path.joinpath("data.feather")
 
             console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
@@ -546,7 +545,7 @@ def _execute_job(
         session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
         session_data_path = project_root.joinpath(session_metadata.animal, session_name)
         multiday_path = session_data_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset.name)
-        output_path = dataset.get_session_data(animal=session_metadata.animal, session=session_name).data_path
+        output_path = session_metadata.session_path.joinpath("data.feather")
 
         # Dispatches the assembly to the pure computation function.
         _run_job(

@@ -6,9 +6,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from numba import njit
+from numba import njit  # type: ignore[import-untyped]
 import numpy as np
 import polars as pl
+from ataraxis_base_utilities import console
 from sollertia_shared_assets import MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
 
@@ -16,60 +17,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
-
-
-@njit(cache=True)
-def _calculate_running_speed(
-    time: NDArray[np.uint64], distance: NDArray[np.float64], window_size_us: int = 100000
-) -> NDArray[np.float64]:
-    """Calculates the animal's running speed using the input data and the requested sliding window.
-
-    Args:
-        time: The sampling time, in microseconds elapsed since UTC epoch onset, for each cumulative traveled distance
-            value.
-        distance: The cumulative distance, in centimeters, traveled by the animal at each time-point.
-        window_size_us: The size of the sliding window, in microseconds.
-
-    Returns:
-        A NumPy array containing the calculated running speed in centimeters per second for each time-point.
-    """
-    # Pre-allocates the output running speed array based on the requested number of time-points for which to compute
-    # the running speed.
-    value_count = len(time)
-    running_speed = np.zeros(value_count, dtype=np.float32)
-
-    # If there are no data points to process, returns early.
-    if value_count == 0:
-        return running_speed
-
-    # Pre-computes the microsecond-to-second conversion constant.
-    us_to_s = np.float64(1.0 / 1_000_000.0)
-
-    # Maintains a sliding window start index that advances monotonically through the data.
-    # This avoids redundant searching and reduces complexity from O(n^2) to O(n).
-    window_start_idx = 0
-
-    # Processes each time point to calculate its running speed.
-    for i in range(value_count):
-        # Defines the target start time for the current window.
-        window_start_time = time[i] - window_size_us
-
-        # Advances the window start index until it reaches the first point within the window.
-        while window_start_idx < i and time[window_start_idx] < window_start_time:
-            window_start_idx += 1
-
-        # Calculates the speed only if there are distinct distance-points in the window.
-        if window_start_idx < i:
-            time_delta = time[i] - time[window_start_idx]
-
-            # Calculates the running speed using the full available window.
-            if time_delta > 0:
-                distance_delta = distance[i] - distance[window_start_idx]
-                speed = distance_delta / (time_delta * us_to_s)
-                # noinspection PyTypeChecker
-                running_speed[i] = max(0.0, speed)
-
-    return running_speed
 
 
 def assemble_behavior_dataset(
@@ -95,6 +42,12 @@ def assemble_behavior_dataset(
     # Loads hardware configuration and pre-creates the assets to map system state codes to descriptive names.
     hardware_state_data = MesoscopeHardwareState.from_yaml(source_data_path.joinpath("hardware_state.yaml"))
     state_mapping = hardware_state_data.system_state_codes
+    if state_mapping is None:
+        message = (
+            "Unable to assemble the behavior dataset for the target session. The hardware state configuration "
+            "is missing the required 'system_state_codes' mapping."
+        )
+        console.error(message=message, error=ValueError)
     inverted_mapping = {v: k for k, v in state_mapping.items()}
     state_enum = pl.Enum(list(state_mapping.keys()))
 
@@ -104,7 +57,7 @@ def assemble_behavior_dataset(
     lick_df = pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 
-    # Creates the aligned data dictionary using the reference time vector and interpolating all other dat sources to
+    # Creates the aligned data dictionary using the reference time vector and interpolating all other data sources to
     # the reference time vector.
     aligned_data: dict[str, NDArray[Any]] = {
         "time_us": reference_time,
@@ -124,11 +77,12 @@ def assemble_behavior_dataset(
             source_coordinates=valve_time,
             source_values=valve_df["dispensed_water_volume_uL"].to_numpy(),
             target_coordinates=reference_time,
-            # Technically continuous, but uses power law, rather than a linear function, so using linear interpolation
-            # is not correct here either.
+            # Uses discrete interpolation because the underlying power-law dispensing function makes linear
+            # interpolation equally inaccurate.
             is_discrete=True,
         ).astype(np.float32),
-        "_tone_state": interpolate_data(  # Temporary column for reward processing
+        # Temporary column used for reward event classification.
+        "_tone_state": interpolate_data(
             source_coordinates=valve_time,
             source_values=valve_df["tone_state"].to_numpy(),
             target_coordinates=reference_time,
@@ -136,18 +90,15 @@ def assemble_behavior_dataset(
         ),
     }
 
-    # Encoder data. Is not present for lick training.
-    if behavior_data_path.joinpath("encoder_data.feather").exists():
-        encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
+    # Encoder data is not present for lick training.
+    encoder_file = behavior_data_path.joinpath("encoder_data.feather")
+    if encoder_file.exists():
+        encoder_df = pl.read_ipc(encoder_file, memory_map=True)
         encoder_time = encoder_df["time_us"].to_numpy()
         encoder_distance = encoder_df["traveled_distance_cm"].to_numpy()
 
-        # Calculates the running speed using the original encoder sampling rate
-        running_speed = _calculate_running_speed(
-            time=encoder_df["time_us"].to_numpy(),
-            distance=encoder_df["traveled_distance_cm"].to_numpy(),
-            window_size_us=100000,
-        )
+        # Calculates the running speed using the original encoder sampling rate.
+        running_speed = _calculate_running_speed(time=encoder_time, distance=encoder_distance, window_size_us=100000)
 
         # Downsamples the running speed and the traveled distance.
         aligned_data["distance_cm"] = interpolate_data(
@@ -163,9 +114,10 @@ def assemble_behavior_dataset(
             is_discrete=False,
         ).astype(np.float32)
 
-    # Screen data. Only present for mesoscope experiments.
-    if behavior_data_path.joinpath("screen_data.feather").exists():
-        screen_df = pl.read_ipc(behavior_data_path.joinpath("screen_data.feather"), memory_map=True)
+    # Screen data is only present for mesoscope experiments.
+    screen_file = behavior_data_path.joinpath("screen_data.feather")
+    if screen_file.exists():
+        screen_df = pl.read_ipc(screen_file, memory_map=True)
         aligned_data["screens"] = interpolate_data(
             source_coordinates=screen_df["time_us"].to_numpy(),
             source_values=screen_df["screen_state"].to_numpy(),
@@ -173,7 +125,7 @@ def assemble_behavior_dataset(
             is_discrete=True,
         )
 
-    # Brake data. Only present for mesoscope experiments.
+    # Brake data is only present for mesoscope experiments.
     brake_file = behavior_data_path.joinpath("brake_data.feather")
     if brake_file.exists():
         brake_df = pl.read_ipc(brake_file, memory_map=True)
@@ -183,11 +135,19 @@ def assemble_behavior_dataset(
             target_coordinates=reference_time,
             is_discrete=True,
         )
-        aligned_data["brake"] = (brake_torque > hardware_state_data.minimum_brake_strength).astype(np.uint8)
+        minimum_brake_strength = hardware_state_data.minimum_brake_strength
+        if minimum_brake_strength is None:
+            message = (
+                "Unable to assemble the behavior dataset for the target session. The hardware state configuration "
+                "is missing the required 'minimum_brake_strength' value."
+            )
+            console.error(message=message, error=ValueError)
+        aligned_data["brake"] = np.asarray(brake_torque > minimum_brake_strength, dtype=np.uint8)
 
-    # Torque data. Is not present for run training.
-    if behavior_data_path.joinpath("torque_data.feather").exists():
-        torque_df = pl.read_ipc(behavior_data_path.joinpath("torque_data.feather"), memory_map=True)
+    # Torque data is not present for run training.
+    torque_file = behavior_data_path.joinpath("torque_data.feather")
+    if torque_file.exists():
+        torque_df = pl.read_ipc(torque_file, memory_map=True)
         aligned_data["torque_N_cm"] = interpolate_data(
             source_coordinates=torque_df["time_us"].to_numpy(),
             source_values=torque_df["torque_N_cm"].to_numpy(),
@@ -202,18 +162,13 @@ def assemble_behavior_dataset(
     # reformats certain data columns to improve future data analysis.
     behavior_data = (
         behavior_data
-        # Convert system_state to an Enum type using the hardware state mapping resolved earlier.
-        .with_columns(pl.col("system_state").replace_strict(inverted_mapping, return_dtype=pl.Utf8).cast(state_enum))
-        # Adds a column that tracks elapsed session time in minutes.
+        # Converts system_state to Enum, adds elapsed session time, and flags active tone regions.
         .with_columns(
+            pl.col("system_state").replace_strict(inverted_mapping, return_dtype=pl.Utf8).cast(state_enum),
             ((pl.col("time_us") - pl.col("time_us").min()) / (60 * 1_000_000))
             .round(2)
             .cast(pl.Float32)
-            .alias("elapsed_minutes")
-        )
-        # Uses valve information to create a 'reward' Enum column that distinguishes reward, tone, and no reward events.
-        .with_columns(
-            # Creates reward event boundaries
+            .alias("elapsed_minutes"),
             (pl.col("_tone_state") > 0).alias("_tone_active"),
         )
         # Uses the tone column to discover reward events.
@@ -223,8 +178,8 @@ def assemble_behavior_dataset(
             .cum_sum()
             .alias("_reward_event_id")
         )
+        # Calculates dispensed water volume per reward event.
         .with_columns(
-            # Calculates dispensed water volume per event and creates the reward column
             pl.col("water_uL").sum().over("_reward_event_id").alias("_reward_event_water_uL"),
         )
         # Classifies each time-point as belonging to one of three categories: 'no' (no reward or tone), 'yes' (reward),
@@ -238,14 +193,15 @@ def assemble_behavior_dataset(
             .cast(pl.Enum(["no", "tone", "yes"]))
             .alias("reward")
         )
-        # Cleans up interpolation artifacts based on the system state
-        .with_columns(
-            # Torque sensor is disabled in the run state, so sets torque readout to 0 when the system state is 'run'
-            pl.when(pl.col("system_state") == "run").then(0.0).otherwise(pl.col("torque_N_cm")).alias("torque_N_cm")
-        )
     )
 
-    # Handle distance_cm cleanup if the encoder data column exists:
+    # Torque sensor is disabled in the run state, so sets torque readout to 0 when the system state is 'run'.
+    if "torque_N_cm" in behavior_data.columns:
+        behavior_data = behavior_data.with_columns(
+            pl.when(pl.col("system_state") == "run").then(0.0).otherwise(pl.col("torque_N_cm")).alias("torque_N_cm")
+        )
+
+    # Handles distance_cm cleanup if the encoder data column exists.
     if "distance_cm" in behavior_data.columns:
         behavior_data = (
             behavior_data
@@ -261,13 +217,13 @@ def assemble_behavior_dataset(
                 .forward_fill()
                 .fill_null(0.0)
                 .alias("distance_cm"),
-                # Fixes running speed at the same time
+                # Fixes running speed at the same time.
                 pl.when(pl.col("system_state") == "run").then(pl.col("speed_cm_s")).otherwise(0.0).alias("speed_cm_s"),
             )
             .drop("_past_idle")
         )
 
-    # Final cleanup: ensures a particular column order and optimize column datatypes:
+    # Ensures a particular column order and optimizes column datatypes.
     final_columns = [
         "time_us",
         "elapsed_minutes",
@@ -290,3 +246,58 @@ def assemble_behavior_dataset(
         columns_to_select = columns_to_select[2:]
 
     return behavior_data.select(columns_to_select)
+
+
+@njit(cache=True)
+def _calculate_running_speed(
+    time: NDArray[np.uint64], distance: NDArray[np.float64], window_size_us: int = 100000
+) -> NDArray[np.float32]:
+    """Calculates the animal's running speed using the input data and the requested sliding window.
+
+    Args:
+        time: The sampling time, in microseconds elapsed since UTC epoch onset, for each cumulative traveled distance
+            value.
+        distance: The cumulative distance, in centimeters, traveled by the animal at each time-point.
+        window_size_us: The size of the sliding window, in microseconds.
+
+    Returns:
+        A NumPy array containing the calculated running speed in centimeters per second for each time-point.
+    """
+    # Pre-allocates the output running speed array based on the requested number of time-points for which to compute
+    # the running speed.
+    value_count = len(time)
+    # noinspection PyTypeChecker
+    running_speed: NDArray[np.float32] = np.zeros(value_count, dtype=np.float32)
+
+    # If there are no data points to process, returns early.
+    if value_count == 0:
+        return running_speed
+
+    # Pre-computes the microsecond-to-second conversion constant.
+    us_to_s = np.float64(1.0 / 1_000_000.0)
+
+    # Maintains a sliding window start index that advances monotonically through the data.
+    # This avoids redundant searching and reduces complexity from O(n^2) to O(n).
+    window_start_index = 0
+
+    # Processes each time point to calculate its running speed.
+    for i in range(value_count):
+        # Defines the target start time for the current window.
+        window_start_time = time[i] - window_size_us
+
+        # Advances the window start index until it reaches the first point within the window.
+        while window_start_index < i and time[window_start_index] < window_start_time:
+            window_start_index += 1
+
+        # Calculates the speed only if there are distinct distance-points in the window.
+        if window_start_index < i:
+            time_delta = time[i] - time[window_start_index]
+
+            # Calculates the running speed using the full available window.
+            if time_delta > 0:
+                distance_delta = distance[i] - distance[window_start_index]
+                speed = distance_delta / (time_delta * us_to_s)
+                # noinspection PyTypeChecker
+                running_speed[i] = max(0.0, speed)
+
+    return running_speed

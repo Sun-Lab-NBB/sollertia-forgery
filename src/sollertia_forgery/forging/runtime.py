@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from numba import njit
+from numba import njit  # type: ignore[import-untyped]
 import numpy as np
 import polars as pl
 from sollertia_shared_assets import MesoscopeExperimentConfiguration
@@ -157,8 +157,7 @@ def assemble_runtime_dataset(session_data_path: Path, reference_time: NDArray[np
     trial_distance = trial_df["traveled_distance_cm"].to_numpy()
 
     # Interpolates the traveled distance first as it's used as a reference for other interpolations.
-    # noinspection PyTypeChecker
-    reference_distance: NDArray[np.float64] = interpolate_data(
+    reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
         source_coordinates=encoder_df["time_us"].to_numpy(),
         source_values=encoder_df["traveled_distance_cm"].to_numpy(),
         target_coordinates=reference_time,
