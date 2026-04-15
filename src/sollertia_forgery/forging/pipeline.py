@@ -8,6 +8,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING
 from functools import partial
 from contextlib import nullcontext
+from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import polars as pl
@@ -23,6 +24,7 @@ from ataraxis_data_structures import ProcessingTracker
 from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
+from ..processing import TRACKER_FILENAME as _BEHAVIOR_TRACKER_FILENAME
 from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
@@ -45,6 +47,25 @@ TRACKER_FILENAME: str = "forging.yaml"
 
 FORGING_JOB_NAME: str = "session_assembly"
 """The job name used to identify session assembly jobs in forging processing trackers."""
+
+_CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
+"""The tracker filename written by the cindra single-recording pipeline into the cindra output directory."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPaths:
+    """Resolved filesystem paths for a single session assembly job."""
+
+    behavior_data_path: Path
+    """The path to the directory containing the processed behavior feather files."""
+    raw_data_path: Path
+    """The path to the session's raw data directory containing the hardware state and experiment configuration."""
+    cindra_data_path: Path | None
+    """The path to the single-recording cindra output directory. None for training sessions."""
+    multiday_data_path: Path | None
+    """The path to the dataset-specific multiday output directory. None for training sessions."""
+    face_camera_path: Path | None
+    """The path to the face camera timestamps feather file. None for experiment sessions."""
 
 
 def define_dataset(
@@ -217,8 +238,7 @@ def discover_forging_jobs(dataset: DatasetData, *, target_session: str | None = 
 
 
 def assemble_session_dataset(
-    session_data_path: Path,
-    session_multiday_path: Path,
+    session_paths: SessionPaths,
     output_path: Path,
     dataset_type: DatasetTypes | int,
     *,
@@ -231,8 +251,7 @@ def assemble_session_dataset(
     .feather file under the output_path directory.
 
     Args:
-        session_data_path: The path to the session's processed data directory.
-        session_multiday_path: The path to the session's multi-day data directory.
+        session_paths: The resolved filesystem paths for the target session's data directories.
         output_path: The path to the directory where to save the assembled dataset as a .feather file.
         dataset_type: The type of the processed session. Must be one of the valid DatasetTypes enumeration members.
         progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
@@ -250,11 +269,24 @@ def assemble_session_dataset(
     try:
         # Experiment dataset.
         if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
+            # Validates that experiment-specific paths were resolved. These are guaranteed non-None by
+            # _resolve_session_paths for experiment dataset types.
+            if session_paths.cindra_data_path is None or session_paths.multiday_data_path is None:
+                message = (
+                    "Unable to assemble the experiment dataset. The cindra or multiday data paths were not resolved "
+                    "for this session. This indicates a mismatch between the dataset type and the resolved paths."
+                )
+                console.error(message=message, error=RuntimeError)
+
             # First assembles the fluorescence data, which is needed to generate the reference time vector for other
             # datasets.
-            with console.progress(total=3, description=f"Assembling session {session_data_path.stem} datasets") as pbar:
+            with console.progress(
+                total=3, description=f"Assembling session {session_paths.behavior_data_path.parent.stem} datasets"
+            ) as pbar:
                 fluorescence_data = assemble_cindra_dataset(
-                    session_data_path=session_data_path, multiday_data_path=session_multiday_path
+                    cindra_data_path=session_paths.cindra_data_path,
+                    behavior_data_path=session_paths.behavior_data_path,
+                    multiday_data_path=session_paths.multiday_data_path,
                 )
                 pbar.update(1)
 
@@ -265,13 +297,15 @@ def assemble_session_dataset(
                 tasks = {
                     "behavior": partial(
                         assemble_behavior_dataset,
-                        session_data_path=session_data_path,
+                        behavior_data_path=session_paths.behavior_data_path,
+                        raw_data_path=session_paths.raw_data_path,
                         reference_time=reference_time,
                         drop_time_columns=True,
                     ),
                     "runtime": partial(
                         assemble_runtime_dataset,
-                        session_data_path=session_data_path,
+                        behavior_data_path=session_paths.behavior_data_path,
+                        raw_data_path=session_paths.raw_data_path,
                         reference_time=reference_time,
                     ),
                 }
@@ -301,19 +335,28 @@ def assemble_session_dataset(
 
         # Behavior-only training dataset.
         elif dataset_type in (DatasetTypes.MESOSCOPE_VR_LICK_TRAINING, DatasetTypes.MESOSCOPE_VR_RUN_TRAINING):
+            # Validates that the face camera path was resolved for training sessions.
+            if session_paths.face_camera_path is None:
+                message = (
+                    "Unable to assemble the training dataset. The face camera timestamps path was not resolved "
+                    "for this session. This indicates a mismatch between the dataset type and the resolved paths."
+                )
+                console.error(message=message, error=RuntimeError)
+
             # Training session data is always aligned to the face camera frame acquisition time. Extracts the reference
             # timepoints from the face camera timestamp data.
-            face_camera_path = session_data_path.joinpath(
-                "processed_data", "behavior_data", "face_camera_timestamps.feather"
-            )
-            face_camera_df = pl.read_ipc(face_camera_path, memory_map=True)
+            face_camera_df = pl.read_ipc(session_paths.face_camera_path, memory_map=True)
             reference_time = face_camera_df["frame_time_us"].to_numpy()
 
             # Assembles and saves the behavior dataset to disk as an uncompressed .feather file (to support
             # memory-mapping).
-            with console.progress(total=1, description=f"Assembling session {session_data_path.stem} datasets") as pbar:
+            with console.progress(
+                total=1, description=f"Assembling session {session_paths.behavior_data_path.parent.stem} datasets"
+            ) as pbar:
                 behavior_data = assemble_behavior_dataset(
-                    session_data_path=session_data_path, reference_time=reference_time
+                    behavior_data_path=session_paths.behavior_data_path,
+                    raw_data_path=session_paths.raw_data_path,
+                    reference_time=reference_time,
                 )
                 behavior_data.write_ipc(file=output_path)
                 pbar.update(1)
@@ -321,8 +364,8 @@ def assemble_session_dataset(
         # If the input dataset type is not supported, raises a ValueError.
         else:
             message = (
-                f"Unsupported dataset type '{dataset_type}' encountered when assembling the dataset for the session "
-                f"{session_data_path.stem}. Use one of the valid DatasetTypes enumeration members."
+                f"Unsupported dataset type '{dataset_type}' encountered when assembling the dataset. "
+                f"Use one of the valid DatasetTypes enumeration members."
             )
             console.error(message=message, error=ValueError)
     finally:
@@ -386,6 +429,75 @@ def _resolve_dataset_type(session_type: str | SessionTypes) -> DatasetTypes:
 
     # Unreachable: console.error always raises when given an error class. Explicit raise satisfies the linter.
     raise ValueError(message)
+
+
+def _resolve_session_paths(session_data_path: Path, dataset_name: str, dataset_type: DatasetTypes) -> SessionPaths:
+    """Discovers and resolves all data directory paths for a single session assembly job.
+
+    Notes:
+        Loads ``SessionData`` to obtain the canonical ``raw_data_path`` and ``processed_data_path``, then uses
+        tracker-file rglob within ``processed_data_path`` to discover the behavior and cindra output directories.
+        The multiday path is derived from the cindra directory's parent (``mesoscope_data/``) by joining the
+        dataset name, since the multiday tracker is only stored in the first session of each dataset.
+
+    Args:
+        session_data_path: The path to the session's root directory.
+        dataset_name: The name of the dataset being assembled, used to resolve the multiday output directory.
+        dataset_type: The resolved dataset type for the session.
+
+    Returns:
+        A frozen ``SessionPaths`` instance containing all resolved data directory paths.
+
+    Raises:
+        FileNotFoundError: If a required tracker file is not found under the processed data directory.
+        RuntimeError: If multiple instances of a tracker file are found, indicating an ambiguous directory structure.
+    """
+    # Loads the session's metadata to obtain canonical raw and processed data root paths.
+    session = SessionData.load(session_path=session_data_path)
+
+    # Discovers the behavior data directory by locating its processing tracker.
+    behavior_candidates = sorted(session.processed_data_path.rglob(_BEHAVIOR_TRACKER_FILENAME))
+    if len(behavior_candidates) != 1:
+        message = (
+            f"Unable to resolve the behavior data directory for session '{session_data_path.name}'. "
+            f"Expected exactly one '{_BEHAVIOR_TRACKER_FILENAME}' under '{session.processed_data_path}', "
+            f"but found {len(behavior_candidates)}."
+        )
+        console.error(message=message, error=FileNotFoundError if not behavior_candidates else RuntimeError)
+    behavior_data_path = behavior_candidates[0].parent
+
+    # Resolves experiment-specific paths (cindra single-day and multiday) or training-specific paths (face camera).
+    if dataset_type == DatasetTypes.MESOSCOPE_VR_EXPERIMENT:
+        # Discovers the cindra single-day output directory by locating its processing tracker.
+        cindra_candidates = sorted(session.processed_data_path.rglob(_CINDRA_TRACKER_FILENAME))
+        if len(cindra_candidates) != 1:
+            message = (
+                f"Unable to resolve the cindra data directory for session '{session_data_path.name}'. "
+                f"Expected exactly one '{_CINDRA_TRACKER_FILENAME}' under '{session.processed_data_path}', "
+                f"but found {len(cindra_candidates)}."
+            )
+            console.error(message=message, error=FileNotFoundError if not cindra_candidates else RuntimeError)
+        cindra_data_path = cindra_candidates[0].parent
+
+        # Derives the multiday output path from the cindra directory's parent (mesoscope_data/) and the dataset name.
+        multiday_data_path = cindra_data_path.parent.joinpath("multiday", dataset_name)
+
+        return SessionPaths(
+            behavior_data_path=behavior_data_path,
+            raw_data_path=session.raw_data_path,
+            cindra_data_path=cindra_data_path,
+            multiday_data_path=multiday_data_path,
+            face_camera_path=None,
+        )
+
+    # Training sessions use face camera timestamps as the reference time vector and have no cindra or multiday data.
+    return SessionPaths(
+        behavior_data_path=behavior_data_path,
+        raw_data_path=session.raw_data_path,
+        cindra_data_path=None,
+        multiday_data_path=None,
+        face_camera_path=behavior_data_path.joinpath("face_camera_timestamps.feather"),
+    )
 
 
 def _execute_jobs_sequential(
@@ -471,18 +583,20 @@ def _execute_jobs_parallel(
         for session_name in sessions:
             job_id = job_ids[session_name]
 
-            # Resolves the session's paths for the worker.
+            # Resolves the session's paths for the worker. Path resolution happens in the parent process before
+            # submission to ensure picklability.
             session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
             session_data_path = project_root.joinpath(session_metadata.animal, session_name)
-            multiday_path = session_data_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset.name)
+            session_paths = _resolve_session_paths(
+                session_data_path=session_data_path, dataset_name=dataset.name, dataset_type=dataset_type
+            )
             output_path = session_metadata.session_path.joinpath("data.feather")
 
             console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
             future = executor.submit(
                 _run_job,
-                session_data_path=session_data_path,
-                session_multiday_path=multiday_path,
+                session_paths=session_paths,
                 output_path=output_path,
                 dataset_type=dataset_type,
             )
@@ -538,19 +652,18 @@ def _execute_job(
     tracker.start_job(job_id=job_id)
 
     try:
-        # Resolves the dataset type from the session type.
+        # Resolves the dataset type and discovers all data directory paths for the session.
         dataset_type = _resolve_dataset_type(session_type=dataset.session_type)
-
-        # Finds the session's metadata and resolves all filesystem paths.
         session_metadata = next(smd for smd in dataset.sessions if smd.session == session_name)
         session_data_path = project_root.joinpath(session_metadata.animal, session_name)
-        multiday_path = session_data_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset.name)
+        session_paths = _resolve_session_paths(
+            session_data_path=session_data_path, dataset_name=dataset.name, dataset_type=dataset_type
+        )
         output_path = session_metadata.session_path.joinpath("data.feather")
 
         # Dispatches the assembly to the pure computation function.
         _run_job(
-            session_data_path=session_data_path,
-            session_multiday_path=multiday_path,
+            session_paths=session_paths,
             output_path=output_path,
             dataset_type=dataset_type,
         )
@@ -564,8 +677,7 @@ def _execute_job(
 
 
 def _run_job(
-    session_data_path: Path,
-    session_multiday_path: Path,
+    session_paths: SessionPaths,
     output_path: Path,
     dataset_type: DatasetTypes | int,
 ) -> None:
@@ -574,19 +686,18 @@ def _run_job(
     Notes:
         This function is the atomic unit of work submitted to worker processes by the parallel execution path. It
         must remain importable at module level and accept only picklable arguments so that ``ProcessPoolExecutor``
-        can dispatch it across process boundaries. Tracker state transitions, progress display, and error
-        reporting are all handled by the parent process; this function performs pure computation and either
-        returns ``None`` on success or propagates any raised exception back through the future.
+        can dispatch it across process boundaries. The ``SessionPaths`` frozen dataclass satisfies this constraint.
+        Tracker state transitions, progress display, and error reporting are all handled by the parent process;
+        this function performs pure computation and either returns ``None`` on success or propagates any raised
+        exception back through the future.
 
     Args:
-        session_data_path: The path to the session's data directory.
-        session_multiday_path: The path to the session's multi-day data directory.
+        session_paths: The resolved filesystem paths for the target session's data directories.
         output_path: The path to the output .feather file.
         dataset_type: The type of the processed session.
     """
     assemble_session_dataset(
-        session_data_path=session_data_path,
-        session_multiday_path=session_multiday_path,
+        session_paths=session_paths,
         output_path=output_path,
         dataset_type=dataset_type,
         progress=False,
