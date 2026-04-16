@@ -2,18 +2,16 @@
 
 from .pipeline import (
     FORGING_JOB_NAME,
-    DatasetTypes,
     SessionPaths,
-    define_dataset,
+    DEFINITION_JOB_NAME,
     run_forging_pipeline,
     assemble_session_dataset,
 )
 
 __all__ = [
+    "DEFINITION_JOB_NAME",
     "FORGING_JOB_NAME",
-    "DatasetTypes",
     "SessionPaths",
     "assemble_session_dataset",
-    "define_dataset",
     "run_forging_pipeline",
 ]

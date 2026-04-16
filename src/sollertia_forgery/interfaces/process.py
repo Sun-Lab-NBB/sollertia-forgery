@@ -3,12 +3,13 @@
 from pathlib import Path
 
 import click
-from ataraxis_base_utilities import console
-from sollertia_shared_assets import DatasetData, DatasetSession
+from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import DatasetData, SessionData, SessionTypes, DatasetSession
+from ataraxis_data_structures import delete_directory
 
 from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
-from ..forging.pipeline import define_dataset, run_forging_pipeline
+from ..forging.pipeline import run_forging_pipeline
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -124,12 +125,29 @@ def transfer_session_data(source_path: Path, destination_path: Path | None, *, r
         "can be specified multiple times to include multiple sessions."
     ),
 )
+@click.option(
+    "-f",
+    "--force-recreate",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to delete any existing dataset hierarchy before creating it fresh. Use this flag when "
+        "extending, shrinking, or modifying the session set of an existing dataset. Any prior assembled data and "
+        "the existing processing tracker are discarded."
+    ),
+)
 def define_dataset_command(
     dataset_name: str,
     project_root: Path,
     session: tuple[str, ...],
+    *,
+    force_recreate: bool,
 ) -> None:
-    """Defines a new analysis dataset by creating its data hierarchy and metadata files."""
+    """Defines a new analysis dataset by creating its data hierarchy and metadata files.
+
+    Dataset creation is currently limited to mesoscope experiment sessions.
+    """
     # Parses the session specifications into DatasetSession instances.
     sessions: list[DatasetSession] = []
     expected_parts = 2
@@ -144,11 +162,42 @@ def define_dataset_command(
             console.error(message=message, error=ValueError)
         sessions.append(DatasetSession(session=parts[0], animal=parts[1]))
 
+    # Removes the existing dataset hierarchy if the caller explicitly requested recreation.
+    dataset_directory = project_root.joinpath(dataset_name)
+    if force_recreate and dataset_directory.exists():
+        delete_directory(directory_path=dataset_directory)
+        console.echo(
+            message=f"Dataset '{dataset_name}': Removed existing hierarchy for recreation.",
+            level=LogLevel.INFO,
+        )
+
+    # Derives session type and acquisition system from the first session's metadata. Validates that the session type
+    # is MESOSCOPE_EXPERIMENT (the only type currently supported by the forging pipeline).
+    first_session_path = project_root.joinpath(sessions[0].animal, sessions[0].session)
+    first_session_data = SessionData.load(session_path=first_session_path)
+    if first_session_data.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
+        message = (
+            f"Unable to define dataset '{dataset_name}'. Dataset creation is currently supported only for mesoscope "
+            f"experiment sessions, but the first session's type resolved to '{first_session_data.session_type}'."
+        )
+        console.error(message=message, error=ValueError)
+
     # Creates the dataset hierarchy and metadata files.
-    define_dataset(
+    dataset = DatasetData.create(
         name=dataset_name,
+        project=project_root.name,
+        session_type=first_session_data.session_type,
+        acquisition_system=first_session_data.acquisition_system,
         sessions=tuple(sessions),
-        project_root=project_root,
+        datasets_root=project_root,
+    )
+
+    console.echo(
+        message=(
+            f"Dataset '{dataset_name}' data hierarchy: Defined with {len(sessions)} sessions from "
+            f"{len(dataset.animals)} animals."
+        ),
+        level=LogLevel.SUCCESS,
     )
 
 
@@ -251,12 +300,14 @@ def assemble_dataset_command(
     This command reads the dataset metadata and assembles each session's data into a unified data.feather file
     within the dataset hierarchy.
     """
-    # Loads the dataset's metadata.
+    # Loads the existing dataset's metadata to extract its name and session set. The forging pipeline's internal
+    # create-or-load path then reuses the on-disk definition instead of re-creating it.
     dataset = DatasetData.load(dataset_path=dataset_path)
 
-    # Runs the forging pipeline.
+    # Runs the unified forging pipeline.
     run_forging_pipeline(
-        dataset=dataset,
+        name=dataset.name,
+        sessions=dataset.sessions,
         project_root=project_root,
         job_id=job_id,
         target_session=target_session,

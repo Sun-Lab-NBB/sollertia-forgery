@@ -194,6 +194,7 @@ def assemble_behavior_dataset(
             .cast(pl.Enum(["no", "tone", "yes"]))
             .alias("reward")
         )
+        .drop("_tone_state", "_tone_active", "_reward_event_id", "_reward_event_water_uL")
     )
 
     # Torque sensor is disabled in the run state, so sets torque readout to 0 when the system state is 'run'.
