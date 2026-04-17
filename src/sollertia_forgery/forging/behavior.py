@@ -19,6 +19,16 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+_MICROSECONDS_PER_SECOND: float = 1_000_000.0
+"""The number of microseconds in one second."""
+
+_MICROSECONDS_PER_MINUTE: int = 60 * 1_000_000
+"""The number of microseconds in one minute."""
+
+_RUNNING_SPEED_WINDOW_US: int = 100_000
+"""The default sliding window size, in microseconds, used when computing running speed from encoder data."""
+
+
 def assemble_behavior_dataset(
     behavior_data_path: Path,
     raw_data_path: Path,
@@ -41,7 +51,7 @@ def assemble_behavior_dataset(
         The Polars DataFrame that contains the assembled behavior data.
     """
     # Loads hardware configuration and pre-creates the assets to map system state codes to descriptive names.
-    hardware_state_data = MesoscopeHardwareState.from_yaml(raw_data_path.joinpath("hardware_state.yaml"))
+    hardware_state_data = MesoscopeHardwareState.from_yaml(file_path=raw_data_path.joinpath("hardware_state.yaml"))
     state_mapping = hardware_state_data.system_state_codes
     if state_mapping is None:
         message = (
@@ -49,13 +59,13 @@ def assemble_behavior_dataset(
             "is missing the required 'system_state_codes' mapping."
         )
         console.error(message=message, error=ValueError)
-    inverted_mapping = {v: k for k, v in state_mapping.items()}
+    inverted_mapping = {value: key for key, value in state_mapping.items()}
     state_enum = pl.Enum(list(state_mapping.keys()))
 
     # Loads the core behavior data present for all session types.
-    valve_df = pl.read_ipc(behavior_data_path.joinpath("valve_data.feather"), memory_map=True)
-    system_state_df = pl.read_ipc(behavior_data_path.joinpath("system_state_data.feather"), memory_map=True)
-    lick_df = pl.read_ipc(behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
+    valve_df = pl.read_ipc(source=behavior_data_path.joinpath("valve_data.feather"), memory_map=True)
+    system_state_df = pl.read_ipc(source=behavior_data_path.joinpath("system_state_data.feather"), memory_map=True)
+    lick_df = pl.read_ipc(source=behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 
     # Creates the aligned data dictionary using the reference time vector and interpolating all other data sources to
@@ -94,12 +104,12 @@ def assemble_behavior_dataset(
     # Encoder data is not present for lick training.
     encoder_file = behavior_data_path.joinpath("encoder_data.feather")
     if encoder_file.exists():
-        encoder_df = pl.read_ipc(encoder_file, memory_map=True)
+        encoder_df = pl.read_ipc(source=encoder_file, memory_map=True)
         encoder_time = encoder_df["time_us"].to_numpy()
         encoder_distance = encoder_df["traveled_distance_cm"].to_numpy()
 
         # Calculates the running speed using the original encoder sampling rate.
-        running_speed = _calculate_running_speed(time=encoder_time, distance=encoder_distance, window_size_us=100000)
+        running_speed = _calculate_running_speed(sample_time=encoder_time, distance=encoder_distance)
 
         # Downsamples the running speed and the traveled distance.
         aligned_data["distance_cm"] = interpolate_data(
@@ -118,7 +128,7 @@ def assemble_behavior_dataset(
     # Screen data is only present for mesoscope experiments.
     screen_file = behavior_data_path.joinpath("screen_data.feather")
     if screen_file.exists():
-        screen_df = pl.read_ipc(screen_file, memory_map=True)
+        screen_df = pl.read_ipc(source=screen_file, memory_map=True)
         aligned_data["screens"] = interpolate_data(
             source_coordinates=screen_df["time_us"].to_numpy(),
             source_values=screen_df["screen_state"].to_numpy(),
@@ -129,7 +139,7 @@ def assemble_behavior_dataset(
     # Brake data is only present for mesoscope experiments.
     brake_file = behavior_data_path.joinpath("brake_data.feather")
     if brake_file.exists():
-        brake_df = pl.read_ipc(brake_file, memory_map=True)
+        brake_df = pl.read_ipc(source=brake_file, memory_map=True)
         brake_torque = interpolate_data(
             source_coordinates=brake_df["time_us"].to_numpy(),
             source_values=brake_df["brake_torque_N_cm"].to_numpy(),
@@ -148,7 +158,7 @@ def assemble_behavior_dataset(
     # Torque data is not present for run training.
     torque_file = behavior_data_path.joinpath("torque_data.feather")
     if torque_file.exists():
-        torque_df = pl.read_ipc(torque_file, memory_map=True)
+        torque_df = pl.read_ipc(source=torque_file, memory_map=True)
         aligned_data["torque_N_cm"] = interpolate_data(
             source_coordinates=torque_df["time_us"].to_numpy(),
             source_values=torque_df["torque_N_cm"].to_numpy(),
@@ -166,7 +176,7 @@ def assemble_behavior_dataset(
         # Converts system_state to Enum, adds elapsed session time, and flags active tone regions.
         .with_columns(
             pl.col("system_state").replace_strict(inverted_mapping, return_dtype=pl.Utf8).cast(state_enum),
-            ((pl.col("time_us") - pl.col("time_us").min()) / (60 * 1_000_000))
+            ((pl.col("time_us") - pl.col("time_us").min()) / _MICROSECONDS_PER_MINUTE)
             .round(2)
             .cast(pl.Float32)
             .alias("elapsed_minutes"),
@@ -252,13 +262,15 @@ def assemble_behavior_dataset(
 
 @njit(cache=True)
 def _calculate_running_speed(
-    time: NDArray[np.uint64], distance: NDArray[np.float64], window_size_us: int = 100000
+    sample_time: NDArray[np.uint64],
+    distance: NDArray[np.float64],
+    window_size_us: int = _RUNNING_SPEED_WINDOW_US,
 ) -> NDArray[np.float32]:
     """Calculates the animal's running speed using the input data and the requested sliding window.
 
     Args:
-        time: The sampling time, in microseconds elapsed since UTC epoch onset, for each cumulative traveled distance
-            value.
+        sample_time: The sampling time, in microseconds elapsed since UTC epoch onset, for each cumulative traveled
+            distance value.
         distance: The cumulative distance, in centimeters, traveled by the animal at each time-point.
         window_size_us: The size of the sliding window, in microseconds.
 
@@ -267,16 +279,16 @@ def _calculate_running_speed(
     """
     # Pre-allocates the output running speed array based on the requested number of time-points for which to compute
     # the running speed.
-    value_count = len(time)
+    value_count = len(sample_time)
     # noinspection PyTypeChecker
     running_speed: NDArray[np.float32] = np.zeros(value_count, dtype=np.float32)
 
     # If there are no data points to process, returns early.
-    if value_count == 0:
+    if not value_count:
         return running_speed
 
     # Pre-computes the microsecond-to-second conversion constant.
-    us_to_s = np.float64(1.0 / 1_000_000.0)
+    us_to_s = np.float64(1.0 / _MICROSECONDS_PER_SECOND)
 
     # Maintains a sliding window start index that advances monotonically through the data.
     # This avoids redundant searching and reduces complexity from O(n^2) to O(n).
@@ -285,15 +297,15 @@ def _calculate_running_speed(
     # Processes each time point to calculate its running speed.
     for i in range(value_count):
         # Defines the target start time for the current window.
-        window_start_time = time[i] - window_size_us
+        window_start_time = sample_time[i] - window_size_us
 
         # Advances the window start index until it reaches the first point within the window.
-        while window_start_index < i and time[window_start_index] < window_start_time:
+        while window_start_index < i and sample_time[window_start_index] < window_start_time:
             window_start_index += 1
 
         # Calculates the speed only if there are distinct distance-points in the window.
         if window_start_index < i:
-            time_delta = time[i] - time[window_start_index]
+            time_delta = sample_time[i] - sample_time[window_start_index]
 
             # Calculates the running speed using the full available window.
             if time_delta > 0:

@@ -292,9 +292,7 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
             f"'{first_session_data.session_type}'."
         )
         console.error(message=message, error=ValueError)
-    dataset_sessions = tuple(
-        DatasetSession(animal=path.parent.name, session=path.name) for path in session_paths
-    )
+    dataset_sessions = tuple(DatasetSession(animal=path.parent.name, session=path.name) for path in session_paths)
     dataset = DatasetData.create(
         name=name,
         project=project_root.name,
@@ -386,10 +384,10 @@ def _assemble_session_dataset(
         progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
     """
     # Ensures that the output directory exists.
-    ensure_directory_exists(output_path)
+    ensure_directory_exists(path=output_path)
 
     # Configures progress bar visibility based on the progress parameter.
-    _prior_progress = console.progress_enabled
+    prior_progress = console.progress_enabled
     if progress:
         console.enable_progress()
     else:
@@ -446,13 +444,13 @@ def _assemble_session_dataset(
         result = pl.concat([fluorescence_data, behavior_data, runtime_data], how="horizontal")
 
         # Masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
-        result = _mask_non_run_experiment_data(result)
+        result = _mask_non_run_experiment_data(experiment_data=result)
 
         # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
         result.write_ipc(file=output_path)
     finally:
         # Restores the previous progress bar visibility state.
-        if _prior_progress:
+        if prior_progress:
             console.enable_progress()
         else:
             console.disable_progress()
@@ -547,9 +545,7 @@ def _execute_jobs_parallel(
             # submission to ensure picklability.
             session_metadata = session_lookup[session_name]
             session_data_path = project_root.joinpath(session_metadata.animal, session_name)
-            session_paths = _resolve_session_paths(
-                session_data_path=session_data_path, dataset_name=dataset_name
-            )
+            session_paths = _resolve_session_paths(session_data_path=session_data_path, dataset_name=dataset_name)
             output_path = session_metadata.session_path.joinpath("data.feather")
 
             console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
@@ -613,9 +609,7 @@ def _execute_job(
         # Discovers all data directory paths for the session.
         session_metadata = session_lookup[session_name]
         session_data_path = project_root.joinpath(session_metadata.animal, session_name)
-        session_paths = _resolve_session_paths(
-            session_data_path=session_data_path, dataset_name=dataset_name
-        )
+        session_paths = _resolve_session_paths(session_data_path=session_data_path, dataset_name=dataset_name)
         output_path = session_metadata.session_path.joinpath("data.feather")
 
         # Dispatches the assembly to the pure computation function.
@@ -627,8 +621,8 @@ def _execute_job(
         tracker.complete_job(job_id=job_id)
         console.echo(message=f"Session '{session_name}' data assembly: Complete.", level=LogLevel.SUCCESS)
 
-    except Exception:
-        tracker.fail_job(job_id=job_id)
+    except Exception as exception:
+        tracker.fail_job(job_id=job_id, error_message=str(exception))
         raise
 
 

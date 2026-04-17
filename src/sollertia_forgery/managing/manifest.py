@@ -107,7 +107,7 @@ def generate_project_manifest(project_directory: Path) -> None:
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
-    lock = FileLock(manifest_lock)
+    lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
         # Marks the job as running.
         tracker.start_job(job_id=job_id)

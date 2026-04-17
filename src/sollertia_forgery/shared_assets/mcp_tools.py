@@ -1,24 +1,24 @@
 """Provides shared Model Context Protocol (MCP) tools used across multiple library packages."""
 
-from __future__ import annotations  # pragma: no cover
+from __future__ import annotations
 
-from typing import Any  # pragma: no cover
-from pathlib import Path  # pragma: no cover
+from typing import Any
+from pathlib import Path
 
-from sollertia_shared_assets import SessionData, SessionTypes, DatasetSession  # pragma: no cover
+from sollertia_shared_assets import SessionData, SessionTypes, DatasetSession
 
-from .metadata import ProjectManifest  # pragma: no cover
-from ..interfaces import mcp  # pragma: no cover
-from .mcp_orchestration import validate_directory  # pragma: no cover
-from .session_discovery import filter_sessions, discover_sessions  # pragma: no cover
+from .metadata import ProjectManifest
+from ..interfaces import mcp
+from .mcp_orchestration import validate_directory
+from .session_discovery import filter_sessions, discover_sessions
 
 _STATUS_COLUMNS: frozenset[str] = frozenset({"complete", "integrity", "cindra", "behavior", "video"})
 """The manifest column names that store boolean-like UInt8 processing status flags, cast to native bools by
 ``get_project_manifest_tool`` for readability."""
 
 
-@mcp.tool()  # pragma: no cover
-def discover_sessions_tool(  # pragma: no cover
+@mcp.tool()
+def discover_sessions_tool(
     root_directory: str,
     session_types: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -104,8 +104,8 @@ def discover_sessions_tool(  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_project_manifest_tool(  # pragma: no cover
+@mcp.tool()
+def get_project_manifest_tool(
     manifest_file: str,
     animal: int | None = None,
     session: str | None = None,
@@ -206,8 +206,8 @@ def get_project_manifest_tool(  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def filter_sessions_tool(  # pragma: no cover
+@mcp.tool()
+def filter_sessions_tool(
     sessions: list[dict[str, Any]],
     start_date: str | None = None,
     end_date: str | None = None,

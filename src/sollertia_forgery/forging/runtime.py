@@ -18,6 +18,15 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+_CUE_UNDEFINED: int = 255
+"""The sentinel value used to mask the cue column when the system is not in the run state, equal to the maximum value
+of UInt8 so it sits outside the valid cue code range."""
+
+_TRIAL_UNDEFINED: int = 65535
+"""The sentinel value used to mask the trial column when the system is not in the run state, equal to the maximum
+value of UInt16 so it sits outside the expected trial ID range for any realistic session."""
+
+
 def assemble_runtime_dataset(
     behavior_data_path: Path, raw_data_path: Path, reference_time: NDArray[np.uint64]
 ) -> pl.DataFrame:
@@ -34,7 +43,7 @@ def assemble_runtime_dataset(
     """
     # Loads experiment configuration early to have mappings ready.
     experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
-        raw_data_path.joinpath("experiment_configuration.yaml")
+        file_path=raw_data_path.joinpath("experiment_configuration.yaml")
     )
 
     # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
@@ -50,11 +59,11 @@ def assemble_runtime_dataset(
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
-    trigger_zones_df = pl.read_ipc(behavior_data_path.joinpath("vr_trigger_zone_data.feather"), memory_map=True)
-    cue_df = pl.read_ipc(behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
-    trial_df = pl.read_ipc(behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
-    runtime_state_df = pl.read_ipc(behavior_data_path.joinpath("runtime_state_data.feather"), memory_map=True)
+    encoder_df = pl.read_ipc(source=behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
+    trigger_zones_df = pl.read_ipc(source=behavior_data_path.joinpath("vr_trigger_zone_data.feather"), memory_map=True)
+    cue_df = pl.read_ipc(source=behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
+    trial_df = pl.read_ipc(source=behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
+    runtime_state_df = pl.read_ipc(source=behavior_data_path.joinpath("runtime_state_data.feather"), memory_map=True)
 
     # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
     # intermediate Polars DataFrame since both are only consumed by interpolate_data.
@@ -112,7 +121,7 @@ def assemble_runtime_dataset(
 
     # Adds reinforcing guidance state if the file was produced by the processing pipeline.
     if reinforcing_guidance_file.exists():
-        reinforcing_df = pl.read_ipc(reinforcing_guidance_file, memory_map=True)
+        reinforcing_df = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
         aligned_data["reinforcing_guided"] = interpolate_data(
             source_coordinates=reinforcing_df["time_us"].to_numpy(),
             source_values=reinforcing_df["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
@@ -122,7 +131,7 @@ def assemble_runtime_dataset(
 
     # Adds aversive guidance state if the file was produced by the processing pipeline.
     if aversive_guidance_file.exists():
-        aversive_df = pl.read_ipc(aversive_guidance_file, memory_map=True)
+        aversive_df = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
         aligned_data["aversive_guided"] = interpolate_data(
             source_coordinates=aversive_df["time_us"].to_numpy(),
             source_values=aversive_df["aversive_guidance_state"].to_numpy().astype(np.uint8),
@@ -166,7 +175,7 @@ def _check_trigger_zones(
     in_zone: NDArray[np.uint8] = np.zeros(distance_value_count, dtype=np.uint8)
 
     # If no trigger zones are defined, returns the binary array set to 0 everywhere.
-    if trigger_zone_count == 0:
+    if not trigger_zone_count:
         return in_zone
 
     # Tracks the current zone being checked.
@@ -225,8 +234,8 @@ def _mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame
     is_non_run = pl.col("system_state").is_in(non_run_states)
 
     return experiment_data.with_columns(
-        pl.when(is_non_run).then(pl.lit(255, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
-        pl.when(is_non_run).then(pl.lit(65535, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
+        pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
+        pl.when(is_non_run).then(pl.lit(_TRIAL_UNDEFINED, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
         pl.when(is_non_run)
         .then(pl.lit("undefined").cast(trial_type_dtype))
         .otherwise(pl.col("trial_type"))

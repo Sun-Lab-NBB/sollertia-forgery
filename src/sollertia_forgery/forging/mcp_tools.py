@@ -1,28 +1,28 @@
 """Provides Model Context Protocol (MCP) tools for the forging (dataset assembly) pipeline."""
 
-from __future__ import annotations  # pragma: no cover
+from __future__ import annotations
 
-from typing import Any  # pragma: no cover
-from pathlib import Path  # pragma: no cover
-from threading import Thread  # pragma: no cover
-import contextlib  # pragma: no cover
-from collections import deque  # pragma: no cover
-from dataclasses import dataclass  # pragma: no cover
+from typing import Any
+from pathlib import Path
+from threading import Thread
+import contextlib
+from collections import deque
+from dataclasses import dataclass
 
-from ataraxis_time import (  # pragma: no cover
+from ataraxis_time import (
     TimeUnits,
     TimestampFormats,
     TimestampPrecisions,
     convert_time,
     get_timestamp,
 )
-from ataraxis_base_utilities import resolve_worker_count  # pragma: no cover
-from sollertia_shared_assets import DatasetData  # pragma: no cover
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory  # pragma: no cover
+from ataraxis_base_utilities import resolve_worker_count
+from sollertia_shared_assets import DatasetData
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .pipeline import FORGING_JOB_NAME, TRACKER_FILENAME, resolve_dataset, run_forging_pipeline  # pragma: no cover
-from ..interfaces import mcp  # pragma: no cover
-from ..shared_assets import (  # pragma: no cover
+from .pipeline import FORGING_JOB_NAME, TRACKER_FILENAME, resolve_dataset, run_forging_pipeline
+from ..interfaces import mcp
+from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
@@ -36,8 +36,8 @@ from ..shared_assets import (  # pragma: no cover
 )
 
 
-@dataclass(slots=True)  # pragma: no cover
-class _ForgingPendingJob(PendingJob):  # pragma: no cover
+@dataclass(slots=True)
+class _ForgingPendingJob(PendingJob):
     """Describes a single forging assembly job queued for background execution.
 
     Extends the shared ``PendingJob`` base with the dataset-level metadata required by the forging worker
@@ -54,12 +54,12 @@ class _ForgingPendingJob(PendingJob):  # pragma: no cover
     """The human-readable session name used for logging and status reporting."""
 
 
-_job_execution_state: JobExecutionState[_ForgingPendingJob] | None = None  # pragma: no cover
+_job_execution_state: JobExecutionState[_ForgingPendingJob] | None = None
 """Stores the active execution state for batch forging jobs."""
 
 
-@mcp.tool()  # pragma: no cover
-def prepare_forging_batch_tool(  # pragma: no cover
+@mcp.tool()
+def prepare_forging_batch_tool(
     datasets: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Prepares an execution manifest for batch dataset forging without starting execution.
@@ -200,8 +200,8 @@ def prepare_forging_batch_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def execute_forging_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def execute_forging_jobs_tool(
     jobs: list[dict[str, str]],
     *,
     worker_budget: int = -1,
@@ -299,8 +299,8 @@ def execute_forging_jobs_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_forging_status_tool() -> dict[str, Any]:
     """Returns the current status of the active forging execution session.
 
     Reads ProcessingTracker files from disk for each job to report per-job progress. When no execution session
@@ -389,8 +389,8 @@ def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_forging_timing_tool() -> dict[str, Any]:
     """Returns timing information for all jobs in the active forging execution session.
 
     Reports elapsed time for running jobs and duration for completed jobs using microsecond-precision UTC
@@ -506,8 +506,8 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
     return {"active": manager_alive, "jobs": job_timing, "session": session}
 
 
-@mcp.tool()  # pragma: no cover
-def cancel_forging_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def cancel_forging_tool() -> dict[str, Any]:
     """Cancels the active forging execution session.
 
     Clears the pending job queue so no new jobs are dispatched. Active jobs complete naturally but no new jobs
@@ -555,8 +555,8 @@ def cancel_forging_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def reset_forging_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def reset_forging_jobs_tool(
     tracker_path: str,
     job_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -608,8 +608,8 @@ def reset_forging_jobs_tool(  # pragma: no cover
     return {"reset": True, "jobs_reset": len(target_ids), **updated_status}
 
 
-@mcp.tool()  # pragma: no cover
-def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes forging status for all datasets under a root directory.
 
     Recursively searches for ``forging.yaml`` tracker files and aggregates their status. Each tracker lives
@@ -683,8 +683,8 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
     }
 
 
-@mcp.tool()  # pragma: no cover
-def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
     """Verifies the completeness of forged data output for a single dataset.
 
     Loads the dataset's :class:`DatasetData` marker, then checks for a ``data.feather`` file within each
@@ -762,8 +762,8 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
     }
 
 
-@mcp.tool()  # pragma: no cover
-def query_forging_data_tool(  # pragma: no cover
+@mcp.tool()
+def query_forging_data_tool(
     feather_files: list[str],
     max_sample_rows: int = 10,
 ) -> dict[str, Any]:
@@ -789,8 +789,8 @@ def query_forging_data_tool(  # pragma: no cover
     return {"results": results, "total_files": len(results)}
 
 
-@mcp.tool()  # pragma: no cover
-def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:
     """Deletes the full dataset hierarchy for one or more datasets.
 
     For each dataset path, removes the entire directory tree (tracker, dataset metadata, and all per-session
@@ -822,15 +822,11 @@ def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pr
         dataset_path = Path(dataset_path_str)
 
         if not dataset_path.exists():
-            results.append(
-                {"dataset_path": dataset_path_str, "cleaned": True, "message": "Nothing to clean."}
-            )
+            results.append({"dataset_path": dataset_path_str, "cleaned": True, "message": "Nothing to clean."})
             continue
 
         if not dataset_path.is_dir():
-            results.append(
-                {"dataset_path": dataset_path_str, "cleaned": False, "error": "Path is not a directory."}
-            )
+            results.append({"dataset_path": dataset_path_str, "cleaned": False, "error": "Path is not a directory."})
             continue
 
         try:
@@ -847,7 +843,7 @@ def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pr
     return {"results": results, "total_cleaned": total_cleaned, "total_datasets": len(results)}
 
 
-def _run_forging_job(job: _ForgingPendingJob) -> None:  # pragma: no cover
+def _run_forging_job(job: _ForgingPendingJob) -> None:
     """Executes a single forging assembly job in-process via the pipeline's remote mode.
 
     Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch
