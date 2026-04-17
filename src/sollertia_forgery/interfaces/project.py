@@ -1,9 +1,4 @@
-"""Provides CLIs for interacting with projects stored on the remote compute server.
-
-Notes:
-    These interfaces allow fetching and displaying project data and processing state snapshots, and adopting shared
-    project data for further processing.
-"""
+"""Provides CLIs for interacting with sollertia project manifest files."""
 
 from pathlib import Path
 
@@ -26,7 +21,7 @@ CONTEXT_SETTINGS = {"max_content_width": 120}
     "--project",
     type=str,
     required=False,
-    help="The name of the server-stored project to work with (remote mode).",
+    help="The name of the project to work with.",
 )
 @click.option(
     "-pp",
@@ -154,58 +149,3 @@ def print_project_manifest_data(
     # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
-
-
-@project_cli.command("adopt")
-@click.option(
-    "-r",
-    "--repeat-adoption",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to re-adopt sessions that have already been adopted. If False (default), already-adopted "
-        "sessions are skipped during the adoption stage."
-    ),
-)
-@click.option(
-    "-k",
-    "--keep-job-logs",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to keep completed job logs on the server or (default) remove them after each pipeline "
-        "completes successfully. If the pipeline fails, the job logs are kept regardless of this argument's value."
-    ),
-)
-@click.pass_context
-def adopt_project_data(ctx: click.Context, *, repeat_adoption: bool, keep_job_logs: bool) -> None:
-    """Discovers and adopts all unadopted project sessions from the remote compute server.
-
-    This command scans the project's directory on the shared server's volume, identifies sessions that have not yet
-    been adopted (copied to the user's working directory), and executes the adoption pipeline followed by the data
-    integrity verification pipeline. Adopting the project's session data in this way is the prerequisite for running
-    all further processing and analysis workflows on the remote compute server. This command is not necessary to
-    run the processing in the local processing mode.
-    """
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    project_path = ctx.obj["project_path"]
-
-    # Blocks local mode for the adopt command.
-    if project_path is not None:
-        message = (
-            "The 'adopt' command is only available in the 'remote' mode. Local processing mode does not require "
-            "adopting the data to support the full range of processing offered by the Sollertia data workflow. "
-            "To run the command in the remote processing mode, use the '--project' argument instead of the "
-            "'--project-path' argument to specify the target project."
-        )
-        console.error(message=message, error=ValueError)
-
-    # Executes the adoption process.
-    adopt_project(
-        project=project,
-        repeat_adoption=repeat_adoption,
-        keep_job_logs=keep_job_logs,
-    )

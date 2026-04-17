@@ -18,7 +18,7 @@ from ataraxis_time import (  # pragma: no cover
 )
 from ataraxis_base_utilities import resolve_worker_count  # pragma: no cover
 from sollertia_shared_assets import DatasetData  # pragma: no cover
-from ataraxis_data_structures import delete_directory, ProcessingStatus, ProcessingTracker  # pragma: no cover
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory  # pragma: no cover
 
 from .pipeline import FORGING_JOB_NAME, TRACKER_FILENAME, resolve_dataset, run_forging_pipeline  # pragma: no cover
 from ..interfaces import mcp  # pragma: no cover
@@ -26,8 +26,8 @@ from ..shared_assets import (  # pragma: no cover
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
-    validate_directory,
     prepare_tracker,
+    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -88,22 +88,24 @@ def prepare_forging_batch_tool(  # pragma: no cover
     invalid_datasets: list[dict[str, Any]] = []
     total_jobs = 0
 
-    for spec in datasets:
+    for dataset_spec in datasets:
         # Validates the required keys.
-        name = spec.get("name")
-        project_root_str = spec.get("project_root")
+        name = dataset_spec.get("name")
+        project_root_str = dataset_spec.get("project_root")
         if not name or not project_root_str:
-            invalid_datasets.append({**spec, "error": "Missing required 'name' or 'project_root' key."})
+            invalid_datasets.append({**dataset_spec, "error": "Missing required 'name' or 'project_root' key."})
             continue
 
-        error = validate_directory(project_root_str)
+        name = str(name)
+        project_root_str = str(project_root_str)
+        error = validate_directory(directory=project_root_str)
         if error is not None:
             invalid_datasets.append({"name": name, "error": error})
             continue
 
         project_root = Path(project_root_str)
-        session_names = tuple(spec.get("session_names", []))
-        force_recreate = bool(spec.get("force_recreate", False))
+        session_names = tuple(dataset_spec.get("session_names", []))
+        force_recreate = bool(dataset_spec.get("force_recreate", False))
 
         # Resolves the dataset hierarchy without triggering execution.
         try:
@@ -118,51 +120,73 @@ def prepare_forging_batch_tool(  # pragma: no cover
             continue
 
         dataset_path = dataset.dataset_data_path.parent
-        tracker_path = dataset_path.joinpath(TRACKER_FILENAME)
+        tracker_path = dataset_path / TRACKER_FILENAME
 
         # Prepares the processing tracker and aligns it with the session set.
         tracker = ProcessingTracker(file_path=tracker_path)
         jobs_tuples = [(FORGING_JOB_NAME, entry.session) for entry in dataset.sessions]
         prepare_tracker(tracker=tracker, jobs=jobs_tuples)
 
-        # Reads the tracker state to enrich the manifest with per-job status.
-        try:
-            tracker_status = read_tracker_status(tracker_path=tracker_path)
-        except Exception:
-            tracker_status = {"jobs": [], "summary": {}}
-
-        # Builds enriched job descriptors.
-        tracker_jobs_by_id = {
+        # Builds enriched job descriptors directly from the in-memory tracker, which
+        # prepare_tracker just aligned. This avoids a redundant YAML deserialization.
+        session_by_job_id = {
             ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=entry.session): entry
             for entry in dataset.sessions
         }
 
         enriched_jobs: list[dict[str, Any]] = []
-        for tracker_entry in tracker_status.get("jobs", []):
-            entry_job_id = tracker_entry["job_id"]
-            if entry_job_id not in tracker_jobs_by_id:
-                continue
-            session_entry = tracker_jobs_by_id[entry_job_id]
-            enriched_jobs.append(
-                {
-                    **tracker_entry,
-                    "session_name": session_entry.session,
-                    "dataset_name": name,
-                    "project_root": project_root_str,
-                    "tracker_path": str(tracker_path),
-                }
-            )
+        succeeded_count = 0
+        failed_count = 0
+        running_count = 0
+        scheduled_count = 0
 
+        for job_id, job_state in tracker.jobs.items():
+            if job_id not in session_by_job_id:
+                continue
+            session_entry = session_by_job_id[job_id]
+            status = job_state.status
+
+            if status == ProcessingStatus.SUCCEEDED:
+                succeeded_count += 1
+            elif status == ProcessingStatus.FAILED:
+                failed_count += 1
+            elif status == ProcessingStatus.RUNNING:
+                running_count += 1
+            else:
+                scheduled_count += 1
+
+            entry: dict[str, Any] = {
+                "job_id": job_id,
+                "job_name": job_state.job_name,
+                "specifier": job_state.specifier,
+                "status": status.name,
+                "session_name": session_entry.session,
+                "dataset_name": name,
+                "project_root": project_root_str,
+                "tracker_path": str(tracker_path),
+            }
+            if job_state.error_message is not None:
+                entry["error_message"] = job_state.error_message
+            enriched_jobs.append(entry)
+
+        # Assembles the per-dataset manifest entry.
         result_datasets[name] = {
             "dataset_path": str(dataset_path),
             "tracker_path": str(tracker_path),
             "dataset_name": name,
             "project_root": project_root_str,
             "jobs": enriched_jobs,
-            "summary": tracker_status.get("summary", {}),
+            "summary": {
+                "total": len(tracker.jobs),
+                "succeeded": succeeded_count,
+                "failed": failed_count,
+                "running": running_count,
+                "scheduled": scheduled_count,
+            },
         }
         total_jobs += len(enriched_jobs)
 
+    # Packages the final response with aggregate counts and any invalid specs.
     result: dict[str, Any] = {
         "success": True,
         "datasets": result_datasets,
@@ -262,6 +286,7 @@ def execute_forging_jobs_tool(  # pragma: no cover
     manager.start()
     _job_execution_state.manager_thread = manager
 
+    # Packages the final response with job count and resolved budget.
     result: dict[str, Any] = {
         "started": True,
         "total_jobs": len(pending),
@@ -288,6 +313,7 @@ def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
     if _job_execution_state is None:
         return {"active": False, "message": "No execution session exists."}
 
+    # Snapshots current manager liveness and initializes per-status counters.
     state = _job_execution_state
     manager_alive = state.manager_thread is not None and state.manager_thread.is_alive()
 
@@ -297,10 +323,12 @@ def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
     running_count = 0
     scheduled_count = 0
 
+    # Reads each tracker file from disk and classifies jobs by status.
     for tracker_path, path_jobs in group_jobs_by_tracker(state=state).items():
         try:
             tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
         except Exception:
+            # Marks all jobs under an unreadable tracker as UNKNOWN.
             job_details.extend(
                 {
                     "job_id": job.job_id,
@@ -312,6 +340,7 @@ def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
             )
             continue
 
+        # Classifies each job's status and builds the detail entry.
         for job in path_jobs:
             if job.job_id in tracker.jobs:
                 job_state = tracker.jobs[job.job_id]
@@ -345,6 +374,7 @@ def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
                     }
                 )
 
+    # Assembles the response with per-job details and aggregate summary.
     return {
         "active": manager_alive,
         "canceled": state.canceled,
@@ -373,6 +403,7 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
     if _job_execution_state is None:
         return {"active": False, "message": "No execution session exists."}
 
+    # Captures current wall-clock time for elapsed-time calculations.
     state = _job_execution_state
     manager_alive = state.manager_thread is not None and state.manager_thread.is_alive()
 
@@ -382,7 +413,9 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
     earliest_start: int | None = None
     completed_count = 0
     failed_count = 0
+    running_count = 0
 
+    # Reads each tracker and extracts per-job timing information.
     for tracker_path, path_jobs in group_jobs_by_tracker(state=state).items():
         try:
             tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
@@ -400,12 +433,14 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
                 "session_name": job.session_name,
             }
 
+            # Records start timestamp and tracks the earliest start across all jobs.
             if job_info.started_at is not None:
                 started_at_us = int(job_info.started_at)
                 entry["started_at"] = started_at_us
                 if earliest_start is None or started_at_us < earliest_start:
                     earliest_start = started_at_us
 
+            # Computes live elapsed time for currently running jobs.
             if job_info.status == ProcessingStatus.RUNNING and job_info.started_at is not None:
                 elapsed_seconds = convert_time(
                     time=current_us - int(job_info.started_at),
@@ -414,7 +449,9 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
                     as_float=True,
                 )
                 entry["elapsed_seconds"] = round(elapsed_seconds, 2)
+                running_count += 1
 
+            # Computes final duration for completed jobs.
             if job_info.completed_at is not None:
                 entry["completed_at"] = int(job_info.completed_at)
                 if job_info.started_at is not None:
@@ -433,6 +470,7 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
 
             job_timing.append(entry)
 
+    # Calculates total wall-clock elapsed time from the earliest job start to now.
     total_elapsed_seconds = 0.0
     if earliest_start is not None:
         total_elapsed_seconds = round(
@@ -445,7 +483,7 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
             2,
         )
 
-    running_count = sum(1 for job_entry in job_timing if "elapsed_seconds" in job_entry)
+    # Assembles the session-level summary with per-status counts.
     session: dict[str, Any] = {
         "total_elapsed_seconds": total_elapsed_seconds,
         "completed_count": completed_count,
@@ -454,6 +492,7 @@ def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
         "pending_count": len(state.all_jobs) - completed_count - failed_count - running_count,
     }
 
+    # Derives throughput as completed jobs per hour when at least one job has finished.
     if completed_count > 0 and earliest_start is not None:
         elapsed_hours = convert_time(
             time=current_us - earliest_start,
@@ -483,12 +522,14 @@ def cancel_forging_tool() -> dict[str, Any]:  # pragma: no cover
 
     state = _job_execution_state
 
+    # Atomically drains the pending queue so no new jobs are dispatched.
     with state.lock:
         state.canceled = True
         cleared_count = len(state.pending_queue)
         state.pending_queue.clear()
         active_count = len(state.active_jobs)
 
+    # Scans all trackers to tally final succeeded/failed counts at the point of cancellation.
     succeeded = 0
     failed = 0
     tracker_paths: set[Path] = {job.tracker_path for job in state.all_jobs.values()}
@@ -502,6 +543,7 @@ def cancel_forging_tool() -> dict[str, Any]:  # pragma: no cover
                 elif job_state.status == ProcessingStatus.FAILED:
                     failed += 1
 
+    # Assembles the cancellation summary with final state snapshot.
     return {
         "canceled": True,
         "message": f"Canceled. Cleared {cleared_count} pending job(s). {active_count} job(s) still completing.",
@@ -527,6 +569,7 @@ def reset_forging_jobs_tool(  # pragma: no cover
     Returns:
         A dictionary containing a 'reset' flag, the number of jobs reset, and updated job statuses.
     """
+    # Loads and validates the tracker file.
     path = Path(tracker_path)
 
     if not path.exists():
@@ -537,12 +580,14 @@ def reset_forging_jobs_tool(  # pragma: no cover
     except Exception as error:
         return {"error": f"Unable to read tracker: {error}"}
 
+    # Resolves which job IDs to reset: all jobs if none specified, otherwise the intersection.
     tracker_ids = set(tracker.jobs.keys())
     target_ids = tracker_ids if job_ids is None else tracker_ids & set(job_ids)
 
     if not target_ids:
         return {"reset": False, "message": "No matching jobs found to reset."}
 
+    # Removes targeted jobs and re-initializes them as SCHEDULED in a fresh tracker.
     reset_jobs: list[tuple[str, str]] = [
         (tracker.jobs[job_id].job_name, tracker.jobs[job_id].specifier) for job_id in target_ids
     ]
@@ -554,6 +599,7 @@ def reset_forging_jobs_tool(  # pragma: no cover
     reset_tracker = ProcessingTracker(file_path=path)
     reset_tracker.initialize_jobs(jobs=reset_jobs)
 
+    # Reads back the updated tracker state to confirm the reset.
     try:
         updated_status = read_tracker_status(tracker_path=path)
     except Exception:
@@ -576,7 +622,8 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
     Returns:
         A dictionary containing per-dataset status summaries and aggregate counts.
     """
-    error = validate_directory(root_directory)
+    # Validates the root directory path.
+    error = validate_directory(directory=root_directory)
     if error is not None:
         return {"error": error}
 
@@ -587,6 +634,7 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
     aggregate_running = 0
     aggregate_scheduled = 0
 
+    # Discovers all tracker files and aggregates per-dataset status summaries.
     for found_tracker_path in sorted(root_path.rglob(TRACKER_FILENAME)):
         dataset_path = found_tracker_path.parent
         dataset_name = dataset_path.name
@@ -594,19 +642,20 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
             status = read_tracker_status(tracker_path=found_tracker_path)
             summary = status.get("summary", {})
 
+            # Accumulates cross-dataset totals for the aggregate summary.
             aggregate_succeeded += summary.get("succeeded", 0)
             aggregate_failed += summary.get("failed", 0)
             aggregate_running += summary.get("running", 0)
             aggregate_scheduled += summary.get("scheduled", 0)
 
-            dir_status = derive_tracker_status(summary=summary)
+            dataset_status = derive_tracker_status(summary=summary)
 
             dataset_statuses.append(
                 {
                     "dataset_name": dataset_name,
                     "dataset_path": str(dataset_path),
                     "tracker_path": str(found_tracker_path),
-                    "status": dir_status,
+                    "status": dataset_status,
                     **status,
                 }
             )
@@ -621,6 +670,7 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
                 }
             )
 
+    # Assembles the response with per-dataset entries and cross-dataset aggregates.
     return {
         "datasets": dataset_statuses,
         "total_datasets": len(dataset_statuses),
@@ -648,7 +698,8 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
         A dictionary containing a 'verified' flag, per-file results in 'files', tracker status in 'tracker',
         and aggregate counts.
     """
-    error = validate_directory(dataset_path)
+    # Validates the dataset directory path and loads the dataset metadata.
+    error = validate_directory(directory=dataset_path)
     if error is not None:
         return {"error": error}
 
@@ -662,8 +713,9 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
     file_results: list[dict[str, Any]] = []
     all_valid = True
 
+    # Checks each session's feather file for existence and readability.
     for session_entry in dataset.sessions:
-        feather_path = session_entry.session_path.joinpath("data.feather")
+        feather_path = session_entry.session_path / "data.feather"
         entry: dict[str, Any] = {
             "session_name": session_entry.session,
             "animal": session_entry.animal,
@@ -677,6 +729,7 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
             file_results.append(entry)
             continue
 
+        # Loads the feather file without sampling to confirm readability and extract metadata.
         analysis = analyze_feather_file(feather_file=str(feather_path), max_sample_rows=0)
         if "error" in analysis:
             entry["valid"] = False
@@ -689,7 +742,8 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
             entry["row_count"] = summary.get("total_rows", 0)
         file_results.append(entry)
 
-    tracker_path = dataset.dataset_data_path.parent.joinpath(TRACKER_FILENAME)
+    # Reads the forging tracker to include per-job pipeline statuses alongside file checks.
+    tracker_path = dataset.dataset_data_path.parent / TRACKER_FILENAME
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:
@@ -697,6 +751,7 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: 
         except Exception:
             tracker_info = {"error": "Unable to read tracker file."}
 
+    # Assembles the verification result with per-file outcomes and tracker state.
     return {
         "verified": all_valid and bool(file_results),
         "dataset_path": str(dataset_root),
@@ -725,6 +780,7 @@ def query_forging_data_tool(  # pragma: no cover
     Returns:
         A dictionary containing a 'results' list with per-file summaries and a 'total_files' count.
     """
+    # Analyzes each feather file for row count, column metadata, and sample rows.
     results = [
         analyze_feather_file(feather_file=feather_file, max_sample_rows=max_sample_rows)
         for feather_file in feather_files
@@ -751,6 +807,7 @@ def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pr
     Returns:
         A dictionary containing per-dataset outcomes and a 'total_cleaned' count.
     """
+    # Refuses to clean while jobs are still running to prevent data loss.
     if (
         _job_execution_state is not None
         and _job_execution_state.manager_thread is not None
@@ -760,6 +817,7 @@ def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pr
 
     results: list[dict[str, Any]] = []
 
+    # Validates and deletes each dataset directory tree.
     for dataset_path_str in dataset_paths:
         dataset_path = Path(dataset_path_str)
 
@@ -783,6 +841,7 @@ def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pr
                 {"dataset_path": dataset_path_str, "cleaned": False, "error": f"Unable to delete: {delete_error}"}
             )
 
+    # Tallies how many datasets were successfully cleaned.
     total_cleaned = sum(1 for result in results if result.get("cleaned", False))
 
     return {"results": results, "total_cleaned": total_cleaned, "total_datasets": len(results)}
