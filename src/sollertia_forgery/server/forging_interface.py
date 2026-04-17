@@ -273,7 +273,6 @@ def _construct_data_assembly_pipeline(
     project: str,
     server: Server,
     *,
-    target_session: str | None = None,
     keep_job_logs: bool = False,
 ) -> ProcessingPipeline:
     """Generates and returns the ProcessingPipeline instance used to execute the data assembly pipeline for the target
@@ -284,7 +283,6 @@ def _construct_data_assembly_pipeline(
         project: The name of the project for which to execute the target processing pipeline.
         server: The Server class instance that manages access to the remote server that executes the pipeline and
             stores the target session's data.
-        target_session: If provided, limits the pipeline to assemble only the specified session.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
             value.
@@ -301,8 +299,6 @@ def _construct_data_assembly_pipeline(
 
     # Collects the session names from the dataset.
     session_names = [s.session for s in dataset.sessions]
-    if target_session is not None:
-        session_names = [target_session]
 
     # Extracts the first animal from the dataset for pipeline metadata.
     first_animal = dataset.animals[0] if dataset.animals else "unknown"
@@ -328,7 +324,7 @@ def _construct_data_assembly_pipeline(
             ram=32,
             time=60,
         )
-        job.add_command(f"sl-process assemble -dp {remote_dataset_path} -pr {project_root} -id {job_id} -t {session}")
+        job.add_command(f"sl-process assemble -dp {remote_dataset_path} -pr {project_root} -id {job_id}")
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.

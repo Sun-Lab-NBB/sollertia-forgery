@@ -1,0 +1,808 @@
+"""Provides Model Context Protocol (MCP) tools for the forging (dataset assembly) pipeline."""
+
+from __future__ import annotations  # pragma: no cover
+
+from typing import Any  # pragma: no cover
+from pathlib import Path  # pragma: no cover
+from threading import Thread  # pragma: no cover
+import contextlib  # pragma: no cover
+from collections import deque  # pragma: no cover
+from dataclasses import dataclass  # pragma: no cover
+
+from ataraxis_time import (  # pragma: no cover
+    TimeUnits,
+    TimestampFormats,
+    TimestampPrecisions,
+    convert_time,
+    get_timestamp,
+)
+from ataraxis_base_utilities import resolve_worker_count  # pragma: no cover
+from sollertia_shared_assets import DatasetData  # pragma: no cover
+from ataraxis_data_structures import delete_directory, ProcessingStatus, ProcessingTracker  # pragma: no cover
+
+from .pipeline import FORGING_JOB_NAME, TRACKER_FILENAME, resolve_dataset, run_forging_pipeline  # pragma: no cover
+from ..interfaces import mcp  # pragma: no cover
+from ..shared_assets import (  # pragma: no cover
+    RESERVED_CORES,
+    PendingJob,
+    JobExecutionState,
+    validate_directory,
+    prepare_tracker,
+    read_tracker_status,
+    analyze_feather_file,
+    derive_tracker_status,
+    group_jobs_by_tracker,
+    job_execution_manager,
+)
+
+
+@dataclass(slots=True)  # pragma: no cover
+class _ForgingPendingJob(PendingJob):  # pragma: no cover
+    """Describes a single forging assembly job queued for background execution.
+
+    Extends the shared ``PendingJob`` base with the dataset-level metadata required by the forging worker
+    callable: the dataset name and the project root (passed to ``run_forging_pipeline`` in remote mode), and
+    the session name for human-readable logging and status reporting. Path resolution (session directories,
+    output paths) happens inside the worker subprocess via the pipeline's remote-mode routing.
+    """
+
+    dataset_name: str
+    """The name of the dataset this job belongs to."""
+    project_root: Path
+    """The project root directory passed to ``run_forging_pipeline``."""
+    session_name: str
+    """The human-readable session name used for logging and status reporting."""
+
+
+_job_execution_state: JobExecutionState[_ForgingPendingJob] | None = None  # pragma: no cover
+"""Stores the active execution state for batch forging jobs."""
+
+
+@mcp.tool()  # pragma: no cover
+def prepare_forging_batch_tool(  # pragma: no cover
+    datasets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Prepares an execution manifest for batch dataset forging without starting execution.
+
+    Accepts a list of dataset specifications, resolves each dataset hierarchy (creating, loading, or recreating
+    as needed via :func:`resolve_dataset`), and initializes a :class:`ProcessingTracker` under each dataset
+    directory. Idempotent: if a tracker already exists and the session set matches, returns the existing tracker
+    state instead of reinitializing.
+
+    Important:
+        The AI agent calling this tool MUST run session discovery and filtering first to obtain confirmed
+        session names. Do not assume or guess session names. Each dataset spec is resolved independently so
+        that a failure in one dataset does not block the others.
+
+    Args:
+        datasets: The list of dataset specification dictionaries. Each dictionary must have a 'name' key
+            (the dataset name) and a 'project_root' key (the absolute path to the project root). Optional keys
+            are 'session_names' (a list of session name strings; empty or omitted to reuse an existing dataset)
+            and 'force_recreate' (a boolean; defaults to False).
+
+    Returns:
+        A dictionary containing per-dataset manifests in ``datasets`` (keyed by dataset name) with tracker
+        paths and job lists, total counts, and any invalid dataset specifications in ``invalid_datasets``.
+    """
+    result_datasets: dict[str, Any] = {}
+    invalid_datasets: list[dict[str, Any]] = []
+    total_jobs = 0
+
+    for spec in datasets:
+        # Validates the required keys.
+        name = spec.get("name")
+        project_root_str = spec.get("project_root")
+        if not name or not project_root_str:
+            invalid_datasets.append({**spec, "error": "Missing required 'name' or 'project_root' key."})
+            continue
+
+        error = validate_directory(project_root_str)
+        if error is not None:
+            invalid_datasets.append({"name": name, "error": error})
+            continue
+
+        project_root = Path(project_root_str)
+        session_names = tuple(spec.get("session_names", []))
+        force_recreate = bool(spec.get("force_recreate", False))
+
+        # Resolves the dataset hierarchy without triggering execution.
+        try:
+            dataset = resolve_dataset(
+                name=name,
+                session_names=session_names,
+                project_root=project_root,
+                force_recreate=force_recreate,
+            )
+        except Exception as resolve_error:
+            invalid_datasets.append({"name": name, "error": str(resolve_error)})
+            continue
+
+        dataset_path = dataset.dataset_data_path.parent
+        tracker_path = dataset_path.joinpath(TRACKER_FILENAME)
+
+        # Prepares the processing tracker and aligns it with the session set.
+        tracker = ProcessingTracker(file_path=tracker_path)
+        jobs_tuples = [(FORGING_JOB_NAME, entry.session) for entry in dataset.sessions]
+        prepare_tracker(tracker=tracker, jobs=jobs_tuples)
+
+        # Reads the tracker state to enrich the manifest with per-job status.
+        try:
+            tracker_status = read_tracker_status(tracker_path=tracker_path)
+        except Exception:
+            tracker_status = {"jobs": [], "summary": {}}
+
+        # Builds enriched job descriptors.
+        tracker_jobs_by_id = {
+            ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=entry.session): entry
+            for entry in dataset.sessions
+        }
+
+        enriched_jobs: list[dict[str, Any]] = []
+        for tracker_entry in tracker_status.get("jobs", []):
+            entry_job_id = tracker_entry["job_id"]
+            if entry_job_id not in tracker_jobs_by_id:
+                continue
+            session_entry = tracker_jobs_by_id[entry_job_id]
+            enriched_jobs.append(
+                {
+                    **tracker_entry,
+                    "session_name": session_entry.session,
+                    "dataset_name": name,
+                    "project_root": project_root_str,
+                    "tracker_path": str(tracker_path),
+                }
+            )
+
+        result_datasets[name] = {
+            "dataset_path": str(dataset_path),
+            "tracker_path": str(tracker_path),
+            "dataset_name": name,
+            "project_root": project_root_str,
+            "jobs": enriched_jobs,
+            "summary": tracker_status.get("summary", {}),
+        }
+        total_jobs += len(enriched_jobs)
+
+    result: dict[str, Any] = {
+        "success": True,
+        "datasets": result_datasets,
+        "total_datasets": len(result_datasets),
+        "total_jobs": total_jobs,
+    }
+
+    if invalid_datasets:
+        result["invalid_datasets"] = invalid_datasets
+
+    return result
+
+
+@mcp.tool()  # pragma: no cover
+def execute_forging_jobs_tool(  # pragma: no cover
+    jobs: list[dict[str, str]],
+    *,
+    worker_budget: int = -1,
+) -> dict[str, Any]:
+    """Dispatches forging assembly jobs for background execution with budget-bounded concurrency.
+
+    Takes job descriptors from the manifest produced by :func:`prepare_forging_batch_tool` and starts a
+    background execution manager that runs each job in a separate worker subprocess. Each job invokes
+    :func:`run_forging_pipeline` in remote mode with the descriptor's ``job_id`` so that only that single
+    session assembly is executed. The worker budget directly controls memory footprint since each worker
+    spawns a separate process.
+
+    Important:
+        Only one execution session can be active at a time. Use :func:`cancel_forging_tool` to cancel an
+        active session before starting a new one.
+
+    Args:
+        jobs: The list of job descriptors from :func:`prepare_forging_batch_tool`. Each dictionary must have
+            'tracker_path', 'job_id', 'dataset_name', 'project_root', and 'session_name' keys.
+        worker_budget: The total number of CPU cores available for the execution session. Set to -1 for
+            automatic resolution via :func:`ataraxis_base_utilities.resolve_worker_count`.
+
+    Returns:
+        A dictionary containing a 'started' flag, 'total_jobs', resolved worker budget, and any invalid jobs.
+    """
+    global _job_execution_state
+
+    # Enforces single-session constraint.
+    if (
+        _job_execution_state is not None
+        and _job_execution_state.manager_thread is not None
+        and _job_execution_state.manager_thread.is_alive()
+    ):
+        return {"error": "An execution session is already active. Cancel it first or wait for completion."}
+
+    # Validates and builds pending jobs.
+    required_keys = {"tracker_path", "job_id", "dataset_name", "project_root", "session_name"}
+    pending: list[_ForgingPendingJob] = []
+    all_jobs: dict[tuple[str, str], _ForgingPendingJob] = {}
+    invalid_jobs: list[dict[str, Any]] = []
+
+    for job_dict in jobs:
+        missing = required_keys - job_dict.keys()
+        if missing:
+            invalid_jobs.append({**job_dict, "error": f"Missing required keys: {sorted(missing)}"})
+            continue
+
+        tracker_path = Path(job_dict["tracker_path"])
+        if not tracker_path.exists():
+            invalid_jobs.append({**job_dict, "error": f"Tracker file not found: {job_dict['tracker_path']}"})
+            continue
+
+        pending_job = _ForgingPendingJob(
+            tracker_path=tracker_path,
+            job_id=job_dict["job_id"],
+            dataset_name=job_dict["dataset_name"],
+            project_root=Path(job_dict["project_root"]),
+            session_name=job_dict["session_name"],
+        )
+        pending.append(pending_job)
+        all_jobs[pending_job.dispatch_key] = pending_job
+
+    if not pending:
+        return {"error": "No valid jobs to execute.", "invalid_jobs": invalid_jobs}
+
+    # Resolves the total worker budget.
+    resolved_budget = resolve_worker_count(requested_workers=worker_budget, reserved_cores=RESERVED_CORES)
+
+    # Creates the execution state and starts the shared manager thread.
+    _job_execution_state = JobExecutionState[_ForgingPendingJob](
+        worker=_run_forging_job,
+        all_jobs=all_jobs,
+        pending_queue=deque(pending),
+        worker_budget=resolved_budget,
+    )
+
+    manager = Thread(
+        target=job_execution_manager,
+        kwargs={"state": _job_execution_state},
+        daemon=True,
+    )
+    manager.start()
+    _job_execution_state.manager_thread = manager
+
+    result: dict[str, Any] = {
+        "started": True,
+        "total_jobs": len(pending),
+        "worker_budget": resolved_budget,
+    }
+
+    if invalid_jobs:
+        result["invalid_jobs"] = invalid_jobs
+
+    return result
+
+
+@mcp.tool()  # pragma: no cover
+def get_forging_status_tool() -> dict[str, Any]:  # pragma: no cover
+    """Returns the current status of the active forging execution session.
+
+    Reads ProcessingTracker files from disk for each job to report per-job progress. When no execution session
+    exists, returns an inactive status.
+
+    Returns:
+        A dictionary containing an 'active' flag, per-job status entries in 'jobs', and a 'summary' with counts
+        for pending, running, succeeded, and failed jobs.
+    """
+    if _job_execution_state is None:
+        return {"active": False, "message": "No execution session exists."}
+
+    state = _job_execution_state
+    manager_alive = state.manager_thread is not None and state.manager_thread.is_alive()
+
+    job_details: list[dict[str, Any]] = []
+    succeeded_count = 0
+    failed_count = 0
+    running_count = 0
+    scheduled_count = 0
+
+    for tracker_path, path_jobs in group_jobs_by_tracker(state=state).items():
+        try:
+            tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
+        except Exception:
+            job_details.extend(
+                {
+                    "job_id": job.job_id,
+                    "dataset_name": job.dataset_name,
+                    "session_name": job.session_name,
+                    "status": "UNKNOWN",
+                }
+                for job in path_jobs
+            )
+            continue
+
+        for job in path_jobs:
+            if job.job_id in tracker.jobs:
+                job_state = tracker.jobs[job.job_id]
+                status = job_state.status
+
+                if status == ProcessingStatus.SUCCEEDED:
+                    succeeded_count += 1
+                elif status == ProcessingStatus.FAILED:
+                    failed_count += 1
+                elif status == ProcessingStatus.RUNNING:
+                    running_count += 1
+                else:
+                    scheduled_count += 1
+
+                entry: dict[str, Any] = {
+                    "job_id": job.job_id,
+                    "dataset_name": job.dataset_name,
+                    "session_name": job.session_name,
+                    "status": status.name,
+                }
+                if job_state.error_message is not None:
+                    entry["error_message"] = job_state.error_message
+                job_details.append(entry)
+            else:
+                job_details.append(
+                    {
+                        "job_id": job.job_id,
+                        "dataset_name": job.dataset_name,
+                        "session_name": job.session_name,
+                        "status": "UNKNOWN",
+                    }
+                )
+
+    return {
+        "active": manager_alive,
+        "canceled": state.canceled,
+        "jobs": job_details,
+        "summary": {
+            "total": len(state.all_jobs),
+            "succeeded": succeeded_count,
+            "failed": failed_count,
+            "running": running_count,
+            "scheduled": scheduled_count,
+        },
+    }
+
+
+@mcp.tool()  # pragma: no cover
+def get_forging_timing_tool() -> dict[str, Any]:  # pragma: no cover
+    """Returns timing information for all jobs in the active forging execution session.
+
+    Reports elapsed time for running jobs and duration for completed jobs using microsecond-precision UTC
+    timestamps recorded in the ProcessingTracker.
+
+    Returns:
+        A dictionary containing an 'active' flag, per-job timing in 'jobs', and a 'session' summary with total
+        elapsed seconds and throughput.
+    """
+    if _job_execution_state is None:
+        return {"active": False, "message": "No execution session exists."}
+
+    state = _job_execution_state
+    manager_alive = state.manager_thread is not None and state.manager_thread.is_alive()
+
+    current_us = int(get_timestamp(output_format=TimestampFormats.INTEGER, precision=TimestampPrecisions.MICROSECOND))
+
+    job_timing: list[dict[str, Any]] = []
+    earliest_start: int | None = None
+    completed_count = 0
+    failed_count = 0
+
+    for tracker_path, path_jobs in group_jobs_by_tracker(state=state).items():
+        try:
+            tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
+        except Exception:  # noqa: S112
+            continue
+
+        for job in path_jobs:
+            if job.job_id not in tracker.jobs:
+                continue
+
+            job_info = tracker.jobs[job.job_id]
+            entry: dict[str, Any] = {
+                "job_id": job.job_id,
+                "dataset_name": job.dataset_name,
+                "session_name": job.session_name,
+            }
+
+            if job_info.started_at is not None:
+                started_at_us = int(job_info.started_at)
+                entry["started_at"] = started_at_us
+                if earliest_start is None or started_at_us < earliest_start:
+                    earliest_start = started_at_us
+
+            if job_info.status == ProcessingStatus.RUNNING and job_info.started_at is not None:
+                elapsed_seconds = convert_time(
+                    time=current_us - int(job_info.started_at),
+                    from_units=TimeUnits.MICROSECOND,
+                    to_units=TimeUnits.SECOND,
+                    as_float=True,
+                )
+                entry["elapsed_seconds"] = round(elapsed_seconds, 2)
+
+            if job_info.completed_at is not None:
+                entry["completed_at"] = int(job_info.completed_at)
+                if job_info.started_at is not None:
+                    duration_seconds = convert_time(
+                        time=int(job_info.completed_at) - int(job_info.started_at),
+                        from_units=TimeUnits.MICROSECOND,
+                        to_units=TimeUnits.SECOND,
+                        as_float=True,
+                    )
+                    entry["duration_seconds"] = round(duration_seconds, 2)
+
+            if job_info.status == ProcessingStatus.SUCCEEDED:
+                completed_count += 1
+            elif job_info.status == ProcessingStatus.FAILED:
+                failed_count += 1
+
+            job_timing.append(entry)
+
+    total_elapsed_seconds = 0.0
+    if earliest_start is not None:
+        total_elapsed_seconds = round(
+            convert_time(
+                time=current_us - earliest_start,
+                from_units=TimeUnits.MICROSECOND,
+                to_units=TimeUnits.SECOND,
+                as_float=True,
+            ),
+            2,
+        )
+
+    running_count = sum(1 for job_entry in job_timing if "elapsed_seconds" in job_entry)
+    session: dict[str, Any] = {
+        "total_elapsed_seconds": total_elapsed_seconds,
+        "completed_count": completed_count,
+        "failed_count": failed_count,
+        "running_count": running_count,
+        "pending_count": len(state.all_jobs) - completed_count - failed_count - running_count,
+    }
+
+    if completed_count > 0 and earliest_start is not None:
+        elapsed_hours = convert_time(
+            time=current_us - earliest_start,
+            from_units=TimeUnits.MICROSECOND,
+            to_units=TimeUnits.HOUR,
+            as_float=True,
+        )
+        if elapsed_hours > 0:
+            session["throughput_jobs_per_hour"] = round(completed_count / elapsed_hours, 2)
+
+    return {"active": manager_alive, "jobs": job_timing, "session": session}
+
+
+@mcp.tool()  # pragma: no cover
+def cancel_forging_tool() -> dict[str, Any]:  # pragma: no cover
+    """Cancels the active forging execution session.
+
+    Clears the pending job queue so no new jobs are dispatched. Active jobs complete naturally but no new jobs
+    are started.
+
+    Returns:
+        A dictionary containing a 'canceled' flag, a 'message', and 'final_state' with counts for succeeded,
+        failed, and active jobs at the time of cancellation.
+    """
+    if _job_execution_state is None:
+        return {"canceled": False, "message": "No execution session is active."}
+
+    state = _job_execution_state
+
+    with state.lock:
+        state.canceled = True
+        cleared_count = len(state.pending_queue)
+        state.pending_queue.clear()
+        active_count = len(state.active_jobs)
+
+    succeeded = 0
+    failed = 0
+    tracker_paths: set[Path] = {job.tracker_path for job in state.all_jobs.values()}
+
+    for tracker_path in tracker_paths:
+        with contextlib.suppress(Exception):
+            tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
+            for job_state in tracker.jobs.values():
+                if job_state.status == ProcessingStatus.SUCCEEDED:
+                    succeeded += 1
+                elif job_state.status == ProcessingStatus.FAILED:
+                    failed += 1
+
+    return {
+        "canceled": True,
+        "message": f"Canceled. Cleared {cleared_count} pending job(s). {active_count} job(s) still completing.",
+        "final_state": {
+            "succeeded_jobs": succeeded,
+            "failed_jobs": failed,
+            "active_jobs_at_cancel": active_count,
+        },
+    }
+
+
+@mcp.tool()  # pragma: no cover
+def reset_forging_jobs_tool(  # pragma: no cover
+    tracker_path: str,
+    job_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Resets specific jobs or all jobs in a forging tracker to scheduled status for re-runs.
+
+    Args:
+        tracker_path: The absolute path to the forging :class:`ProcessingTracker` YAML file.
+        job_ids: An optional list of job IDs to reset. If not provided, every job in the tracker is reset.
+
+    Returns:
+        A dictionary containing a 'reset' flag, the number of jobs reset, and updated job statuses.
+    """
+    path = Path(tracker_path)
+
+    if not path.exists():
+        return {"error": f"Tracker file not found: {tracker_path}"}
+
+    try:
+        tracker = ProcessingTracker.from_yaml(file_path=path)
+    except Exception as error:
+        return {"error": f"Unable to read tracker: {error}"}
+
+    tracker_ids = set(tracker.jobs.keys())
+    target_ids = tracker_ids if job_ids is None else tracker_ids & set(job_ids)
+
+    if not target_ids:
+        return {"reset": False, "message": "No matching jobs found to reset."}
+
+    reset_jobs: list[tuple[str, str]] = [
+        (tracker.jobs[job_id].job_name, tracker.jobs[job_id].specifier) for job_id in target_ids
+    ]
+
+    for job_id in target_ids:
+        del tracker.jobs[job_id]
+    tracker.to_yaml(file_path=path)
+
+    reset_tracker = ProcessingTracker(file_path=path)
+    reset_tracker.initialize_jobs(jobs=reset_jobs)
+
+    try:
+        updated_status = read_tracker_status(tracker_path=path)
+    except Exception:
+        updated_status = {"jobs": [], "summary": {}}
+
+    return {"reset": True, "jobs_reset": len(target_ids), **updated_status}
+
+
+@mcp.tool()  # pragma: no cover
+def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
+    """Discovers and summarizes forging status for all datasets under a root directory.
+
+    Recursively searches for ``forging.yaml`` tracker files and aggregates their status. Each tracker lives
+    at ``<project_root>/<dataset_name>/forging.yaml``, so the tracker's parent directory is the dataset root
+    and its name is the dataset name.
+
+    Args:
+        root_directory: The absolute path to the root directory to search for tracker files.
+
+    Returns:
+        A dictionary containing per-dataset status summaries and aggregate counts.
+    """
+    error = validate_directory(root_directory)
+    if error is not None:
+        return {"error": error}
+
+    root_path = Path(root_directory)
+    dataset_statuses: list[dict[str, Any]] = []
+    aggregate_succeeded = 0
+    aggregate_failed = 0
+    aggregate_running = 0
+    aggregate_scheduled = 0
+
+    for found_tracker_path in sorted(root_path.rglob(TRACKER_FILENAME)):
+        dataset_path = found_tracker_path.parent
+        dataset_name = dataset_path.name
+        try:
+            status = read_tracker_status(tracker_path=found_tracker_path)
+            summary = status.get("summary", {})
+
+            aggregate_succeeded += summary.get("succeeded", 0)
+            aggregate_failed += summary.get("failed", 0)
+            aggregate_running += summary.get("running", 0)
+            aggregate_scheduled += summary.get("scheduled", 0)
+
+            dir_status = derive_tracker_status(summary=summary)
+
+            dataset_statuses.append(
+                {
+                    "dataset_name": dataset_name,
+                    "dataset_path": str(dataset_path),
+                    "tracker_path": str(found_tracker_path),
+                    "status": dir_status,
+                    **status,
+                }
+            )
+        except Exception:
+            dataset_statuses.append(
+                {
+                    "dataset_name": dataset_name,
+                    "dataset_path": str(dataset_path),
+                    "tracker_path": str(found_tracker_path),
+                    "status": "error",
+                    "error": "Unable to read tracker file.",
+                }
+            )
+
+    return {
+        "datasets": dataset_statuses,
+        "total_datasets": len(dataset_statuses),
+        "summary": {
+            "succeeded": aggregate_succeeded,
+            "failed": aggregate_failed,
+            "running": aggregate_running,
+            "scheduled": aggregate_scheduled,
+        },
+    }
+
+
+@mcp.tool()  # pragma: no cover
+def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:  # pragma: no cover
+    """Verifies the completeness of forged data output for a single dataset.
+
+    Loads the dataset's :class:`DatasetData` marker, then checks for a ``data.feather`` file within each
+    session's directory in the dataset hierarchy. Each feather file is loaded to confirm readability and to
+    report its row and column counts. The forging processing tracker is also read to report per-job statuses.
+
+    Args:
+        dataset_path: The absolute path to the dataset root directory (containing ``dataset_data.yaml``).
+
+    Returns:
+        A dictionary containing a 'verified' flag, per-file results in 'files', tracker status in 'tracker',
+        and aggregate counts.
+    """
+    error = validate_directory(dataset_path)
+    if error is not None:
+        return {"error": error}
+
+    dataset_root = Path(dataset_path)
+
+    try:
+        dataset = DatasetData.load(dataset_path=dataset_root)
+    except Exception as load_error:
+        return {"error": f"Unable to load dataset: {load_error}"}
+
+    file_results: list[dict[str, Any]] = []
+    all_valid = True
+
+    for session_entry in dataset.sessions:
+        feather_path = session_entry.session_path.joinpath("data.feather")
+        entry: dict[str, Any] = {
+            "session_name": session_entry.session,
+            "animal": session_entry.animal,
+            "file": str(feather_path),
+        }
+
+        if not feather_path.exists():
+            entry["valid"] = False
+            entry["error"] = "data.feather not found."
+            all_valid = False
+            file_results.append(entry)
+            continue
+
+        analysis = analyze_feather_file(feather_file=str(feather_path), max_sample_rows=0)
+        if "error" in analysis:
+            entry["valid"] = False
+            entry["error"] = analysis["error"]
+            all_valid = False
+        else:
+            summary = analysis.get("summary", {})
+            entry["valid"] = True
+            entry["columns"] = summary.get("columns", [])
+            entry["row_count"] = summary.get("total_rows", 0)
+        file_results.append(entry)
+
+    tracker_path = dataset.dataset_data_path.parent.joinpath(TRACKER_FILENAME)
+    tracker_info: dict[str, Any] = {}
+    if tracker_path.exists():
+        try:
+            tracker_info = read_tracker_status(tracker_path=tracker_path)
+        except Exception:
+            tracker_info = {"error": "Unable to read tracker file."}
+
+    return {
+        "verified": all_valid and bool(file_results),
+        "dataset_path": str(dataset_root),
+        "dataset_name": dataset.name,
+        "files": file_results,
+        "total_files": len(file_results),
+        "tracker": tracker_info,
+    }
+
+
+@mcp.tool()  # pragma: no cover
+def query_forging_data_tool(  # pragma: no cover
+    feather_files: list[str],
+    max_sample_rows: int = 10,
+) -> dict[str, Any]:
+    """Reads one or more forged dataset feather files and returns row counts, column metadata, and samples.
+
+    For each file, computes the total row count, the list of columns, inter-row timing statistics (when a
+    time column is present), and a configurable number of sample rows. Accepts feather file paths from the
+    'files' list returned by :func:`verify_forging_output_tool`.
+
+    Args:
+        feather_files: The list of absolute paths to feather files produced by the forging pipeline.
+        max_sample_rows: The maximum number of sample rows to include per file. Defaults to 10.
+
+    Returns:
+        A dictionary containing a 'results' list with per-file summaries and a 'total_files' count.
+    """
+    results = [
+        analyze_feather_file(feather_file=feather_file, max_sample_rows=max_sample_rows)
+        for feather_file in feather_files
+    ]
+
+    return {"results": results, "total_files": len(results)}
+
+
+@mcp.tool()  # pragma: no cover
+def clean_forging_output_tool(dataset_paths: list[str]) -> dict[str, Any]:  # pragma: no cover
+    """Deletes the full dataset hierarchy for one or more datasets.
+
+    For each dataset path, removes the entire directory tree (tracker, dataset metadata, and all per-session
+    ``data.feather`` files). After cleanup, the same dataset specifications can be passed back to
+    :func:`prepare_forging_batch_tool` to reinitialize from scratch.
+
+    Important:
+        This tool refuses to run while a forging execution session is active. Cancel any running session
+        before calling this tool.
+
+    Args:
+        dataset_paths: The list of absolute paths to dataset root directories to delete.
+
+    Returns:
+        A dictionary containing per-dataset outcomes and a 'total_cleaned' count.
+    """
+    if (
+        _job_execution_state is not None
+        and _job_execution_state.manager_thread is not None
+        and _job_execution_state.manager_thread.is_alive()
+    ):
+        return {"error": "Cannot clean while an execution session is active. Cancel it first."}
+
+    results: list[dict[str, Any]] = []
+
+    for dataset_path_str in dataset_paths:
+        dataset_path = Path(dataset_path_str)
+
+        if not dataset_path.exists():
+            results.append(
+                {"dataset_path": dataset_path_str, "cleaned": True, "message": "Nothing to clean."}
+            )
+            continue
+
+        if not dataset_path.is_dir():
+            results.append(
+                {"dataset_path": dataset_path_str, "cleaned": False, "error": "Path is not a directory."}
+            )
+            continue
+
+        try:
+            delete_directory(directory_path=dataset_path)
+            results.append({"dataset_path": dataset_path_str, "cleaned": True})
+        except Exception as delete_error:
+            results.append(
+                {"dataset_path": dataset_path_str, "cleaned": False, "error": f"Unable to delete: {delete_error}"}
+            )
+
+    total_cleaned = sum(1 for result in results if result.get("cleaned", False))
+
+    return {"results": results, "total_cleaned": total_cleaned, "total_datasets": len(results)}
+
+
+def _run_forging_job(job: _ForgingPendingJob) -> None:  # pragma: no cover
+    """Executes a single forging assembly job in-process via the pipeline's remote mode.
+
+    Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch
+    manager's ``ProcessPoolExecutor``. Delegates to ``run_forging_pipeline`` with an empty session list (the
+    dataset is already materialized) and the job's ``job_id`` in remote mode so that only the single session
+    identified by the job ID is assembled.
+
+    Args:
+        job: The pending job descriptor produced by ``prepare_forging_batch_tool`` and attached to the active
+            ``JobExecutionState`` by ``execute_forging_jobs_tool``.
+    """
+    run_forging_pipeline(
+        name=job.dataset_name,
+        session_names=(),
+        project_root=job.project_root,
+        job_id=job.job_id,
+    )

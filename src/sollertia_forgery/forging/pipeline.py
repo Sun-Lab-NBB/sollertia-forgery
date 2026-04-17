@@ -1,5 +1,5 @@
-"""Provides the forging pipeline entry point that defines the dataset hierarchy, discovers session assembly jobs,
-constructs the processing graph, and executes jobs following the same pattern as the behavior processing pipeline.
+"""Provides the forging pipeline entry point that resolves the dataset hierarchy, registers per-session assembly
+jobs, and executes them locally or via remote job routing.
 """
 
 from __future__ import annotations
@@ -33,9 +33,6 @@ if TYPE_CHECKING:
 TRACKER_FILENAME: str = "forging.yaml"
 """The filename for the processing tracker placed in the dataset directory."""
 
-DEFINITION_JOB_NAME: str = "dataset_definition"
-"""The job name used to identify the dataset definition stage in forging processing trackers."""
-
 FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name used to identify per-session assembly stages in forging processing trackers."""
 
@@ -44,7 +41,7 @@ _CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
 
 
 @dataclass(frozen=True, slots=True)
-class SessionPaths:
+class _SessionPaths:
     """Stores resolved filesystem paths for a single session assembly job."""
 
     behavior_data_path: Path
@@ -59,11 +56,10 @@ class SessionPaths:
 
 def run_forging_pipeline(
     name: str,
-    sessions: tuple[DatasetSession, ...],
+    session_names: tuple[str, ...],
     project_root: Path,
     job_id: str | None = None,
     *,
-    target_session: str | None = None,
     workers: int = -1,
     display_progress: bool = False,
     force_recreate: bool = False,
@@ -71,130 +67,81 @@ def run_forging_pipeline(
     """Defines the dataset hierarchy and executes data assembly jobs for the target sessions.
 
     Notes:
-        The pipeline is a two-stage graph mirroring the cindra multi-day pipeline's discovery → extraction layering.
-        Stage 1 (dataset definition) creates the dataset hierarchy or loads an existing one if a prior run has
-        already populated it; stage 2 (per-session assembly) assembles analysis data for each session. Both stages
-        are registered as distinct jobs in the processing tracker: a single definition job (keyed on the dataset
-        name) and one assembly job per session. Dataset creation is currently limited to mesoscope experiment
-        sessions. In local mode (job_id is None), definition is marked complete and every assembly job is then
-        distributed across a shared ``ProcessPoolExecutor`` whose size is resolved from the ``workers`` argument.
-        Sequential execution is used automatically when ``workers`` resolves to 1 or only a single assembly job is
-        discovered. In remote mode (job_id is provided), the pipeline routes on the identifier: if it matches the
-        definition job id, only the definition stage runs; if it matches an assembly job id, only that single
-        assembly runs in-process without any worker pool.
+        Dataset definition runs up front (create-or-verify-or-recreate) before the processing tracker is created,
+        so the tracker only holds per-session assembly jobs — there is no tracker-managed definition stage. In
+        local mode (job_id is None), all assembly jobs are distributed across a parallel worker pool. In remote
+        mode (job_id is provided), the identifier must match an assembly job and the pipeline executes only that
+        single session's assembly in-process.
+
+        Dataset creation is currently limited to mesoscope experiment sessions.
 
     Args:
-        name: The unique name for the dataset.
-        sessions: The DatasetSession instances representing the sessions to include in the dataset. Ignored when the
-            dataset already exists and ``force_recreate`` is False (the existing definition takes precedence).
+        name: The unique name of the dataset.
+        session_names: The session names to include in the dataset. The caller is responsible for any
+            pre-filtering. When the dataset already exists and a non-empty list is provided, the set is verified
+            against the existing definition. Pass an empty tuple to work with an already-defined dataset without
+            triggering the verification step.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
-        job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the job
-            matching this ID is executed (remote mode). The identifier may target either the dataset definition
-            stage or a single per-session assembly job. If not provided, all stages are executed with automatic
-            tracker management (local mode).
-        target_session: If provided, limits the assembly to the specified session only.
+        job_id: The unique hexadecimal identifier for the assembly job to execute. If provided, only the job
+            matching this ID is executed (remote mode). If not provided, all assembly jobs are executed with
+            automatic tracker management (local mode).
         workers: The number of worker processes to use for parallel processing. Setting this to a value less than 1
             uses all available CPU cores (minus reserved cores). Setting this to 1 conducts processing sequentially
             without spawning worker processes.
         display_progress: Determines whether to display a progress bar during processing.
-        force_recreate: Determines whether to delete any existing dataset hierarchy before creating it fresh. Set
-            this to True when extending, shrinking, or modifying the session set of an existing dataset. Any prior
-            assembled data and the existing processing tracker are discarded.
+        force_recreate: Determines whether to allow deletion of the existing dataset hierarchy when the provided
+            session list does not match the existing definition. Set this to True when extending, shrinking, or
+            modifying the session set of an existing dataset. Any prior assembled data and the existing processing
+            tracker are discarded.
 
     Raises:
-        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, if the target session is not found in
-            the dataset, or if the provided job_id does not match any available jobs.
+        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, if the dataset does not exist and no
+            sessions were provided to create it, if the provided session list does not match the existing dataset
+            and force_recreate is False, or if the provided job_id does not match any assembly job.
     """
     console.echo(
         message=f"Initializing the forging pipeline for dataset '{name}'...",
         level=LogLevel.INFO,
     )
 
-    # Removes the existing dataset hierarchy if the caller explicitly requested recreation.
-    dataset_directory = project_root.joinpath(name)
-    if force_recreate and dataset_directory.exists():
-        delete_directory(directory_path=dataset_directory)
-        console.echo(
-            message=f"Dataset '{name}': Removed existing hierarchy for recreation.",
-            level=LogLevel.INFO,
-        )
+    # Resolves the dataset hierarchy (create, load, verify, or recreate). Any error propagates unchanged.
+    dataset = resolve_dataset(
+        name=name,
+        session_names=session_names,
+        project_root=project_root,
+        force_recreate=force_recreate,
+    )
 
-    # Creates the dataset hierarchy or loads an existing one (e.g., when invoked via the remote assembly path after
-    # a prior 'define' job). Dataset creation is currently limited to mesoscope experiment sessions.
-    try:
-        first_session_path = project_root.joinpath(sessions[0].animal, sessions[0].session)
-        first_session_data = SessionData.load(session_path=first_session_path)
-        if first_session_data.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
-            message = (
-                f"Unable to define dataset '{name}'. Dataset creation is currently supported only for mesoscope "
-                f"experiment sessions, but the first session's type resolved to "
-                f"'{first_session_data.session_type}'."
-            )
-            console.error(message=message, error=ValueError)
-        dataset = DatasetData.create(
-            name=name,
-            project=project_root.name,
-            session_type=first_session_data.session_type,
-            acquisition_system=first_session_data.acquisition_system,
-            sessions=sessions,
-            datasets_root=project_root,
-        )
-        console.echo(
-            message=(
-                f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} sessions from "
-                f"{len(dataset.animals)} animals."
-            ),
-            level=LogLevel.SUCCESS,
-        )
-    except FileExistsError:
-        dataset = DatasetData.load(dataset_path=dataset_directory)
-
-    # Resolves the dataset path and discovers session assembly jobs.
+    # Resolves the dataset path and enumerates session assembly jobs.
     dataset_path = dataset.dataset_data_path.parent
-    session_names = _discover_jobs(dataset=dataset, target_session=target_session)
+    dataset_session_names = [entry.session for entry in dataset.sessions]
 
-    console.echo(message=f"Discovered {len(session_names)} assembly job(s).")
+    console.echo(message=f"Discovered {len(dataset_session_names)} assembly job(s).")
 
     # Builds a session metadata lookup for O(1) access per session.
-    session_lookup: dict[str, DatasetSession] = {smd.session: smd for smd in dataset.sessions}
+    session_lookup: dict[str, DatasetSession] = {entry.session: entry for entry in dataset.sessions}
 
-    # Prepares the processing tracker and registers both pipeline stages: one dataset definition job (keyed on the
-    # dataset name) followed by one assembly job per session. Mirrors the cindra multi-day pipeline's discovery →
-    # extraction layering.
+    # Prepares the processing tracker and registers one assembly job per session. Dataset definition is not
+    # tracker-managed: it has already run to completion by the time the tracker is created, so there is nothing
+    # for the tracker to track.
     tracker = ProcessingTracker(file_path=dataset_path.joinpath(TRACKER_FILENAME))
-    jobs = [(DEFINITION_JOB_NAME, name)] + [(FORGING_JOB_NAME, session) for session in session_names]
+    jobs = [(FORGING_JOB_NAME, session) for session in dataset_session_names]
     prepare_tracker(tracker=tracker, jobs=jobs)
 
-    definition_job_id = ProcessingTracker.generate_job_id(job_name=DEFINITION_JOB_NAME, specifier=name)
     job_ids = {
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
-        for session in session_names
+        for session in dataset_session_names
     }
 
-    # Marks the definition stage complete. The dataset hierarchy is guaranteed to exist by this point (freshly
-    # created or loaded above).
-    tracker.start_job(job_id=definition_job_id)
-    tracker.complete_job(job_id=definition_job_id)
-
     if job_id is not None:
-        # Remote mode: routes on the identifier. The definition stage has already been marked complete above, so a
-        # definition-targeting job_id simply returns. An assembly-targeting job_id executes that single session's
-        # assembly in-process.
-        if job_id == definition_job_id:
-            console.echo(
-                message=f"Dataset '{name}' definition stage: Complete.",
-                level=LogLevel.SUCCESS,
-            )
-            return
-
+        # Remote mode: routes on the identifier to execute a single session's assembly in-process.
         id_to_session: dict[str, str] = {jid: session for session, jid in job_ids.items()}
 
         if job_id not in id_to_session:
-            valid_ids = [definition_job_id, *sorted(id_to_session.keys())]
             message = (
                 f"Unable to execute the requested job with ID '{job_id}'. The input identifier does not match "
-                f"any jobs available for this dataset. Valid job IDs: {valid_ids}."
+                f"any assembly jobs available for this dataset. Valid job IDs: {sorted(id_to_session.keys())}."
             )
             console.error(message=message, error=ValueError)
 
@@ -212,9 +159,9 @@ def run_forging_pipeline(
         # worker or only a single job is available.
         resolved_workers = resolve_worker_count(requested_workers=workers)
 
-        if resolved_workers > 1 and len(session_names) > 1:
+        if resolved_workers > 1 and len(dataset_session_names) > 1:
             _execute_jobs_parallel(
-                sessions=session_names,
+                sessions=dataset_session_names,
                 session_lookup=session_lookup,
                 dataset_name=dataset.name,
                 project_root=project_root,
@@ -225,7 +172,7 @@ def run_forging_pipeline(
             )
         else:
             _execute_jobs_sequential(
-                sessions=session_names,
+                sessions=dataset_session_names,
                 session_lookup=session_lookup,
                 dataset_name=dataset.name,
                 project_root=project_root,
@@ -237,124 +184,136 @@ def run_forging_pipeline(
     console.echo(message="All forging jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
-def assemble_session_dataset(
-    session_paths: SessionPaths,
-    output_path: Path,
+def resolve_dataset(
+    name: str,
+    session_names: tuple[str, ...],
+    project_root: Path,
     *,
-    progress: bool = False,
-) -> None:
-    """Assembles the experiment analysis dataset for the target session.
+    force_recreate: bool = False,
+) -> DatasetData:
+    """Creates, loads, or recreates a dataset hierarchy based on the provided session set.
 
-    This function acts as the entry-point for all dataset assembly (forging) runtimes. It extracts, post-processes, and
-    combines all relevant data for the processed session into a Polars DataFrame object and saves it to an uncompressed
-    .feather file at the output_path.
-
-    Args:
-        session_paths: The resolved filesystem paths for the target session's data directories.
-        output_path: The path to the .feather file where to save the assembled dataset.
-        progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
-    """
-    # Ensures that the output directory exists.
-    ensure_directory_exists(output_path)
-
-    # Configures progress bar visibility based on the progress parameter.
-    _prior_progress = console.progress_enabled
-    if progress:
-        console.enable_progress()
-    else:
-        console.disable_progress()
-
-    try:
-        # First assembles the fluorescence data, which is needed to generate the reference time vector for other
-        # datasets.
-        with console.progress(
-            total=3, description=f"Assembling session {session_paths.behavior_data_path.parent.stem} datasets"
-        ) as pbar:
-            fluorescence_data = assemble_cindra_dataset(
-                cindra_data_path=session_paths.cindra_data_path,
-                behavior_data_path=session_paths.behavior_data_path,
-                multiday_data_path=session_paths.multiday_data_path,
-            )
-            pbar.update(1)
-
-            # Extracts reference time to assemble other datasets in parallel.
-            reference_time = fluorescence_data["time_us"].to_numpy()
-
-            # Defines tasks for parallel execution.
-            tasks = {
-                "behavior": partial(
-                    assemble_behavior_dataset,
-                    behavior_data_path=session_paths.behavior_data_path,
-                    raw_data_path=session_paths.raw_data_path,
-                    reference_time=reference_time,
-                    drop_time_columns=True,
-                ),
-                "runtime": partial(
-                    assemble_runtime_dataset,
-                    behavior_data_path=session_paths.behavior_data_path,
-                    raw_data_path=session_paths.raw_data_path,
-                    reference_time=reference_time,
-                ),
-            }
-
-            # Executes the processing in parallel.
-            results: dict[str, pl.DataFrame] = {}
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_to_name = {executor.submit(task): name for name, task in tasks.items()}
-
-                for future in as_completed(future_to_name):
-                    name = future_to_name[future]
-                    results[name] = future.result()
-                    pbar.update(1)
-
-            # Extracts processing results.
-            behavior_data = results["behavior"]
-            runtime_data = results["runtime"]
-
-        # Concatenates all dataframes into the unified dataset.
-        result = pl.concat([fluorescence_data, behavior_data, runtime_data], how="horizontal")
-
-        # Post-processing: masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
-        result = _mask_non_run_experiment_data(result)
-
-        # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
-        result.write_ipc(file=output_path)
-    finally:
-        # Restores the previous progress bar visibility state.
-        if _prior_progress:
-            console.enable_progress()
-        else:
-            console.disable_progress()
-
-
-def _discover_jobs(dataset: DatasetData, *, target_session: str | None = None) -> list[str]:
-    """Discovers all session assembly jobs available for the target dataset.
+    Acts as the dataset-definition entry point for both ``run_forging_pipeline`` and the MCP ``prepare`` tool
+    so that tracker setup and batch dispatch can layer above this helper rather than duplicating the resolution
+    logic. When the dataset already exists, loads it and, when a session list is provided, verifies that the
+    provided set matches the existing definition. A mismatch surfaces as an error unless ``force_recreate`` is
+    True, which unlocks deletion and fresh recreation from the provided session names. When the dataset does
+    not exist, creates it from the provided session names; a non-empty session list is required in that case.
 
     Args:
-        dataset: The initialized DatasetData instance that stores the dataset's metadata.
-        target_session: If provided, limits the discovery to the specified session only.
+        name: The unique name of the dataset.
+        session_names: The session names to include in the dataset. Pass an empty tuple to work with an
+            already-defined dataset without triggering the session-set verification step.
+        project_root: The path to the project's root directory that stores the animal and session data
+            directories. The dataset hierarchy is also created under this directory.
+        force_recreate: Determines whether to allow deletion of the existing dataset hierarchy when the
+            provided session list does not match the existing definition.
 
     Returns:
-        The ordered list of session names available for assembly.
+        The resolved DatasetData instance (either loaded from disk or freshly created).
 
     Raises:
-        ValueError: If the target session is not found in the dataset.
+        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, if the dataset does not exist and
+            no sessions were provided to create it, or if the provided session list does not match the
+            existing dataset and force_recreate is False.
+        FileNotFoundError: If a session name does not resolve to any directory under the project root.
+        RuntimeError: If a session name resolves to more than one directory under the project root.
     """
-    session_names = [s.session for s in dataset.sessions]
+    dataset_directory = project_root.joinpath(name)
+    if dataset_directory.exists():
+        dataset = DatasetData.load(dataset_path=dataset_directory)
 
-    if target_session is not None:
-        if target_session not in session_names:
+        if session_names:
+            provided_sessions = set(session_names)
+            existing_sessions = {entry.session for entry in dataset.sessions}
+            if provided_sessions != existing_sessions:
+                if not force_recreate:
+                    message = (
+                        f"Unable to use the existing '{name}' dataset. The provided session list does not match "
+                        f"the dataset's existing session set. Call with force_recreate=True to delete and "
+                        f"recreate the dataset, or provide a matching session list."
+                    )
+                    console.error(message=message, error=ValueError)
+                delete_directory(directory_path=dataset_directory)
+                console.echo(
+                    message=f"Dataset '{name}': Removed existing hierarchy for recreation.",
+                    level=LogLevel.INFO,
+                )
+                dataset = _create_dataset(name=name, sessions=session_names, project_root=project_root)
+        return dataset
+
+    if not session_names:
+        message = (
+            f"Unable to define dataset '{name}'. The dataset does not exist under '{project_root}' and no "
+            f"sessions were provided to create it."
+        )
+        console.error(message=message, error=ValueError)
+    return _create_dataset(name=name, sessions=session_names, project_root=project_root)
+
+
+def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) -> DatasetData:
+    """Creates a fresh dataset hierarchy by resolving the provided session names under the project root.
+
+    Each session name is resolved by recursively globbing ``project_root`` for a matching directory, with the
+    owning animal derived from the parent directory. Dataset creation is currently limited to mesoscope
+    experiment sessions; the session type and acquisition system are derived from the first session's metadata.
+
+    Args:
+        name: The unique name for the dataset.
+        sessions: The non-empty tuple of session names to include in the dataset.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
+
+    Returns:
+        The newly created DatasetData instance.
+
+    Raises:
+        FileNotFoundError: If a session name does not resolve to any directory under the project root.
+        RuntimeError: If a session name resolves to more than one directory under the project root.
+        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT.
+    """
+    # Resolves each session name to its absolute directory path. The canonical project layout places every
+    # session at ``<project_root>/<animal>/<session>``, so the owning animal name is the parent's directory name.
+    session_paths: list[Path] = []
+    for session_name in sessions:
+        matches = [path for path in project_root.rglob(session_name) if path.is_dir()]
+        if len(matches) != 1:
             message = (
-                f"Unable to assemble the data for the session '{target_session}'. The session is not found in the "
-                f"'{dataset.name}' dataset."
+                f"Unable to resolve the directory for session '{session_name}' under '{project_root}'. "
+                f"Expected exactly one directory match, but found {len(matches)}."
             )
-            console.error(message=message, error=ValueError)
-        return [target_session]
+            console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
+        session_paths.append(matches[0])
 
-    return session_names
+    first_session_data = SessionData.load(session_path=session_paths[0])
+    if first_session_data.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
+        message = (
+            f"Unable to define dataset '{name}'. Dataset creation is currently supported only for mesoscope "
+            f"experiment sessions, but the first session's type resolved to "
+            f"'{first_session_data.session_type}'."
+        )
+        console.error(message=message, error=ValueError)
+    dataset_sessions = tuple(
+        DatasetSession(animal=path.parent.name, session=path.name) for path in session_paths
+    )
+    dataset = DatasetData.create(
+        name=name,
+        project=project_root.name,
+        session_type=first_session_data.session_type,
+        acquisition_system=first_session_data.acquisition_system,
+        sessions=dataset_sessions,
+        datasets_root=project_root,
+    )
+    console.echo(
+        message=(
+            f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} sessions from "
+            f"{len(dataset.animals)} animals."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+    return dataset
 
 
-def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> SessionPaths:
+def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _SessionPaths:
     """Discovers and resolves all data directory paths for a single session assembly job.
 
     Notes:
@@ -368,7 +327,7 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> Sessio
         dataset_name: The name of the dataset being assembled, used to resolve the multiday output directory.
 
     Returns:
-        A frozen ``SessionPaths`` instance containing all resolved data directory paths.
+        A frozen ``_SessionPaths`` instance containing all resolved data directory paths.
 
     Raises:
         FileNotFoundError: If a required tracker file is not found under the processed data directory.
@@ -402,12 +361,101 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> Sessio
     # Derives the multiday output path from the cindra directory's parent (mesoscope_data/) and the dataset name.
     multiday_data_path = cindra_data_path.parent.joinpath("multiday", dataset_name)
 
-    return SessionPaths(
+    return _SessionPaths(
         behavior_data_path=behavior_data_path,
         raw_data_path=session.raw_data_path,
         cindra_data_path=cindra_data_path,
         multiday_data_path=multiday_data_path,
     )
+
+
+def _assemble_session_dataset(
+    session_paths: _SessionPaths,
+    output_path: Path,
+    *,
+    progress: bool = False,
+) -> None:
+    """Assembles the experiment analysis dataset for the target session.
+
+    Extracts, post-processes, and combines all relevant data for the processed session into a unified Polars
+    DataFrame and saves it to an uncompressed .feather file at ``output_path``.
+
+    Args:
+        session_paths: The resolved filesystem paths for the target session's data directories.
+        output_path: The path to the .feather file where to save the assembled dataset.
+        progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
+    """
+    # Ensures that the output directory exists.
+    ensure_directory_exists(output_path)
+
+    # Configures progress bar visibility based on the progress parameter.
+    _prior_progress = console.progress_enabled
+    if progress:
+        console.enable_progress()
+    else:
+        console.disable_progress()
+
+    try:
+        # Assembles the fluorescence data first, which is needed to generate the reference time vector for the
+        # behavior and runtime datasets.
+        with console.progress(
+            total=3, description=f"Assembling session {session_paths.behavior_data_path.parent.stem} datasets"
+        ) as pbar:
+            fluorescence_data = assemble_cindra_dataset(
+                cindra_data_path=session_paths.cindra_data_path,
+                behavior_data_path=session_paths.behavior_data_path,
+                multiday_data_path=session_paths.multiday_data_path,
+            )
+            pbar.update(1)
+
+            # Extracts reference time to assemble other datasets in parallel.
+            reference_time = fluorescence_data["time_us"].to_numpy()
+
+            # Defines tasks for parallel execution.
+            tasks = {
+                "behavior": partial(
+                    assemble_behavior_dataset,
+                    behavior_data_path=session_paths.behavior_data_path,
+                    raw_data_path=session_paths.raw_data_path,
+                    reference_time=reference_time,
+                    drop_time_columns=True,
+                ),
+                "runtime": partial(
+                    assemble_runtime_dataset,
+                    behavior_data_path=session_paths.behavior_data_path,
+                    raw_data_path=session_paths.raw_data_path,
+                    reference_time=reference_time,
+                ),
+            }
+
+            # Executes the behavior and runtime assembly in parallel.
+            results: dict[str, pl.DataFrame] = {}
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_to_name = {executor.submit(task): name for name, task in tasks.items()}
+
+                for future in as_completed(future_to_name):
+                    name = future_to_name[future]
+                    results[name] = future.result()
+                    pbar.update(1)
+
+            # Extracts processing results.
+            behavior_data = results["behavior"]
+            runtime_data = results["runtime"]
+
+        # Concatenates all dataframes into the unified dataset.
+        result = pl.concat([fluorescence_data, behavior_data, runtime_data], how="horizontal")
+
+        # Masks cue, trial, and trial_type with 255 (or "undefined") for non-run experiment states.
+        result = _mask_non_run_experiment_data(result)
+
+        # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
+        result.write_ipc(file=output_path)
+    finally:
+        # Restores the previous progress bar visibility state.
+        if _prior_progress:
+            console.enable_progress()
+        else:
+            console.disable_progress()
 
 
 def _execute_jobs_sequential(
@@ -585,7 +633,7 @@ def _execute_job(
 
 
 def _run_job(
-    session_paths: SessionPaths,
+    session_paths: _SessionPaths,
     output_path: Path,
 ) -> None:
     """Dispatches a single session assembly job to the dataset assembly function.
@@ -593,7 +641,7 @@ def _run_job(
     Notes:
         This function is the atomic unit of work submitted to worker processes by the parallel execution path. It
         must remain importable at module level and accept only picklable arguments so that ``ProcessPoolExecutor``
-        can dispatch it across process boundaries. The ``SessionPaths`` frozen dataclass satisfies this constraint.
+        can dispatch it across process boundaries. The ``_SessionPaths`` frozen dataclass satisfies this constraint.
         Tracker state transitions, progress display, and error reporting are all handled by the parent process;
         this function performs pure computation and either returns ``None`` on success or propagates any raised
         exception back through the future.
@@ -602,7 +650,7 @@ def _run_job(
         session_paths: The resolved filesystem paths for the target session's data directories.
         output_path: The path to the output .feather file.
     """
-    assemble_session_dataset(
+    _assemble_session_dataset(
         session_paths=session_paths,
         output_path=output_path,
         progress=False,

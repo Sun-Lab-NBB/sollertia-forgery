@@ -282,34 +282,25 @@ def run_behavior_pipeline_command(
         "(remote mode)."
     ),
 )
-@click.option(
-    "-t",
-    "--target-session",
-    type=str,
-    default=None,
-    help="If provided, limits the assembly to the specified session only.",
-)
 def assemble_dataset_command(
     dataset_path: Path,
     project_root: Path,
     job_id: str | None,
-    target_session: str | None,
 ) -> None:
     """Assembles forged data for the target dataset's sessions.
 
     This command reads the dataset metadata and assembles each session's data into a unified data.feather file
     within the dataset hierarchy.
     """
-    # Loads the existing dataset's metadata to extract its name and session set. The forging pipeline's internal
-    # create-or-load path then reuses the on-disk definition instead of re-creating it.
+    # Loads the existing dataset's metadata to extract its name. The forging pipeline's create-or-load path then
+    # reuses the on-disk definition; no session list is passed since the dataset is already defined.
     dataset = DatasetData.load(dataset_path=dataset_path)
 
     # Runs the unified forging pipeline.
     run_forging_pipeline(
         name=dataset.name,
-        sessions=dataset.sessions,
+        session_names=(),
         project_root=project_root,
         job_id=job_id,
-        target_session=target_session,
         display_progress=True,
     )
