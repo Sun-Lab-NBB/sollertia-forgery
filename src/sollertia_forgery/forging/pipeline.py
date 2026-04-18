@@ -4,6 +4,7 @@ jobs, and executes them locally or via remote job routing.
 
 from __future__ import annotations
 
+import shutil
 from typing import TYPE_CHECKING
 from functools import partial
 from contextlib import nullcontext
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import polars as pl
+from natsort_rs import natsort  # type: ignore[import-untyped]
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count, ensure_directory_exists
 from sollertia_shared_assets import (
     DatasetData,
@@ -30,7 +32,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-TRACKER_FILENAME: str = "forging.yaml"
+TRACKER_FILENAME: str = "forging_tracker.yaml"
 """The filename for the processing tracker placed in the dataset directory."""
 
 FORGING_JOB_NAME: str = "session_data_assembly"
@@ -38,6 +40,14 @@ FORGING_JOB_NAME: str = "session_data_assembly"
 
 _CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
 """The tracker filename written by the cindra single-recording pipeline into the cindra output directory."""
+
+EXPERIMENT_DESCRIPTOR_FILENAME: str = "experiment_descriptor.yaml"
+"""The filename of the mesoscope experiment descriptor inside each session's raw data directory. Forged copies
+are placed alongside data.feather in every session directory."""
+
+SURGERY_DATA_FILENAME: str = "surgery_data.yaml"
+"""The filename of the surgery metadata YAML inside each session's raw data directory. Forged copies are
+placed once per animal at the dataset's animal directory root."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +266,8 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
 
     Each session name is resolved by recursively globbing ``project_root`` for a matching directory, with the
     owning animal derived from the parent directory. Dataset creation is currently limited to mesoscope
-    experiment sessions; the session type and acquisition system are derived from the first session's metadata.
+    experiment sessions, and every included session must share the first session's session type and
+    acquisition system.
 
     Args:
         name: The unique name for the dataset.
@@ -269,7 +280,8 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
     Raises:
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
         RuntimeError: If a session name resolves to more than one directory under the project root.
-        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT.
+        ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, or if any subsequent session's
+            session type or acquisition system differs from the first session's.
     """
     # Resolves each session name to its absolute directory path. The canonical project layout places every
     # session at ``<project_root>/<animal>/<session>``, so the owning animal name is the parent's directory name.
@@ -292,6 +304,28 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
             f"'{first_session_data.session_type}'."
         )
         console.error(message=message, error=ValueError)
+
+    # Verifies that every remaining session shares the first session's type and acquisition system. A dataset
+    # must contain only sessions of the same type acquired by the same acquisition system; the assembly logic
+    # below assumes this invariant when deriving the dataset-level metadata from the first session.
+    for session_path in session_paths[1:]:
+        session_data = SessionData.load(session_path=session_path)
+        if session_data.session_type != first_session_data.session_type:
+            message = (
+                f"Unable to define dataset '{name}'. All sessions in a dataset must share the same session "
+                f"type, but session '{session_path.name}' has type '{session_data.session_type}' while the "
+                f"first session has type '{first_session_data.session_type}'."
+            )
+            console.error(message=message, error=ValueError)
+        if session_data.acquisition_system != first_session_data.acquisition_system:
+            message = (
+                f"Unable to define dataset '{name}'. All sessions in a dataset must be acquired by the same "
+                f"acquisition system, but session '{session_path.name}' was acquired by "
+                f"'{session_data.acquisition_system}' while the first session was acquired by "
+                f"'{first_session_data.acquisition_system}'."
+            )
+            console.error(message=message, error=ValueError)
+
     dataset_sessions = tuple(DatasetSession(animal=path.parent.name, session=path.name) for path in session_paths)
     dataset = DatasetData.create(
         name=name,
@@ -301,6 +335,9 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
         sessions=dataset_sessions,
         datasets_root=project_root,
     )
+
+    _copy_animal_surgery_files(dataset_name=name, dataset=dataset, source_session_paths=session_paths)
+
     console.echo(
         message=(
             f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} sessions from "
@@ -309,6 +346,57 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
         level=LogLevel.SUCCESS,
     )
     return dataset
+
+
+def _copy_animal_surgery_files(
+    dataset_name: str,
+    dataset: DatasetData,
+    source_session_paths: list[Path],
+) -> None:
+    """Copies the surgery metadata YAML for each animal into the dataset's animal directory.
+
+    For each animal in the dataset, selects that animal's most recent source session and copies its
+    ``surgery_data.yaml`` from the session's raw data directory to the dataset's animal directory root.
+    Surgery metadata is per-animal rather than per-session, so a single copy is materialized for each animal.
+
+    Args:
+        dataset_name: The name of the dataset, used for error messages.
+        dataset: The freshly created DatasetData instance, used to locate per-animal directories.
+        source_session_paths: The resolved source session directory paths used to define the dataset, in the
+            order provided to ``_create_dataset``. Grouped by animal to pick each animal's latest session.
+
+    Raises:
+        FileNotFoundError: If the latest session for any animal does not contain a ``surgery_data.yaml`` file.
+    """
+    # Groups source session paths by owning animal. The animal name is the parent directory name in the source
+    # project layout.
+    sessions_by_animal: dict[str, list[Path]] = {}
+    for source_path in source_session_paths:
+        sessions_by_animal.setdefault(source_path.parent.name, []).append(source_path)
+
+    # The dataset hierarchy stores each animal at ``<dataset_root>/<animal>/``. The dataset root is the parent
+    # of the dataset_data.yaml file written by DatasetData.create.
+    dataset_root = dataset.dataset_data_path.parent
+
+    for animal in dataset.animals:
+        animal_sessions = sessions_by_animal[animal]
+
+        # Picks the most recent session for the animal via natural sort over the timestamped session names.
+        latest_session_name = natsort([path.name for path in animal_sessions])[-1]
+        latest_session_path = next(path for path in animal_sessions if path.name == latest_session_name)
+        session_data = SessionData.load(session_path=latest_session_path)
+
+        source_surgery_path = session_data.raw_data_path.joinpath(SURGERY_DATA_FILENAME)
+        if not source_surgery_path.is_file():
+            message = (
+                f"Unable to define dataset '{dataset_name}'. The latest session '{latest_session_name}' for "
+                f"animal '{animal}' does not contain a '{SURGERY_DATA_FILENAME}' file at "
+                f"'{source_surgery_path}'. Surgery metadata is required for every animal in a forged dataset."
+            )
+            console.error(message=message, error=FileNotFoundError)
+
+        destination_surgery_path = dataset_root.joinpath(animal, SURGERY_DATA_FILENAME)
+        shutil.copy2(src=source_surgery_path, dst=destination_surgery_path)
 
 
 def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _SessionPaths:
@@ -376,15 +464,31 @@ def _assemble_session_dataset(
     """Assembles the experiment analysis dataset for the target session.
 
     Extracts, post-processes, and combines all relevant data for the processed session into a unified Polars
-    DataFrame and saves it to an uncompressed .feather file at ``output_path``.
+    DataFrame and saves it to an uncompressed .feather file at ``output_path``. Also copies the session's
+    experiment descriptor YAML alongside the feather file so the forged session is self-contained for
+    downstream analysis.
 
     Args:
         session_paths: The resolved filesystem paths for the target session's data directories.
         output_path: The path to the .feather file where to save the assembled dataset.
         progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
+
+    Raises:
+        FileNotFoundError: If the session's raw data directory does not contain an ``experiment_descriptor.yaml``
+            file.
     """
     # Ensures that the output directory exists.
     ensure_directory_exists(path=output_path)
+
+    # Verifies the experiment descriptor exists up front so the failure surfaces before any expensive work.
+    source_descriptor_path = session_paths.raw_data_path.joinpath(EXPERIMENT_DESCRIPTOR_FILENAME)
+    if not source_descriptor_path.is_file():
+        message = (
+            f"Unable to assemble session '{output_path.parent.name}'. The session's raw data directory does "
+            f"not contain a '{EXPERIMENT_DESCRIPTOR_FILENAME}' file at '{source_descriptor_path}'. The "
+            f"experiment descriptor is required for every session in a forged dataset."
+        )
+        console.error(message=message, error=FileNotFoundError)
 
     # Configures progress bar visibility based on the progress parameter.
     prior_progress = console.progress_enabled
@@ -448,6 +552,14 @@ def _assemble_session_dataset(
 
         # Saves the unified dataset to disk as an uncompressed .feather file (to support memory-mapping).
         result.write_ipc(file=output_path)
+
+        # Copies the experiment descriptor next to data.feather so the forged session carries the experimenter
+        # context (mouse weight, water dispensed/consumed, completion status, notes) needed for downstream
+        # analysis without reaching back into the raw session.
+        shutil.copy2(
+            src=source_descriptor_path,
+            dst=output_path.parent.joinpath(EXPERIMENT_DESCRIPTOR_FILENAME),
+        )
     finally:
         # Restores the previous progress bar visibility state.
         if prior_progress:

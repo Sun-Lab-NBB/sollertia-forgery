@@ -17,10 +17,21 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count
-from sollertia_shared_assets import DatasetData
+from sollertia_shared_assets import (
+    DatasetData,
+    SurgeryData,
+    MesoscopeExperimentDescriptor,
+)
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .pipeline import FORGING_JOB_NAME, TRACKER_FILENAME, resolve_dataset, run_forging_pipeline
+from .pipeline import (
+    FORGING_JOB_NAME,
+    TRACKER_FILENAME,
+    SURGERY_DATA_FILENAME,
+    EXPERIMENT_DESCRIPTOR_FILENAME,
+    resolve_dataset,
+    run_forging_pipeline,
+)
 from ..interfaces import mcp
 from ..shared_assets import (
     RESERVED_CORES,
@@ -687,16 +698,17 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
 def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
     """Verifies the completeness of forged data output for a single dataset.
 
-    Loads the dataset's :class:`DatasetData` marker, then checks for a ``data.feather`` file within each
-    session's directory in the dataset hierarchy. Each feather file is loaded to confirm readability and to
-    report its row and column counts. The forging processing tracker is also read to report per-job statuses.
+    Loads the dataset's :class:`DatasetData` marker, then for each session in the dataset hierarchy checks the
+    presence and readability of ``data.feather`` and the presence and parseability of the per-session
+    ``experiment_descriptor.yaml``. For each animal in the dataset, also checks the presence and parseability
+    of the per-animal ``surgery_data.yaml``. The forging processing tracker is read to report per-job statuses.
 
     Args:
         dataset_path: The absolute path to the dataset root directory (containing ``dataset_data.yaml``).
 
     Returns:
-        A dictionary containing a 'verified' flag, per-file results in 'files', tracker status in 'tracker',
-        and aggregate counts.
+        A dictionary containing a 'verified' flag, per-session results in 'files', per-animal surgery results
+        in 'animals', tracker status in 'tracker', and aggregate counts.
     """
     # Validates the dataset directory path and loads the dataset metadata.
     error = validate_directory(directory=dataset_path)
@@ -713,7 +725,8 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
     file_results: list[dict[str, Any]] = []
     all_valid = True
 
-    # Checks each session's feather file for existence and readability.
+    # Checks each session's feather file for existence and readability, plus the per-session experiment
+    # descriptor for existence and parseability.
     for session_entry in dataset.sessions:
         feather_path = session_entry.session_path / "data.feather"
         entry: dict[str, Any] = {
@@ -722,25 +735,67 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
             "file": str(feather_path),
         }
 
+        feather_valid = True
         if not feather_path.exists():
             entry["valid"] = False
             entry["error"] = "data.feather not found."
             all_valid = False
-            file_results.append(entry)
-            continue
+            feather_valid = False
+        else:
+            # Loads the feather file without sampling to confirm readability and extract metadata.
+            analysis = analyze_feather_file(feather_file=str(feather_path), max_sample_rows=0)
+            if "error" in analysis:
+                entry["valid"] = False
+                entry["error"] = analysis["error"]
+                all_valid = False
+                feather_valid = False
+            else:
+                summary = analysis.get("summary", {})
+                entry["valid"] = True
+                entry["columns"] = summary.get("columns", [])
+                entry["row_count"] = summary.get("total_rows", 0)
 
-        # Loads the feather file without sampling to confirm readability and extract metadata.
-        analysis = analyze_feather_file(feather_file=str(feather_path), max_sample_rows=0)
-        if "error" in analysis:
-            entry["valid"] = False
-            entry["error"] = analysis["error"]
+        # Verifies the per-session experiment descriptor exists and parses as MesoscopeExperimentDescriptor.
+        descriptor_path = session_entry.session_path / EXPERIMENT_DESCRIPTOR_FILENAME
+        descriptor_entry: dict[str, Any] = {"file": str(descriptor_path)}
+        if not descriptor_path.exists():
+            descriptor_entry["valid"] = False
+            descriptor_entry["error"] = f"{EXPERIMENT_DESCRIPTOR_FILENAME} not found."
             all_valid = False
         else:
-            summary = analysis.get("summary", {})
-            entry["valid"] = True
-            entry["columns"] = summary.get("columns", [])
-            entry["row_count"] = summary.get("total_rows", 0)
+            try:
+                MesoscopeExperimentDescriptor.from_yaml(file_path=descriptor_path)
+                descriptor_entry["valid"] = True
+            except Exception as descriptor_error:
+                descriptor_entry["valid"] = False
+                descriptor_entry["error"] = f"Unable to load descriptor: {descriptor_error}"
+                all_valid = False
+        entry["descriptor"] = descriptor_entry
+
+        # Promotes a feather-only valid flag to overall invalid when the descriptor failed.
+        if feather_valid and not descriptor_entry["valid"]:
+            entry["valid"] = False
+
         file_results.append(entry)
+
+    # Verifies the per-animal surgery file for each unique animal in the dataset.
+    animal_results: list[dict[str, Any]] = []
+    for animal in dataset.animals:
+        surgery_path = dataset_root / animal / SURGERY_DATA_FILENAME
+        animal_entry: dict[str, Any] = {"animal": animal, "file": str(surgery_path)}
+        if not surgery_path.exists():
+            animal_entry["valid"] = False
+            animal_entry["error"] = f"{SURGERY_DATA_FILENAME} not found."
+            all_valid = False
+        else:
+            try:
+                SurgeryData.from_yaml(file_path=surgery_path)
+                animal_entry["valid"] = True
+            except Exception as surgery_error:
+                animal_entry["valid"] = False
+                animal_entry["error"] = f"Unable to load surgery data: {surgery_error}"
+                all_valid = False
+        animal_results.append(animal_entry)
 
     # Reads the forging tracker to include per-job pipeline statuses alongside file checks.
     tracker_path = dataset.dataset_data_path.parent / TRACKER_FILENAME
@@ -751,13 +806,15 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
         except Exception:
             tracker_info = {"error": "Unable to read tracker file."}
 
-    # Assembles the verification result with per-file outcomes and tracker state.
+    # Assembles the verification result with per-file outcomes, per-animal surgery outcomes, and tracker state.
     return {
-        "verified": all_valid and bool(file_results),
+        "verified": all_valid and bool(file_results) and bool(animal_results),
         "dataset_path": str(dataset_root),
         "dataset_name": dataset.name,
         "files": file_results,
         "total_files": len(file_results),
+        "animals": animal_results,
+        "total_animals": len(animal_results),
         "tracker": tracker_info,
     }
 
