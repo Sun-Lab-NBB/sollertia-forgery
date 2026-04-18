@@ -3,9 +3,8 @@
 import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
-from sollertia_shared_assets import get_server_configuration
 
-from ..server import Server
+from ..server import Server, create_server_configuration_file, get_server_configuration
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -121,10 +120,48 @@ def _format_sacct_output(raw_output: str) -> str:
 def server_cli() -> None:
     """Provides commands for interacting with the remote Sollertia compute server.
 
-    This CLI group provides commands for managing non-standardized server interactions, including starting interactive
-    Jupyter sessions and viewing SLURM job information. All data workflow interactions available through sl-project and
-    sl-execute command groups must be carried out through those groups, rather than the commands exposed by this CLI.
+    This CLI group provides commands for managing non-standardized server interactions, including authoring the
+    server access configuration, starting interactive Jupyter sessions, and viewing SLURM job information. All data
+    workflow interactions available through sl-project and sl-execute command groups must be carried out through those
+    groups, rather than the commands exposed by this CLI.
     """
+
+
+@server_cli.command("configure", context_settings=CONTEXT_SETTINGS)
+@click.option(
+    "-u",
+    "--username",
+    type=str,
+    required=True,
+    help="The username to use for server authentication.",
+)
+@click.option(
+    "-p",
+    "--password",
+    type=str,
+    prompt=True,
+    hide_input=True,
+    confirmation_prompt=True,
+    help="The password to use for server authentication. Prompted interactively (with hidden input) if not provided.",
+)
+@click.option(
+    "-h",
+    "--host",
+    type=str,
+    required=True,
+    help="The host name or IP address of the server.",
+)
+def configure_server(
+    username: str,
+    password: str,
+    host: str,
+) -> None:  # pragma: no cover
+    """Creates the remote compute server configuration file in the Sollertia platform working directory."""
+    create_server_configuration_file(
+        username=username,
+        password=password,
+        host=host,
+    )
 
 
 @server_cli.command("jupyter")

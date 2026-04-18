@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 from natsort_rs import natsort
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
-    DatasetData,
     SessionTypes,
     DatasetTrackers,
     SessionMetadata,
@@ -19,10 +18,17 @@ from sollertia_shared_assets import (
     AcquisitionSystems,
     ProcessingPipelines,
     get_working_directory,
-    get_server_configuration,
 )
 
-from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
+from . import (
+    Job,
+    Server,
+    JobStatus,
+    ProcessingPipeline,
+    get_remote_job_work_directory,
+    get_server_configuration,
+)
+from ..forging import DatasetData
 from .pipeline import execute_pipelines, check_session_eligibility
 from ..shared_assets import ProjectManifest, delay_timer, delay_terminal, filter_sessions
 from ..forging.pipeline import FORGING_JOB_NAME

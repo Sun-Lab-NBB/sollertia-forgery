@@ -15,11 +15,11 @@ import polars as pl
 from natsort_rs import natsort  # type: ignore[import-untyped]
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count, ensure_directory_exists
 from sollertia_shared_assets import (
-    DatasetData,
     SessionData,
     SessionTypes,
-    DatasetSession,
 )
+
+from .dataset_data import DatasetData, DatasetSession
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
 from .cindra import assemble_cindra_dataset

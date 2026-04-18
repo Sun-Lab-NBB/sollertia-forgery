@@ -2,11 +2,13 @@
 
 import click
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import DatasetSession, get_working_directory, get_server_configuration
+from sollertia_shared_assets import get_working_directory
 
+from ..forging import DatasetSession
 from ..server import (
     Server,
     forge_dataset,
+    get_server_configuration,
     manage_project_data,
     process_project_data,
     resolve_project_manifest,

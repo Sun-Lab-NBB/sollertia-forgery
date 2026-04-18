@@ -21,8 +21,9 @@ from .job import Job, JupyterJob
 
 if TYPE_CHECKING:
     from paramiko.client import SSHClient
-    from sollertia_shared_assets import ServerConfiguration
     from paramiko.sftp_client import SFTPClient
+
+    from .server_configuration import ServerConfiguration
 
 
 @dataclass(frozen=True)
