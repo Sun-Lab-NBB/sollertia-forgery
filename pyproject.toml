@@ -193,6 +193,14 @@ exclude = [
 module = ["sollertia_forgery.server.*", "sollertia_forgery.analysis.*"]
 ignore_errors = true
 
+# Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
+# inside a live MCP server or CLI invocation.
+[tool.coverage.run]
+omit = [
+    "*/mcp_tools.py",
+    "*/interfaces/*.py",
+]
+
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
 [tool.coverage.paths]
 

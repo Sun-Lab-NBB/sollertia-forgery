@@ -238,7 +238,7 @@ def start_jupyter_server(environment: str, cores: int, memory: int, time: int, p
     ),
 )
 @click.option(
-    "-jid",
+    "-id",
     "--job-id",
     type=str,
     default=None,

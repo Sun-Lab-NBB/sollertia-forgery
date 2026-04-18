@@ -1,33 +1,33 @@
 """Provides Model Context Protocol (MCP) tools for the behavior processing pipeline."""
 
-from __future__ import annotations  # pragma: no cover
+from __future__ import annotations
 
-from typing import Any  # pragma: no cover
-from pathlib import Path  # pragma: no cover
-from threading import Thread  # pragma: no cover
-import contextlib  # pragma: no cover
-from collections import deque  # pragma: no cover
-from dataclasses import dataclass  # pragma: no cover
+from typing import Any
+from pathlib import Path
+from threading import Thread
+import contextlib
+from collections import deque
+from dataclasses import dataclass
 
-from ataraxis_time import (  # pragma: no cover
+from ataraxis_time import (
     TimeUnits,
     TimestampFormats,
     TimestampPrecisions,
     convert_time,
     get_timestamp,
 )
-from ataraxis_base_utilities import resolve_worker_count  # pragma: no cover
-from sollertia_shared_assets import SessionData  # pragma: no cover
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker  # pragma: no cover
+from ataraxis_base_utilities import resolve_worker_count
+from sollertia_shared_assets import SessionData
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .pipeline import (  # pragma: no cover
+from .pipeline import (
     TRACKER_FILENAME,
     BEHAVIOR_DATA_DIRECTORY,
     discover_behavior_jobs,
     run_behavior_processing_pipeline,
 )
-from ..interfaces import mcp  # pragma: no cover
-from ..shared_assets import (  # pragma: no cover
+from ..interfaces import mcp
+from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
@@ -41,8 +41,8 @@ from ..shared_assets import (  # pragma: no cover
 )
 
 
-@dataclass(slots=True)  # pragma: no cover
-class _BehaviorPendingJob(PendingJob):  # pragma: no cover
+@dataclass(slots=True)
+class _BehaviorPendingJob(PendingJob):
     """Describes a single behavior processing job queued for background execution.
 
     Extends the shared ``PendingJob`` base with the session-level metadata required by the behavior worker
@@ -65,12 +65,12 @@ class _BehaviorPendingJob(PendingJob):  # pragma: no cover
     ``controller-type-id`` triple)."""
 
 
-_job_execution_state: JobExecutionState[_BehaviorPendingJob] | None = None  # pragma: no cover
+_job_execution_state: JobExecutionState[_BehaviorPendingJob] | None = None
 """Stores the active execution state for batch behavior processing jobs."""
 
 
-@mcp.tool()  # pragma: no cover
-def prepare_behavior_processing_batch_tool(  # pragma: no cover
+@mcp.tool()
+def prepare_behavior_processing_batch_tool(
     session_paths: list[str],
 ) -> dict[str, Any]:
     """Prepares an execution manifest for batch behavior processing without starting execution.
@@ -224,8 +224,8 @@ def prepare_behavior_processing_batch_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def execute_behavior_processing_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def execute_behavior_processing_jobs_tool(
     jobs: list[dict[str, str]],
     *,
     worker_budget: int = -1,
@@ -330,8 +330,8 @@ def execute_behavior_processing_jobs_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def get_behavior_processing_status_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_behavior_processing_status_tool() -> dict[str, Any]:
     """Returns the current status of the active behavior processing execution session.
 
     Reads ProcessingTracker files from disk for each job to report per-job progress. When no execution session
@@ -419,8 +419,8 @@ def get_behavior_processing_status_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_behavior_processing_timing_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_behavior_processing_timing_tool() -> dict[str, Any]:
     """Returns timing information for all jobs in the active behavior processing execution session.
 
     Reports elapsed time for running jobs and duration for completed jobs using microsecond-precision UTC
@@ -529,8 +529,8 @@ def get_behavior_processing_timing_tool() -> dict[str, Any]:  # pragma: no cover
     return {"active": manager_alive, "jobs": job_timing, "session": session}
 
 
-@mcp.tool()  # pragma: no cover
-def cancel_behavior_processing_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def cancel_behavior_processing_tool() -> dict[str, Any]:
     """Cancels the active behavior processing execution session.
 
     Clears the pending job queue so no new jobs are dispatched. Active jobs complete naturally but no new jobs
@@ -578,8 +578,8 @@ def cancel_behavior_processing_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def reset_behavior_processing_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def reset_behavior_processing_jobs_tool(
     tracker_path: str,
     job_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -634,8 +634,8 @@ def reset_behavior_processing_jobs_tool(  # pragma: no cover
     return {"reset": True, "jobs_reset": len(target_ids), **updated_status}
 
 
-@mcp.tool()  # pragma: no cover
-def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes behavior processing status for all sessions under a root directory.
 
     Recursively searches for ``behavior_processing_tracker.yaml`` files and aggregates their status. Each
@@ -709,8 +709,8 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pr
     }
 
 
-@mcp.tool()  # pragma: no cover
-def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
     """Verifies the completeness of processed behavior data output for a single session.
 
     Loads the session's :class:`SessionData` marker to resolve ``processed_data_path``, then scans the
@@ -790,8 +790,8 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
     }
 
 
-@mcp.tool()  # pragma: no cover
-def query_behavior_data_tool(  # pragma: no cover
+@mcp.tool()
+def query_behavior_data_tool(
     feather_files: list[str],
     max_sample_rows: int = 10,
 ) -> dict[str, Any]:
@@ -818,8 +818,8 @@ def query_behavior_data_tool(  # pragma: no cover
     return {"results": results, "total_files": len(results)}
 
 
-@mcp.tool()  # pragma: no cover
-def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str, Any]:
     """Deletes the behavior_data subdirectory under one or more sessions' processed_data directories.
 
     For each session, loads :class:`SessionData` to resolve ``processed_data_path``, then removes
@@ -870,7 +870,7 @@ def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str,
     return {"results": results, "total_cleaned": total_cleaned, "total_sessions": len(results)}
 
 
-def _run_behavior_job(job: _BehaviorPendingJob) -> None:  # pragma: no cover
+def _run_behavior_job(job: _BehaviorPendingJob) -> None:
     """Executes a single behavior processing job in-process via the pipeline's remote mode.
 
     Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch

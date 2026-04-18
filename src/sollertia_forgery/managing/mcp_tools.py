@@ -1,33 +1,34 @@
 """Provides Model Context Protocol (MCP) tools for the checksum, transfer, and manifest generation pipelines."""
 
-from __future__ import annotations  # pragma: no cover
+from __future__ import annotations
 
-from typing import Any  # pragma: no cover
-from pathlib import Path  # pragma: no cover
-from threading import Thread  # pragma: no cover
-import contextlib  # pragma: no cover
-from collections import deque  # pragma: no cover
-from dataclasses import dataclass  # pragma: no cover
+from typing import Any
+from pathlib import Path
+from threading import Thread
+import contextlib
+from collections import deque
+from dataclasses import dataclass
 
-from ataraxis_time import (  # pragma: no cover
+from ataraxis_time import (
     TimeUnits,
     TimestampFormats,
     TimestampPrecisions,
     convert_time,
     get_timestamp,
 )
-from ataraxis_base_utilities import resolve_parallel_job_capacity, resolve_worker_count  # pragma: no cover
-from sollertia_shared_assets import SessionData  # pragma: no cover
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker  # pragma: no cover
+from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
+from sollertia_shared_assets import SessionData
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .checksum import CHECKSUM_JOB_NAME, CHECKSUM_TRACKER_FILENAME, resolve_checksum  # pragma: no cover
-from .manifest import MANIFEST_TRACKER_FILENAME, generate_project_manifest  # pragma: no cover
-from .transfer import transfer_session  # pragma: no cover
-from ..interfaces import mcp  # pragma: no cover
-from ..shared_assets import (  # pragma: no cover
+from .checksum import CHECKSUM_JOB_NAME, CHECKSUM_TRACKER_FILENAME, resolve_checksum
+from .manifest import MANIFEST_TRACKER_FILENAME, generate_project_manifest
+from .transfer import transfer_session
+from ..interfaces import mcp
+from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
+    prepare_tracker,
     validate_directory,
     read_tracker_status,
     derive_tracker_status,
@@ -35,38 +36,38 @@ from ..shared_assets import (  # pragma: no cover
     job_execution_manager,
 )
 
-_TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"  # pragma: no cover
+_TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"
 """The filename for the processing tracker created in the caller-specified directory to track transfer and deletion
 jobs. Placed outside the sessions being transferred or deleted so the tracker survives session removal."""
 
-_TRANSFER_JOB_NAME: str = "session_transfer"  # pragma: no cover
+_TRANSFER_JOB_NAME: str = "session_transfer"
 """The job name used to identify session transfer jobs in processing trackers."""
 
-_DELETION_JOB_NAME: str = "session_deletion"  # pragma: no cover
+_DELETION_JOB_NAME: str = "session_deletion"
 """The job name used to identify session deletion jobs in processing trackers."""
 
-_CHECKSUM_MAX_WORKERS_PER_JOB: int = 20  # pragma: no cover
+_CHECKSUM_MAX_WORKERS_PER_JOB: int = 20
 """The hard cap on CPU cores allocated to a single checksum job. Checksum computation shows no throughput benefit
 beyond this core count per session."""
 
-_CHECKSUM_PREFERRED_WORKERS_PER_JOB: int = 10  # pragma: no cover
+_CHECKSUM_PREFERRED_WORKERS_PER_JOB: int = 10
 """The preferred number of CPU cores per checksum job used by saturating allocation. The allocator attempts to run
 as many concurrent jobs as possible at this worker count before trading parallelism for per-job throughput."""
 
-_CHECKSUM_MINIMUM_WORKERS_PER_JOB: int = 5  # pragma: no cover
+_CHECKSUM_MINIMUM_WORKERS_PER_JOB: int = 5
 """The minimum acceptable workers per checksum job when running multiple jobs concurrently. If the budget cannot
 sustain this floor with more than one concurrent job, parallelism is reduced until each job meets the minimum."""
 
-_CHECKSUM_WORKER_MULTIPLE: int = 5  # pragma: no cover
+_CHECKSUM_WORKER_MULTIPLE: int = 5
 """Worker counts are rounded down to the nearest multiple of this value for clean process-pool sizing."""
 
-_MAX_PARALLEL_TRANSFER_JOBS: int = 4  # pragma: no cover
+_MAX_PARALLEL_TRANSFER_JOBS: int = 4
 """The hard cap on the number of concurrently executing transfer or deletion operations. Transfer throughput is
 limited by I/O bandwidth; more than four parallel transfers typically saturate network or disk links."""
 
 
-@dataclass(slots=True)  # pragma: no cover
-class _ChecksumPendingJob(PendingJob):  # pragma: no cover
+@dataclass(slots=True)
+class _ChecksumPendingJob(PendingJob):
     """Describes a single checksum resolution job queued for background execution.
 
     Extends the shared ``PendingJob`` base with the session root path, the session's human-readable name, the
@@ -86,8 +87,8 @@ class _ChecksumPendingJob(PendingJob):  # pragma: no cover
     value after resolving the saturating allocation."""
 
 
-@dataclass(slots=True)  # pragma: no cover
-class _TransferPendingJob(PendingJob):  # pragma: no cover
+@dataclass(slots=True)
+class _TransferPendingJob(PendingJob):
     """Describes a single session transfer or deletion job queued for background execution.
 
     Extends the shared ``PendingJob`` base with the source path, optional destination path, the session's
@@ -104,15 +105,15 @@ class _TransferPendingJob(PendingJob):  # pragma: no cover
     """Determines whether to remove the source session directory after transfer completion."""
 
 
-_checksum_execution_state: JobExecutionState[_ChecksumPendingJob] | None = None  # pragma: no cover
+_checksum_execution_state: JobExecutionState[_ChecksumPendingJob] | None = None
 """Stores the active execution state for batch checksum resolution jobs."""
 
-_transfer_execution_state: JobExecutionState[_TransferPendingJob] | None = None  # pragma: no cover
+_transfer_execution_state: JobExecutionState[_TransferPendingJob] | None = None
 """Stores the active execution state for batch transfer and deletion jobs."""
 
 
-@mcp.tool()  # pragma: no cover
-def prepare_checksum_batch_tool(  # pragma: no cover
+@mcp.tool()
+def prepare_checksum_batch_tool(
     session_paths: list[str],
 ) -> dict[str, Any]:
     """Prepares an execution manifest for batch checksum resolution without starting execution.
@@ -157,65 +158,39 @@ def prepare_checksum_batch_tool(  # pragma: no cover
             continue
 
         tracker_path = session.raw_data_path / CHECKSUM_TRACKER_FILENAME
+        expected_jobs: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, session.session_name)]
 
-        if tracker_path.exists():
-            # Idempotent path: returns existing tracker state without reinitializing.
-            try:
-                tracker_status = read_tracker_status(tracker_path=tracker_path)
-            except Exception:
-                tracker_status = {"jobs": [], "summary": {}}
-
-            # Augments each tracker entry with dispatch metadata so the caller can feed the manifest directly
-            # into execute_checksum_jobs_tool without re-deriving per-job fields.
-            enriched_jobs: list[dict[str, Any]] = [
-                {
-                    **tracker_entry,
-                    "session_path": session_path_str,
-                    "session_name": session.session_name,
-                    "tracker_path": str(tracker_path),
-                }
-                for tracker_entry in tracker_status.get("jobs", [])
-            ]
-
-            result_sessions[session_path_str] = {
-                "tracker_path": str(tracker_path),
-                "session_name": session.session_name,
-                "jobs": enriched_jobs,
-                "summary": tracker_status.get("summary", {}),
-            }
-            total_jobs += len(enriched_jobs)
-            continue
-
-        # Initializes a new tracker with the single checksum resolution job for this session.
+        # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries
+        # are detected and the tracker is reset before reinitializing with the expected job set. If the tracker
+        # does not exist, it is created from scratch with the expected jobs.
         tracker = ProcessingTracker(file_path=tracker_path)
-        tracker.initialize_jobs(jobs=[(CHECKSUM_JOB_NAME, session.session_name)])
+        prepare_tracker(tracker=tracker, jobs=expected_jobs)
 
-        job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
-        jobs: list[dict[str, Any]] = [
+        # Reads the (possibly just-repaired or freshly-created) tracker state to return to the caller.
+        try:
+            tracker_status = read_tracker_status(tracker_path=tracker_path)
+        except Exception:
+            tracker_status = {"jobs": [], "summary": {}}
+
+        # Augments each tracker entry with dispatch metadata so the caller can feed the manifest directly
+        # into execute_checksum_jobs_tool without re-deriving per-job fields.
+        enriched_jobs: list[dict[str, Any]] = [
             {
-                "job_id": job_id,
-                "job_name": CHECKSUM_JOB_NAME,
-                "specifier": session.session_name,
-                "status": ProcessingStatus.SCHEDULED.name,
+                **tracker_entry,
                 "session_path": session_path_str,
                 "session_name": session.session_name,
                 "tracker_path": str(tracker_path),
             }
+            for tracker_entry in tracker_status.get("jobs", [])
         ]
 
         result_sessions[session_path_str] = {
             "tracker_path": str(tracker_path),
             "session_name": session.session_name,
-            "jobs": jobs,
-            "summary": {
-                "total": 1,
-                "succeeded": 0,
-                "failed": 0,
-                "running": 0,
-                "scheduled": 1,
-            },
+            "jobs": enriched_jobs,
+            "summary": tracker_status.get("summary", {}),
         }
-        total_jobs += 1
+        total_jobs += len(enriched_jobs)
 
     result: dict[str, Any] = {
         "success": True,
@@ -230,8 +205,8 @@ def prepare_checksum_batch_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def execute_checksum_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def execute_checksum_jobs_tool(
     jobs: list[dict[str, str]],
     *,
     workers_per_job: int = -1,
@@ -372,8 +347,8 @@ def execute_checksum_jobs_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def get_checksum_status_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_checksum_status_tool() -> dict[str, Any]:
     """Returns the current status of the active checksum resolution execution session.
 
     Reads :class:`ProcessingTracker` files from disk for each job to report per-job progress. When no execution
@@ -456,8 +431,8 @@ def get_checksum_status_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_checksum_timing_tool() -> dict[str, Any]:
     """Returns timing information for all jobs in the active checksum resolution execution session.
 
     Reports elapsed time for running jobs and duration for completed jobs using microsecond-precision UTC
@@ -569,8 +544,8 @@ def get_checksum_timing_tool() -> dict[str, Any]:  # pragma: no cover
     return {"active": manager_alive, "jobs": job_timing, "session": session}
 
 
-@mcp.tool()  # pragma: no cover
-def cancel_checksum_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def cancel_checksum_tool() -> dict[str, Any]:
     """Cancels the active checksum resolution execution session.
 
     Clears the pending job queue so no new jobs are dispatched. Active jobs complete naturally but no new jobs
@@ -617,8 +592,8 @@ def cancel_checksum_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def reset_checksum_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def reset_checksum_jobs_tool(
     tracker_path: str,
     job_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -672,8 +647,8 @@ def reset_checksum_jobs_tool(  # pragma: no cover
     return {"reset": True, "jobs_reset": len(target_ids), **updated_status}
 
 
-@mcp.tool()  # pragma: no cover
-def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes checksum resolution status for all sessions under a root directory.
 
     Recursively searches for ``checksum_processing_tracker.yaml`` files and aggregates their status. Each
@@ -744,8 +719,8 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     }
 
 
-@mcp.tool()  # pragma: no cover
-def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:
     """Deletes checksum processing tracker files and their lock files for one or more sessions.
 
     For each session, loads :class:`SessionData` to resolve ``raw_data_path``, then removes
@@ -819,8 +794,8 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:  # 
     return {"results": results, "total_cleaned": total_cleaned, "total_sessions": len(results)}
 
 
-@mcp.tool()  # pragma: no cover
-def prepare_transfer_batch_tool(  # pragma: no cover
+@mcp.tool()
+def prepare_transfer_batch_tool(
     jobs: list[dict[str, Any]],
     tracker_directory: str,
 ) -> dict[str, Any]:
@@ -884,9 +859,7 @@ def prepare_transfer_batch_tool(  # pragma: no cover
         elif destination_path_str is not None:
             job_name = _TRANSFER_JOB_NAME
         else:
-            invalid_jobs.append(
-                {**job_dict, "error": "No destination_path provided and remove_source is not 'true'."}
-            )
+            invalid_jobs.append({**job_dict, "error": "No destination_path provided and remove_source is not 'true'."})
             continue
 
         validated_jobs.append(
@@ -908,63 +881,38 @@ def prepare_transfer_batch_tool(  # pragma: no cover
             result["invalid_jobs"] = invalid_jobs
         return result
 
-    # Idempotent path: if the tracker already exists, returns existing state.
-    if tracker_path.exists():
-        try:
-            tracker_status = read_tracker_status(tracker_path=tracker_path)
-        except Exception:
-            tracker_status = {"jobs": [], "summary": {}}
-
-        # Builds a lookup from job_id to the validated metadata for enrichment.
-        job_id_lookup: dict[str, dict[str, Any]] = {}
-        for job_name, specifier, metadata in validated_jobs:
-            generated_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
-            job_id_lookup[generated_id] = metadata
-
-        enriched_jobs: list[dict[str, Any]] = [
-            {
-                **tracker_entry,
-                **job_id_lookup.get(tracker_entry["job_id"], {}),
-                "tracker_path": str(tracker_path),
-            }
-            for tracker_entry in tracker_status.get("jobs", [])
-        ]
-
-        result = {
-            "tracker_path": str(tracker_path),
-            "jobs": enriched_jobs,
-            "summary": tracker_status.get("summary", {}),
-        }
-        if invalid_jobs:
-            result["invalid_jobs"] = invalid_jobs
-        return result
-
-    # Initializes a new tracker with all validated transfer/deletion jobs.
+    # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries are
+    # detected and the tracker is reset before reinitializing with the expected job set. If the tracker does not
+    # exist, it is created from scratch with the validated jobs.
+    expected_jobs: list[tuple[str, str]] = [(job_name, specifier) for job_name, specifier, _ in validated_jobs]
     tracker = ProcessingTracker(file_path=tracker_path)
-    tracker.initialize_jobs(jobs=[(job_name, specifier) for job_name, specifier, _ in validated_jobs])
+    prepare_tracker(tracker=tracker, jobs=expected_jobs)
 
-    result_jobs: list[dict[str, Any]] = [
+    # Reads the (possibly just-repaired or freshly-created) tracker state to return to the caller.
+    try:
+        tracker_status = read_tracker_status(tracker_path=tracker_path)
+    except Exception:
+        tracker_status = {"jobs": [], "summary": {}}
+
+    # Builds a lookup from job_id to the validated metadata for enrichment.
+    job_id_lookup: dict[str, dict[str, Any]] = {}
+    for job_name, specifier, metadata in validated_jobs:
+        generated_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
+        job_id_lookup[generated_id] = metadata
+
+    enriched_jobs: list[dict[str, Any]] = [
         {
-            "job_id": ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier),
-            "job_name": job_name,
-            "specifier": specifier,
-            "status": ProcessingStatus.SCHEDULED.name,
+            **tracker_entry,
+            **job_id_lookup.get(tracker_entry["job_id"], {}),
             "tracker_path": str(tracker_path),
-            **metadata,
         }
-        for job_name, specifier, metadata in validated_jobs
+        for tracker_entry in tracker_status.get("jobs", [])
     ]
 
     result = {
         "tracker_path": str(tracker_path),
-        "jobs": result_jobs,
-        "summary": {
-            "total": len(result_jobs),
-            "succeeded": 0,
-            "failed": 0,
-            "running": 0,
-            "scheduled": len(result_jobs),
-        },
+        "jobs": enriched_jobs,
+        "summary": tracker_status.get("summary", {}),
     }
 
     if invalid_jobs:
@@ -973,8 +921,8 @@ def prepare_transfer_batch_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def execute_transfer_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def execute_transfer_jobs_tool(
     jobs: list[dict[str, str]],
     *,
     worker_budget: int = -1,
@@ -1087,8 +1035,8 @@ def execute_transfer_jobs_tool(  # pragma: no cover
     return result
 
 
-@mcp.tool()  # pragma: no cover
-def get_transfer_status_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_transfer_status_tool() -> dict[str, Any]:
     """Returns the current status of the active transfer execution session.
 
     Reads :class:`ProcessingTracker` files from disk for each job to report per-job progress. When no execution
@@ -1170,8 +1118,8 @@ def get_transfer_status_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_transfer_timing_tool() -> dict[str, Any]:
     """Returns timing information for all jobs in the active transfer execution session.
 
     Reports elapsed time for running jobs and duration for completed jobs using microsecond-precision UTC
@@ -1282,8 +1230,8 @@ def get_transfer_timing_tool() -> dict[str, Any]:  # pragma: no cover
     return {"active": manager_alive, "jobs": job_timing, "session": session}
 
 
-@mcp.tool()  # pragma: no cover
-def cancel_transfer_tool() -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def cancel_transfer_tool() -> dict[str, Any]:
     """Cancels the active transfer execution session.
 
     Clears the pending job queue so no new jobs are dispatched. Active jobs complete naturally but no new jobs
@@ -1330,8 +1278,8 @@ def cancel_transfer_tool() -> dict[str, Any]:  # pragma: no cover
     }
 
 
-@mcp.tool()  # pragma: no cover
-def reset_transfer_jobs_tool(  # pragma: no cover
+@mcp.tool()
+def reset_transfer_jobs_tool(
     tracker_path: str,
     job_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1385,8 +1333,8 @@ def reset_transfer_jobs_tool(  # pragma: no cover
     return {"reset": True, "jobs_reset": len(target_ids), **updated_status}
 
 
-@mcp.tool()  # pragma: no cover
-def clean_transfer_tracker_tool(tracker_path: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def clean_transfer_tracker_tool(tracker_path: str) -> dict[str, Any]:
     """Deletes a transfer processing tracker file and its lock file after the batch is complete.
 
     Removes the ``transfer_processing_tracker.yaml`` file created by :func:`prepare_transfer_batch_tool` and
@@ -1433,8 +1381,8 @@ def clean_transfer_tracker_tool(tracker_path: str) -> dict[str, Any]:  # pragma:
     return {"cleaned": True, "tracker_path": tracker_path, "deleted_files": deleted_files}
 
 
-@mcp.tool()  # pragma: no cover
-def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:
     """Generates a project manifest ``.feather`` file capturing the snapshot of a project's state.
 
     Calls :func:`generate_project_manifest` to scan the entire project for sessions, processing status, and
@@ -1480,8 +1428,8 @@ def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:  #
     }
 
 
-@mcp.tool()  # pragma: no cover
-def get_manifest_generation_status_tool(project_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def get_manifest_generation_status_tool(project_directory: str) -> dict[str, Any]:
     """Returns the status of the most recent manifest generation for a project.
 
     Reads the :class:`ProcessingTracker` at ``{project_root}/manifest_processing_tracker.yaml`` and returns
@@ -1518,8 +1466,8 @@ def get_manifest_generation_status_tool(project_directory: str) -> dict[str, Any
     }
 
 
-@mcp.tool()  # pragma: no cover
-def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pragma: no cover
+@mcp.tool()
+def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:
     """Deletes all manifest generation artifacts from a project's root directory.
 
     Removes the ``manifest_processing_tracker.yaml`` tracker, the ``{project_name}_manifest.feather`` data file,
@@ -1562,7 +1510,7 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:  # pr
     return {"cleaned": True, "project_directory": project_directory, "deleted_files": deleted_files}
 
 
-def _resolve_checksum_saturating_allocation(budget: int, total_jobs: int) -> tuple[int, int]:  # pragma: no cover
+def _resolve_checksum_saturating_allocation(budget: int, total_jobs: int) -> tuple[int, int]:
     """Resolves per-job worker count and maximum parallel job count for checksum batch execution.
 
     Distributes the CPU budget across as many concurrent jobs as possible at the preferred worker count, then
@@ -1596,7 +1544,7 @@ def _resolve_checksum_saturating_allocation(budget: int, total_jobs: int) -> tup
     return workers, max_parallel
 
 
-def _run_checksum_job(job: _ChecksumPendingJob) -> None:  # pragma: no cover
+def _run_checksum_job(job: _ChecksumPendingJob) -> None:
     """Executes a single checksum resolution job in-process via ``resolve_checksum``.
 
     Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch
@@ -1616,7 +1564,7 @@ def _run_checksum_job(job: _ChecksumPendingJob) -> None:  # pragma: no cover
     )
 
 
-def _run_transfer_job(job: _TransferPendingJob) -> None:  # pragma: no cover
+def _run_transfer_job(job: _TransferPendingJob) -> None:
     """Executes a single session transfer or deletion job in-process via ``transfer_session``.
 
     Serves as the picklable worker callable stored on ``JobExecutionState`` and dispatched to the batch

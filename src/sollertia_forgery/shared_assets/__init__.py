@@ -8,6 +8,7 @@ from .mcp_orchestration import (
     ActiveJob,
     PendingJob,
     JobExecutionState,
+    prepare_tracker,
     validate_directory,
     read_tracker_status,
     analyze_feather_file,
@@ -35,6 +36,7 @@ __all__ = [
     "get_session_root_from_marker",
     "group_jobs_by_tracker",
     "job_execution_manager",
+    "prepare_tracker",
     "read_tracker_status",
     "validate_directory",
 ]

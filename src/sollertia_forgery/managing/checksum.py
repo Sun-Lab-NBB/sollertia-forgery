@@ -8,6 +8,8 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
+from ..shared_assets import prepare_tracker
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -59,10 +61,12 @@ def resolve_checksum(
     # Loads session data to resolve the raw_data path where the tracker and checksum file live.
     session_data = SessionData.load(session_path=session_path)
 
-    # Initializes the processing tracker in the raw_data directory alongside the checksum file.
+    # Initializes the processing tracker in the raw_data directory alongside the checksum file. Applies stale
+    # entry detection so that foreign or outdated job entries are reset before the new job is registered.
     tracker = ProcessingTracker(file_path=session_data.raw_data_path.joinpath(CHECKSUM_TRACKER_FILENAME))
-    job_ids = tracker.initialize_jobs(jobs=[(CHECKSUM_JOB_NAME, session_data.session_name)])
-    job_id = job_ids[0]
+    jobs = [(CHECKSUM_JOB_NAME, session_data.session_name)]
+    prepare_tracker(tracker=tracker, jobs=jobs)
+    job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session_data.session_name)
 
     # Marks the job as running.
     tracker.start_job(job_id=job_id)

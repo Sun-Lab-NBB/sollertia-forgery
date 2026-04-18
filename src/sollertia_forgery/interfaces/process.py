@@ -3,15 +3,13 @@
 from pathlib import Path
 
 import click
-from ataraxis_base_utilities import console
-from sollertia_shared_assets import DatasetData, DatasetSession
 
+from ..forging import run_forging_pipeline
 from ..managing import resolve_checksum, transfer_session, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
-from ..forging.processing import define_dataset, assemble_dataset
 
-# Ensures that displayed CLICK help messages are formatted according to the lab standard.
-CONTEXT_SETTINGS = {"max_content_width": 120}
+CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+"""Ensures that displayed Click help messages are formatted according to the lab standard."""
 
 
 @click.group("process", context_settings=CONTEXT_SETTINGS)
@@ -44,6 +42,8 @@ def generate_manifest(project_path: Path) -> None:
     "-rc",
     "--regenerate-checksum",
     is_flag=True,
+    show_default=True,
+    default=False,
     help=(
         "Determines whether to recalculate and overwrite the cached session's checksum value. When "
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
@@ -67,7 +67,7 @@ def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -
     "--source-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
-    help="The absolute path to the transferred session's source data directory",
+    help="The absolute path to the transferred session's source data directory.",
 )
 @click.option(
     "-dp",
@@ -80,6 +80,8 @@ def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -
     "-rm",
     "--remove-source",
     is_flag=True,
+    show_default=True,
+    default=False,
     help=(
         "Determines whether to delete the source session directory after completing the transfer. If the destination "
         "path is not provided, this command deletes the source session directory without transferring."
@@ -95,60 +97,6 @@ def transfer_session_data(source_path: Path, destination_path: Path | None, *, r
         source_path=source_path,
         destination_path=destination_path,
         remove_source=remove_source,
-    )
-
-
-@process_cli.command("define")
-@click.option(
-    "-dn",
-    "--dataset-name",
-    type=str,
-    required=True,
-    help="The unique name for the dataset to create.",
-)
-@click.option(
-    "-pr",
-    "--project-root",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The path to the root directory of the project for which to create the dataset.",
-)
-@click.option(
-    "-s",
-    "--session",
-    type=str,
-    multiple=True,
-    required=True,
-    help=(
-        "The session to include in the dataset specified using the 'session_name:animal_name' format. This argument "
-        "can be specified multiple times to include multiple sessions."
-    ),
-)
-def define_dataset_command(
-    dataset_name: str,
-    project_root: Path,
-    session: tuple[str, ...],
-) -> None:
-    """Defines a new analysis dataset by creating its data hierarchy and metadata files."""
-    # Parses the session specifications into DatasetSession instances.
-    sessions: list[DatasetSession] = []
-    expected_parts = 2
-    for session_spec in session:
-        parts = session_spec.split(":")
-        if len(parts) != expected_parts:
-            message = (
-                f"Invalid session specification '{session_spec}' encountered when defining the '{dataset_name}' "
-                f"analysis dataset's data hierarchy. All session entries must follow the 'session_name:animal_name' "
-                f"format."
-            )
-            console.error(message=message, error=ValueError)
-        sessions.append(DatasetSession(session=parts[0], animal=parts[1]))
-
-    # Creates the dataset hierarchy and metadata files.
-    define_dataset(
-        name=dataset_name,
-        sessions=tuple(sessions),
-        project_root=project_root,
     )
 
 
@@ -208,20 +156,31 @@ def run_behavior_pipeline_command(
     )
 
 
-@process_cli.command("assemble")
+@process_cli.command("forge")
 @click.option(
-    "-dp",
-    "--dataset-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    "-dn",
+    "--dataset-name",
+    type=str,
     required=True,
-    help="The path to the dataset's root directory (containing dataset_data.yaml).",
+    help="The unique name for the dataset to create or use.",
 )
 @click.option(
-    "-pr",
-    "--project-root",
+    "-pp",
+    "--project-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
-    help="The path to the project's root directory that stores the animal and session data directories.",
+    help="The path to the project's root data directory that stores the animal and session data directories.",
+)
+@click.option(
+    "-s",
+    "--session",
+    type=str,
+    multiple=True,
+    help=(
+        "The session name to include in the dataset. Can be specified multiple times. When the dataset already "
+        "exists and sessions are provided, the set is verified against the existing definition. Omit to work "
+        "with an already-defined dataset without triggering verification."
+    ),
 )
 @click.option(
     "-id",
@@ -229,36 +188,65 @@ def run_behavior_pipeline_command(
     type=str,
     default=None,
     help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
-        "(remote mode)."
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching "
+        "job (remote mode). If not provided, discovers and runs every available job for the dataset "
+        "(local mode)."
     ),
 )
 @click.option(
-    "-t",
-    "--target-session",
-    type=str,
-    default=None,
-    help="If provided, limits the assembly to the specified session only.",
+    "-w",
+    "--workers",
+    type=int,
+    default=-1,
+    show_default=True,
+    help=(
+        "The number of worker processes to use for parallel processing. Set to -1 for automatic "
+        "resolution via 'resolve_worker_count'. Set to 1 for sequential execution without spawning "
+        "worker processes. Ignored when '--job-id' is provided (remote mode runs the single job "
+        "in-process)."
+    ),
 )
-def assemble_dataset_command(
-    dataset_path: Path,
-    project_root: Path,
+@click.option(
+    "-pr",
+    "--progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to display a progress bar during processing. Only meaningful in local mode.",
+)
+@click.option(
+    "-f",
+    "--force-recreate",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to delete any existing dataset hierarchy before creating it fresh. Use this flag when "
+        "extending, shrinking, or modifying the session set of an existing dataset. Any prior assembled data and "
+        "the existing processing tracker are discarded."
+    ),
+)
+def run_forging_pipeline_command(
+    dataset_name: str,
+    project_path: Path,
+    session: tuple[str, ...],
     job_id: str | None,
-    target_session: str | None,
+    workers: int,
+    *,
+    progress: bool,
+    force_recreate: bool,
 ) -> None:
-    """Assembles forged data for the target dataset's sessions.
+    """Runs the forging (dataset assembly) pipeline on the target dataset.
 
-    This command reads the dataset metadata and assembles each session's data into a unified data.feather file
-    within the dataset hierarchy.
+    Defines the dataset hierarchy if it does not exist, then executes per-session data assembly jobs. When
+    called with an existing dataset and no session list, reuses the on-disk definition.
     """
-    # Loads the dataset's metadata.
-    dataset = DatasetData.load(dataset_path=dataset_path)
-
-    # Runs the assembly.
-    assemble_dataset(
-        dataset=dataset,
-        project_root=project_root,
+    run_forging_pipeline(
+        name=dataset_name,
+        session_names=session,
+        project_root=project_path,
         job_id=job_id,
-        target_session=target_session,
-        progress=True,
+        workers=workers,
+        display_progress=progress,
+        force_recreate=force_recreate,
     )

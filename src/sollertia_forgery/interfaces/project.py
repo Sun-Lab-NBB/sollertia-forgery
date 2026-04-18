@@ -1,56 +1,29 @@
-"""Provides CLIs for interacting with projects stored on the remote compute server.
-
-Notes:
-    These interfaces allow fetching and displaying project data and processing state snapshots, and adopting shared
-    project data for further processing.
-"""
+"""Provides CLIs for interacting with Sollertia project manifest files."""
 
 from pathlib import Path
 
 import click
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import get_server_configuration
 
-from ..server import Server, adopt_project, resolve_project_manifest
 from ..managing import generate_project_manifest
 from ..shared_assets import ProjectManifest
 
-# Ensures that displayed CLICK help messages are formatted according to the lab standard.
-CONTEXT_SETTINGS = {"max_content_width": 120}
+CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+"""Ensures that displayed Click help messages are formatted according to the lab standard."""
 
 
 @click.group("project", context_settings=CONTEXT_SETTINGS)
 @click.pass_context
 @click.option(
-    "-p",
-    "--project",
-    type=str,
-    required=False,
-    help="The name of the server-stored project to work with (remote mode).",
-)
-@click.option(
     "-pp",
     "--project-path",
-    type=click.Path(exists=True, path_type=Path),
-    required=False,
-    help="The path to the locally stored project directory to work with (local mode).",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The path to the project's root data directory.",
 )
-def project_cli(ctx: click.Context, project: str | None, project_path: Path | None) -> None:
-    """Provides commands for working with Sollertia projects.
-
-    This CLI group is intended to be called on user machines as part of the shared Sollertia data workflow interface.
-    Primarily, commands from this CLI group are intended to be used as entry-points for all further interactions with
-    the target project's data stored on the lab's remote compute server. Some commands also allow working with the data
-    stored locally on the user's host-machine.
-    """
-    # Validates mutual exclusivity of project and project_path options.
-    if project and project_path:
-        console.error(message="Cannot specify both --project and --project-path.", error=ValueError)
-    if not project and not project_path:
-        console.error(message="Must specify either --project or --project-path.", error=ValueError)
-
+def project_cli(ctx: click.Context, project_path: Path) -> None:
+    """Provides commands for working with Sollertia projects stored on local machine."""
     ctx.ensure_object(dict)
-    ctx.obj["project"] = project
     ctx.obj["project_path"] = project_path
 
 
@@ -94,8 +67,8 @@ def project_cli(ctx: click.Context, project: str | None, project_path: Path | No
     show_default=True,
     default=False,
     help=(
-        "Determines whether to regenerate the manifest file on the remote server before fetching it. Use this option "
-        "to ensure the manifest reflects the latest state of the project's data on the server."
+        "Determines whether to regenerate the manifest file before loading it. Use this option to ensure the manifest "
+        "reflects the latest state of the project's data."
     ),
 )
 @click.pass_context
@@ -108,9 +81,7 @@ def print_project_manifest_data(
     regenerate: bool,
 ) -> None:
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    project_path = ctx.obj["project_path"]
+    project_path: Path = ctx.obj["project_path"]
 
     if not summary and not notes:
         message = (
@@ -119,31 +90,18 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # Determines the execution mode based on whether project_path is provided.
-    if project_path is not None:
-        # LOCAL MODE: Loads manifest directly from the local project directory.
-        manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
+    # Resolves the manifest path and regenerates if requested or absent.
+    manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
+    if regenerate or not manifest_path.exists():
+        generate_project_manifest(project_directory=project_path)
 
-        # Regenerates the manifest locally if requested or if it doesn't exist.
-        if regenerate or not manifest_path.exists():
-            generate_project_manifest(project_directory=project_path)
-
-        manifest = ProjectManifest(manifest_file=manifest_path)
-    else:
-        # REMOTE MODE: Fetches the manifest from the server.
-        configuration = get_server_configuration()
-        server = Server(configuration=configuration)
-
-        # Fetches the manifest from the server. Regenerates if requested or if manifest doesn't exist.
-        manifest_path = resolve_project_manifest(project=project, server=server, generate=regenerate)
-        manifest = ProjectManifest(manifest_file=manifest_path)
+    manifest = ProjectManifest(manifest_file=manifest_path)
 
     # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
-        project_name = project or project_path.stem
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
-            f"target project '{project_name}'."
+            f"target project '{project_path.stem}'."
         )
         console.error(message=message, error=ValueError)
 
@@ -154,58 +112,3 @@ def print_project_manifest_data(
     # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
-
-
-@project_cli.command("adopt")
-@click.option(
-    "-r",
-    "--repeat-adoption",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to re-adopt sessions that have already been adopted. If False (default), already-adopted "
-        "sessions are skipped during the adoption stage."
-    ),
-)
-@click.option(
-    "-k",
-    "--keep-job-logs",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to keep completed job logs on the server or (default) remove them after each pipeline "
-        "completes successfully. If the pipeline fails, the job logs are kept regardless of this argument's value."
-    ),
-)
-@click.pass_context
-def adopt_project_data(ctx: click.Context, *, repeat_adoption: bool, keep_job_logs: bool) -> None:
-    """Discovers and adopts all unadopted project sessions from the remote compute server.
-
-    This command scans the project's directory on the shared server's volume, identifies sessions that have not yet
-    been adopted (copied to the user's working directory), and executes the adoption pipeline followed by the data
-    integrity verification pipeline. Adopting the project's session data in this way is the prerequisite for running
-    all further processing and analysis workflows on the remote compute server. This command is not necessary to
-    run the processing in the local processing mode.
-    """
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    project_path = ctx.obj["project_path"]
-
-    # Blocks local mode for the adopt command.
-    if project_path is not None:
-        message = (
-            "The 'adopt' command is only available in the 'remote' mode. Local processing mode does not require "
-            "adopting the data to support the full range of processing offered by the Sollertia data workflow. "
-            "To run the command in the remote processing mode, use the '--project' argument instead of the "
-            "'--project-path' argument to specify the target project."
-        )
-        console.error(message=message, error=ValueError)
-
-    # Executes the adoption process.
-    adopt_project(
-        project=project,
-        repeat_adoption=repeat_adoption,
-        keep_job_logs=keep_job_logs,
-    )
