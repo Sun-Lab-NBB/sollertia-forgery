@@ -16,11 +16,17 @@ from sollertia_shared_assets import (
     ProcessingPipelines,
     delete_directory,
     get_working_directory,
-    get_server_configuration,
 )
 from ataraxis_base_utilities import LogLevel, console, ensure_directory_exists
 
-from . import Job, Server, JobStatus, ProcessingPipeline, get_remote_job_work_directory
+from . import (
+    Job,
+    Server,
+    JobStatus,
+    ProcessingPipeline,
+    get_remote_job_work_directory,
+    get_server_configuration,
+)
 from ..shared_assets import ProjectManifest, SessionMetadata, delay_timer, delay_terminal
 from .pipeline import execute_pipelines, check_session_eligibility
 

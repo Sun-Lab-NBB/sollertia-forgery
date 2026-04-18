@@ -18,10 +18,11 @@ from ataraxis_time import (
 )
 from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import (
-    DatasetData,
     SurgeryData,
     MesoscopeExperimentDescriptor,
 )
+
+from .dataset_data import DatasetData
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 from .pipeline import (

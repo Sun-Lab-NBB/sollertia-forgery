@@ -15,7 +15,7 @@ from .mcp_orchestration import SESSION_MARKER_FILENAME
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sollertia_shared_assets import DatasetSession
+    from ..forging.dataset_data import DatasetSession
 
 _SESSION_NAME_COMPONENTS: int = 7
 """The number of hyphen-separated components in a valid session name (YYYY-MM-DD-HH-MM-SS-microseconds)."""
