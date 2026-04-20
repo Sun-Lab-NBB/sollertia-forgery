@@ -140,7 +140,7 @@ def print_project_manifest_data(
 
     # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
-        project_name = project if project else project_path.stem
+        project_name = project or project_path.stem
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
             f"target project '{project_name}'."

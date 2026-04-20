@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
 from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
-import matplotlib.pyplot as plt
+from tqdm import tqdm
+from numba import njit, prange
 import numpy as np
 import polars as pl
-from numba import njit, prange
-from numpy.typing import NDArray
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.ndimage import maximum_filter1d, uniform_filter1d
 from scipy.signal import savgol_filter
+from scipy.ndimage import maximum_filter1d, uniform_filter1d
+import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist
-from tqdm import tqdm
+from scipy.cluster.hierarchy import linkage, fcluster
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
+    from numpy.typing import NDArray
+
     from sl_forgery.analysis.place_cell_analysis import PlaceFields
 
 
@@ -149,10 +151,12 @@ def _enforce_minimum_interval(
 
         # Accepts each crossing only if enough frames have elapsed since the last accepted onset.
         for frame_index in range(frame_count):
-            if above_threshold[cell_index, frame_index]:
-                if (frame_index - last_onset_frame) >= minimum_inter_event_frames:
-                    onsets[cell_index, frame_index] = True
-                    last_onset_frame = frame_index
+            if (
+                above_threshold[cell_index, frame_index]
+                and (frame_index - last_onset_frame) >= minimum_inter_event_frames
+            ):
+                onsets[cell_index, frame_index] = True
+                last_onset_frame = frame_index
 
     return onsets
 
@@ -228,8 +232,7 @@ def _compute_shuffled_max_counts(
         peak = 0
         for frame_index in range(frame_count):
             running += diff[frame_index]
-            if running > peak:
-                peak = running
+            peak = max(peak, running)
         max_counts[shuffle_index] = peak
 
     return max_counts
@@ -309,7 +312,7 @@ def _compute_shuffled_threshold(
     # Packs per-cell onset frame indices into a flat array with offsets for sparse iteration.
     onset_lists: list[NDArray[np.int32]] = []
     onset_offsets = np.zeros(cell_count + 1, dtype=np.int32)
-    
+
     for cell_index in range(cell_count):
         cell_onsets = np.nonzero(onsets[cell_index])[0]
         onset_lists.append(cell_onsets)
@@ -488,7 +491,7 @@ class SCEDetector:
         self._elapsed_minutes = (time_us - time_us[0]).astype(np.float32) / np.float32(60_000_000.0)
 
         # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        self._fluorescence = np.vstack(df[fluorescence_column].to_list()).T.astype(np.float32)
+        self._fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
         self._torque = df["torque_N_cm"].to_numpy()
         self._distance = df["distance_cm"].to_numpy().astype(np.float32)
 
@@ -522,7 +525,6 @@ class SCEDetector:
         Returns:
             A list of SCEResult objects in temporal session order, each tagged with its PeriodType.
         """
-
         # Segments the session into contiguous rest and run periods and prepares fluorescence data for each.
         pending = []
         current_state = None
@@ -550,11 +552,13 @@ class SCEDetector:
 
                         # Skips rest periods where fewer than half the frames have stable torque.
                         if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_FRAME_COUNT:
-                            pending.append((
-                                period_fluorescence[:, stable_mask],
-                                period_timestamps[stable_mask],
-                                PeriodType.REST,
-                            ))
+                            pending.append(
+                                (
+                                    period_fluorescence[:, stable_mask],
+                                    period_timestamps[stable_mask],
+                                    PeriodType.REST,
+                                )
+                            )
 
                     elif current_state == PeriodType.RUN:
                         run_fluorescence = period_fluorescence.copy()
@@ -749,7 +753,7 @@ class SCEDetector:
 
             cell_indices = np.unique(np.concatenate([calm_indices, spiker_indices])).astype(np.int32)
             cell_indices = cell_indices[:cell_count]
-            
+
         else:
             cell_indices = np.asarray(cell_indices, dtype=np.int32)
 
@@ -846,7 +850,6 @@ class SCEDetector:
 
         figure.tight_layout()
         return figure
-
 
     def plot_assemblies(
         self,
@@ -955,7 +958,7 @@ class SCEDetector:
             )
 
         if assembly_index > 0:
-                axis.tick_params(axis="y", labelleft=False)
+            axis.tick_params(axis="y", labelleft=False)
 
         axes[0].set_ylabel("Cell number")
 
@@ -990,5 +993,4 @@ class SCEDetector:
         frame_to_sce = np.zeros((frame_count, total_sce_count), dtype=np.float32)
         frame_to_sce[sce_frame_indices, result.sce_labels[sce_frame_indices] - 1] = 1.0
 
-        participation = (result.onset_matrix.astype(np.float32) @ frame_to_sce > 0).T
-        return participation
+        return (result.onset_matrix.astype(np.float32) @ frame_to_sce > 0).T
