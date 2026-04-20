@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-    from sl_forgery.cell_analysis_protocols.place_cell_analysis import PlaceFields
+    from sl_forgery.analysis.place_cell_analysis import PlaceFields
 
 
 _MINIMUM_STABLE_FRACTION: float = 0.5

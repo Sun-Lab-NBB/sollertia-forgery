@@ -26,6 +26,8 @@ class _PlaceFieldRows(NamedTuple):
 
     row_cell_ids: NDArray[np.int32]
     """Maps each row to its parent cell index."""
+    region_count: int
+    """Number of leading rows that correspond to actual place fields; remaining rows are for cells without fields."""
     pf_start_cm: NDArray[np.float32]
     """Starting position of each place field in centimeters."""
     pf_end_cm: NDArray[np.float32]
@@ -38,15 +40,17 @@ class _PlaceFieldRows(NamedTuple):
     """Peak fluorescence intensity within each place field region."""
     pf_width_cm: NDArray[np.float32]
     """Spatial width of each place field in centimeters."""
-    binned_fluorescence: list[list[float]]
-    """Full spatial tuning curve for each row's parent cell."""
+    binned_fluorescence: list[list[list[float]] | None]
+    """Per-lap binned fluorescence (trial x bin) for each place-field row. None for rows whose cell has no
+    detected place field."""
 
 
 def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _PlaceFieldRows:
     """Builds per-place-field row arrays from detected place fields.
 
-    Each detected place field produces one row. Cells without any place field produce a single row with NaN for all
-    field-specific columns. The binned fluorescence for a cell is duplicated across all rows belonging to that cell.
+    Each detected place field produces one row with populated field-level columns and the cell's per-lap binned
+    fluorescence. Cells without any place field produce a single row with NaN for field-specific scalar columns and
+    None for the binned fluorescence column.
 
     Args:
         cell_count: Total number of cells.
@@ -64,15 +68,15 @@ def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _Plac
     centers = place_fields.centers
     mean_intensities = place_fields.mean_intensity
     max_intensities = place_fields.max_intensity
-    fluorescence = place_fields.binned_fluorescence
+    binned_per_trial = place_fields.binned_fluorescence_per_trial
 
     # Identifies cells with and without place fields using numpy set operations.
     unique_field_cells = np.unique(cell_ids[:region_count])
     cells_without_fields = np.setdiff1d(np.arange(cell_count, dtype=np.int32), unique_field_cells)
     total_rows = region_count + len(cells_without_fields)
 
-    # Pre-allocates all column arrays. Field-specific columns default to NaN so that cells without place fields
-    # automatically receive NaN values without additional assignment.
+    # Pre-allocates all scalar column arrays. Field-specific columns default to NaN so that cells without place
+    # fields automatically receive NaN values without additional assignment.
     row_cell_ids = np.empty(total_rows, dtype=np.int32)
     pf_start_cm = np.full(total_rows, np.nan, dtype=np.float32)
     pf_end_cm = np.full(total_rows, np.nan, dtype=np.float32)
@@ -80,9 +84,6 @@ def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _Plac
     pf_mean_intensity = np.full(total_rows, np.nan, dtype=np.float32)
     pf_max_intensity = np.full(total_rows, np.nan, dtype=np.float32)
     pf_width_cm = np.full(total_rows, np.nan, dtype=np.float32)
-
-    # Collects the fluorescence row indices to batch-convert at the end instead of calling .tolist() per row.
-    fluorescence_row_indices = np.empty(total_rows, dtype=np.int32)
 
     # Extracts labeled region boundaries for each place field, handling wrapped circular fields via gap detection.
     for field_index in range(region_count):
@@ -107,19 +108,22 @@ def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _Plac
         pf_mean_intensity[field_index] = mean_intensities[field_index]
         pf_max_intensity[field_index] = max_intensities[field_index]
         pf_width_cm[field_index] = len(bins) * bin_size
-        fluorescence_row_indices[field_index] = cell_index
 
-    # Assigns NaN rows for cells without place fields using the pre-computed array.
+    # Assigns rows for cells without place fields after the field rows.
     no_field_start = region_count
     no_field_end = no_field_start + len(cells_without_fields)
     row_cell_ids[no_field_start:no_field_end] = cells_without_fields
-    fluorescence_row_indices[no_field_start:no_field_end] = cells_without_fields
 
-    # Batch-converts fluorescence rows to lists using fancy indexing instead of per-row .tolist() calls.
-    row_fluorescence = fluorescence[fluorescence_row_indices].tolist()
+    # Builds the per-row 2D binned fluorescence list. Place-field rows carry their cell's (trial_count, bin_count)
+    # matrix; cells without fields carry None so the output column is explicitly null for those rows.
+    row_fluorescence: list[list[list[float]] | None] = [
+        binned_per_trial[int(cell_ids[field_index])].tolist() for field_index in range(region_count)
+    ]
+    row_fluorescence.extend([None] * len(cells_without_fields))
 
     return _PlaceFieldRows(
         row_cell_ids=row_cell_ids,
+        region_count=region_count,
         pf_start_cm=pf_start_cm,
         pf_end_cm=pf_end_cm,
         pf_center_cm=pf_center_cm,
@@ -271,36 +275,43 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
 def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> PlaceFields:
     """Reconstructs a PlaceFields object from a previously saved analysis feather file.
 
-    Rebuilds the label_image, binned_fluorescence, centers, and bin_size from the per-place-field rows stored in the
-    feather file. The reconstructed object is suitable for SCE run-period masking.
+    Rebuilds the label_image and bin_size from the per-place-field rows stored in the feather file. The resulting
+    object is suitable for SCE run-period masking, which reads only label_image and bin_size from PlaceFields.
+
+    Notes:
+        The saved binned_fluorescence column now holds a per-lap (trial x bin) matrix and is null for cells without
+        place fields, so this function does not reconstruct the pooled binned_fluorescence. A zero-filled placeholder
+        is returned in its slot, which satisfies the dataclass contract without requiring per-lap data to be loaded
+        or averaged.
 
     Args:
         analysis_path: Path to the analysis feather file containing place field columns.
-        track_length: Length of the track in centimeters, used to derive bin_size from the binned fluorescence width.
+        track_length: Length of the track in centimeters, used to derive bin_size from the per-lap fluorescence width.
 
     Returns:
-        A PlaceFields object with label_image, binned_fluorescence, centers, and bin_size reconstructed from the
-        feather data.
+        A PlaceFields object with label_image, centers, and bin_size reconstructed from the feather data, and a
+        zero-filled binned_fluorescence placeholder.
     """
     dataframe = pl.read_ipc(source=analysis_path, memory_map=True)
 
     cell_ids = dataframe["cell_id"].to_numpy()
     cell_count = int(cell_ids.max()) + 1
 
-    # Extracts per-cell binned fluorescence by taking the first occurrence of each cell (all rows for the same cell
-    # share identical binned fluorescence). Batch-converts the list of lists to a single numpy array.
-    unique_cells = dataframe.group_by("cell_id", maintain_order=True).first()
-    unique_cell_ids = unique_cells["cell_id"].to_numpy()
-    all_fluorescence = np.array(unique_cells["binned_fluorescence"].to_list(), dtype=np.float32)
-    bin_count = all_fluorescence.shape[1]
-    bin_size = track_length / bin_count
-    binned_fluorescence = np.zeros((cell_count, bin_count), dtype=np.float32)
-    binned_fluorescence[unique_cell_ids] = all_fluorescence
-
-    # Reconstructs label_image and centers from the non-NaN place field rows.
-    label_image = np.zeros((cell_count, bin_count), dtype=np.int32)
+    # Filters to rows that carry an actual place field; these rows have non-null binned_fluorescence.
     field_rows = dataframe.filter(pl.col("pf_start_cm").is_not_null())
     field_count = len(field_rows)
+
+    # Derives the bin count from the first field row's per-lap fluorescence matrix (trial_count, bin_count). When no
+    # fields are present, defaults to a single-bin placeholder since SCE masking on an all-zero label image is a
+    # no-op.
+    if field_count > 0:
+        first_binned = field_rows["binned_fluorescence"][0].to_list()
+        bin_count = len(first_binned[0]) if len(first_binned) > 0 else 1
+    else:
+        bin_count = 1
+    bin_size = track_length / bin_count
+
+    label_image = np.zeros((cell_count, bin_count), dtype=np.int32)
 
     centers_list: list[list[float]] = []
     for field_index in range(field_count):
@@ -323,7 +334,7 @@ def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> Place
 
     return PlaceFields(
         label_image=label_image,
-        binned_fluorescence=binned_fluorescence,
+        binned_fluorescence=np.zeros((cell_count, bin_count), dtype=np.float32),
         centers=centers,
         bin_size=bin_size,
     )
@@ -393,20 +404,26 @@ def generate_place_field_dataframe(
     console.echo(message="Assembling per-place-field analysis DataFrame...", level=LogLevel.INFO)
     place_field_rows = _build_place_field_rows(cell_count=cell_count, place_fields=place_fields)
 
+    # Builds the DataFrame with fill_nan(None) on scalar float columns so NaN sentinels become true polars nulls,
+    # letting downstream code use is_null() to distinguish place-field rows from cells-without-field rows.
     dataframe = pl.DataFrame(
         {
             "cell_id": place_field_rows.row_cell_ids,
-            "pf_start_cm": place_field_rows.pf_start_cm,
-            "pf_end_cm": place_field_rows.pf_end_cm,
-            "pf_center_cm": place_field_rows.pf_center_cm,
+            "pf_start_cm": pl.Series(values=place_field_rows.pf_start_cm, dtype=pl.Float32).fill_nan(None),
+            "pf_end_cm": pl.Series(values=place_field_rows.pf_end_cm, dtype=pl.Float32).fill_nan(None),
+            "pf_center_cm": pl.Series(values=place_field_rows.pf_center_cm, dtype=pl.Float32).fill_nan(None),
             "binned_fluorescence": pl.Series(
                 name="binned_fluorescence",
                 values=place_field_rows.binned_fluorescence,
-                dtype=pl.List(pl.Float32),
+                dtype=pl.List(pl.List(pl.Float32)),
             ),
-            "pf_mean_intensity": place_field_rows.pf_mean_intensity,
-            "pf_max_intensity": place_field_rows.pf_max_intensity,
-            "pf_width_cm": place_field_rows.pf_width_cm,
+            "pf_mean_intensity": pl.Series(
+                values=place_field_rows.pf_mean_intensity, dtype=pl.Float32,
+            ).fill_nan(None),
+            "pf_max_intensity": pl.Series(
+                values=place_field_rows.pf_max_intensity, dtype=pl.Float32,
+            ).fill_nan(None),
+            "pf_width_cm": pl.Series(values=place_field_rows.pf_width_cm, dtype=pl.Float32).fill_nan(None),
         },
     ).sort("cell_id")
 
@@ -455,6 +472,10 @@ def append_reward_cell_columns(
     dataframe = pl.read_ipc(source=output_path, memory_map=True)
     row_cell_ids = dataframe["cell_id"].to_numpy()
 
+    # Identifies which rows are place-field rows (mutually exclusive from reward-cell rows). Rows where pf_start_cm
+    # is not null carry a place field, so their reward columns must stay null.
+    is_place_field_row = dataframe["pf_start_cm"].is_not_null().to_numpy()
+
     if track_length is None:
         track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
         console.echo(message=f"Computed track length: {track_length} cm.", level=LogLevel.INFO)
@@ -483,12 +504,23 @@ def append_reward_cell_columns(
         level=LogLevel.SUCCESS,
     )
 
-    # Expands per-cell reward columns to match the per-place-field row structure and appends to the DataFrame.
+    # Builds a per-cell mask of reward-classified neurons. A row receives populated reward columns only when it is a
+    # no-field row (not a place-field row) and its cell is classified as a reward cell.
+    is_reward_cell = reward_results.spatial_results.is_significant & reward_results.is_reward_proximal
+    is_reward_eligible_row = (~is_place_field_row) & is_reward_cell[row_cell_ids]
+
+    # Expands per-cell reward arrays to the row level and nulls out non-eligible rows so that place-field rows and
+    # non-reward no-field rows both receive explicit nulls in every reward column.
     reward_columns = _aggregate_reward_cell_columns(reward_results=reward_results)
-    reward_series = [
-        pl.Series(name=name, values=_expand_cell_array_to_rows(cell_array=array, row_cell_ids=row_cell_ids))
-        for name, array in reward_columns.items()
-    ]
+    non_eligible_indices = np.where(~is_reward_eligible_row)[0]
+    reward_series: list[pl.Series] = []
+    for name, cell_array in reward_columns.items():
+        expanded = _expand_cell_array_to_rows(cell_array=cell_array, row_cell_ids=row_cell_ids)
+        series = pl.Series(name=name, values=expanded)
+        if len(non_eligible_indices) > 0:
+            series = series.scatter(indices=non_eligible_indices, values=None)
+        reward_series.append(series)
+
     dataframe = dataframe.hstack(reward_series)
 
     # Writes the updated DataFrame back to the same feather file.

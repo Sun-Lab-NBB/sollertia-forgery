@@ -352,6 +352,7 @@ class PlaceFields:
     Attributes:
         label_image: Labeled image of detected place fields with dimensions (cell_count, bin_count).
         binned_fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
+        binned_fluorescence_per_trial: Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count).
         centers: Centers of detected place fields with dimensions (field_count, 2).
         bin_size: Size of spatial bins in centimeters.
     """
@@ -360,6 +361,11 @@ class PlaceFields:
     """Labeled image of detected place fields with dimensions (cell_count, bin_count)."""
     binned_fluorescence: NDArray[np.float32]
     """Binned fluorescence data with dimensions (cell_count, bin_count)."""
+    binned_fluorescence_per_trial: NDArray[np.float32] = field(
+        default_factory=lambda: np.zeros((0, 0, 0), dtype=np.float32),
+    )
+    """Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count). Empty when per-trial
+    binning was not computed."""
     centers: NDArray[np.float32] = field(default_factory=lambda: np.array([], dtype=np.float32))
     """Centers of detected place fields with dimensions (field_count, 2)."""
     bin_size: float = 5.0
@@ -763,8 +769,8 @@ class PlaceFieldDetector:
         bin_size: float = 5.0,
         configuration: PlaceFieldDetectionConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, position, and speed data from a memory-mapped feather file for place field detection.
-        Filters to 'run' state frames and converts cumulative distance to track position via modulo.
+        """Loads fluorescence, position, speed, and trial data from a memory-mapped feather file for place field
+        detection. Filters to 'run' state frames and converts cumulative distance to track position via modulo.
 
         Args:
             session_path: Path to the session feather file.
@@ -775,7 +781,8 @@ class PlaceFieldDetector:
             configuration: Configuration parameters for place field detection. Uses defaults if None.
         """
         df = pl.read_ipc(
-            session_path, columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s"]
+            session_path,
+            columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s", "trial"],
         )
         df = df.filter(pl.col("system_state") == "run")
         if trial_type is not None:
@@ -787,6 +794,7 @@ class PlaceFieldDetector:
         # Converts the cumulative distance to track position using modulus to wrap within a single lap.
         self.position = df["distance_cm"].to_numpy().astype(np.float32) % track_length
         self.speed = df["speed_cm_s"].to_numpy().astype(np.float32)
+        self.trial_ids = df["trial"].to_numpy().astype(np.int32)
         self.track_length = track_length
         self.bin_size = bin_size
         self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
@@ -799,8 +807,8 @@ class PlaceFieldDetector:
                 cells with statistically significant place fields.
 
         Returns:
-            A PlaceFields instance containing the labeled regions, binned fluorescence, and centers of detected place
-            fields. If run_shuffle is True, only significant cells are included.
+            A PlaceFields instance containing the labeled regions, pooled and per-lap binned fluorescence, and centers
+            of detected place fields. If run_shuffle is True, only significant cells are included.
         """
         # Computes dF/F0 to normalize fluorescence relative to baseline.
         fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
@@ -817,7 +825,63 @@ class PlaceFieldDetector:
             significant_cells, _ = self.compute_shuffle_significance(repeat_count=self.configuration.chunk_count)
             place_fields = place_fields.filter_cells(indices=significant_cells)
 
+        # Computes per-lap binned fluorescence using the same speed filter and smoothing as the pooled computation.
+        place_fields.binned_fluorescence_per_trial = self._bin_fluorescence_per_trial(fluorescence=fluorescence)
+
         return place_fields
+
+    def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
+        """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.
+
+        Notes:
+            Excludes trial id 255, which the acquisition pipeline uses as a sentinel for "no trial" frames. Applies
+            the same speed filter and uniform_filter1d smoothing used for the pooled binned fluorescence so that
+            averaging the returned array across the trial axis reproduces the pooled binned_fluorescence within
+            numerical rounding.
+
+        Args:
+            fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, frame_count).
+
+        Returns:
+            Per-lap binned fluorescence array with dimensions (cell_count, trial_count, bin_count). Bins and lap
+            slices with no valid speed-filtered frames are filled with NaN.
+        """
+        # Collects valid trial identifiers, excluding the 255 sentinel that marks "no trial" frames.
+        valid_trial_mask = self.trial_ids != 255
+        unique_trials = np.unique(self.trial_ids[valid_trial_mask])
+        trial_count = int(len(unique_trials))
+
+        cell_count = fluorescence.shape[0]
+        bin_edges = np.arange(0, self.track_length + self.bin_size, self.bin_size, dtype=np.float32)
+        bin_count = int(len(bin_edges)) - 1
+
+        output = np.full((cell_count, trial_count, bin_count), np.nan, dtype=np.float32)
+
+        # Bins each lap independently, applying the same speed filter and smoothing as the pooled computation.
+        for trial_index, trial_id in enumerate(unique_trials):
+            trial_mask = (self.trial_ids == trial_id) & (self.speed > self.configuration.minimum_speed)
+            if not np.any(trial_mask):
+                continue
+
+            trial_position = self.position[trial_mask]
+            trial_fluorescence = fluorescence[:, trial_mask]
+
+            trial_binned, _ = _bin_fluorescence_by_position(
+                fluorescence=trial_fluorescence,
+                position=trial_position,
+                bin_edges=bin_edges,
+            )
+
+            trial_binned = filters.uniform_filter1d(
+                input=trial_binned,
+                size=self.configuration.smooth_size,
+                axis=1,
+                mode="wrap",
+            ).astype(np.float32)
+
+            output[:, trial_index, :] = trial_binned
+
+        return output
 
     def compute_shuffle_significance(
         self,
