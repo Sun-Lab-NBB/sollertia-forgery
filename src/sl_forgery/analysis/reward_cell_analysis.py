@@ -211,10 +211,7 @@ def _compute_shuffled_source_indices(
     for filtered_index in range(filtered_count):
         destination = filtered_frame_indices[filtered_index]
         output_chunk_position = 0
-        while (
-            output_chunk_position + 1 < chunk_count
-            and output_chunk_starts[output_chunk_position + 1] <= destination
-        ):
+        while output_chunk_position + 1 < chunk_count and output_chunk_starts[output_chunk_position + 1] <= destination:
             output_chunk_position += 1
         offset_within_chunk = destination - output_chunk_starts[output_chunk_position]
         source_chunk_index = permutation[output_chunk_position]
@@ -582,7 +579,7 @@ class RewardCellDetector:
         configuration = self.configuration
         cell_count = self.fluorescence.shape[0]
         frame_count = self.fluorescence.shape[1]
-        bin_count = int(len(bin_edges)) - 1
+        bin_count = len(bin_edges) - 1
 
         # Precomputes destination-frame indices and their spatial bin assignments; both are invariant across shuffles.
         filtered_frame_indices = np.nonzero(speed_mask)[0].astype(np.int32)

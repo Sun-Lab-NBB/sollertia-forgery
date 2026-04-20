@@ -849,11 +849,11 @@ class PlaceFieldDetector:
         # Collects valid trial identifiers, excluding the 255 sentinel that marks "no trial" frames.
         valid_trial_mask = self.trial_ids != 255
         unique_trials = np.unique(self.trial_ids[valid_trial_mask])
-        trial_count = int(len(unique_trials))
+        trial_count = len(unique_trials)
 
         cell_count = fluorescence.shape[0]
         bin_edges = np.arange(0, self.track_length + self.bin_size, self.bin_size, dtype=np.float32)
-        bin_count = int(len(bin_edges)) - 1
+        bin_count = len(bin_edges) - 1
 
         output = np.full((cell_count, trial_count, bin_count), np.nan, dtype=np.float32)
 

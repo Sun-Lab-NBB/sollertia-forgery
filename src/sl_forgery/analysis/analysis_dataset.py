@@ -10,7 +10,7 @@ import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
 from .utilities import compute_track_length, compute_reward_position
-from .sce_analysis import SCEDetector, SCEDetectionConfiguration
+from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
 
@@ -21,74 +21,63 @@ if TYPE_CHECKING:
     from .reward_cell_analysis import RewardCellResults
 
 
-class _PlaceFieldRows(NamedTuple):
-    """Stores pre-allocated per-place-field row arrays and the row-level cell IDs for column expansion."""
+class _PerCellRows(NamedTuple):
+    """Stores per-cell arrays and per-cell per-field lists for assembling the wide-format DataFrame."""
 
-    row_cell_ids: NDArray[np.int32]
-    """Maps each row to its parent cell index."""
-    region_count: int
-    """Number of leading rows that correspond to actual place fields; remaining rows are for cells without fields."""
-    pf_start_cm: NDArray[np.float32]
-    """Starting position of each place field in centimeters."""
-    pf_end_cm: NDArray[np.float32]
-    """Ending position of each place field in centimeters."""
-    pf_center_cm: NDArray[np.float32]
-    """Intensity-weighted centroid of each place field in centimeters."""
-    pf_mean_intensity: NDArray[np.float32]
-    """Mean fluorescence intensity within each place field region."""
-    pf_max_intensity: NDArray[np.float32]
-    """Peak fluorescence intensity within each place field region."""
-    pf_width_cm: NDArray[np.float32]
-    """Spatial width of each place field in centimeters."""
+    cell_ids: NDArray[np.int32]
+    """Contiguous cell identifiers with length cell_count."""
+    is_place: NDArray[np.bool_]
+    """Boolean mask marking cells with at least one detected place field."""
+    pf_start_cm: list[list[float]]
+    """Per-cell list of place-field start positions in centimeters."""
+    pf_end_cm: list[list[float]]
+    """Per-cell list of place-field end positions in centimeters."""
+    pf_center_cm: list[list[float]]
+    """Per-cell list of intensity-weighted place-field centroids in centimeters."""
+    pf_mean_intensity: list[list[float]]
+    """Per-cell list of mean fluorescence intensities within each place field."""
+    pf_max_intensity: list[list[float]]
+    """Per-cell list of peak fluorescence intensities within each place field."""
+    pf_width_cm: list[list[float]]
+    """Per-cell list of spatial widths of each place field in centimeters."""
     binned_fluorescence: list[list[list[float]] | None]
-    """Per-lap binned fluorescence (trial x bin) for each place-field row. None for rows whose cell has no
-    detected place field."""
+    """Per-cell trial x bin fluorescence matrix. None for cells without any detected place field."""
 
 
-def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _PlaceFieldRows:
-    """Builds per-place-field row arrays from detected place fields.
-
-    Each detected place field produces one row with populated field-level columns and the cell's per-lap binned
-    fluorescence. Cells without any place field produce a single row with NaN for field-specific scalar columns and
-    None for the binned fluorescence column.
+def _build_per_cell_rows(cell_count: int, place_fields: PlaceFields) -> _PerCellRows:
+    """Builds per-cell arrays and per-field lists from detected place fields.
 
     Args:
         cell_count: Total number of cells.
         place_fields: Detected place fields from the place field detection pipeline.
 
     Returns:
-        A named tuple containing pre-allocated arrays for all place field columns and the row-level cell IDs needed
-        to expand per-cell columns to per-row.
+        A named tuple of per-cell arrays and per-cell per-field lists.
     """
     label_image = place_fields.label_image
     bin_size = place_fields.bin_size
     region_count = int(np.max(label_image)) if label_image.size > 0 else 0
 
-    cell_ids = place_fields.cell_id
+    field_cell_ids = place_fields.cell_id
     centers = place_fields.centers
     mean_intensities = place_fields.mean_intensity
     max_intensities = place_fields.max_intensity
     binned_per_trial = place_fields.binned_fluorescence_per_trial
 
-    # Identifies cells with and without place fields using numpy set operations.
-    unique_field_cells = np.unique(cell_ids[:region_count])
-    cells_without_fields = np.setdiff1d(np.arange(cell_count, dtype=np.int32), unique_field_cells)
-    total_rows = region_count + len(cells_without_fields)
+    cell_ids = np.arange(cell_count, dtype=np.int32)
+    is_place = np.zeros(cell_count, dtype=np.bool_)
 
-    # Pre-allocates all scalar column arrays. Field-specific columns default to NaN so that cells without place
-    # fields automatically receive NaN values without additional assignment.
-    row_cell_ids = np.empty(total_rows, dtype=np.int32)
-    pf_start_cm = np.full(total_rows, np.nan, dtype=np.float32)
-    pf_end_cm = np.full(total_rows, np.nan, dtype=np.float32)
-    pf_center_cm = np.full(total_rows, np.nan, dtype=np.float32)
-    pf_mean_intensity = np.full(total_rows, np.nan, dtype=np.float32)
-    pf_max_intensity = np.full(total_rows, np.nan, dtype=np.float32)
-    pf_width_cm = np.full(total_rows, np.nan, dtype=np.float32)
+    pf_start_cm: list[list[float]] = [[] for _ in range(cell_count)]
+    pf_end_cm: list[list[float]] = [[] for _ in range(cell_count)]
+    pf_center_cm: list[list[float]] = [[] for _ in range(cell_count)]
+    pf_mean_intensity: list[list[float]] = [[] for _ in range(cell_count)]
+    pf_max_intensity: list[list[float]] = [[] for _ in range(cell_count)]
+    pf_width_cm: list[list[float]] = [[] for _ in range(cell_count)]
 
-    # Extracts labeled region boundaries for each place field, handling wrapped circular fields via gap detection.
+    # Extracts labeled region boundaries for each field and appends to its parent cell's per-field lists.
     for field_index in range(region_count):
         label = field_index + 1
-        cell_index = int(cell_ids[field_index])
+        cell_index = int(field_cell_ids[field_index])
         bins = np.where(label_image[cell_index, :] == label)[0]
 
         # Identifies wrapped fields by a gap in the sorted bin indices.
@@ -101,69 +90,31 @@ def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> _Plac
             start_bin = bins[0]
             end_bin = bins[-1]
 
-        row_cell_ids[field_index] = cell_index
-        pf_start_cm[field_index] = start_bin * bin_size
-        pf_end_cm[field_index] = end_bin * bin_size
-        pf_center_cm[field_index] = centers[field_index, 1]
-        pf_mean_intensity[field_index] = mean_intensities[field_index]
-        pf_max_intensity[field_index] = max_intensities[field_index]
-        pf_width_cm[field_index] = len(bins) * bin_size
+        is_place[cell_index] = True
+        pf_start_cm[cell_index].append(float(start_bin * bin_size))
+        pf_end_cm[cell_index].append(float(end_bin * bin_size))
+        pf_center_cm[cell_index].append(float(centers[field_index, 1]))
+        pf_mean_intensity[cell_index].append(float(mean_intensities[field_index]))
+        pf_max_intensity[cell_index].append(float(max_intensities[field_index]))
+        pf_width_cm[cell_index].append(float(len(bins) * bin_size))
 
-    # Assigns rows for cells without place fields after the field rows.
-    no_field_start = region_count
-    no_field_end = no_field_start + len(cells_without_fields)
-    row_cell_ids[no_field_start:no_field_end] = cells_without_fields
-
-    # Builds the per-row 2D binned fluorescence list. Place-field rows carry their cell's (trial_count, bin_count)
-    # matrix; cells without fields carry None so the output column is explicitly null for those rows.
-    row_fluorescence: list[list[list[float]] | None] = [
-        binned_per_trial[int(cell_ids[field_index])].tolist() for field_index in range(region_count)
+    # Populates the trial x bin matrix only for cells with a detected place field; stores None for all other cells
+    # to keep the feather file compact.
+    binned_fluorescence: list[list[list[float]] | None] = [
+        binned_per_trial[cell_index].tolist() if is_place[cell_index] else None for cell_index in range(cell_count)
     ]
-    row_fluorescence.extend([None] * len(cells_without_fields))
 
-    return _PlaceFieldRows(
-        row_cell_ids=row_cell_ids,
-        region_count=region_count,
+    return _PerCellRows(
+        cell_ids=cell_ids,
+        is_place=is_place,
         pf_start_cm=pf_start_cm,
         pf_end_cm=pf_end_cm,
         pf_center_cm=pf_center_cm,
         pf_mean_intensity=pf_mean_intensity,
         pf_max_intensity=pf_max_intensity,
         pf_width_cm=pf_width_cm,
-        binned_fluorescence=row_fluorescence,
+        binned_fluorescence=binned_fluorescence,
     )
-
-
-def _expand_cell_array_to_rows(
-    cell_array: NDArray[np.float32] | NDArray[np.int32] | NDArray[np.bool_],
-    row_cell_ids: NDArray[np.int32],
-) -> NDArray[np.float32] | NDArray[np.int32] | NDArray[np.bool_]:
-    """Expands a per-cell array to per-row by indexing with row-level cell IDs.
-
-    Args:
-        cell_array: Per-cell array with one value per cell.
-        row_cell_ids: Array mapping each row to its parent cell index.
-
-    Returns:
-        An array with the same dtype as the input, expanded to match the row count.
-    """
-    return cell_array[row_cell_ids]
-
-
-def _expand_cell_list_to_rows(
-    cell_list: list[list[tuple[int, int]]],
-    row_cell_ids: NDArray[np.int32],
-) -> list[list[tuple[int, int]]]:
-    """Expands a per-cell list to per-row by indexing with row-level cell IDs.
-
-    Args:
-        cell_list: Per-cell list with one entry per cell.
-        row_cell_ids: Array mapping each row to its parent cell index.
-
-    Returns:
-        A list expanded to match the row count.
-    """
-    return [cell_list[cell_id] for cell_id in row_cell_ids]
 
 
 def _aggregate_reward_cell_columns(reward_results: RewardCellResults) -> dict[str, NDArray]:
@@ -176,20 +127,12 @@ def _aggregate_reward_cell_columns(reward_results: RewardCellResults) -> dict[st
         A dictionary mapping column names to numpy arrays of per-cell values.
     """
     spatial = reward_results.spatial_results
-    is_significant = spatial.is_significant
-    is_proximal = reward_results.is_reward_proximal
-    is_slowing = reward_results.is_slowing_correlated
 
     return {
-        "spatial_information": spatial.spatial_information,
-        "spatial_p_value": spatial.p_values,
-        "is_spatially_significant": is_significant,
         "center_of_mass_cm": spatial.centers_of_mass,
-        "is_reward_proximal": is_proximal,
         "speed_activity_correlation": reward_results.speed_activity_correlations,
-        "is_slowing_correlated": is_slowing,
-        "is_reward_cell": is_significant & is_proximal,
-        "is_reward_predictive": is_significant & is_proximal & is_slowing,
+        "is_slowing_correlated": reward_results.is_slowing_correlated,
+        "is_reward_cell": spatial.is_significant & reward_results.is_reward_proximal,
     }
 
 
@@ -212,7 +155,8 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
     sce_events: list[list[list[tuple[int, int]]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
 
     for result in sce_results:
-        period = int(result.period_type)
+        # Maps the PeriodType string enum to the numeric row index (REST=0, RUN=1) used throughout the aggregation.
+        period = 0 if result.period_type == PeriodType.REST else 1
         period_index = int(period_counter[period])
         period_counter[period] += 1
         sce_count = int(np.max(result.sce_labels))
@@ -275,9 +219,6 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
 def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> PlaceFields:
     """Reconstructs a PlaceFields object from a previously saved analysis feather file.
 
-    Rebuilds the label_image and bin_size from the per-place-field rows stored in the feather file. The resulting
-    object is suitable for SCE run-period masking, which reads only label_image and bin_size from PlaceFields.
-
     Notes:
         The saved binned_fluorescence column now holds a per-lap (trial x bin) matrix and is null for cells without
         place fields, so this function does not reconstruct the pooled binned_fluorescence. A zero-filled placeholder
@@ -293,49 +234,58 @@ def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> Place
         zero-filled binned_fluorescence placeholder.
     """
     dataframe = pl.read_ipc(source=analysis_path, memory_map=True)
+    cell_count = len(dataframe)
 
-    cell_ids = dataframe["cell_id"].to_numpy()
-    cell_count = int(cell_ids.max()) + 1
-
-    # Filters to rows that carry an actual place field; these rows have non-null binned_fluorescence.
-    field_rows = dataframe.filter(pl.col("pf_start_cm").is_not_null())
-    field_count = len(field_rows)
-
-    # Derives the bin count from the first field row's per-lap fluorescence matrix (trial_count, bin_count). When no
-    # fields are present, defaults to a single-bin placeholder since SCE masking on an all-zero label image is a
-    # no-op.
-    if field_count > 0:
-        first_binned = field_rows["binned_fluorescence"][0].to_list()
-        bin_count = len(first_binned[0]) if len(first_binned) > 0 else 1
+    # Derives the bin count from the first non-null trial x bin matrix; falls back to a single-bin placeholder.
+    populated_binned = dataframe.filter(pl.col("binned_fluorescence").is_not_null())["binned_fluorescence"]
+    if len(populated_binned) > 0:
+        first_binned = populated_binned[0].to_list()
+        bin_count = len(first_binned[0]) if first_binned and len(first_binned[0]) > 0 else 1
     else:
         bin_count = 1
     bin_size = track_length / bin_count
 
     label_image = np.zeros((cell_count, bin_count), dtype=np.int32)
-
     centers_list: list[list[float]] = []
-    for field_index in range(field_count):
-        cell_index = int(field_rows["cell_id"][field_index])
-        start_bin = int(field_rows["pf_start_cm"][field_index] / bin_size)
-        end_bin = int(field_rows["pf_end_cm"][field_index] / bin_size)
-        label = field_index + 1
 
-        # Handles both contiguous and wrapped place fields.
-        if start_bin <= end_bin:
-            label_image[cell_index, start_bin : end_bin + 1] = label
-        else:
-            # Wrapped field: bins from start_bin to end of track, then from 0 to end_bin.
-            label_image[cell_index, start_bin:] = label
-            label_image[cell_index, : end_bin + 1] = label
+    cell_id_column = dataframe["cell_id"].to_list()
+    pf_start_column = dataframe["pf_start_cm"].to_list()
+    pf_end_column = dataframe["pf_end_cm"].to_list()
+    pf_center_column = dataframe["pf_center_cm"].to_list()
 
-        centers_list.append([float(cell_index), float(field_rows["pf_center_cm"][field_index])])
+    # Walks through each cell's per-field lists and reconstructs the labeled image one field at a time.
+    next_label = 1
+    for row_index in range(cell_count):
+        starts = pf_start_column[row_index]
+        if not starts:
+            continue
 
-    centers = np.array(centers_list, dtype=np.float32) if centers_list else np.array([], dtype=np.float32).reshape(0, 2)
+        cell_index = int(cell_id_column[row_index])
+        ends = pf_end_column[row_index]
+        centers = pf_center_column[row_index]
+
+        for field_index in range(len(starts)):
+            start_bin = int(starts[field_index] / bin_size)
+            end_bin = int(ends[field_index] / bin_size)
+
+            # Handles both contiguous and wrapped place fields.
+            if start_bin <= end_bin:
+                label_image[cell_index, start_bin : end_bin + 1] = next_label
+            else:
+                label_image[cell_index, start_bin:] = next_label
+                label_image[cell_index, : end_bin + 1] = next_label
+
+            centers_list.append([float(cell_index), float(centers[field_index])])
+            next_label += 1
+
+    centers_array = (
+        np.array(centers_list, dtype=np.float32) if centers_list else np.array([], dtype=np.float32).reshape(0, 2)
+    )
 
     return PlaceFields(
         label_image=label_image,
         binned_fluorescence=np.zeros((cell_count, bin_count), dtype=np.float32),
-        centers=centers,
+        centers=centers_array,
         bin_size=bin_size,
     )
 
@@ -363,9 +313,6 @@ def generate_place_field_dataframe(
     place_configuration: PlaceFieldDetectionConfiguration | None = None,
 ) -> pl.DataFrame:
     """Runs the place field detection pipeline and writes a per-place-field analysis feather file.
-
-    Each row in the output represents a single place field. Cells with multiple place fields produce multiple rows,
-    and cells without any place field produce a single row with NaN for all field-specific columns.
 
     Args:
         session_path: Path to the session feather file.
@@ -400,41 +347,36 @@ def generate_place_field_dataframe(
         level=LogLevel.SUCCESS,
     )
 
-    # Builds per-place-field rows from the detection results.
-    console.echo(message="Assembling per-place-field analysis DataFrame...", level=LogLevel.INFO)
-    place_field_rows = _build_place_field_rows(cell_count=cell_count, place_fields=place_fields)
+    # Builds per-cell rows from the detection results.
+    console.echo(message="Assembling per-cell analysis DataFrame...", level=LogLevel.INFO)
+    per_cell_rows = _build_per_cell_rows(cell_count=cell_count, place_fields=place_fields)
 
-    # Builds the DataFrame with fill_nan(None) on scalar float columns so NaN sentinels become true polars nulls,
-    # letting downstream code use is_null() to distinguish place-field rows from cells-without-field rows.
+    # Builds the wide-format DataFrame where each row represents one cell and all per-field metrics are list columns
+    # indexable by field number.
     dataframe = pl.DataFrame(
         {
-            "cell_id": place_field_rows.row_cell_ids,
-            "pf_start_cm": pl.Series(values=place_field_rows.pf_start_cm, dtype=pl.Float32).fill_nan(None),
-            "pf_end_cm": pl.Series(values=place_field_rows.pf_end_cm, dtype=pl.Float32).fill_nan(None),
-            "pf_center_cm": pl.Series(values=place_field_rows.pf_center_cm, dtype=pl.Float32).fill_nan(None),
+            "cell_id": per_cell_rows.cell_ids,
+            "is_place": pl.Series(values=per_cell_rows.is_place, dtype=pl.Boolean),
+            "pf_start_cm": pl.Series(values=per_cell_rows.pf_start_cm, dtype=pl.List(pl.Float32)),
+            "pf_end_cm": pl.Series(values=per_cell_rows.pf_end_cm, dtype=pl.List(pl.Float32)),
+            "pf_center_cm": pl.Series(values=per_cell_rows.pf_center_cm, dtype=pl.List(pl.Float32)),
             "binned_fluorescence": pl.Series(
                 name="binned_fluorescence",
-                values=place_field_rows.binned_fluorescence,
+                values=per_cell_rows.binned_fluorescence,
                 dtype=pl.List(pl.List(pl.Float32)),
             ),
-            "pf_mean_intensity": pl.Series(
-                values=place_field_rows.pf_mean_intensity, dtype=pl.Float32,
-            ).fill_nan(None),
-            "pf_max_intensity": pl.Series(
-                values=place_field_rows.pf_max_intensity, dtype=pl.Float32,
-            ).fill_nan(None),
-            "pf_width_cm": pl.Series(values=place_field_rows.pf_width_cm, dtype=pl.Float32).fill_nan(None),
+            "pf_mean_intensity": pl.Series(values=per_cell_rows.pf_mean_intensity, dtype=pl.List(pl.Float32)),
+            "pf_max_intensity": pl.Series(values=per_cell_rows.pf_max_intensity, dtype=pl.List(pl.Float32)),
+            "pf_width_cm": pl.Series(values=per_cell_rows.pf_width_cm, dtype=pl.List(pl.Float32)),
         },
     ).sort("cell_id")
 
     row_count = len(dataframe)
     column_count = len(dataframe.columns)
-    place_field_row_count = dataframe.filter(pl.col("pf_start_cm").is_not_null()).shape[0]
     console.echo(
         message=(
-            f"Place field DataFrame assembled: {row_count} rows, {column_count} columns. "
-            f"{cell_count} total cells, {place_cell_count} with place fields, "
-            f"{place_field_row_count} place field entries."
+            f"Per-cell DataFrame assembled: {row_count} rows, {column_count} columns. "
+            f"{place_cell_count} cells with place fields."
         ),
         level=LogLevel.SUCCESS,
     )
@@ -469,12 +411,10 @@ def append_reward_cell_columns(
         The updated polars DataFrame with reward cell columns appended.
     """
     output_path = _resolve_output_path(session_path=session_path, output_directory=output_directory)
-    dataframe = pl.read_ipc(source=output_path, memory_map=True)
-    row_cell_ids = dataframe["cell_id"].to_numpy()
 
-    # Identifies which rows are place-field rows (mutually exclusive from reward-cell rows). Rows where pf_start_cm
-    # is not null carry a place field, so their reward columns must stay null.
-    is_place_field_row = dataframe["pf_start_cm"].is_not_null().to_numpy()
+    # Reads without memory-mapping so Windows allows writing back to the same path after appending columns.
+    dataframe = pl.read_ipc(source=output_path, memory_map=False)
+    is_place_row = dataframe["is_place"].to_numpy()
 
     if track_length is None:
         track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
@@ -504,21 +444,14 @@ def append_reward_cell_columns(
         level=LogLevel.SUCCESS,
     )
 
-    # Builds a per-cell mask of reward-classified neurons. A row receives populated reward columns only when it is a
-    # no-field row (not a place-field row) and its cell is classified as a reward cell.
-    is_reward_cell = reward_results.spatial_results.is_significant & reward_results.is_reward_proximal
-    is_reward_eligible_row = (~is_place_field_row) & is_reward_cell[row_cell_ids]
-
-    # Expands per-cell reward arrays to the row level and nulls out non-eligible rows so that place-field rows and
-    # non-reward no-field rows both receive explicit nulls in every reward column.
+    # Nulls reward columns for place cells to preserve mutual exclusion.
     reward_columns = _aggregate_reward_cell_columns(reward_results=reward_results)
-    non_eligible_indices = np.where(~is_reward_eligible_row)[0]
+    place_indices = np.where(is_place_row)[0]
     reward_series: list[pl.Series] = []
     for name, cell_array in reward_columns.items():
-        expanded = _expand_cell_array_to_rows(cell_array=cell_array, row_cell_ids=row_cell_ids)
-        series = pl.Series(name=name, values=expanded)
-        if len(non_eligible_indices) > 0:
-            series = series.scatter(indices=non_eligible_indices, values=None)
+        series = pl.Series(name=name, values=cell_array)
+        if len(place_indices) > 0:
+            series = series.scatter(indices=place_indices, values=None)
         reward_series.append(series)
 
     dataframe = dataframe.hstack(reward_series)
@@ -552,9 +485,10 @@ def append_sce_columns(
         The updated polars DataFrame with SCE columns appended.
     """
     output_path = _resolve_output_path(session_path=session_path, output_directory=output_directory)
-    dataframe = pl.read_ipc(source=output_path, memory_map=True)
-    row_cell_ids = dataframe["cell_id"].to_numpy()
-    cell_count = int(row_cell_ids.max()) + 1
+
+    # Reads without memory-mapping so Windows allows writing back to the same path after appending columns.
+    dataframe = pl.read_ipc(source=output_path, memory_map=False)
+    cell_count = len(dataframe)
 
     if track_length is None:
         track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
@@ -587,30 +521,9 @@ def append_sce_columns(
         level=LogLevel.SUCCESS,
     )
 
-    # Expands per-cell SCE columns to match the per-place-field row structure and appends to the DataFrame.
+    # Appends per-cell SCE columns directly to the wide-format DataFrame.
     sce_columns = _aggregate_sce_columns(cell_count=cell_count, sce_results=sce_results)
-
-    # Separates numpy array columns from list columns for proper expansion.
-    array_column_names = [
-        "sce_participation_count_rest",
-        "sce_participation_count_run",
-        "sce_participation_rate_rest",
-        "sce_participation_rate_run",
-        "sce_mean_onset_rank_rest",
-        "sce_mean_onset_rank_run",
-    ]
-    list_column_names = ["sce_events_rest", "sce_events_run"]
-
-    sce_series: list[pl.Series] = [
-        pl.Series(name=name, values=_expand_cell_array_to_rows(cell_array=sce_columns[name], row_cell_ids=row_cell_ids))
-        for name in array_column_names
-    ]
-    for name in list_column_names:
-        sce_series.append(
-            pl.Series(
-                name=name, values=_expand_cell_list_to_rows(cell_list=sce_columns[name], row_cell_ids=row_cell_ids)
-            )
-        )
+    sce_series: list[pl.Series] = [pl.Series(name=name, values=values) for name, values in sce_columns.items()]
 
     dataframe = dataframe.hstack(sce_series)
 
