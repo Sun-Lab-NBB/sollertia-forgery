@@ -60,8 +60,8 @@ def test_dataset_data_direct_initialization() -> None:
 def test_dataset_data_create_initializes_directory_structure(tmp_path: Path) -> None:
     """Verifies that DatasetData.create materializes the dataset hierarchy on disk."""
     sessions = (
-        DatasetSession(session="2024-01-15-12-30-45-123456", animal="mouse_a"),
-        DatasetSession(session="2024-01-16-09-15-22-654321", animal="mouse_b"),
+        DatasetSession(session="2024-01-15-12-30-45-123456", animal="animal_a"),
+        DatasetSession(session="2024-01-16-09-15-22-654321", animal="animal_b"),
     )
 
     dataset_data = DatasetData.create(
@@ -76,8 +76,8 @@ def test_dataset_data_create_initializes_directory_structure(tmp_path: Path) -> 
     dataset_root = tmp_path / "test_dataset"
     assert dataset_root.is_dir()
     assert (dataset_root / "dataset.yaml").is_file()
-    assert (dataset_root / "mouse_a" / "2024-01-15-12-30-45-123456").is_dir()
-    assert (dataset_root / "mouse_b" / "2024-01-16-09-15-22-654321").is_dir()
+    assert (dataset_root / "animal_a" / "2024-01-15-12-30-45-123456").is_dir()
+    assert (dataset_root / "animal_b" / "2024-01-16-09-15-22-654321").is_dir()
     assert dataset_data.dataset_data_path == dataset_root / "dataset.yaml"
 
 
@@ -85,7 +85,7 @@ def test_dataset_data_create_resolves_session_paths(tmp_path: Path) -> None:
     """Verifies that create() rebuilds each input DatasetSession with its resolved session_path."""
     inputs = (
         DatasetSession(
-            session="2024-01-15-12-30-45-123456", animal="mouse_a", session_path=Path("/ignored")
+            session="2024-01-15-12-30-45-123456", animal="animal_a", session_path=Path("/ignored")
         ),
     )
 
@@ -99,14 +99,14 @@ def test_dataset_data_create_resolves_session_paths(tmp_path: Path) -> None:
     )
 
     resolved = dataset_data.sessions[0]
-    assert resolved.session_path == tmp_path / "test_dataset" / "mouse_a" / "2024-01-15-12-30-45-123456"
+    assert resolved.session_path == tmp_path / "test_dataset" / "animal_a" / "2024-01-15-12-30-45-123456"
 
 
 def test_dataset_data_create_accepts_set_of_sessions(tmp_path: Path) -> None:
     """Verifies that create() accepts a set of DatasetSession instances and converts them to a tuple."""
     sessions = {
-        DatasetSession(session="2024-01-15-12-30-45-123456", animal="mouse_a"),
-        DatasetSession(session="2024-01-16-09-15-22-654321", animal="mouse_b"),
+        DatasetSession(session="2024-01-15-12-30-45-123456", animal="animal_a"),
+        DatasetSession(session="2024-01-16-09-15-22-654321", animal="animal_b"),
     }
 
     dataset_data = DatasetData.create(
@@ -137,7 +137,7 @@ def test_dataset_data_create_raises_on_empty_sessions(tmp_path: Path) -> None:
 
 def test_dataset_data_create_rejects_existing_directory(tmp_path: Path) -> None:
     """Verifies that create() refuses to overwrite an existing dataset directory."""
-    sessions = (DatasetSession(session="2024-01-15-12-30-45-123456", animal="mouse_a"),)
+    sessions = (DatasetSession(session="2024-01-15-12-30-45-123456", animal="animal_a"),)
     (tmp_path / "existing").mkdir()
 
     with pytest.raises(FileExistsError):
@@ -154,8 +154,8 @@ def test_dataset_data_create_rejects_existing_directory(tmp_path: Path) -> None:
 def test_dataset_data_load_roundtrips_through_yaml(tmp_path: Path) -> None:
     """Verifies that load() reconstructs a DatasetData instance from a previously saved dataset.yaml file."""
     sessions = (
-        DatasetSession(session="2024-01-15-12-30-45-123456", animal="mouse_a"),
-        DatasetSession(session="2024-01-16-09-15-22-654321", animal="mouse_b"),
+        DatasetSession(session="2024-01-15-12-30-45-123456", animal="animal_a"),
+        DatasetSession(session="2024-01-16-09-15-22-654321", animal="animal_b"),
     )
     created = DatasetData.create(
         name="test_dataset",
@@ -186,9 +186,9 @@ def test_dataset_data_load_errors_when_no_marker(tmp_path: Path) -> None:
 def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:
     """Verifies that the animals property exposes a sorted tuple of unique animal identifiers."""
     sessions = (
-        DatasetSession(session="2024-01-15-12-30-45-000001", animal="mouse_b"),
-        DatasetSession(session="2024-01-15-12-30-45-000002", animal="mouse_a"),
-        DatasetSession(session="2024-01-15-12-30-45-000003", animal="mouse_b"),
+        DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_b"),
+        DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_a"),
+        DatasetSession(session="2024-01-15-12-30-45-000003", animal="animal_b"),
     )
     dataset_data = DatasetData.create(
         name="test_dataset",
@@ -199,15 +199,15 @@ def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:
         datasets_root=tmp_path,
     )
 
-    assert dataset_data.animals == ("mouse_a", "mouse_b")
+    assert dataset_data.animals == ("animal_a", "animal_b")
 
 
 def test_dataset_data_get_sessions_for_animal(tmp_path: Path) -> None:
     """Verifies that get_sessions_for_animal returns only sessions belonging to the requested animal."""
     sessions = (
-        DatasetSession(session="2024-01-15-12-30-45-000001", animal="mouse_a"),
-        DatasetSession(session="2024-01-15-12-30-45-000002", animal="mouse_b"),
-        DatasetSession(session="2024-01-15-12-30-45-000003", animal="mouse_a"),
+        DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_a"),
+        DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_b"),
+        DatasetSession(session="2024-01-15-12-30-45-000003", animal="animal_a"),
     )
     dataset_data = DatasetData.create(
         name="test_dataset",
@@ -218,17 +218,17 @@ def test_dataset_data_get_sessions_for_animal(tmp_path: Path) -> None:
         datasets_root=tmp_path,
     )
 
-    mouse_a_sessions = dataset_data.get_sessions_for_animal(animal="mouse_a")
+    animal_a_sessions = dataset_data.get_sessions_for_animal(animal="animal_a")
 
-    assert len(mouse_a_sessions) == 2
-    assert all(session.animal == "mouse_a" for session in mouse_a_sessions)
+    assert len(animal_a_sessions) == 2
+    assert all(session.animal == "animal_a" for session in animal_a_sessions)
 
 
 def test_dataset_data_get_session_found(tmp_path: Path) -> None:
     """Verifies that get_session() returns the DatasetSession matching the specified animal and session."""
     sessions = (
-        DatasetSession(session="2024-01-15-12-30-45-000001", animal="mouse_a"),
-        DatasetSession(session="2024-01-15-12-30-45-000002", animal="mouse_b"),
+        DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_a"),
+        DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_b"),
     )
     dataset_data = DatasetData.create(
         name="test_dataset",
@@ -239,15 +239,15 @@ def test_dataset_data_get_session_found(tmp_path: Path) -> None:
         datasets_root=tmp_path,
     )
 
-    found = dataset_data.get_session(animal="mouse_a", session="2024-01-15-12-30-45-000001")
+    found = dataset_data.get_session(animal="animal_a", session="2024-01-15-12-30-45-000001")
 
-    assert found.animal == "mouse_a"
+    assert found.animal == "animal_a"
     assert found.session == "2024-01-15-12-30-45-000001"
 
 
 def test_dataset_data_get_session_not_found(tmp_path: Path) -> None:
     """Verifies that get_session() raises ValueError when the animal/session pair is not in the dataset."""
-    sessions = (DatasetSession(session="2024-01-15-12-30-45-000001", animal="mouse_a"),)
+    sessions = (DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_a"),)
     dataset_data = DatasetData.create(
         name="test_dataset",
         project="test_project",
@@ -258,4 +258,4 @@ def test_dataset_data_get_session_not_found(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="must exist in the 'test_dataset' dataset"):
-        dataset_data.get_session(animal="mouse_z", session="2024-01-15-12-30-45-999999")
+        dataset_data.get_session(animal="animal_z", session="2024-01-15-12-30-45-999999")

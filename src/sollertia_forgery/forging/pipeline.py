@@ -554,7 +554,7 @@ def _assemble_session_dataset(
         result.write_ipc(file=output_path)
 
         # Copies the experiment descriptor next to data.feather so the forged session carries the experimenter
-        # context (mouse weight, water dispensed/consumed, completion status, notes) needed for downstream
+        # context (animal weight, water dispensed/consumed, completion status, notes) needed for downstream
         # analysis without reaching back into the raw session.
         shutil.copy2(
             src=source_descriptor_path,
