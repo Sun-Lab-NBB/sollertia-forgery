@@ -1,9 +1,7 @@
 """Identifies reward-associated and reward-predictive neurons from spatial and speed-activity data."""
 
-import os
 from pathlib import Path
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from numba import njit, prange
@@ -13,7 +11,6 @@ from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
-from ataraxis_base_utilities import LogLevel, console
 
 from sl_forgery.analysis.utilities import compute_within_trial_position
 from sl_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
@@ -166,63 +163,98 @@ def _compute_spatial_information(
         information[cell_index] = info
 
 
-@njit(cache=True)
-def _apply_circular_shift_and_chunk_permute(
-    fluorescence: NDArray[np.float32],
+@njit(cache=True, nogil=True)
+def _compute_shuffled_source_indices(
+    filtered_frame_indices: NDArray[np.int32],
+    frame_count: int,
     minimum_shift: int,
     chunk_count: int,
     seed: int,
-    output: NDArray[np.float32],
-) -> NDArray[np.float32]:
-    """Generates a shuffled fluorescence trace by circular shifting and chunk permutation.
+) -> NDArray[np.int32]:
+    """Maps each speed-filtered destination frame back to the source frame it pulls from under the shuffle.
 
     Notes:
-        Writes directly into the provided output buffer, avoiding an intermediate shifted copy so each shuffle
-        iteration only holds one full-size array in memory.
+        Encodes the circular shift and chunk permutation as an indirection array rather than materializing a full
+        shuffled fluorescence matrix.
 
     Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
+        filtered_frame_indices: Destination-frame indices retained by the speed filter with length
+            filtered_frame_count.
+        frame_count: Total number of frames in the original fluorescence time series.
         minimum_shift: Minimum number of frames for the circular shift.
         chunk_count: Number of chunks to split the shifted trace into for permutation.
         seed: Random seed for reproducibility.
-        output: Pre-allocated output buffer with the same dimensions as fluorescence.
 
     Returns:
-        The output buffer filled with the shuffled trace.
+        Source-frame indices with length filtered_frame_count.
     """
     np.random.seed(seed)
-    cell_count = fluorescence.shape[0]
-    frame_count = fluorescence.shape[1]
-
-    # Generates a random circular shift amount ensuring at least minimum_shift displacement.
     shift_amount = np.random.randint(minimum_shift, frame_count - minimum_shift)
-
-    # Computes chunk boundaries and generates a random permutation of chunk indices.
     chunk_size = frame_count // chunk_count
     permutation = np.random.permutation(chunk_count)
 
-    # Pre-computes the output position for each shifted frame index. Non-final chunks have size chunk_size; the
-    # final chunk absorbs the remainder. The combined shift+permute mapping lets each input frame write directly
-    # into its final output slot without materializing an intermediate shifted buffer.
-    shifted_to_output = np.empty(frame_count, dtype=np.int64)
-    write_position = 0
-    for permuted_index in range(chunk_count):
-        chunk_index = permutation[permuted_index]
-        start = chunk_index * chunk_size
-        end = start + chunk_size if chunk_index < chunk_count - 1 else frame_count
+    # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
+    output_chunk_starts = np.empty(chunk_count + 1, dtype=np.int32)
+    output_chunk_starts[0] = 0
+    for output_chunk_position in range(chunk_count):
+        source_chunk_index = permutation[output_chunk_position]
+        if source_chunk_index < chunk_count - 1:
+            chunk_size_local = chunk_size
+        else:
+            chunk_size_local = frame_count - source_chunk_index * chunk_size
+        output_chunk_starts[output_chunk_position + 1] = output_chunk_starts[output_chunk_position] + chunk_size_local
 
-        for shifted_frame_index in range(start, end):
-            shifted_to_output[shifted_frame_index] = write_position + (shifted_frame_index - start)
+    filtered_count = filtered_frame_indices.shape[0]
+    source_indices = np.empty(filtered_count, dtype=np.int32)
 
-        write_position += end - start
+    # Resolves each destination back through the permutation and shift to its source frame.
+    for filtered_index in range(filtered_count):
+        destination = filtered_frame_indices[filtered_index]
+        output_chunk_position = 0
+        while (
+            output_chunk_position + 1 < chunk_count
+            and output_chunk_starts[output_chunk_position + 1] <= destination
+        ):
+            output_chunk_position += 1
+        offset_within_chunk = destination - output_chunk_starts[output_chunk_position]
+        source_chunk_index = permutation[output_chunk_position]
+        shifted_index = source_chunk_index * chunk_size + offset_within_chunk
+        source_indices[filtered_index] = (shifted_index - shift_amount) % frame_count
 
-    # Writes each source frame directly into its final output slot after composing the shift and chunk mappings.
-    for cell_index in range(cell_count):
-        for source_frame_index in range(frame_count):
-            shifted_frame_index = (source_frame_index + shift_amount) % frame_count
-            output[cell_index, shifted_to_output[shifted_frame_index]] = fluorescence[cell_index, source_frame_index]
+    return source_indices
 
-    return output
+
+@njit(cache=True, parallel=True, nogil=True)
+def _accumulate_shuffled_rate_maps(
+    fluorescence: NDArray[np.float32],
+    source_indices: NDArray[np.int32],
+    bin_indices: NDArray[np.int32],
+    sample_counts: NDArray[np.int32],
+    output: NDArray[np.float32],
+) -> None:
+    """Bins fluorescence into a per-cell rate map by gathering source frames through an indirection array.
+
+    Args:
+        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
+        source_indices: Source-frame indices per filtered destination frame with length filtered_frame_count.
+        bin_indices: Spatial bin indices per filtered destination frame with length filtered_frame_count.
+        sample_counts: Per-bin occupancy counts with length bin_count.
+        output: Pre-allocated output rate maps with dimensions (cell_count, bin_count).
+    """
+    cell_count = fluorescence.shape[0]
+    filtered_count = source_indices.shape[0]
+    bin_count = output.shape[1]
+
+    for cell_index in prange(cell_count):
+        bin_sums = np.zeros(bin_count, dtype=np.float32)
+        for filtered_index in range(filtered_count):
+            bin_sums[bin_indices[filtered_index]] += fluorescence[cell_index, source_indices[filtered_index]]
+
+        for bin_index in range(bin_count):
+            if sample_counts[bin_index] > 0:
+                output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
+            else:
+                output[cell_index, bin_index] = 0.0
 
 
 @njit(cache=True, parallel=True)
@@ -549,55 +581,45 @@ class RewardCellDetector:
         """
         configuration = self.configuration
         cell_count = self.fluorescence.shape[0]
+        frame_count = self.fluorescence.shape[1]
+        bin_count = int(len(bin_edges)) - 1
 
-        worker_count = max(1, os.cpu_count() - 4)
+        # Precomputes destination-frame indices and their spatial bin assignments; both are invariant across shuffles.
+        filtered_frame_indices = np.nonzero(speed_mask)[0].astype(np.int32)
+        filtered_bin_indices = np.clip(
+            np.searchsorted(bin_edges, filtered_position, side="right") - 1, 0, bin_count - 1
+        ).astype(np.int32)
 
-        # Pre-allocates one thread-local shuffle buffer per worker so iterations reuse memory instead of
-        # repeatedly allocating and releasing arrays the size of the full fluorescence matrix.
-        shuffle_buffers = [np.empty_like(self.fluorescence) for _ in range(worker_count)]
-        buffer_index_queue = list(range(worker_count))
+        # Reuses rate-map and information buffers across iterations.
+        rate_maps = np.empty((cell_count, bin_count), dtype=np.float32)
+        shuffled_information = np.zeros((configuration.shuffle_count, cell_count), dtype=np.float32)
 
-        def run_single_shuffle(iteration: int) -> NDArray[np.float32]:
-            """Runs a single shuffle iteration and returns spatial information values."""
-            buffer_index = buffer_index_queue.pop()
-            try:
-                shuffled_fluorescence = _apply_circular_shift_and_chunk_permute(
-                    fluorescence=self.fluorescence,
-                    minimum_shift=configuration.minimum_shift_frames,
-                    chunk_count=configuration.chunk_count,
-                    seed=iteration,
-                    output=shuffle_buffers[buffer_index],
-                )
+        for iteration in tqdm(range(configuration.shuffle_count), desc="Running shuffling", unit="iter"):
+            source_indices = _compute_shuffled_source_indices(
+                filtered_frame_indices=filtered_frame_indices,
+                frame_count=frame_count,
+                minimum_shift=configuration.minimum_shift_frames,
+                chunk_count=configuration.chunk_count,
+                seed=iteration,
+            )
 
-                # Applies the same speed filter and reuses place_1d binning.
-                filtered_shuffled = shuffled_fluorescence[:, speed_mask]
-                shuffled_maps, _ = _bin_fluorescence_by_position(
-                    fluorescence=filtered_shuffled,
-                    position=filtered_position,
-                    bin_edges=bin_edges,
-                    compute_mean=True,
-                )
-                shuffled_maps = np.nan_to_num(shuffled_maps, nan=0.0)
-                smoothed_shuffled = _apply_smooth_rate_maps_wrapped(rate_maps=shuffled_maps, sigma_bins=sigma_bins)
+            _accumulate_shuffled_rate_maps(
+                fluorescence=self.fluorescence,
+                source_indices=source_indices,
+                bin_indices=filtered_bin_indices,
+                sample_counts=occupancy,
+                output=rate_maps,
+            )
 
-                shuffled_information = np.zeros(cell_count, dtype=np.float32)
-                _compute_spatial_information(
-                    rate_maps=smoothed_shuffled,
-                    occupancy=occupancy,
-                    information=shuffled_information,
-                )
-                return shuffled_information
-            finally:
-                buffer_index_queue.append(buffer_index)
+            smoothed_shuffled = _apply_smooth_rate_maps_wrapped(rate_maps=rate_maps, sigma_bins=sigma_bins)
 
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(run_single_shuffle, iteration) for iteration in range(configuration.shuffle_count)]
-            shuffled_results = [
-                future.result() for future in tqdm(futures, desc="Running shuffling", unit="iter", total=len(futures))
-            ]
+            _compute_spatial_information(
+                rate_maps=smoothed_shuffled,
+                occupancy=occupancy,
+                information=shuffled_information[iteration],
+            )
 
-        # Stacks shuffled information and computes p-values as the fraction of shuffles exceeding observed.
-        shuffled_information = np.vstack(shuffled_results)
+        # Computes p-values as the fraction of shuffles exceeding observed.
         exceed_count = np.sum(shuffled_information >= observed_information[np.newaxis, :], axis=0)
         p_values = (exceed_count / configuration.shuffle_count).astype(np.float32)
 
