@@ -18,14 +18,13 @@ from sollertia_shared_assets import (
     SessionData,
     SessionTypes,
 )
-
-from .dataset_data import DatasetData, DatasetSession
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
 from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
 from ..processing import TRACKER_FILENAME as _BEHAVIOR_TRACKER_FILENAME
+from .dataset_data import DatasetData, DatasetSession
 from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
@@ -41,13 +40,13 @@ FORGING_JOB_NAME: str = "session_data_assembly"
 _CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
 """The tracker filename written by the cindra single-recording pipeline into the cindra output directory."""
 
-EXPERIMENT_DESCRIPTOR_FILENAME: str = "experiment_descriptor.yaml"
-"""The filename of the mesoscope experiment descriptor inside each session's raw data directory. Forged copies
-are placed alongside data.feather in every session directory."""
+EXPERIMENT_DESCRIPTOR_FILENAME: str = "session_descriptor.yaml"
+"""The filename of the mesoscope experiment descriptor inside each session's raw data directory, as written
+by the acquisition runtime. Forged copies are placed alongside data.feather in every session directory."""
 
-SURGERY_DATA_FILENAME: str = "surgery_data.yaml"
-"""The filename of the surgery metadata YAML inside each session's raw data directory. Forged copies are
-placed once per animal at the dataset's animal directory root."""
+SURGERY_DATA_FILENAME: str = "surgery_metadata.yaml"
+"""The filename of the surgery metadata YAML inside each session's raw data directory, as written by the
+acquisition runtime. Forged copies are placed once per animal at the dataset's animal directory root."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,7 +355,7 @@ def _copy_animal_surgery_files(
     """Copies the surgery metadata YAML for each animal into the dataset's animal directory.
 
     For each animal in the dataset, selects that animal's most recent source session and copies its
-    ``surgery_data.yaml`` from the session's raw data directory to the dataset's animal directory root.
+    ``surgery_metadata.yaml`` from the session's raw data directory to the dataset's animal directory root.
     Surgery metadata is per-animal rather than per-session, so a single copy is materialized for each animal.
 
     Args:
@@ -366,7 +365,7 @@ def _copy_animal_surgery_files(
             order provided to ``_create_dataset``. Grouped by animal to pick each animal's latest session.
 
     Raises:
-        FileNotFoundError: If the latest session for any animal does not contain a ``surgery_data.yaml`` file.
+        FileNotFoundError: If the latest session for any animal does not contain a ``surgery_metadata.yaml`` file.
     """
     # Groups source session paths by owning animal. The animal name is the parent directory name in the source
     # project layout.
@@ -405,12 +404,14 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
     Notes:
         Loads ``SessionData`` to obtain the canonical ``raw_data_path`` and ``processed_data_path``, then uses
         tracker-file rglob within ``processed_data_path`` to discover the behavior and cindra output directories.
-        The multiday path is derived from the cindra directory's parent (``mesoscope_data/``) by joining the
-        dataset name, since the multiday tracker is only stored in the first session of each dataset.
+        The cindra multi-recording path is derived by joining ``cindra/multi_recording/{animal_id}_{dataset_name}``
+        to the session's processed data directory; the animal identifier is prepended to match Cindra's
+        on-disk qualification convention for collision-free multi-animal batches.
 
     Args:
         session_data_path: The path to the session's root directory.
-        dataset_name: The name of the dataset being assembled, used to resolve the multiday output directory.
+        dataset_name: The unqualified dataset name being assembled, used together with the animal identifier to
+            resolve the cindra multi-recording output directory.
 
     Returns:
         A frozen ``_SessionPaths`` instance containing all resolved data directory paths.
@@ -444,8 +445,10 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
         console.error(message=message, error=FileNotFoundError if not cindra_candidates else RuntimeError)
     cindra_data_path = cindra_candidates[0].parent
 
-    # Derives the multiday output path from the cindra directory's parent (mesoscope_data/) and the dataset name.
-    multiday_data_path = cindra_data_path.parent.joinpath("multiday", dataset_name)
+    # Derives the cindra multi-recording output path under ``cindra/multi_recording/``. Cindra writes the
+    # dataset directory as ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple
+    # animals under a single analysis name, so the animal identifier is prepended here.
+    multiday_data_path = cindra_data_path.joinpath("multi_recording", f"{session.animal_id}_{dataset_name}")
 
     return _SessionPaths(
         behavior_data_path=behavior_data_path,
@@ -474,7 +477,7 @@ def _assemble_session_dataset(
         progress: Determines whether to display the session's data assembly progress via the terminal progress bar.
 
     Raises:
-        FileNotFoundError: If the session's raw data directory does not contain an ``experiment_descriptor.yaml``
+        FileNotFoundError: If the session's raw data directory does not contain a ``session_descriptor.yaml``
             file.
     """
     # Ensures that the output directory exists.

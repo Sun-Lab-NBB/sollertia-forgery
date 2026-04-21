@@ -45,7 +45,7 @@ dependencies = [
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
-    "sollertia-shared-assets>=8.0.0rc2,<9",
+    "sollertia-shared-assets>=8.0.0rc3,<9",
 
     # Data Processing
     "polars>=1,<2",
@@ -82,8 +82,6 @@ Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 [project.scripts]
 sl-project = "sollertia_forgery.interfaces.project:project_cli"
 sl-process = "sollertia_forgery.interfaces.process:process_cli"
-sl-execute = "sollertia_forgery.interfaces.execute:execute_cli"
-sl-server = "sollertia_forgery.interfaces.server:server_cli"
 sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
 
 # Development dependencies (PEP 735). Not published to PyPI.

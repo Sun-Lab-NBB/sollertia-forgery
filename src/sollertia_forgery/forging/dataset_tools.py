@@ -18,86 +18,6 @@ _DATASET_MARKER_FILENAME: str = "dataset.yaml"
 """Marker filename used to identify dataset directories during recursive discovery walks."""
 
 
-def _serialize(value: Any) -> Any:  # noqa: ANN401
-    """Recursively converts a dataclass, Path, Enum, mapping, or sequence into JSON-friendly Python."""
-    if value is None:
-        return None
-    if is_dataclass(value) and not isinstance(value, type):
-        return {
-            field_definition.name: _serialize(value=getattr(value, field_definition.name))
-            for field_definition in fields(value)
-        }
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {str(key): _serialize(value=item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_serialize(value=item) for item in value]
-    return value
-
-
-def _describe_type(type_hint: Any) -> str:  # noqa: ANN401
-    """Returns a human-readable string for the given type hint."""
-    if type_hint is None:
-        return "None"
-    if isinstance(type_hint, type):
-        return type_hint.__name__
-    return str(type_hint).replace("typing.", "")
-
-
-def _describe_dataclass(cls: type) -> dict[str, Any]:
-    """Returns a structured schema description of a dataclass type."""
-    if not is_dataclass(cls):
-        return {"type": _describe_type(type_hint=cls)}
-
-    try:
-        hints = get_type_hints(cls)
-    except Exception:
-        hints = {}
-
-    schema: dict[str, Any] = {"class": cls.__name__, "fields": {}}
-    # noinspection PyDataclass
-    for field_definition in fields(cls):
-        type_hint = hints.get(field_definition.name, field_definition.type)
-        field_schema: dict[str, Any] = {"type": _describe_type(type_hint=type_hint)}
-        if field_definition.default is not MISSING:
-            field_schema["default"] = _serialize(value=field_definition.default)
-        elif field_definition.default_factory is not MISSING:
-            try:
-                field_schema["default"] = _serialize(value=field_definition.default_factory())
-            except Exception:
-                field_schema["required"] = True
-        else:
-            field_schema["required"] = True
-        schema["fields"][field_definition.name] = field_schema
-    return schema
-
-
-def _load_dataset_summary(marker: Path) -> dict[str, Any]:
-    """Loads a DatasetData YAML and returns a flat summary dict for discovery responses."""
-    dataset_root = marker.parent
-    try:
-        instance: DatasetData = DatasetData.load(dataset_path=dataset_root)
-    except Exception as exception:
-        return {
-            "dataset_path": str(dataset_root),
-            "marker": str(marker),
-            "error": f"Failed to load dataset: {exception}",
-        }
-    return {
-        "name": instance.name,
-        "project": instance.project,
-        "session_type": _serialize(value=instance.session_type),
-        "acquisition_system": _serialize(value=instance.acquisition_system),
-        "session_count": len(instance.sessions),
-        "animal_count": len(instance.animals),
-        "dataset_path": str(dataset_root),
-        "dataset_data_path": str(instance.dataset_data_path),
-    }
-
-
 @mcp.tool()
 def discover_datasets_tool(
     datasets_root: str,
@@ -115,7 +35,7 @@ def discover_datasets_tool(
         A dictionary with ``datasets`` (list of dataset summary dicts), ``total_datasets``, and ``datasets_root``,
         or ``{"error": ...}`` on failure.
     """
-    error = validate_directory(datasets_root)
+    error = validate_directory(directory=datasets_root)
     if error is not None:
         return {"error": error}
 
@@ -198,9 +118,8 @@ def write_dataset_tool(
     dataset_session_objects: list[DatasetSession] = []
     for entry in sessions:
         if not isinstance(entry, dict) or "session" not in entry or "animal" not in entry:
-            return {
-                "error": f"Invalid session entry {entry!r}. Each entry must be a dict with 'session' and 'animal' keys.",
-            }
+            message = f"Invalid session entry {entry!r}. Each entry must be a dict with 'session' and 'animal' keys."
+            return {"error": message}
         dataset_session_objects.append(DatasetSession(session=entry["session"], animal=entry["animal"]))
 
     root = Path(datasets_root)
@@ -278,3 +197,127 @@ def describe_dataset_schema_tool() -> dict[str, Any]:
     schema = _describe_dataclass(cls=DatasetData)
     schema["nested_classes"] = {"DatasetSession": _describe_dataclass(cls=DatasetSession)}
     return {"schema": schema}
+
+
+def _serialize(value: Any) -> Any:  # noqa: ANN401
+    """Recursively converts a dataclass, Path, Enum, mapping, or sequence into JSON-friendly Python.
+
+    Args:
+        value: The object to convert. Dataclass instances are expanded into dictionaries, Path objects are
+            stringified, Enum members are unwrapped to their underlying value, mappings are recursed with
+            string-coerced keys, and iterable containers are converted to lists. All other values are
+            returned unchanged.
+
+    Returns:
+        A JSON-compatible Python object mirroring the input structure.
+    """
+    if value is None:
+        return None
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field_definition.name: _serialize(value=getattr(value, field_definition.name))
+            for field_definition in fields(value)
+        }
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _serialize(value=item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_serialize(value=item) for item in value]
+    return value
+
+
+def _describe_type(type_hint: Any) -> str:  # noqa: ANN401
+    """Returns a human-readable string for the given type hint.
+
+    Args:
+        type_hint: The type object or typing construct to render. Bare classes are rendered by their
+            ``__name__`` attribute; typing constructs are rendered via their string form with the
+            ``typing.`` prefix stripped.
+
+    Returns:
+        A display string suitable for inclusion in schema documentation.
+    """
+    if type_hint is None:
+        return "None"
+    if isinstance(type_hint, type):
+        return type_hint.__name__
+    return str(type_hint).replace("typing.", "")
+
+
+def _describe_dataclass(cls: type) -> dict[str, Any]:
+    """Returns a structured schema description of a dataclass type.
+
+    Resolves field type hints via :func:`typing.get_type_hints`, falling back to the raw field type when
+    hint resolution fails. Each field reports its type, and either the serialized default value or a
+    ``required`` flag when no default is provided.
+
+    Args:
+        cls: The dataclass type to describe. Non-dataclass types are rendered as a minimal schema dict
+            containing only the resolved type string.
+
+    Returns:
+        A schema dictionary with ``class`` naming the dataclass and ``fields`` mapping each field name to
+        its type and default or required marker. Non-dataclass inputs return a dictionary with only the
+        ``type`` key populated.
+    """
+    if not is_dataclass(cls):
+        return {"type": _describe_type(type_hint=cls)}
+
+    try:
+        hints = get_type_hints(cls)
+    except Exception:
+        hints = {}
+
+    schema: dict[str, Any] = {"class": cls.__name__, "fields": {}}
+    # noinspection PyDataclass
+    for field_definition in fields(cls):
+        type_hint = hints.get(field_definition.name, field_definition.type)
+        field_schema: dict[str, Any] = {"type": _describe_type(type_hint=type_hint)}
+        if field_definition.default is not MISSING:
+            field_schema["default"] = _serialize(value=field_definition.default)
+        elif field_definition.default_factory is not MISSING:
+            try:
+                field_schema["default"] = _serialize(value=field_definition.default_factory())
+            except Exception:
+                field_schema["required"] = True
+        else:
+            field_schema["required"] = True
+        schema["fields"][field_definition.name] = field_schema
+    return schema
+
+
+def _load_dataset_summary(marker: Path) -> dict[str, Any]:
+    """Loads a DatasetData YAML and returns a flat summary dict for discovery responses.
+
+    Args:
+        marker: The path to a ``dataset.yaml`` marker file. The dataset root is resolved from the marker's
+            parent directory.
+
+    Returns:
+        A summary dictionary with the dataset's ``name``, ``project``, ``session_type``,
+        ``acquisition_system``, ``session_count``, ``animal_count``, ``dataset_path``, and
+        ``dataset_data_path``, or an error dictionary with ``dataset_path``, ``marker``, and ``error``
+        when the dataset cannot be loaded.
+    """
+    dataset_root = marker.parent
+    try:
+        instance: DatasetData = DatasetData.load(dataset_path=dataset_root)
+    except Exception as exception:
+        return {
+            "dataset_path": str(dataset_root),
+            "marker": str(marker),
+            "error": f"Failed to load dataset: {exception}",
+        }
+    return {
+        "name": instance.name,
+        "project": instance.project,
+        "session_type": _serialize(value=instance.session_type),
+        "acquisition_system": _serialize(value=instance.acquisition_system),
+        "session_count": len(instance.sessions),
+        "animal_count": len(instance.animals),
+        "dataset_path": str(dataset_root),
+        "dataset_data_path": str(instance.dataset_data_path),
+    }

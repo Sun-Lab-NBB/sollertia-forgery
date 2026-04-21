@@ -21,8 +21,6 @@ from sollertia_shared_assets import (
     SurgeryData,
     MesoscopeExperimentDescriptor,
 )
-
-from .dataset_data import DatasetData
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 from .pipeline import (
@@ -34,6 +32,7 @@ from .pipeline import (
     run_forging_pipeline,
 )
 from ..interfaces import mcp
+from .dataset_data import DatasetData
 from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
@@ -68,6 +67,10 @@ class _ForgingPendingJob(PendingJob):
 
 _job_execution_state: JobExecutionState[_ForgingPendingJob] | None = None
 """Stores the active execution state for batch forging jobs."""
+
+_CORES_PER_JOB: int = 3
+"""CPU cores consumed per forging worker: one subprocess plus a two-thread pool that parallelizes behavior
+and runtime assembly. Divides the worker budget to yield the core-bounded concurrent-job ceiling."""
 
 
 @mcp.tool()
@@ -217,14 +220,15 @@ def execute_forging_jobs_tool(
     jobs: list[dict[str, str]],
     *,
     worker_budget: int = -1,
+    max_parallel_jobs: int = 10,
 ) -> dict[str, Any]:
     """Dispatches forging assembly jobs for background execution with budget-bounded concurrency.
 
     Takes job descriptors from the manifest produced by :func:`prepare_forging_batch_tool` and starts a
     background execution manager that runs each job in a separate worker subprocess. Each job invokes
     :func:`run_forging_pipeline` in remote mode with the descriptor's ``job_id`` so that only that single
-    session assembly is executed. The worker budget directly controls memory footprint since each worker
-    spawns a separate process.
+    session assembly is executed. Concurrency is bounded by ``min(max_parallel_jobs, worker_budget //
+    _CORES_PER_JOB)``; lower ``max_parallel_jobs`` to reduce per-session memory peaks.
 
     Important:
         Only one execution session can be active at a time. Use :func:`cancel_forging_tool` to cancel an
@@ -233,11 +237,13 @@ def execute_forging_jobs_tool(
     Args:
         jobs: The list of job descriptors from :func:`prepare_forging_batch_tool`. Each dictionary must have
             'tracker_path', 'job_id', 'dataset_name', 'project_root', and 'session_name' keys.
-        worker_budget: The total number of CPU cores available for the execution session. Set to -1 for
-            automatic resolution via :func:`ataraxis_base_utilities.resolve_worker_count`.
+        worker_budget: Total CPU cores available for the execution session. Set to -1 for automatic
+            resolution via :func:`ataraxis_base_utilities.resolve_worker_count`.
+        max_parallel_jobs: Hard cap on concurrent forging jobs. Set to -1 to fall back to the default of 10.
 
     Returns:
-        A dictionary containing a 'started' flag, 'total_jobs', resolved worker budget, and any invalid jobs.
+        A dictionary containing a 'started' flag, 'total_jobs', resolved 'worker_budget', the effective
+        'max_parallel_jobs' after applying the CPU floor, and any invalid jobs.
     """
     global _job_execution_state
 
@@ -282,12 +288,18 @@ def execute_forging_jobs_tool(
     # Resolves the total worker budget.
     resolved_budget = resolve_worker_count(requested_workers=worker_budget, reserved_cores=RESERVED_CORES)
 
+    # Floors the user-supplied parallel-job cap by the CPU budget divided by the per-worker core cost.
+    requested_parallel = max_parallel_jobs if max_parallel_jobs > 0 else 10
+    core_bounded_parallel = max(1, resolved_budget // _CORES_PER_JOB)
+    effective_parallel = min(requested_parallel, core_bounded_parallel)
+
     # Creates the execution state and starts the shared manager thread.
     _job_execution_state = JobExecutionState[_ForgingPendingJob](
         worker=_run_forging_job,
         all_jobs=all_jobs,
         pending_queue=deque(pending),
         worker_budget=resolved_budget,
+        max_parallel_jobs=effective_parallel,
     )
 
     manager = Thread(
@@ -303,6 +315,7 @@ def execute_forging_jobs_tool(
         "started": True,
         "total_jobs": len(pending),
         "worker_budget": resolved_budget,
+        "max_parallel_jobs": effective_parallel,
     }
 
     if invalid_jobs:
@@ -701,8 +714,8 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
 
     Loads the dataset's :class:`DatasetData` marker, then for each session in the dataset hierarchy checks the
     presence and readability of ``data.feather`` and the presence and parseability of the per-session
-    ``experiment_descriptor.yaml``. For each animal in the dataset, also checks the presence and parseability
-    of the per-animal ``surgery_data.yaml``. The forging processing tracker is read to report per-job statuses.
+    ``session_descriptor.yaml``. For each animal in the dataset, also checks the presence and parseability
+    of the per-animal ``surgery_metadata.yaml``. The forging processing tracker is read to report per-job statuses.
 
     Args:
         dataset_path: The absolute path to the dataset root directory (containing ``dataset_data.yaml``).

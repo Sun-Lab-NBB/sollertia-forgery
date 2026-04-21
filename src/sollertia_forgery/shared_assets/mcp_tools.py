@@ -9,9 +9,9 @@ from sollertia_shared_assets import SessionData, SessionTypes
 
 from .metadata import ProjectManifest
 from ..interfaces import mcp
-from ..forging.dataset_data import DatasetSession
 from .mcp_orchestration import validate_directory
 from .session_discovery import filter_sessions, discover_sessions
+from ..forging.dataset_data import DatasetSession
 
 _STATUS_COLUMNS: frozenset[str] = frozenset({"complete", "integrity", "cindra", "behavior", "video"})
 """The manifest column names that store boolean-like UInt8 processing status flags, cast to native bools by

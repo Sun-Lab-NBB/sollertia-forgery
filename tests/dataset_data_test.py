@@ -83,11 +83,7 @@ def test_dataset_data_create_initializes_directory_structure(tmp_path: Path) -> 
 
 def test_dataset_data_create_resolves_session_paths(tmp_path: Path) -> None:
     """Verifies that create() rebuilds each input DatasetSession with its resolved session_path."""
-    inputs = (
-        DatasetSession(
-            session="2024-01-15-12-30-45-123456", animal="animal_a", session_path=Path("/ignored")
-        ),
-    )
+    inputs = (DatasetSession(session="2024-01-15-12-30-45-123456", animal="animal_a", session_path=Path("/ignored")),)
 
     dataset_data = DatasetData.create(
         name="test_dataset",

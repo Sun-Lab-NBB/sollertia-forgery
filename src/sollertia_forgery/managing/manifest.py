@@ -147,7 +147,11 @@ def generate_project_manifest(project_directory: Path) -> None:
             # resolve completion status for datasets discovered on non-main sessions.
             multi_recording_registry: dict[str, bool] = {}
             for tracker_path in sorted(project_directory.rglob(_MULTI_RECORDING_TRACKER_FILENAME)):
-                dataset_name = tracker_path.parent.name
+                # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision avoidance
+                # when batching multiple animals under one analysis. The manifest surfaces the unqualified
+                # base name, so the animal_id prefix is stripped using the project-relative path component.
+                animal_id = tracker_path.relative_to(project_directory).parts[0]
+                dataset_name = _strip_animal_prefix(qualified_name=tracker_path.parent.name, animal_id=animal_id)
                 dataset_tracker = ProcessingTracker(file_path=tracker_path)
                 multi_recording_registry[dataset_name] = dataset_tracker.complete
 
@@ -254,7 +258,9 @@ def generate_project_manifest(project_directory: Path) -> None:
                 session_dataset_complete: list[bool] = []
                 for dataset_dir in dataset_dirs:
                     if dataset_dir.is_dir():
-                        dataset_name = dataset_dir.name
+                        dataset_name = _strip_animal_prefix(
+                            qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
+                        )
                         session_datasets.append(dataset_name)
                         session_dataset_complete.append(multi_recording_registry.get(dataset_name, False))
                 manifest["multi_recording_datasets"].append(session_datasets)
@@ -297,6 +303,28 @@ def generate_project_manifest(project_directory: Path) -> None:
             # If the code reaches this section, this means the runtime encountered an error.
             tracker.fail_job(job_id=job_id)
             raise
+
+
+def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
+    """Strips the ``{animal_id}_`` prefix from a cindra multi-recording dataset directory name.
+
+    Cindra's ``resolve_dataset_name_tool`` prepends the animal identifier to user-supplied dataset names to
+    produce collision-free output directories when batching multiple animals with the same analysis. This
+    helper reverses that qualification so manifest consumers see the logical base name instead of the
+    filesystem-qualified name.
+
+    Args:
+        qualified_name: The on-disk directory name as produced by cindra.
+        animal_id: The animal identifier that was prepended by cindra as the specifier.
+
+    Returns:
+        The dataset name with the ``{animal_id}_`` prefix removed when present, or the input unchanged when
+        the prefix is absent.
+    """
+    prefix = f"{animal_id}_"
+    if qualified_name.startswith(prefix):
+        return qualified_name[len(prefix) :]
+    return qualified_name
 
 
 def _find_tracker(search_root: Path, tracker_filename: str) -> ProcessingTracker | None:

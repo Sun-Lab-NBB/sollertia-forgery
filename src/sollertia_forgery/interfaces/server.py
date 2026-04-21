@@ -4,7 +4,7 @@ import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import Server, create_server_configuration_file, get_server_configuration
+from ..server import Server, get_server_configuration, create_server_configuration_file
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

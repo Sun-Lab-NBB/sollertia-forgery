@@ -117,30 +117,26 @@ def assemble_cindra_dataset(cindra_data_path: Path, behavior_data_path: Path, mu
     classification = np.load(file=cindra_data_path.joinpath("cell_classification.npy"), mmap_mode="r")
     is_cell_mask: NDArray[np.bool_] = classification[:, 0] == 1
 
-    # Builds all fluorescence Series up front: single-day traces filtered by the cell classification mask, and
-    # multi-day traces without filtering (already tracked ROIs). Adding all columns in a single with_columns call
-    # avoids creating intermediate DataFrame copies for each file.
-    fluorescence_columns = [
-        _load_cindra_fluorescence(
-            data_path=cindra_data_path, filename=filename, column_name=column_name, cell_mask=is_cell_mask
+    # Streams fluorescence Series into the DataFrame one file at a time to keep peak memory at one
+    # array-worth instead of eight.
+    fluorescence_sources: tuple[tuple[Path, str, str, NDArray[np.bool_] | None], ...] = (
+        (cindra_data_path, "cell_fluorescence.npy", "single_day_cell_fluorescence", is_cell_mask),
+        (cindra_data_path, "neuropil_fluorescence.npy", "single_day_neuropil_fluorescence", is_cell_mask),
+        (cindra_data_path, "subtracted_fluorescence.npy", "single_day_subtracted_fluorescence", is_cell_mask),
+        (cindra_data_path, "spikes.npy", "single_day_spikes", is_cell_mask),
+        (multiday_data_path, "cell_fluorescence.npy", "multi_day_cell_fluorescence", None),
+        (multiday_data_path, "neuropil_fluorescence.npy", "multi_day_neuropil_fluorescence", None),
+        (multiday_data_path, "subtracted_fluorescence.npy", "multi_day_subtracted_fluorescence", None),
+        (multiday_data_path, "spikes.npy", "multi_day_spikes", None),
+    )
+    for source_path, filename, column_name, mask in fluorescence_sources:
+        series = _load_cindra_fluorescence(
+            data_path=source_path, filename=filename, column_name=column_name, cell_mask=mask
         )
-        for filename, column_name in (
-            ("cell_fluorescence.npy", "single_day_cell_fluorescence"),
-            ("neuropil_fluorescence.npy", "single_day_neuropil_fluorescence"),
-            ("subtracted_fluorescence.npy", "single_day_subtracted_fluorescence"),
-            ("spikes.npy", "single_day_spikes"),
-        )
-    ] + [
-        _load_cindra_fluorescence(data_path=multiday_data_path, filename=filename, column_name=column_name)
-        for filename, column_name in (
-            ("cell_fluorescence.npy", "multi_day_cell_fluorescence"),
-            ("neuropil_fluorescence.npy", "multi_day_neuropil_fluorescence"),
-            ("subtracted_fluorescence.npy", "multi_day_subtracted_fluorescence"),
-            ("spikes.npy", "multi_day_spikes"),
-        )
-    ]
+        frame_aligned_data = frame_aligned_data.with_columns(series)
+        del series
 
-    return frame_aligned_data.with_columns(fluorescence_columns)
+    return frame_aligned_data
 
 
 def _load_cindra_fluorescence(
@@ -165,12 +161,12 @@ def _load_cindra_fluorescence(
     # Memory-maps the cindra fluorescence array to defer reading the pixel data until the selection is applied.
     fluorescence = np.load(file=data_path.joinpath(filename), mmap_mode="r")
 
-    # Applies the cell mask if provided.
+    # Drops the masked intermediate before returning to keep peak memory at one array-worth instead of two.
     if cell_mask is not None:
-        fluorescence = fluorescence[cell_mask, :]
-
-    # Transposes (ROI, Frame) to (Frame, ROI) as a contiguous float32 array. Polars constructs an Array-typed column
-    # directly from the 2D numpy array, avoiding intermediate per-row Python list conversion.
-    transposed = np.ascontiguousarray(fluorescence.T, dtype=np.float32)
+        masked = fluorescence[cell_mask, :]
+        transposed = np.ascontiguousarray(masked.T, dtype=np.float32)
+        del masked
+    else:
+        transposed = np.ascontiguousarray(fluorescence.T, dtype=np.float32)
 
     return pl.Series(name=column_name, values=transposed)

@@ -8,8 +8,8 @@ from pathlib import Path
 from dataclasses import field, dataclass
 
 from ataraxis_base_utilities import console, ensure_directory_exists
-from ataraxis_data_structures import YamlConfig
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
+from ataraxis_data_structures import YamlConfig
 
 
 @dataclass(frozen=True, slots=True)

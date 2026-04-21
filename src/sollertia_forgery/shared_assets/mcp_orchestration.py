@@ -96,8 +96,11 @@ class JobExecutionState[PendingJobT: PendingJob]:
     active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
     """Jobs currently executing on the shared process pool."""
     worker_budget: int = 1
-    """Total CPU cores available for the execution session. Also bounds the maximum number of concurrently
-    executing jobs."""
+    """Total CPU cores available for the execution session."""
+    max_parallel_jobs: int = -1
+    """Hard cap on concurrently executing jobs. Set to -1 to defer to ``worker_budget``. Tools where each
+    job consumes multiple cores internally set this to bound memory footprint independently of CPU
+    allocation."""
     lock: Lock = field(default_factory=Lock)
     """Thread synchronization lock for execution state access."""
     manager_thread: Thread | None = None
@@ -191,9 +194,14 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
     """
     poll_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
-    # Creates a single ProcessPoolExecutor sized to the worker budget. The executor is reused across every
-    # dispatch cycle so worker subprocesses are spawned once per execution session rather than per job.
-    with ProcessPoolExecutor(max_workers=state.worker_budget) as pool:
+    # Resolves the concurrency cap. A non-positive ``max_parallel_jobs`` defers to the CPU budget alone.
+    concurrency_limit = (
+        state.worker_budget if state.max_parallel_jobs <= 0 else min(state.worker_budget, state.max_parallel_jobs)
+    )
+
+    # Creates a single ProcessPoolExecutor sized to the concurrency limit. The executor is reused across
+    # every dispatch cycle so worker subprocesses are spawned once per execution session rather than per job.
+    with ProcessPoolExecutor(max_workers=concurrency_limit) as pool:
         while True:
             with state.lock:
                 # Reaps completed futures and frees their budget. Draining each future's result surfaces any
@@ -216,7 +224,7 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
                 # Dispatches as many pending jobs as the remaining budget allows. Cancellation suppresses new
                 # dispatches but lets the already-running futures continue to completion.
                 if not state.canceled:
-                    available = state.worker_budget - len(state.active_jobs)
+                    available = concurrency_limit - len(state.active_jobs)
                     while state.pending_queue and available > 0:
                         job = state.pending_queue.popleft()
                         future = pool.submit(state.worker, job)
