@@ -17,7 +17,7 @@ from .mcp_orchestration import (
     job_execution_manager,
     clean_output_subdirectory,
 )
-from .session_discovery import filter_sessions, discover_sessions, get_session_root_from_marker
+from .session_discovery import iter_sessions, filter_sessions, discover_sessions, get_session_root_from_marker
 
 __all__ = [
     "RESERVED_CORES",
@@ -35,6 +35,7 @@ __all__ = [
     "filter_sessions",
     "get_session_root_from_marker",
     "group_jobs_by_tracker",
+    "iter_sessions",
     "job_execution_manager",
     "prepare_tracker",
     "read_tracker_status",

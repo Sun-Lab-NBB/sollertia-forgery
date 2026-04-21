@@ -26,7 +26,7 @@ from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
 from .dataset_data import DatasetData, DatasetSession
-from ..shared_assets import prepare_tracker
+from ..shared_assets import SESSION_MARKER_FILENAME, prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -253,10 +253,10 @@ def resolve_dataset(
 def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) -> DatasetData:
     """Creates a fresh dataset hierarchy by resolving the provided session names under the project root.
 
-    Each session name is resolved by recursively globbing ``project_root`` for a matching directory, with the
-    owning animal derived from the parent directory. Dataset creation is currently limited to mesoscope
-    experiment sessions, and every included session must share the first session's session type and
-    acquisition system.
+    Each session name is resolved by probing the canonical ``<project_root>/<animal>/<session_name>`` layout
+    and requiring the session's ``session_data.yaml`` marker to be present. Dataset creation is currently
+    limited to mesoscope experiment sessions, and every included session must share the first session's
+    session type and acquisition system.
 
     Args:
         name: The unique name for the dataset.
@@ -267,20 +267,28 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
         The newly created DatasetData instance.
 
     Raises:
-        FileNotFoundError: If a session name does not resolve to any directory under the project root.
-        RuntimeError: If a session name resolves to more than one directory under the project root.
+        FileNotFoundError: If a session name does not resolve to any animal directory under the project root.
+        RuntimeError: If a session name resolves to more than one animal directory under the project root.
         ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, or if any subsequent session's
             session type or acquisition system differs from the first session's.
     """
     # Resolves each session name to its absolute directory path. The canonical project layout places every
-    # session at ``<project_root>/<animal>/<session>``, so the owning animal name is the parent's directory name.
+    # session at ``<project_root>/<animal>/<session>/raw_data/session_data.yaml``, so this probes each
+    # top-level animal directory for the marker rather than walking the whole project.
     session_paths: list[Path] = []
     for session_name in sessions:
-        matches = [path for path in project_root.rglob(session_name) if path.is_dir()]
+        matches: list[Path] = []
+        for animal_dir in project_root.iterdir():
+            if not animal_dir.is_dir():
+                continue
+            candidate = animal_dir.joinpath(session_name)
+            if candidate.joinpath("raw_data", SESSION_MARKER_FILENAME).is_file():
+                matches.append(candidate)
         if len(matches) != 1:
             message = (
                 f"Unable to resolve the directory for session '{session_name}' under '{project_root}'. "
-                f"Expected exactly one directory match, but found {len(matches)}."
+                f"Expected exactly one animal directory to contain '{session_name}/raw_data/"
+                f"{SESSION_MARKER_FILENAME}', but found {len(matches)}."
             )
             console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
         session_paths.append(matches[0])

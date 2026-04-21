@@ -10,10 +10,7 @@ import polars as pl
 from filelock import FileLock
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
-    SessionData,
-    RawDataFiles,
     SessionTypes,
-    ProcessingTrackers,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
@@ -21,10 +18,12 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from ..shared_assets import prepare_tracker, discover_sessions
+from ..shared_assets import prepare_tracker, iter_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sollertia_shared_assets import SessionData
 
 MANIFEST_TRACKER_FILENAME: str = "manifest_processing_tracker.yaml"
 """The filename for the processing tracker placed in the project's root directory alongside the manifest .feather
@@ -72,10 +71,12 @@ def generate_project_manifest(project_directory: Path) -> None:
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Finds the root directories for all project's sessions.
-    session_directories = discover_sessions(root_path=project_directory)
+    # Discovers and loads every session under the project once. Both the multi-recording registry and the
+    # per-session manifest rows consume this list, avoiding a second project-wide scan and redundant
+    # SessionData loads.
+    sessions: list[SessionData] = list(iter_sessions(root_path=project_directory))
 
-    if not session_directories:
+    if not sessions:
         message = (
             f"Unable to generate the project manifest file for the '{project_directory.stem}' project. The "
             f"project directory does not contain any session data. To generate the manifest file, the project must "
@@ -131,31 +132,38 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "multi_recording_complete": [],
             }
 
-            # Scans the entire project for cindra multi-recording tracker files to build a dataset completion
-            # registry. The tracker only lives on the main recording, so a project-wide scan is needed to
-            # resolve completion status for datasets discovered on non-main sessions.
+            # Builds the cindra multi-recording dataset completion registry from the canonical
+            # ``cindra/multi_recording`` subdirectory of every session, rather than rescanning the whole
+            # project. The tracker only lives on the main recording, so the registry later resolves
+            # completion status for datasets discovered on non-main sessions.
             multi_recording_registry: dict[str, bool] = {}
-            for tracker_path in sorted(project_directory.rglob(_MULTI_RECORDING_TRACKER_FILENAME)):
-                # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision avoidance
-                # when batching multiple animals under one analysis. The manifest surfaces the unqualified
-                # base name, so the animal_id prefix is stripped using the project-relative path component.
-                animal_id = tracker_path.relative_to(project_directory).parts[0]
-                dataset_name = _strip_animal_prefix(qualified_name=tracker_path.parent.name, animal_id=animal_id)
-                dataset_tracker = ProcessingTracker(file_path=tracker_path)
-                multi_recording_registry[dataset_name] = dataset_tracker.complete
+            for session_data in sessions:
+                multi_recording_root = session_data.cindra_multi_recording_path
+                if not multi_recording_root.is_dir():
+                    continue
+                for dataset_dir in multi_recording_root.iterdir():
+                    if not dataset_dir.is_dir():
+                        continue
+                    tracker_path = dataset_dir.joinpath(_MULTI_RECORDING_TRACKER_FILENAME)
+                    if not tracker_path.is_file():
+                        continue
+                    # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision
+                    # avoidance when batching multiple animals under one analysis. The manifest surfaces the
+                    # unqualified base name, so the animal_id prefix is stripped here.
+                    dataset_name = _strip_animal_prefix(
+                        qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
+                    )
+                    multi_recording_registry[dataset_name] = ProcessingTracker(file_path=tracker_path).complete
 
             # Pre-creates the Eastern timezone object for UTC-to-EST/EDT conversion.
             eastern = ZoneInfo("America/New_York")
 
             # Loops over each session of every animal in the project and extracts session ID information and
             # information about which processing steps have been successfully applied to the session.
-            for directory in session_directories:
+            for session_data in sessions:
                 # Skips processing directories without files (sessions with empty raw_data directories).
-                if not any(directory.joinpath("raw_data").glob("*")):
+                if not any(session_data.raw_data_path.glob("*")):
                     continue
-
-                # Instantiates the SessionData instance to resolve the paths to all session's data files and locations.
-                session_data = SessionData.load(session_path=directory)
 
                 # Extracts ID and data path information from the SessionData instance.
                 manifest["animal"].append(session_data.animal_id)
@@ -185,7 +193,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 if descriptor_class is None:
                     message = (
                         f"Unsupported session type '{session_data.session_type}' encountered for session "
-                        f"'{directory.stem}' when generating the manifest file for the project "
+                        f"'{session_data.session_name}' when generating the manifest file for the project "
                         f"{project_directory.stem}. Currently, only the following session types are supported: "
                         f"{tuple(SessionTypes)}."
                     )
@@ -203,11 +211,8 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 manifest["complete"].append(is_complete)
 
-                # Resolves data integrity verification status. The checksum tracker lives alongside the
-                # checksum file in raw_data.
-                checksum_tracker = _find_tracker(
-                    search_root=session_data.raw_data_path, tracker_filename=RawDataFiles.CHECKSUM_TRACKER
-                )
+                # Resolves data integrity verification status from the canonical checksum tracker path.
+                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.checksum_tracker_path)
                 is_verified = checksum_tracker.complete if checksum_tracker is not None else False
                 manifest["integrity"].append(is_verified)
 
@@ -221,33 +226,29 @@ def generate_project_manifest(project_directory: Path) -> None:
                     manifest["multi_recording_complete"].append([])
                     continue  # Cycles to the next session
 
-                # Resolves cindra single-recording processing status by searching processed_data for the tracker.
-                cindra_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path,
-                    tracker_filename=ProcessingTrackers.CINDRA_SINGLE_RECORDING,
+                # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
+                # canonical tracker paths exposed by SessionData.
+                cindra_tracker = _load_tracker_if_exists(
+                    tracker_path=session_data.cindra_single_recording_tracker_path
                 )
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
-                # Resolves behavior data processing status by searching processed_data for the tracker.
-                behavior_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path, tracker_filename=ProcessingTrackers.BEHAVIOR
-                )
+                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.behavior_tracker_path)
                 manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
-                # Resolves DeepLabCut (video) processing status by searching processed_data for the tracker.
-                video_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path, tracker_filename=ProcessingTrackers.VIDEO
-                )
+                video_tracker = _load_tracker_if_exists(tracker_path=session_data.video_tracker_path)
                 manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
 
-                # Resolves multi-recording dataset membership by searching for multi_recording subdirectories
-                # under processed_data to discover which datasets this session participates in, then looks up
-                # each dataset's completion status from the project-wide registry.
-                dataset_dirs = sorted(session_data.processed_data_path.rglob("multi_recording/*/"))
+                # Resolves multi-recording dataset membership by enumerating the session's
+                # ``cindra/multi_recording`` subdirectories, then looks up each dataset's completion status
+                # from the project-wide registry built above.
+                multi_recording_root = session_data.cindra_multi_recording_path
                 session_datasets: list[str] = []
                 session_dataset_complete: list[bool] = []
-                for dataset_dir in dataset_dirs:
-                    if dataset_dir.is_dir():
+                if multi_recording_root.is_dir():
+                    for dataset_dir in sorted(multi_recording_root.iterdir()):
+                        if not dataset_dir.is_dir():
+                            continue
                         dataset_name = _strip_animal_prefix(
                             qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
                         )
@@ -317,26 +318,15 @@ def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
     return qualified_name
 
 
-def _find_tracker(search_root: Path, tracker_filename: str) -> ProcessingTracker | None:
-    """Searches for a single processing tracker file by name under the given directory tree.
+def _load_tracker_if_exists(tracker_path: Path) -> ProcessingTracker | None:
+    """Returns a ProcessingTracker bound to the target path when it exists, or None otherwise.
 
     Args:
-        search_root: The root directory to search recursively.
-        tracker_filename: The filename of the tracker to locate.
+        tracker_path: The canonical path to the processing tracker YAML file.
 
     Returns:
-        A ProcessingTracker instance bound to the discovered file, or None if the file was not found.
-
-    Raises:
-        RuntimeError: If more than one matching tracker file is found under the search root.
+        A ProcessingTracker instance when the file is present on disk, or None when it is missing.
     """
-    candidates = list(search_root.rglob(tracker_filename))
-    if len(candidates) == 1:
-        return ProcessingTracker(file_path=candidates[0])
-    if len(candidates) > 1:
-        message = (
-            f"Expected at most one '{tracker_filename}' under '{search_root}', but found {len(candidates)}: "
-            f"{candidates}."
-        )
-        console.error(message=message, error=RuntimeError)
-    return None
+    if not tracker_path.is_file():
+        return None
+    return ProcessingTracker(file_path=tracker_path)

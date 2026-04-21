@@ -9,11 +9,13 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from dateutil import parser
+from sollertia_shared_assets import SessionData
 
 from .mcp_orchestration import SESSION_MARKER_FILENAME
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Iterator
 
     from ..forging.dataset_data import DatasetSession
 
@@ -56,6 +58,23 @@ def discover_sessions(root_path: Path) -> list[Path]:
     return sorted(
         get_session_root_from_marker(marker_path=marker) for marker in root_path.rglob(SESSION_MARKER_FILENAME)
     )
+
+
+def iter_sessions(root_path: Path) -> Iterator[SessionData]:
+    """Discovers and lazily loads every ``SessionData`` instance under the target root directory.
+
+    Thin composite over :func:`discover_sessions` and :meth:`SessionData.load` so that callers (manifest
+    generation, MCP status aggregators) can switch from project-wide ``rglob`` scans to typed iteration
+    in one call. The returned iterator yields sessions in the same sorted order as ``discover_sessions``.
+
+    Args:
+        root_path: The absolute path to the directory to search recursively for session markers.
+
+    Yields:
+        Each :class:`SessionData` instance loaded from a session marker found under ``root_path``.
+    """
+    for session_root in discover_sessions(root_path=root_path):
+        yield SessionData.load(session_path=session_root)
 
 
 def filter_sessions(

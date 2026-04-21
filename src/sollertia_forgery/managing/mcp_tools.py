@@ -17,7 +17,7 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
-from sollertia_shared_assets import SessionData, RawDataFiles
+from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
@@ -28,6 +28,7 @@ from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
+    iter_sessions,
     prepare_tracker,
     validate_directory,
     read_tracker_status,
@@ -651,12 +652,11 @@ def reset_checksum_jobs_tool(
 def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes checksum resolution status for all sessions under a root directory.
 
-    Recursively searches for ``checksum_processing_tracker.yaml`` files and aggregates their status. Each
-    tracker lives at ``{session_root}/raw_data/checksum_processing_tracker.yaml``, so walking up one parent
-    from each tracker yields the ``raw_data`` directory and two parents yields the session root.
+    Iterates every session marker under the root via :func:`iter_sessions` and, for each session whose
+    canonical ``SessionData.checksum_tracker_path`` exists, reads the tracker and aggregates its status.
 
     Args:
-        root_directory: The absolute path to the root directory to search for tracker files.
+        root_directory: The absolute path to the root directory to search for sessions.
 
     Returns:
         A dictionary containing per-session status summaries and aggregate counts.
@@ -672,14 +672,15 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for found_tracker_path in sorted(root_path.rglob(RawDataFiles.CHECKSUM_TRACKER)):
-        # The tracker lives at ``{session_root}/raw_data/<tracker>``, so walking up two parents yields the
-        # session root.
-        raw_data_path = found_tracker_path.parent
-        session_root = raw_data_path.parent
+    for session in iter_sessions(root_path=root_path):
+        tracker_path = session.checksum_tracker_path
+        if not tracker_path.is_file():
+            continue
+
+        session_root = session.raw_data_path.parent
         try:
             # Reads the tracker and accumulates per-session counts into the project-wide aggregate.
-            status = read_tracker_status(tracker_path=found_tracker_path)
+            status = read_tracker_status(tracker_path=tracker_path)
             summary = status.get("summary", {})
 
             aggregate_succeeded += summary.get("succeeded", 0)
@@ -692,7 +693,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
             session_statuses.append(
                 {
                     "session_path": str(session_root),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": dir_status,
                     **status,
                 }
@@ -701,7 +702,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
             session_statuses.append(
                 {
                     "session_path": str(session_root),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": "error",
                     "error": "Unable to read tracker file.",
                 }

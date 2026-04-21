@@ -112,13 +112,9 @@ def run_behavior_processing_pipeline(
     experiment_configuration = _load_experiment_configuration(session=session)
 
     # Discovers all available processing jobs based on files present in the session directory. The mapping
-    # caches the feather file already resolved for each job, so the execution helpers can skip a second rglob
+    # caches the feather file already resolved for each job, so the execution helpers can skip a second glob
     # pass, and iterating its keys yields the (job_name, specifier) tuples in discovery order.
-    job_paths = _discover_jobs(
-        raw_data_path=session.raw_data_path,
-        processed_data_path=session.processed_data_path,
-        hardware_state=hardware_state,
-    )
+    job_paths = _discover_jobs(session=session, hardware_state=hardware_state)
 
     if not job_paths:
         message = (
@@ -223,11 +219,7 @@ def discover_behavior_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
         console.error(message=message, error=ValueError)
 
     hardware_state = _load_hardware_state(session=session)
-    job_paths = _discover_jobs(
-        raw_data_path=session.raw_data_path,
-        processed_data_path=session.processed_data_path,
-        hardware_state=hardware_state,
-    )
+    job_paths = _discover_jobs(session=session, hardware_state=hardware_state)
 
     return session, list(job_paths.keys())
 
@@ -242,19 +234,18 @@ def _load_hardware_state(session: SessionData) -> MesoscopeHardwareState:
         The loaded MesoscopeHardwareState instance.
 
     Raises:
-        FileNotFoundError: If no hardware state YAML file is found in the session's raw data directory.
+        FileNotFoundError: If no hardware state YAML file is found at the session's canonical location.
     """
-    # Searches for the hardware state YAML file in the raw data directory.
-    candidates = sorted(session.raw_data_path.rglob("*hardware_state*.yaml"))
+    hardware_state_path = session.hardware_state_path
 
-    if not candidates:
+    if not hardware_state_path.is_file():
         message = (
             f"Unable to load hardware state for session '{session.session_name}'. No hardware state YAML file was "
-            f"found in '{session.raw_data_path}'."
+            f"found at '{hardware_state_path}'."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    return MesoscopeHardwareState.from_yaml(file_path=candidates[0])
+    return MesoscopeHardwareState.from_yaml(file_path=hardware_state_path)
 
 
 def _load_experiment_configuration(session: SessionData) -> MesoscopeExperimentConfiguration | None:
@@ -270,30 +261,28 @@ def _load_experiment_configuration(session: SessionData) -> MesoscopeExperimentC
     if session.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
         return None
 
-    # Searches for the experiment configuration YAML file in the raw data directory.
-    candidates = sorted(session.raw_data_path.rglob("*experiment_configuration*.yaml"))
+    experiment_configuration_path = session.experiment_configuration_path
 
-    if not candidates:
+    if not experiment_configuration_path.is_file():
         message = (
             f"Unable to load experiment configuration for session '{session.session_name}'. No experiment "
-            f"configuration YAML file was found in '{session.raw_data_path}'."
+            f"configuration YAML file was found at '{experiment_configuration_path}'."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    return MesoscopeExperimentConfiguration.from_yaml(file_path=candidates[0])
+    return MesoscopeExperimentConfiguration.from_yaml(file_path=experiment_configuration_path)
 
 
 def _discover_jobs(
-    raw_data_path: Path,
-    processed_data_path: Path,
+    session: SessionData,
     hardware_state: MesoscopeHardwareState,
 ) -> dict[tuple[str, str], Path]:
     """Discovers all available processing jobs based on files present in the session directories.
 
     Args:
-        raw_data_path: The path to the session's raw data directory (searched for system log NPZ archives).
-        processed_data_path: The path to the session's processed data directory (searched for pre-extracted
-            camera and microcontroller feather files).
+        session: The loaded SessionData instance. Canonical subdirectories (``raw_behavior_data_path``,
+            ``camera_timestamps_path``, ``microcontroller_data_path``) are queried directly to avoid
+            recursive project scans.
         hardware_state: The hardware configuration used to filter microcontroller modules by eligibility.
 
     Returns:
@@ -307,7 +296,7 @@ def _discover_jobs(
 
     # Discovers the single runtime processing job, if a runtime log archive is present. The Mesoscope-VR
     # runtime DataLogger always writes to a fixed source ID, so there is at most one archive per session.
-    archive_path = find_log_archive(data_directory=raw_data_path)
+    archive_path = find_log_archive(data_directory=session.raw_behavior_data_path)
     if archive_path is not None:
         job_paths[(BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)] = archive_path
 
@@ -315,13 +304,13 @@ def _discover_jobs(
     job_paths.update(
         {
             (BehaviorJobNames.CAMERA, str(extract_camera_source_id(feather_path=feather_path))): feather_path
-            for feather_path in find_camera_feathers(data_directory=processed_data_path)
+            for feather_path in find_camera_feathers(data_directory=session.camera_timestamps_path)
         }
     )
 
     # Discovers microcontroller processing jobs from pre-extracted module feather files, filtering out modules
     # whose hardware parameters are not configured.
-    for feather_path in find_module_feathers(data_directory=processed_data_path):
+    for feather_path in find_module_feathers(data_directory=session.microcontroller_data_path):
         controller_id, module_type, module_id = parse_module_feather_name(feather_path=feather_path)
         if not is_module_eligible(module_type=module_type, module_id=module_id, hardware_state=hardware_state):
             continue

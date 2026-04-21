@@ -45,37 +45,26 @@ _DISTANCE_SNAPSHOT_CODE: int = 5
 
 
 def find_log_archive(data_directory: Path) -> Path | None:
-    """Discovers the runtime log archive under the data directory.
+    """Resolves the runtime log archive inside the canonical raw behavior data directory.
 
-    Recursively searches the data_directory for the single ``{RUNTIME_SOURCE_ID}_log.npz`` archive produced by the
-    Mesoscope-VR runtime DataLogger. The runtime DataLogger always writes to a fixed source ID, so at most one
-    archive is expected per session.
+    Looks for the single ``{RUNTIME_SOURCE_ID}_log.npz`` archive produced by the Mesoscope-VR runtime
+    DataLogger at the canonical location ``data_directory / {RUNTIME_SOURCE_ID}_log.npz``. The runtime
+    DataLogger always writes to a fixed source ID, so at most one archive is expected per session.
 
     Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively, so the
-            archive may be nested at any depth below this path.
+        data_directory: The path to the session's raw behavior data directory (``session.raw_behavior_data_path``).
 
     Returns:
         The path to the runtime log archive, or None if the directory does not exist or no archive is present.
-
-    Raises:
-        ValueError: If more than one archive matching the expected name is found under the data directory.
     """
-    if not data_directory.exists() or not data_directory.is_dir():
+    if not data_directory.is_dir():
         return None
 
-    matches = sorted(data_directory.rglob(_LOG_ARCHIVE_NAME))
-    if not matches:
+    archive_path = data_directory.joinpath(_LOG_ARCHIVE_NAME)
+    if not archive_path.is_file():
         return None
 
-    if len(matches) > 1:
-        message = (
-            f"Unable to resolve the runtime log archive in '{data_directory}'. Expected exactly one file named "
-            f"'{_LOG_ARCHIVE_NAME}', but found multiple: {[str(match) for match in matches]}."
-        )
-        console.error(message=message, error=ValueError)
-
-    return matches[0]
+    return archive_path
 
 
 def process_runtime_data(

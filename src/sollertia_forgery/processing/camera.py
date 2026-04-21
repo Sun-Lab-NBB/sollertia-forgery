@@ -24,22 +24,22 @@ sollertia-forgery processing."""
 
 
 def find_camera_feathers(data_directory: Path) -> list[Path]:
-    """Discovers camera timestamp feather files under the data directory.
+    """Discovers camera timestamp feather files inside the canonical camera timestamps directory.
 
-    Recursively searches the data_directory for feather files matching the ``camera_*_timestamps.feather`` naming
-    convention used by ataraxis-video-system.
+    Searches ``data_directory`` non-recursively for feather files matching the ``camera_*_timestamps.feather``
+    naming convention used by ataraxis-video-system. The directory is expected to be the session's canonical
+    ``processed_data/camera_timestamps`` location exposed by ``SessionData.camera_timestamps_path``.
 
     Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively, so feather
-            files may be nested at any depth below this path.
+        data_directory: The path to the session's camera timestamps directory.
 
     Returns:
         A sorted list of paths to the discovered camera timestamp feather files. Returns an empty list if the
         directory does not exist or if no matching files are found.
     """
-    if not data_directory.exists() or not data_directory.is_dir():
+    if not data_directory.is_dir():
         return []
-    return sorted(data_directory.rglob(_CAMERA_FEATHER_PATTERN))
+    return sorted(data_directory.glob(_CAMERA_FEATHER_PATTERN))
 
 
 def extract_camera_source_id(feather_path: Path) -> int:
