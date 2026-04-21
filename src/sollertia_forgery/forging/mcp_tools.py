@@ -21,6 +21,7 @@ from sollertia_shared_assets import (
     SurgeryData,
     RawDataFiles,
     MesoscopeExperimentDescriptor,
+    validate_directory,
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
@@ -37,7 +38,6 @@ from ..shared_assets import (
     PendingJob,
     JobExecutionState,
     prepare_tracker,
-    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,

@@ -26,7 +26,7 @@ from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
 from .dataset_data import DatasetData, DatasetSession
-from ..shared_assets import SESSION_MARKER_FILENAME, prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -282,13 +282,13 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
             if not animal_dir.is_dir():
                 continue
             candidate = animal_dir.joinpath(session_name)
-            if candidate.joinpath("raw_data", SESSION_MARKER_FILENAME).is_file():
+            if candidate.joinpath("raw_data", RawDataFiles.SESSION_DATA).is_file():
                 matches.append(candidate)
         if len(matches) != 1:
             message = (
                 f"Unable to resolve the directory for session '{session_name}' under '{project_root}'. "
                 f"Expected exactly one animal directory to contain '{session_name}/raw_data/"
-                f"{SESSION_MARKER_FILENAME}', but found {len(matches)}."
+                f"{RawDataFiles.SESSION_DATA}', but found {len(matches)}."
             )
             console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
         session_paths.append(matches[0])

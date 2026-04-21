@@ -15,10 +15,11 @@ from sollertia_shared_assets import (
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
     MesoscopeExperimentDescriptor,
+    iterate_sessions,
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from ..shared_assets import prepare_tracker, iter_sessions
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -74,7 +75,7 @@ def generate_project_manifest(project_directory: Path) -> None:
     # Discovers and loads every session under the project once. Both the multi-recording registry and the
     # per-session manifest rows consume this list, avoiding a second project-wide scan and redundant
     # SessionData loads.
-    sessions: list[SessionData] = list(iter_sessions(root_path=project_directory))
+    sessions: list[SessionData] = list(iterate_sessions(root_path=project_directory))
 
     if not sessions:
         message = (
@@ -228,9 +229,7 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
                 # canonical tracker paths exposed by SessionData.
-                cindra_tracker = _load_tracker_if_exists(
-                    tracker_path=session_data.cindra_single_recording_tracker_path
-                )
+                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.cindra_single_recording_tracker_path)
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
                 behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.behavior_tracker_path)

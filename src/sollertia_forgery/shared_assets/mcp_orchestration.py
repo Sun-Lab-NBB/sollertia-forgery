@@ -14,6 +14,7 @@ import numpy as np
 import polars as pl
 from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
 from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 if TYPE_CHECKING:
@@ -22,10 +23,6 @@ if TYPE_CHECKING:
 RESERVED_CORES: int = 2
 """The number of CPU cores reserved for system operations. Each package's ``execute_*_jobs_tool`` subtracts this
 value from the available core count when resolving the worker budget."""
-
-SESSION_MARKER_FILENAME: str = "session_data.yaml"
-"""The filename of the session metadata marker written into every session's ``raw_data/`` subdirectory. Session
-discovery helpers use this marker to locate session root directories under a project root."""
 
 _MINIMUM_ROWS_FOR_INTERVALS: int = 2
 """The minimum number of rows required in a feather file to compute inter-row timing intervals."""
@@ -107,24 +104,6 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """Background execution manager thread reference."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
-
-
-def validate_directory(directory: str) -> str | None:
-    """Checks that the given directory path is an existing directory and returns an error message if not.
-
-    Args:
-        directory: The absolute path string to validate as an existing directory.
-
-    Returns:
-        ``None`` when the path is a valid directory, or a human-readable error string suitable for inclusion in
-        an MCP tool response.
-    """
-    path = Path(directory)
-    if not path.exists():
-        return f"Directory does not exist: {directory}"
-    if not path.is_dir():
-        return f"Path is not a directory: {directory}"
-    return None
 
 
 def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]]) -> None:

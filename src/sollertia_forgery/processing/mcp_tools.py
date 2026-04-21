@@ -17,7 +17,7 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count
-from sollertia_shared_assets import Directories, SessionData
+from sollertia_shared_assets import Directories, SessionData, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .pipeline import (
@@ -29,8 +29,6 @@ from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
-    iter_sessions,
-    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -637,7 +635,7 @@ def reset_behavior_processing_jobs_tool(
 def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes behavior processing status for all sessions under a root directory.
 
-    Iterates every session marker under the root via :func:`iter_sessions` and, for each session whose
+    Iterates every session marker under the root via :func:`iterate_sessions` and, for each session whose
     canonical ``SessionData.behavior_tracker_path`` exists, reads the tracker and aggregates its status.
 
     Args:
@@ -657,7 +655,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for session in iter_sessions(root_path=root_path):
+    for session in iterate_sessions(root_path=root_path):
         tracker_path = session.behavior_tracker_path
         if not tracker_path.is_file():
             continue

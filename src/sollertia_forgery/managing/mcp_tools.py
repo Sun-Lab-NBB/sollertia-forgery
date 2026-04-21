@@ -17,7 +17,7 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import SessionData, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
@@ -28,9 +28,7 @@ from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
-    iter_sessions,
     prepare_tracker,
-    validate_directory,
     read_tracker_status,
     derive_tracker_status,
     group_jobs_by_tracker,
@@ -652,7 +650,7 @@ def reset_checksum_jobs_tool(
 def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes checksum resolution status for all sessions under a root directory.
 
-    Iterates every session marker under the root via :func:`iter_sessions` and, for each session whose
+    Iterates every session marker under the root via :func:`iterate_sessions` and, for each session whose
     canonical ``SessionData.checksum_tracker_path`` exists, reads the tracker and aggregates its status.
 
     Args:
@@ -672,7 +670,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for session in iter_sessions(root_path=root_path):
+    for session in iterate_sessions(root_path=root_path):
         tracker_path = session.checksum_tracker_path
         if not tracker_path.is_file():
             continue
