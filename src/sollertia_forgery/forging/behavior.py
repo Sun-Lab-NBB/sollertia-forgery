@@ -10,7 +10,7 @@ from numba import njit  # type: ignore[import-untyped]
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import MesoscopeHardwareState
+from sollertia_shared_assets import RawDataFiles, MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
 
 if TYPE_CHECKING:
@@ -51,7 +51,9 @@ def assemble_behavior_dataset(
         The Polars DataFrame that contains the assembled behavior data.
     """
     # Loads hardware configuration and pre-creates the assets to map system state codes to descriptive names.
-    hardware_state_data = MesoscopeHardwareState.from_yaml(file_path=raw_data_path.joinpath("hardware_state.yaml"))
+    hardware_state_data = MesoscopeHardwareState.from_yaml(
+        file_path=raw_data_path.joinpath(RawDataFiles.HARDWARE_STATE)
+    )
     state_mapping = hardware_state_data.system_state_codes
     if state_mapping is None:
         message = (

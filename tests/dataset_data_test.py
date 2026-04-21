@@ -38,6 +38,19 @@ def test_dataset_session_is_frozen() -> None:
         dataset_session.session = "new_session"  # type: ignore[misc]
 
 
+def test_dataset_session_data_and_descriptor_paths() -> None:
+    """Verifies that data_path and descriptor_path resolve relative to session_path."""
+    session_path = Path("/tmp/test_dataset/animal_a/2024-01-15-12-30-45-123456")
+    dataset_session = DatasetSession(
+        session="2024-01-15-12-30-45-123456",
+        animal="animal_a",
+        session_path=session_path,
+    )
+
+    assert dataset_session.data_path == session_path / "data.feather"
+    assert dataset_session.descriptor_path == session_path / "session_descriptor.yaml"
+
+
 # Tests for DatasetData dataclass
 
 
@@ -177,6 +190,30 @@ def test_dataset_data_load_errors_when_no_marker(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError):
         DatasetData.load(dataset_path=tmp_path / "empty_dataset")
+
+
+def test_dataset_data_surgery_paths_maps_each_animal(tmp_path: Path) -> None:
+    """Verifies that surgery_paths yields a per-animal mapping anchored on the dataset root."""
+    sessions = (
+        DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_a"),
+        DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_b"),
+        DatasetSession(session="2024-01-15-12-30-45-000003", animal="animal_a"),
+    )
+    dataset_data = DatasetData.create(
+        name="test_dataset",
+        project="test_project",
+        session_type=SessionTypes.LICK_TRAINING,
+        acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+        sessions=sessions,
+        datasets_root=tmp_path,
+    )
+
+    surgery_paths = dataset_data.surgery_paths
+    dataset_root = tmp_path / "test_dataset"
+
+    assert set(surgery_paths.keys()) == {"animal_a", "animal_b"}
+    assert surgery_paths["animal_a"] == dataset_root / "animal_a" / "surgery_metadata.yaml"
+    assert surgery_paths["animal_b"] == dataset_root / "animal_b" / "surgery_metadata.yaml"
 
 
 def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:

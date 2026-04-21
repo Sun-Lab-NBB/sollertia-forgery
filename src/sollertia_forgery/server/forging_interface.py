@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from natsort_rs import natsort
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    Directories,
     SessionTypes,
     DatasetTrackers,
     SessionMetadata,
@@ -183,7 +184,12 @@ def _construct_cindra_multiday_pipeline(
     sorted_sessions = natsort(sessions)
     main_session = sorted_sessions[0]
     main_session_path = project_root.joinpath(animal, main_session)
-    main_session_multiday = main_session_path.joinpath("processed_data", "mesoscope_data", "multiday", dataset_name)
+    # Cindra writes multi-recording output to ``processed_data/cindra/multi_recording/<dataset_name>/``. The
+    # dataset directory here intentionally omits the animal_id prefix used on local disk because the server
+    # execution context operates on a single animal at a time.
+    main_session_multiday = main_session_path.joinpath(
+        "processed_data", Directories.CINDRA, Directories.MULTI_RECORDING, dataset_name
+    )
 
     # Validates each session for eligibility with the multiday pipeline.
     for session in sessions:

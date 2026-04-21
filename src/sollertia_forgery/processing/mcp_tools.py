@@ -17,12 +17,10 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import Directories, SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .pipeline import (
-    TRACKER_FILENAME,
-    BEHAVIOR_DATA_DIRECTORY,
     discover_behavior_jobs,
     run_behavior_processing_pipeline,
 )
@@ -132,9 +130,9 @@ def prepare_behavior_processing_batch_tool(
         # session's ``processed_data_path``, co-located with the upstream ``camera_timestamps/`` and
         # ``microcontroller_data/`` produced by axvs and axci. The caller does not choose where behavior
         # outputs go.
-        data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
+        data_path = session.behavior_data_path
         data_path.mkdir(parents=True, exist_ok=True)
-        tracker_path = data_path / TRACKER_FILENAME
+        tracker_path = session.behavior_tracker_path
 
         if tracker_path.exists():
             # Idempotent path: returns existing tracker state without rebuilding the job registry.
@@ -659,7 +657,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for found_tracker_path in sorted(root_path.rglob(TRACKER_FILENAME)):
+    for found_tracker_path in sorted(root_path.rglob(ProcessingTrackers.BEHAVIOR)):
         # The tracker lives at ``{session_root}/processed_data/behavior_data/<tracker>``, so walking up three
         # parents yields the session root. The caller can feed that path back into ``/session-setup`` or
         # ``/behavior-processing`` without further resolution.
@@ -738,12 +736,12 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
     except Exception as error:
         return {"error": f"Unable to load session: {error}"}
 
-    data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
+    data_path = session.behavior_data_path
 
     if not data_path.exists():
         return {
             "error": (
-                f"No '{BEHAVIOR_DATA_DIRECTORY}' subdirectory found under '{session.processed_data_path}'. "
+                f"No '{Directories.BEHAVIOR_DATA}' subdirectory found under '{session.processed_data_path}'. "
                 f"Processing may not have been run yet."
             ),
         }
@@ -772,7 +770,7 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
         entry["row_count"] = summary.get("total_rows", 0)
         file_results.append(entry)
 
-    tracker_path = data_path / TRACKER_FILENAME
+    tracker_path = session.behavior_tracker_path
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:
@@ -857,7 +855,7 @@ def clean_behavior_processing_output_tool(session_paths: list[str]) -> dict[str,
 
         outcome = clean_output_subdirectory(
             output_directory=str(session.processed_data_path),
-            subdirectory_name=BEHAVIOR_DATA_DIRECTORY,
+            subdirectory_name=Directories.BEHAVIOR_DATA,
         )
         # Rewrites the helper's ``output_directory`` key into ``session_path`` so that the MCP surface
         # consistently identifies each entry by its session root.

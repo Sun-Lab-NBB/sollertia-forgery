@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import SessionData, RawDataFiles
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
 from ..shared_assets import prepare_tracker
@@ -13,17 +13,17 @@ from ..shared_assets import prepare_tracker
 if TYPE_CHECKING:
     from pathlib import Path
 
-CHECKSUM_TRACKER_FILENAME: str = "checksum_processing_tracker.yaml"
-"""The filename for the processing tracker placed in the session's raw_data directory alongside the ax_checksum.txt
-file."""
-
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name used to identify checksum resolution jobs in processing trackers."""
 
-_CHECKSUM_TRACKER_LOCK_FILENAME: str = CHECKSUM_TRACKER_FILENAME + ".lock"
+_CHECKSUM_TRACKER_LOCK_FILENAME: str = RawDataFiles.CHECKSUM_TRACKER + ".lock"
 """The lock filename associated with the checksum processing tracker."""
 
-_CHECKSUM_EXCLUDED_FILES: set[str] = {"ax_checksum.txt", CHECKSUM_TRACKER_FILENAME, _CHECKSUM_TRACKER_LOCK_FILENAME}
+_CHECKSUM_EXCLUDED_FILES: set[str] = {
+    str(RawDataFiles.CHECKSUM),
+    str(RawDataFiles.CHECKSUM_TRACKER),
+    _CHECKSUM_TRACKER_LOCK_FILENAME,
+}
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
 tracker, and its lock file to prevent the tracker presence from altering the checksum value."""
 
@@ -63,7 +63,7 @@ def resolve_checksum(
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Applies stale
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
-    tracker = ProcessingTracker(file_path=session_data.raw_data_path.joinpath(CHECKSUM_TRACKER_FILENAME))
+    tracker = ProcessingTracker(file_path=session_data.checksum_tracker_path)
     jobs = [(CHECKSUM_JOB_NAME, session_data.session_name)]
     prepare_tracker(tracker=tracker, jobs=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session_data.session_name)
@@ -90,7 +90,7 @@ def resolve_checksum(
         )
 
         # Loads the checksum stored inside the ax_checksum.txt file.
-        checksum_path = session_data.raw_data_path.joinpath("ax_checksum.txt")
+        checksum_path = session_data.checksum_path
         with checksum_path.open() as file:
             stored_checksum = file.read().strip()
 

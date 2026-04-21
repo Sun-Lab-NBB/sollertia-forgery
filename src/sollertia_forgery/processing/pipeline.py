@@ -13,6 +13,7 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import (
     SessionData,
     SessionTypes,
+    ProcessingTrackers,
     MesoscopeHardwareState,
     MesoscopeExperimentConfiguration,
 )
@@ -30,13 +31,6 @@ from .microcontrollers import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-BEHAVIOR_DATA_DIRECTORY: str = "behavior_data"
-"""The name of the subdirectory created under the output path for behavior processing results. All tracker files and
-processed feather outputs are written into this subdirectory."""
-
-TRACKER_FILENAME: str = "behavior_processing_tracker.yaml"
-"""The filename for the processing tracker placed in the behavior data output directory."""
 
 PROCESSABLE_SESSION_TYPES: frozenset[SessionTypes] = frozenset(
     {
@@ -140,9 +134,9 @@ def run_behavior_processing_pipeline(
     # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs. The
     # ``behavior_data/`` subdirectory is always placed under the session's ``processed_data_path``, co-located
     # with the upstream ``camera_timestamps/`` and ``microcontroller_data/`` produced by axvs and axci.
-    data_path = session.processed_data_path / BEHAVIOR_DATA_DIRECTORY
+    data_path = session.behavior_data_path
     data_path.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=data_path / TRACKER_FILENAME)
+    tracker = ProcessingTracker(file_path=data_path / ProcessingTrackers.BEHAVIOR)
     jobs = list(job_paths.keys())
     prepare_tracker(tracker=tracker, jobs=jobs)
 

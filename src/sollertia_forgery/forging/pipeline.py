@@ -16,14 +16,15 @@ from natsort_rs import natsort  # type: ignore[import-untyped]
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count, ensure_directory_exists
 from sollertia_shared_assets import (
     SessionData,
+    RawDataFiles,
     SessionTypes,
+    ProcessingTrackers,
 )
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
 from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
-from ..processing import TRACKER_FILENAME as _BEHAVIOR_TRACKER_FILENAME
 from .dataset_data import DatasetData, DatasetSession
 from ..shared_assets import prepare_tracker
 
@@ -36,17 +37,6 @@ TRACKER_FILENAME: str = "forging_tracker.yaml"
 
 FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name used to identify per-session assembly stages in forging processing trackers."""
-
-_CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
-"""The tracker filename written by the cindra single-recording pipeline into the cindra output directory."""
-
-EXPERIMENT_DESCRIPTOR_FILENAME: str = "session_descriptor.yaml"
-"""The filename of the mesoscope experiment descriptor inside each session's raw data directory, as written
-by the acquisition runtime. Forged copies are placed alongside data.feather in every session directory."""
-
-SURGERY_DATA_FILENAME: str = "surgery_metadata.yaml"
-"""The filename of the surgery metadata YAML inside each session's raw data directory, as written by the
-acquisition runtime. Forged copies are placed once per animal at the dataset's animal directory root."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,9 +363,9 @@ def _copy_animal_surgery_files(
     for source_path in source_session_paths:
         sessions_by_animal.setdefault(source_path.parent.name, []).append(source_path)
 
-    # The dataset hierarchy stores each animal at ``<dataset_root>/<animal>/``. The dataset root is the parent
-    # of the dataset_data.yaml file written by DatasetData.create.
-    dataset_root = dataset.dataset_data_path.parent
+    # The dataset hierarchy stores each animal at ``<dataset_root>/<animal>/``. DatasetData.surgery_paths
+    # resolves the per-animal destination by anchoring on the dataset_data.yaml file's parent.
+    destination_paths = dataset.surgery_paths
 
     for animal in dataset.animals:
         animal_sessions = sessions_by_animal[animal]
@@ -385,28 +375,26 @@ def _copy_animal_surgery_files(
         latest_session_path = next(path for path in animal_sessions if path.name == latest_session_name)
         session_data = SessionData.load(session_path=latest_session_path)
 
-        source_surgery_path = session_data.raw_data_path.joinpath(SURGERY_DATA_FILENAME)
+        source_surgery_path = session_data.surgery_metadata_path
         if not source_surgery_path.is_file():
             message = (
                 f"Unable to define dataset '{dataset_name}'. The latest session '{latest_session_name}' for "
-                f"animal '{animal}' does not contain a '{SURGERY_DATA_FILENAME}' file at "
+                f"animal '{animal}' does not contain a '{RawDataFiles.SURGERY_METADATA}' file at "
                 f"'{source_surgery_path}'. Surgery metadata is required for every animal in a forged dataset."
             )
             console.error(message=message, error=FileNotFoundError)
 
-        destination_surgery_path = dataset_root.joinpath(animal, SURGERY_DATA_FILENAME)
-        shutil.copy2(src=source_surgery_path, dst=destination_surgery_path)
+        shutil.copy2(src=source_surgery_path, dst=destination_paths[animal])
 
 
 def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _SessionPaths:
-    """Discovers and resolves all data directory paths for a single session assembly job.
+    """Resolves all data directory paths for a single session assembly job from the canonical session layout.
 
     Notes:
-        Loads ``SessionData`` to obtain the canonical ``raw_data_path`` and ``processed_data_path``, then uses
-        tracker-file rglob within ``processed_data_path`` to discover the behavior and cindra output directories.
-        The cindra multi-recording path is derived by joining ``cindra/multi_recording/{animal_id}_{dataset_name}``
-        to the session's processed data directory; the animal identifier is prepended to match Cindra's
-        on-disk qualification convention for collision-free multi-animal batches.
+        Loads ``SessionData`` and reads its path-resolution properties for the canonical ``behavior_data`` and
+        ``cindra`` locations under ``processed_data``. The cindra multi-recording path is derived by joining
+        ``multi_recording/{animal_id}_{dataset_name}`` to the cindra output directory; the animal identifier is
+        prepended to match Cindra's on-disk qualification convention for collision-free multi-animal batches.
 
     Args:
         session_data_path: The path to the session's root directory.
@@ -417,43 +405,36 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
         A frozen ``_SessionPaths`` instance containing all resolved data directory paths.
 
     Raises:
-        FileNotFoundError: If a required tracker file is not found under the processed data directory.
-        RuntimeError: If multiple instances of a tracker file are found, indicating an ambiguous directory structure.
+        FileNotFoundError: If either the behavior or cindra canonical output directory is missing.
     """
     # Loads the session's metadata to obtain canonical raw and processed data root paths.
     session = SessionData.load(session_path=session_data_path)
 
-    # Discovers the behavior data directory by locating its processing tracker.
-    behavior_candidates = sorted(session.processed_data_path.rglob(_BEHAVIOR_TRACKER_FILENAME))
-    if len(behavior_candidates) != 1:
+    # Validates that the canonical behavior and cindra output directories exist under processed_data.
+    if not session.behavior_data_path.is_dir():
         message = (
             f"Unable to resolve the behavior data directory for session '{session_data_path.name}'. "
-            f"Expected exactly one '{_BEHAVIOR_TRACKER_FILENAME}' under '{session.processed_data_path}', "
-            f"but found {len(behavior_candidates)}."
+            f"Expected '{session.behavior_data_path}' to exist and contain "
+            f"'{ProcessingTrackers.BEHAVIOR}'."
         )
-        console.error(message=message, error=FileNotFoundError if not behavior_candidates else RuntimeError)
-    behavior_data_path = behavior_candidates[0].parent
-
-    # Discovers the cindra single-day output directory by locating its processing tracker.
-    cindra_candidates = sorted(session.processed_data_path.rglob(_CINDRA_TRACKER_FILENAME))
-    if len(cindra_candidates) != 1:
+        console.error(message=message, error=FileNotFoundError)
+    if not session.cindra_data_path.is_dir():
         message = (
             f"Unable to resolve the cindra data directory for session '{session_data_path.name}'. "
-            f"Expected exactly one '{_CINDRA_TRACKER_FILENAME}' under '{session.processed_data_path}', "
-            f"but found {len(cindra_candidates)}."
+            f"Expected '{session.cindra_data_path}' to exist and contain "
+            f"'{ProcessingTrackers.CINDRA_SINGLE_RECORDING}'."
         )
-        console.error(message=message, error=FileNotFoundError if not cindra_candidates else RuntimeError)
-    cindra_data_path = cindra_candidates[0].parent
+        console.error(message=message, error=FileNotFoundError)
 
-    # Derives the cindra multi-recording output path under ``cindra/multi_recording/``. Cindra writes the
-    # dataset directory as ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple
-    # animals under a single analysis name, so the animal identifier is prepended here.
-    multiday_data_path = cindra_data_path.joinpath("multi_recording", f"{session.animal_id}_{dataset_name}")
+    # Derives the cindra multi-recording output path. Cindra writes the dataset directory as
+    # ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple animals under a single
+    # analysis name, so the animal identifier is prepended here.
+    multiday_data_path = session.cindra_multi_recording_path.joinpath(f"{session.animal_id}_{dataset_name}")
 
     return _SessionPaths(
-        behavior_data_path=behavior_data_path,
+        behavior_data_path=session.behavior_data_path,
         raw_data_path=session.raw_data_path,
-        cindra_data_path=cindra_data_path,
+        cindra_data_path=session.cindra_data_path,
         multiday_data_path=multiday_data_path,
     )
 
@@ -484,11 +465,11 @@ def _assemble_session_dataset(
     ensure_directory_exists(path=output_path)
 
     # Verifies the experiment descriptor exists up front so the failure surfaces before any expensive work.
-    source_descriptor_path = session_paths.raw_data_path.joinpath(EXPERIMENT_DESCRIPTOR_FILENAME)
+    source_descriptor_path = session_paths.raw_data_path.joinpath(RawDataFiles.SESSION_DESCRIPTOR)
     if not source_descriptor_path.is_file():
         message = (
             f"Unable to assemble session '{output_path.parent.name}'. The session's raw data directory does "
-            f"not contain a '{EXPERIMENT_DESCRIPTOR_FILENAME}' file at '{source_descriptor_path}'. The "
+            f"not contain a '{RawDataFiles.SESSION_DESCRIPTOR}' file at '{source_descriptor_path}'. The "
             f"experiment descriptor is required for every session in a forged dataset."
         )
         console.error(message=message, error=FileNotFoundError)
@@ -561,7 +542,7 @@ def _assemble_session_dataset(
         # analysis without reaching back into the raw session.
         shutil.copy2(
             src=source_descriptor_path,
-            dst=output_path.parent.joinpath(EXPERIMENT_DESCRIPTOR_FILENAME),
+            dst=output_path.parent.joinpath(RawDataFiles.SESSION_DESCRIPTOR),
         )
     finally:
         # Restores the previous progress bar visibility state.
@@ -661,14 +642,13 @@ def _execute_jobs_parallel(
             session_metadata = session_lookup[session_name]
             session_data_path = project_root.joinpath(session_metadata.animal, session_name)
             session_paths = _resolve_session_paths(session_data_path=session_data_path, dataset_name=dataset_name)
-            output_path = session_metadata.session_path.joinpath("data.feather")
 
             console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
             future = executor.submit(
                 _run_job,
                 session_paths=session_paths,
-                output_path=output_path,
+                output_path=session_metadata.data_path,
             )
             future_to_job_id[future] = job_id
 
@@ -725,12 +705,11 @@ def _execute_job(
         session_metadata = session_lookup[session_name]
         session_data_path = project_root.joinpath(session_metadata.animal, session_name)
         session_paths = _resolve_session_paths(session_data_path=session_data_path, dataset_name=dataset_name)
-        output_path = session_metadata.session_path.joinpath("data.feather")
 
         # Dispatches the assembly to the pure computation function.
         _run_job(
             session_paths=session_paths,
-            output_path=output_path,
+            output_path=session_metadata.data_path,
         )
 
         tracker.complete_job(job_id=job_id)

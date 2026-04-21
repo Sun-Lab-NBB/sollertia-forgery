@@ -8,8 +8,11 @@ from pathlib import Path
 from dataclasses import field, dataclass
 
 from ataraxis_base_utilities import console, ensure_directory_exists
-from sollertia_shared_assets import SessionTypes, AcquisitionSystems
+from sollertia_shared_assets import RawDataFiles, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import YamlConfig
+
+DATA_FILENAME: str = "data.feather"
+"""The filename of the assembled session data inside each session directory of a forged dataset."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +31,16 @@ class DatasetSession:
     """The unique identifier of the animal that participated in the session."""
     session_path: Path = Path()
     """The path to the session's directory within the dataset hierarchy (dataset/animal/session)."""
+
+    @property
+    def data_path(self) -> Path:
+        """Returns the path to the session's assembled ``data.feather`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(DATA_FILENAME)
+
+    @property
+    def descriptor_path(self) -> Path:
+        """Returns the path to the session's ``session_descriptor.yaml`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(RawDataFiles.SESSION_DESCRIPTOR)
 
 
 @dataclass
@@ -207,6 +220,16 @@ class DatasetData(YamlConfig):
     def animals(self) -> tuple[str, ...]:
         """Returns a tuple of unique animal identifiers included in the dataset."""
         return tuple(sorted({session.animal for session in self.sessions}))
+
+    @property
+    def surgery_paths(self) -> dict[str, Path]:
+        """Returns a mapping of each animal identifier to the path of its surgery metadata YAML file.
+
+        The returned paths point to ``surgery_metadata.yaml`` files stored at the root of each animal
+        directory within the forged dataset hierarchy.
+        """
+        dataset_root = self.dataset_data_path.parent
+        return {animal: dataset_root.joinpath(animal, RawDataFiles.SURGERY_METADATA) for animal in self.animals}
 
     def get_sessions_for_animal(self, animal: str) -> tuple[DatasetSession, ...]:
         """Returns the DatasetSession instances for all sessions performed by the specified animal.

@@ -11,7 +11,9 @@ from filelock import FileLock
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
     SessionData,
+    RawDataFiles,
     SessionTypes,
+    ProcessingTrackers,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
@@ -19,8 +21,6 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from .checksum import CHECKSUM_TRACKER_FILENAME
-from ..processing import TRACKER_FILENAME as BEHAVIOR_TRACKER_FILENAME
 from ..shared_assets import prepare_tracker, discover_sessions
 
 if TYPE_CHECKING:
@@ -33,9 +33,6 @@ file."""
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
-_SESSION_DESCRIPTOR_FILENAME: str = "session_descriptor.yaml"
-"""The expected filename for the session descriptor YAML file stored in each session's raw_data directory."""
-
 _DESCRIPTOR_CLASSES: dict[
     str,
     type[LickTrainingDescriptor | RunTrainingDescriptor | MesoscopeExperimentDescriptor | WindowCheckingDescriptor],
@@ -47,14 +44,6 @@ _DESCRIPTOR_CLASSES: dict[
 }
 """Maps each session type to its corresponding descriptor class. All descriptor classes share the
 ``experimenter_notes`` and ``incomplete`` attributes used by manifest generation."""
-
-_CINDRA_TRACKER_FILENAME: str = "single_recording_tracker.yaml"
-"""The tracker filename used to check whether a session has been processed with the cindra single-recording pipeline.
-Located in the session's processed_data output directory."""
-
-_VIDEO_TRACKER_FILENAME: str = "video_processing_tracker.yaml"
-"""The tracker filename used to check whether a session has been processed with the DeepLabCut (video tracking)
-pipeline. Located in the session's processed_data output directory."""
 
 _MULTI_RECORDING_TRACKER_FILENAME: str = "multi_recording_tracker.yaml"
 """The tracker filename used to check whether a cindra multi-recording dataset has been processed. Located in
@@ -191,7 +180,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 # Loads the session descriptor to extract experimenter notes and completeness status. Window
                 # Checking sessions acquired before sollertia-experiment 3.0.0 lack descriptors, so a missing
                 # file is handled gracefully for that session type only.
-                descriptor_path = session_data.raw_data_path.joinpath(_SESSION_DESCRIPTOR_FILENAME)
+                descriptor_path = session_data.session_descriptor_path
                 descriptor_class = _DESCRIPTOR_CLASSES.get(session_data.session_type)
                 if descriptor_class is None:
                     message = (
@@ -217,7 +206,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 # Resolves data integrity verification status. The checksum tracker lives alongside the
                 # checksum file in raw_data.
                 checksum_tracker = _find_tracker(
-                    search_root=session_data.raw_data_path, tracker_filename=CHECKSUM_TRACKER_FILENAME
+                    search_root=session_data.raw_data_path, tracker_filename=RawDataFiles.CHECKSUM_TRACKER
                 )
                 is_verified = checksum_tracker.complete if checksum_tracker is not None else False
                 manifest["integrity"].append(is_verified)
@@ -234,19 +223,20 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 # Resolves cindra single-recording processing status by searching processed_data for the tracker.
                 cindra_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path, tracker_filename=_CINDRA_TRACKER_FILENAME
+                    search_root=session_data.processed_data_path,
+                    tracker_filename=ProcessingTrackers.CINDRA_SINGLE_RECORDING,
                 )
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
                 # Resolves behavior data processing status by searching processed_data for the tracker.
                 behavior_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path, tracker_filename=BEHAVIOR_TRACKER_FILENAME
+                    search_root=session_data.processed_data_path, tracker_filename=ProcessingTrackers.BEHAVIOR
                 )
                 manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
                 # Resolves DeepLabCut (video) processing status by searching processed_data for the tracker.
                 video_tracker = _find_tracker(
-                    search_root=session_data.processed_data_path, tracker_filename=_VIDEO_TRACKER_FILENAME
+                    search_root=session_data.processed_data_path, tracker_filename=ProcessingTrackers.VIDEO
                 )
                 manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
 

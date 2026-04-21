@@ -19,6 +19,7 @@ from ataraxis_time import (
 from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import (
     SurgeryData,
+    RawDataFiles,
     MesoscopeExperimentDescriptor,
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
@@ -26,13 +27,11 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete
 from .pipeline import (
     FORGING_JOB_NAME,
     TRACKER_FILENAME,
-    SURGERY_DATA_FILENAME,
-    EXPERIMENT_DESCRIPTOR_FILENAME,
     resolve_dataset,
     run_forging_pipeline,
 )
 from ..interfaces import mcp
-from .dataset_data import DatasetData
+from .dataset_data import DATA_FILENAME, DatasetData
 from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
@@ -742,22 +741,22 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
     # Checks each session's feather file for existence and readability, plus the per-session experiment
     # descriptor for existence and parseability.
     for session_entry in dataset.sessions:
-        feather_path = session_entry.session_path / "data.feather"
+        data_path = session_entry.data_path
         entry: dict[str, Any] = {
             "session_name": session_entry.session,
             "animal": session_entry.animal,
-            "file": str(feather_path),
+            "file": str(data_path),
         }
 
         feather_valid = True
-        if not feather_path.exists():
+        if not data_path.exists():
             entry["valid"] = False
-            entry["error"] = "data.feather not found."
+            entry["error"] = f"{DATA_FILENAME} not found."
             all_valid = False
             feather_valid = False
         else:
             # Loads the feather file without sampling to confirm readability and extract metadata.
-            analysis = analyze_feather_file(feather_file=str(feather_path), max_sample_rows=0)
+            analysis = analyze_feather_file(feather_file=str(data_path), max_sample_rows=0)
             if "error" in analysis:
                 entry["valid"] = False
                 entry["error"] = analysis["error"]
@@ -770,11 +769,11 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
                 entry["row_count"] = summary.get("total_rows", 0)
 
         # Verifies the per-session experiment descriptor exists and parses as MesoscopeExperimentDescriptor.
-        descriptor_path = session_entry.session_path / EXPERIMENT_DESCRIPTOR_FILENAME
+        descriptor_path = session_entry.descriptor_path
         descriptor_entry: dict[str, Any] = {"file": str(descriptor_path)}
         if not descriptor_path.exists():
             descriptor_entry["valid"] = False
-            descriptor_entry["error"] = f"{EXPERIMENT_DESCRIPTOR_FILENAME} not found."
+            descriptor_entry["error"] = f"{RawDataFiles.SESSION_DESCRIPTOR} not found."
             all_valid = False
         else:
             try:
@@ -794,12 +793,11 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
 
     # Verifies the per-animal surgery file for each unique animal in the dataset.
     animal_results: list[dict[str, Any]] = []
-    for animal in dataset.animals:
-        surgery_path = dataset_root / animal / SURGERY_DATA_FILENAME
+    for animal, surgery_path in dataset.surgery_paths.items():
         animal_entry: dict[str, Any] = {"animal": animal, "file": str(surgery_path)}
         if not surgery_path.exists():
             animal_entry["valid"] = False
-            animal_entry["error"] = f"{SURGERY_DATA_FILENAME} not found."
+            animal_entry["error"] = f"{RawDataFiles.SURGERY_METADATA} not found."
             all_valid = False
         else:
             try:

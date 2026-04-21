@@ -17,10 +17,10 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import SessionData, RawDataFiles
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .checksum import CHECKSUM_JOB_NAME, CHECKSUM_TRACKER_FILENAME, resolve_checksum
+from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import MANIFEST_TRACKER_FILENAME, generate_project_manifest
 from .transfer import transfer_session
 from ..interfaces import mcp
@@ -157,7 +157,7 @@ def prepare_checksum_batch_tool(
             }
             continue
 
-        tracker_path = session.raw_data_path / CHECKSUM_TRACKER_FILENAME
+        tracker_path = session.checksum_tracker_path
         expected_jobs: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, session.session_name)]
 
         # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries
@@ -672,7 +672,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for found_tracker_path in sorted(root_path.rglob(CHECKSUM_TRACKER_FILENAME)):
+    for found_tracker_path in sorted(root_path.rglob(RawDataFiles.CHECKSUM_TRACKER)):
         # The tracker lives at ``{session_root}/raw_data/<tracker>``, so walking up two parents yields the
         # session root.
         raw_data_path = found_tracker_path.parent
@@ -766,7 +766,7 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:
             continue
 
         # Resolves the tracker and lock file paths from the session's raw_data directory.
-        tracker_file = session.raw_data_path / CHECKSUM_TRACKER_FILENAME
+        tracker_file = session.checksum_tracker_path
         lock_file = tracker_file.with_suffix(tracker_file.suffix + ".lock")
         deleted_files: list[str] = []
 

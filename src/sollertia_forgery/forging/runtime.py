@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 from numba import njit  # type: ignore[import-untyped]
 import numpy as np
 import polars as pl
-from sollertia_shared_assets import MesoscopeExperimentConfiguration
+from sollertia_shared_assets import RawDataFiles, MesoscopeExperimentConfiguration
 from ataraxis_data_structures import interpolate_data
 
 if TYPE_CHECKING:
@@ -43,7 +43,7 @@ def assemble_runtime_dataset(
     """
     # Loads experiment configuration early to have mappings ready.
     experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
-        file_path=raw_data_path.joinpath("experiment_configuration.yaml")
+        file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
     )
 
     # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
