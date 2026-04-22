@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 from sollertia_shared_assets import (
     SessionTypes,
-    ManagingTrackers,
     ProcessingStatus,
     ProcessingTracker,
     AcquisitionSystems,
+    ProcessingTrackers,
     ProcessingPipelines,
     delete_directory,
     get_working_directory,
@@ -127,8 +127,8 @@ def _generate_remote_manifest(
     )
 
     # Resolves the paths to the remote and local manifest generation tracker files.
-    remote_manifest_tracker_path = server.shared_storage_root.joinpath(project, ManagingTrackers.MANIFEST)
-    local_manifest_tracker_path = local_working_directory.joinpath(project, job_name, ManagingTrackers.MANIFEST)
+    remote_manifest_tracker_path = server.shared_storage_root.joinpath(project, ProcessingTrackers.MANIFEST)
+    local_manifest_tracker_path = local_working_directory.joinpath(project, job_name, ProcessingTrackers.MANIFEST)
     ensure_directory_exists(local_manifest_tracker_path)
 
     # Generates the remote job header.
@@ -539,8 +539,8 @@ def _construct_checksum_resolution_pipeline(
     job.add_command(f"sl-process checksum -sp {remote_session_path} {'-rc' if recreate_checksum else ''}")
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = remote_session_path.joinpath("tracking_data", ManagingTrackers.CHECKSUM)
-    local_tracker_path = local_working_directory.joinpath(project, f"{session}_checksum", ManagingTrackers.CHECKSUM)
+    remote_tracker_path = remote_session_path.joinpath("tracking_data", ProcessingTrackers.CHECKSUM)
+    local_tracker_path = local_working_directory.joinpath(project, f"{session}_checksum", ProcessingTrackers.CHECKSUM)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(

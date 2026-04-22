@@ -11,6 +11,7 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     SessionTypes,
     AcquisitionSystems,
+    ProcessingTrackers,
     get_working_directory,
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
@@ -29,11 +30,10 @@ _BEHAVIOR_PIPELINE_NAME: str = "behavior"
 _SUITE2P_PIPELINE_NAME: str = "cindra"
 """The pipeline identifier for the single-day cindra data processing pipeline."""
 
-_BEHAVIOR_TRACKER_FILENAME: str = "behavior_processing_tracker.yaml"
-"""The filename for the behavior processing tracker YAML file."""
-
 _SUITE2P_TRACKER_FILENAME: str = "cindra_processing_tracker.yaml"
-"""The filename for the cindra processing tracker YAML file."""
+"""The filename for the cindra processing tracker YAML file. Distinct from ``ProcessingTrackers.CINDRA_SINGLE_RECORDING``
+— this is the server-side forgery-dispatch mirror, not the tracker cindra writes at the recording root. Pending
+server-package refactor to align with shared-assets."""
 
 
 def _construct_behavior_processing_pipeline(
@@ -213,9 +213,9 @@ def _construct_behavior_processing_pipeline(
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = server.shared_storage_root.joinpath(
-        project, animal, session, "tracking_data", _BEHAVIOR_TRACKER_FILENAME
+        project, animal, session, "tracking_data", ProcessingTrackers.BEHAVIOR
     )
-    local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", _BEHAVIOR_TRACKER_FILENAME)
+    local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", ProcessingTrackers.BEHAVIOR)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(

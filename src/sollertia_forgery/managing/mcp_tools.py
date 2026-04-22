@@ -17,11 +17,11 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
-from sollertia_shared_assets import SessionData, iterate_sessions, validate_directory
+from sollertia_shared_assets import SessionData, ProcessingTrackers, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
-from .manifest import MANIFEST_TRACKER_FILENAME, generate_project_manifest
+from .manifest import generate_project_manifest
 from .transfer import transfer_session
 from ..interfaces import mcp
 from ..shared_assets import (
@@ -34,10 +34,6 @@ from ..shared_assets import (
     group_jobs_by_tracker,
     job_execution_manager,
 )
-
-_TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"
-"""The filename for the processing tracker created in the caller-specified directory to track transfer and deletion
-jobs. Placed outside the sessions being transferred or deleted so the tracker survives session removal."""
 
 _TRANSFER_JOB_NAME: str = "session_transfer"
 """The job name used to identify session transfer jobs in processing trackers."""
@@ -826,7 +822,7 @@ def prepare_transfer_batch_tool(
     if error is not None:
         return {"error": error}
 
-    tracker_path = Path(tracker_directory) / _TRANSFER_TRACKER_FILENAME
+    tracker_path = Path(tracker_directory) / ProcessingTrackers.TRANSFER
 
     # Validates each job descriptor and builds the (job_name, specifier) tuples for tracker initialization.
     validated_jobs: list[tuple[str, str, dict[str, Any]]] = []
@@ -1407,7 +1403,7 @@ def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:
     # Resolves expected output paths so they can be reported in the response even on failure.
     project_path = Path(project_directory)
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
-    tracker_file = project_path / MANIFEST_TRACKER_FILENAME
+    tracker_file = project_path / ProcessingTrackers.MANIFEST
 
     # Delegates to the pipeline function which handles tracker lifecycle, session scanning, and feather output.
     try:
@@ -1445,7 +1441,7 @@ def get_manifest_generation_status_tool(project_directory: str) -> dict[str, Any
     if error is not None:
         return {"error": error}
 
-    tracker_path = Path(project_directory) / MANIFEST_TRACKER_FILENAME
+    tracker_path = Path(project_directory) / ProcessingTrackers.MANIFEST
 
     if not tracker_path.exists():
         return {
@@ -1486,7 +1482,7 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:
 
     # Resolves paths for all manifest artifacts: tracker, data file, and their companion lock files.
     project_path = Path(project_directory)
-    tracker_file = project_path / MANIFEST_TRACKER_FILENAME
+    tracker_file = project_path / ProcessingTrackers.MANIFEST
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
     manifest_lock = manifest_file.with_suffix(manifest_file.suffix + ".lock")
     tracker_lock = tracker_file.with_suffix(tracker_file.suffix + ".lock")

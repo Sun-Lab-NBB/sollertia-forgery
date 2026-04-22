@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from sollertia_shared_assets import SessionData, RawDataFiles
+from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
 from ..shared_assets import prepare_tracker
@@ -16,12 +16,12 @@ if TYPE_CHECKING:
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name used to identify checksum resolution jobs in processing trackers."""
 
-_CHECKSUM_TRACKER_LOCK_FILENAME: str = RawDataFiles.CHECKSUM_TRACKER + ".lock"
+_CHECKSUM_TRACKER_LOCK_FILENAME: str = ProcessingTrackers.CHECKSUM + ".lock"
 """The lock filename associated with the checksum processing tracker."""
 
 _CHECKSUM_EXCLUDED_FILES: set[str] = {
     str(RawDataFiles.CHECKSUM),
-    str(RawDataFiles.CHECKSUM_TRACKER),
+    str(ProcessingTrackers.CHECKSUM),
     _CHECKSUM_TRACKER_LOCK_FILENAME,
 }
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing

@@ -12,11 +12,11 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     Directories,
     SessionTypes,
-    DatasetTrackers,
     SessionMetadata,
     ProcessingStatus,
     ProcessingTracker,
     AcquisitionSystems,
+    ProcessingTrackers,
     ProcessingPipelines,
     get_working_directory,
 )
@@ -342,8 +342,8 @@ def _construct_data_assembly_pipeline(
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = remote_dataset_path.joinpath(DatasetTrackers.FORGING)
-    local_tracker_path = local_working_directory.joinpath(project, dataset.name, DatasetTrackers.FORGING)
+    remote_tracker_path = remote_dataset_path.joinpath(ProcessingTrackers.FORGING)
+    local_tracker_path = local_working_directory.joinpath(project, dataset.name, ProcessingTrackers.FORGING)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(

@@ -11,6 +11,7 @@ from filelock import FileLock
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
     SessionTypes,
+    ProcessingTrackers,
     RunTrainingDescriptor,
     LickTrainingDescriptor,
     WindowCheckingDescriptor,
@@ -26,10 +27,6 @@ if TYPE_CHECKING:
 
     from sollertia_shared_assets import SessionData
 
-MANIFEST_TRACKER_FILENAME: str = "manifest_processing_tracker.yaml"
-"""The filename for the processing tracker placed in the project's root directory alongside the manifest .feather
-file."""
-
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
@@ -44,11 +41,6 @@ _DESCRIPTOR_CLASSES: dict[
 }
 """Maps each session type to its corresponding descriptor class. All descriptor classes share the
 ``experimenter_notes`` and ``incomplete`` attributes used by manifest generation."""
-
-_MULTI_RECORDING_TRACKER_FILENAME: str = "multi_recording_tracker.yaml"
-"""The tracker filename used to check whether a cindra multi-recording dataset has been processed. Located in
-the dataset's output directory under the main recording's cindra multi_recording path."""
-
 
 def generate_project_manifest(project_directory: Path) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
@@ -92,7 +84,7 @@ def generate_project_manifest(project_directory: Path) -> None:
 
     # Initializes the processing tracker in the project directory alongside the manifest output. Applies stale
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
-    tracker = ProcessingTracker(file_path=project_directory.joinpath(MANIFEST_TRACKER_FILENAME))
+    tracker = ProcessingTracker(file_path=project_directory.joinpath(ProcessingTrackers.MANIFEST))
     jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
     prepare_tracker(tracker=tracker, jobs=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
@@ -145,7 +137,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 for dataset_dir in multi_recording_root.iterdir():
                     if not dataset_dir.is_dir():
                         continue
-                    tracker_path = dataset_dir.joinpath(_MULTI_RECORDING_TRACKER_FILENAME)
+                    tracker_path = dataset_dir.joinpath(ProcessingTrackers.CINDRA_MULTI_RECORDING)
                     if not tracker_path.is_file():
                         continue
                     # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision
