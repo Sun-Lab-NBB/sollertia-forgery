@@ -72,6 +72,10 @@ dependencies = [
     "natsort-rs>=0,<1",
     "python-dateutil>=2,<3",
     "tabulate>=0,<1",
+
+    # Platform-Specific Acceleration
+    "tbb4py>=2022,<2023; sys_platform != 'darwin'",
+    "intel-cmplr-lib-rt>=2025,<2026; sys_platform != 'darwin'",
 ]
 
 [project.urls]
