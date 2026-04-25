@@ -1,9 +1,9 @@
-# sl-forgery
+# sollertia-forgery
 STUB
 
 ## Usage
 
-This section has been transferred from sl-shared-assets and requires verification before 1.0.0 release!
+This section has been transferred from sollertia-shared-assets and requires verification before 1.0.0 release!
 
 ### Generating Access Credentials
 
@@ -20,10 +20,10 @@ machine**, except that the command is executed on a remote compute server. There
 exposed by this library is to transfer the target command request to the remote server, execute it, and monitor the 
 runtime status until it is complete.
 
-For example, the [sl-suite2p package](https://github.com/Sun-Lab-NBB/suite2p) maintained in the lab exposes a CLI to 
+For example, the [cindra package](https://github.com/Sun-Lab-NBB/cindra) maintained in the lab exposes a CLI to 
 process 2-Photon data from experiment sessions. During data processing by the 
-[sl-forgery](https://github.com/Sun-Lab-NBB/sl-forgery) library, a remote job is sent to the server that uses the CLI 
-exposed by the sl-suite2p package to process target session(s).
+[sollertia-forgery](https://github.com/Sun-Lab-NBB/sollertia-forgery) library, a remote job is sent to the server that uses the CLI 
+exposed by the cindra package to process target session(s).
 
 ### Creating Jobs
 All remote jobs are sent to the server in the form of an executable *shell* (.sh) script. The script is composed on the 
@@ -50,10 +50,10 @@ initializing the Job instance, while **step 3** is added via the `add_command()`
 ```
 # First, import the job class
 from pathlib import Path
-from sl_shared_assets import Job
+from sollertia_shared_assets import Job
 
 # Next, instantiate a new Job object. For example, this job is used to verify the integrity of raw experiment data as
-# it is transferred to the long-term storage destination (server) by the sl-experiment library.
+# it is transferred to the long-term storage destination (server) by the sollertia-experiment library.
 job = Job(
     job_name="data_integrity_verification",
     output_log=Path("/temp/output.txt"),
@@ -66,7 +66,7 @@ job = Job(
 )
 
 # Finally, add a CLI command call (the actual work to be done by the job). Here, the job calls the
-# 'sl-verify-session' command exposed by the sl-shared-assets library installed in the target environment on the server.
+# 'sl-verify-session' command exposed by the sollertia-shared-assets library installed in the target environment on the server.
 # Use this method to add commands as you would type them in your local terminal / shell / command line.
 job.add_command(f"sl-verify-session -sp /temp/test_session")
 ```
@@ -82,7 +82,7 @@ server = Server(credentials_path=Path("/temp/server_credentials.yaml"))
 job = server.submit_job(job)
 
 # Wait for the server to complete the job
-from sl_forgery.server import JobStatus
+from sollertia_forgery.server import JobStatus
 delay_timer = PrecisionTimer("s")
 while server.get_job_status(int(job.job_id)) in (JobStatus.PENDING, JobStatus.RUNNING):
     delay_timer.delay_noblock(delay=5, allow_sleep=True)
