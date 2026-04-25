@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import console, ensure_directory_exists
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -16,8 +18,8 @@ _CAMERA_FEATHER_PATTERN: str = "camera_*_timestamps.feather"
 """The glob pattern used to discover camera timestamp feather files produced by ataraxis-video-system."""
 
 _CAMERA_OUTPUT_NAMES: dict[int, str] = {
-    51: "face_camera_timestamps.feather",
-    62: "body_camera_timestamps.feather",
+    51: BehaviorDataFiles.FACE_CAMERA_TIMESTAMPS,
+    62: BehaviorDataFiles.BODY_CAMERA_TIMESTAMPS,
 }
 """Maps camera source IDs to their output feather filenames, matching the naming convention used by
 sollertia-forgery processing."""

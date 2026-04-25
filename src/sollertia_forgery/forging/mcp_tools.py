@@ -20,6 +20,7 @@ from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import (
     SurgeryData,
     RawDataFiles,
+    ProcessingTrackers,
     MesoscopeExperimentDescriptor,
     validate_directory,
 )
@@ -27,7 +28,6 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete
 
 from .pipeline import (
     FORGING_JOB_NAME,
-    TRACKER_FILENAME,
     resolve_dataset,
     run_forging_pipeline,
 )
@@ -134,7 +134,7 @@ def prepare_forging_batch_tool(
             continue
 
         dataset_path = dataset.dataset_data_path.parent
-        tracker_path = dataset_path / TRACKER_FILENAME
+        tracker_path = dataset_path / ProcessingTrackers.FORGING
 
         # Prepares the processing tracker and aligns it with the session set.
         tracker = ProcessingTracker(file_path=tracker_path)
@@ -662,7 +662,7 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
     for dataset_path in sorted(root_path.iterdir()):
         if not dataset_path.is_dir():
             continue
-        tracker_path = dataset_path.joinpath(TRACKER_FILENAME)
+        tracker_path = dataset_path.joinpath(ProcessingTrackers.FORGING)
         if not tracker_path.is_file():
             continue
         dataset_name = dataset_path.name
@@ -814,7 +814,7 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
         animal_results.append(animal_entry)
 
     # Reads the forging tracker to include per-job pipeline statuses alongside file checks.
-    tracker_path = dataset.dataset_data_path.parent / TRACKER_FILENAME
+    tracker_path = dataset.dataset_data_path.parent / ProcessingTrackers.FORGING
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:

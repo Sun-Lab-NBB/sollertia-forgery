@@ -45,7 +45,7 @@ dependencies = [
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
-    "sollertia-shared-assets>=8.0.0rc6,<9",
+    "sollertia-shared-assets>=8.0.0rc7,<9",
 
     # Data Processing
     "polars>=1,<2",

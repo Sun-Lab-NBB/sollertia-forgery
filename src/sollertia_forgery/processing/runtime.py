@@ -13,6 +13,8 @@ from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba 
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import LogArchiveReader
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -136,11 +138,11 @@ def process_runtime_data(
 
     # Exports system state data.
     system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
-    system_dataframe.write_ipc(file=output_directory / "system_state_data.feather", compression="uncompressed")
+    system_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.SYSTEM_STATE, compression="uncompressed")
 
     # Exports runtime state data.
     runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
-    runtime_dataframe.write_ipc(file=output_directory / "runtime_state_data.feather", compression="uncompressed")
+    runtime_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.RUNTIME_STATE, compression="uncompressed")
 
     # Exports experiment-specific data only for experiment sessions.
     if experiment_configuration is not None:
@@ -150,7 +152,7 @@ def process_runtime_data(
                 {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
             )
             reinforcing_dataframe.write_ipc(
-                file=output_directory / "reinforcing_guidance_state_data.feather", compression="uncompressed"
+                file=output_directory / BehaviorDataFiles.REINFORCING_GUIDANCE, compression="uncompressed"
             )
 
         # Exports aversive guidance state data if present.
@@ -159,7 +161,7 @@ def process_runtime_data(
                 {"time_us": aversive_guidance_timestamps, "aversive_guidance_state": aversive_guidance_states}
             )
             aversive_dataframe.write_ipc(
-                file=output_directory / "aversive_guidance_state_data.feather", compression="uncompressed"
+                file=output_directory / BehaviorDataFiles.AVERSIVE_GUIDANCE, compression="uncompressed"
             )
 
         # Decomposes cue sequences into trials, handling single or multiple sequences.
@@ -178,19 +180,19 @@ def process_runtime_data(
 
         # Exports VR cue-distance mapping.
         cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
-        cue_dataframe.write_ipc(file=output_directory / "vr_cue_data.feather", compression="uncompressed")
+        cue_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.VR_CUE, compression="uncompressed")
 
         # Exports trigger zone boundaries.
         trigger_zone_dataframe = pl.DataFrame(
             {"trigger_zone_start_cm": trigger_start, "trigger_zone_end_cm": trigger_end}
         )
         trigger_zone_dataframe.write_ipc(
-            file=output_directory / "vr_trigger_zone_data.feather", compression="uncompressed"
+            file=output_directory / BehaviorDataFiles.VR_TRIGGER_ZONE, compression="uncompressed"
         )
 
         # Exports trial type and start distance data.
         trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
-        trial_dataframe.write_ipc(file=output_directory / "trial_data.feather", compression="uncompressed")
+        trial_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.TRIAL, compression="uncompressed")
 
 
 def _decompose_multiple_cue_sequences_into_trials(

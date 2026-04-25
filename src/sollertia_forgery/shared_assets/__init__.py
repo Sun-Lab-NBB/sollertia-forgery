@@ -2,6 +2,7 @@
 
 from .metadata import ProjectManifest
 from .utilities import delay_timer, delay_terminal
+from .data_files import BehaviorDataFiles
 from .mcp_orchestration import (
     RESERVED_CORES,
     ActiveJob,
@@ -19,6 +20,7 @@ from .mcp_orchestration import (
 __all__ = [
     "RESERVED_CORES",
     "ActiveJob",
+    "BehaviorDataFiles",
     "JobExecutionState",
     "PendingJob",
     "ProjectManifest",

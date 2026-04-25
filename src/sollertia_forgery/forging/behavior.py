@@ -13,6 +13,8 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import RawDataFiles, MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -65,9 +67,11 @@ def assemble_behavior_dataset(
     state_enum = pl.Enum(list(state_mapping.keys()))
 
     # Loads the core behavior data present for all session types.
-    valve_df = pl.read_ipc(source=behavior_data_path.joinpath("valve_data.feather"), memory_map=True)
-    system_state_df = pl.read_ipc(source=behavior_data_path.joinpath("system_state_data.feather"), memory_map=True)
-    lick_df = pl.read_ipc(source=behavior_data_path.joinpath("lick_data.feather"), memory_map=True)
+    valve_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
+    system_state_df = pl.read_ipc(
+        source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
+    )
+    lick_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 
     # Creates the aligned data dictionary using the reference time vector and interpolating all other data sources to
@@ -104,7 +108,7 @@ def assemble_behavior_dataset(
     }
 
     # Encoder data is not present for lick training.
-    encoder_file = behavior_data_path.joinpath("encoder_data.feather")
+    encoder_file = behavior_data_path.joinpath(BehaviorDataFiles.ENCODER)
     if encoder_file.exists():
         encoder_df = pl.read_ipc(source=encoder_file, memory_map=True)
         encoder_time = encoder_df["time_us"].to_numpy()
@@ -128,7 +132,7 @@ def assemble_behavior_dataset(
         ).astype(np.float32)
 
     # Screen data is only present for mesoscope experiments.
-    screen_file = behavior_data_path.joinpath("screen_data.feather")
+    screen_file = behavior_data_path.joinpath(BehaviorDataFiles.SCREEN)
     if screen_file.exists():
         screen_df = pl.read_ipc(source=screen_file, memory_map=True)
         aligned_data["screens"] = interpolate_data(
@@ -139,7 +143,7 @@ def assemble_behavior_dataset(
         )
 
     # Brake data is only present for mesoscope experiments.
-    brake_file = behavior_data_path.joinpath("brake_data.feather")
+    brake_file = behavior_data_path.joinpath(BehaviorDataFiles.BRAKE)
     if brake_file.exists():
         brake_df = pl.read_ipc(source=brake_file, memory_map=True)
         brake_torque = interpolate_data(
@@ -158,7 +162,7 @@ def assemble_behavior_dataset(
         aligned_data["brake"] = np.asarray(brake_torque > minimum_brake_strength, dtype=np.uint8)
 
     # Torque data is not present for run training.
-    torque_file = behavior_data_path.joinpath("torque_data.feather")
+    torque_file = behavior_data_path.joinpath(BehaviorDataFiles.TORQUE)
     if torque_file.exists():
         torque_df = pl.read_ipc(source=torque_file, memory_map=True)
         aligned_data["torque_N_cm"] = interpolate_data(

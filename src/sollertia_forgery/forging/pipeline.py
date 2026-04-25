@@ -19,6 +19,7 @@ from sollertia_shared_assets import (
     RawDataFiles,
     SessionTypes,
     ProcessingTrackers,
+    discover_sessions,
 )
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
@@ -31,9 +32,6 @@ from ..shared_assets import prepare_tracker
 if TYPE_CHECKING:
     from pathlib import Path
 
-
-TRACKER_FILENAME: str = "forging_tracker.yaml"
-"""The filename for the processing tracker placed in the dataset directory."""
 
 FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name used to identify per-session assembly stages in forging processing trackers."""
@@ -124,7 +122,7 @@ def run_forging_pipeline(
     # Prepares the processing tracker and registers one assembly job per session. Dataset definition is not
     # tracker-managed: it has already run to completion by the time the tracker is created, so there is nothing
     # for the tracker to track.
-    tracker = ProcessingTracker(file_path=dataset_path.joinpath(TRACKER_FILENAME))
+    tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
     jobs = [(FORGING_JOB_NAME, session) for session in dataset_session_names]
     prepare_tracker(tracker=tracker, jobs=jobs)
 
@@ -272,23 +270,21 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
         ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, or if any subsequent session's
             session type or acquisition system differs from the first session's.
     """
-    # Resolves each session name to its absolute directory path. The canonical project layout places every
-    # session at ``<project_root>/<animal>/<session>/raw_data/session_data.yaml``, so this probes each
-    # top-level animal directory for the marker rather than walking the whole project.
+    # Builds a session-name → session-root index via shared-assets discovery so the project layout is not
+    # assumed here. A session name colliding across animals surfaces as a RuntimeError during lookup rather
+    # than silently selecting the first match.
+    discovered: dict[str, list[Path]] = {}
+    for session_root in discover_sessions(root_path=project_root):
+        discovered.setdefault(session_root.name, []).append(session_root)
+
     session_paths: list[Path] = []
     for session_name in sessions:
-        matches: list[Path] = []
-        for animal_dir in project_root.iterdir():
-            if not animal_dir.is_dir():
-                continue
-            candidate = animal_dir.joinpath(session_name)
-            if candidate.joinpath("raw_data", RawDataFiles.SESSION_DATA).is_file():
-                matches.append(candidate)
+        matches = discovered.get(session_name, [])
         if len(matches) != 1:
             message = (
                 f"Unable to resolve the directory for session '{session_name}' under '{project_root}'. "
-                f"Expected exactly one animal directory to contain '{session_name}/raw_data/"
-                f"{RawDataFiles.SESSION_DATA}', but found {len(matches)}."
+                f"Expected exactly one session named '{session_name}' to be discoverable via "
+                f"'{RawDataFiles.SESSION_DATA}' markers, but found {len(matches)}."
             )
             console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
         session_paths.append(matches[0])
