@@ -20,13 +20,14 @@ from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import (
     SurgeryData,
     RawDataFiles,
+    ProcessingTrackers,
     MesoscopeExperimentDescriptor,
+    validate_directory,
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 from .pipeline import (
     FORGING_JOB_NAME,
-    TRACKER_FILENAME,
     resolve_dataset,
     run_forging_pipeline,
 )
@@ -37,7 +38,6 @@ from ..shared_assets import (
     PendingJob,
     JobExecutionState,
     prepare_tracker,
-    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -134,7 +134,7 @@ def prepare_forging_batch_tool(
             continue
 
         dataset_path = dataset.dataset_data_path.parent
-        tracker_path = dataset_path / TRACKER_FILENAME
+        tracker_path = dataset_path / ProcessingTrackers.FORGING
 
         # Prepares the processing tracker and aligns it with the session set.
         tracker = ProcessingTracker(file_path=tracker_path)
@@ -636,12 +636,12 @@ def reset_forging_jobs_tool(
 def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes forging status for all datasets under a root directory.
 
-    Recursively searches for ``forging.yaml`` tracker files and aggregates their status. Each tracker lives
-    at ``<project_root>/<dataset_name>/forging.yaml``, so the tracker's parent directory is the dataset root
-    and its name is the dataset name.
+    Datasets live at the canonical ``<project_root>/<dataset_name>/`` layout and each holds its tracker at
+    ``<dataset_root>/forging_tracker.yaml``. This tool iterates the top-level children of ``root_directory``
+    and reads the tracker from each candidate dataset directory rather than walking the whole project.
 
     Args:
-        root_directory: The absolute path to the root directory to search for tracker files.
+        root_directory: The absolute path to the project root containing dataset directories.
 
     Returns:
         A dictionary containing per-dataset status summaries and aggregate counts.
@@ -658,12 +658,16 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    # Discovers all tracker files and aggregates per-dataset status summaries.
-    for found_tracker_path in sorted(root_path.rglob(TRACKER_FILENAME)):
-        dataset_path = found_tracker_path.parent
+    # Iterates top-level children only; datasets are never nested under animals or sessions.
+    for dataset_path in sorted(root_path.iterdir()):
+        if not dataset_path.is_dir():
+            continue
+        tracker_path = dataset_path.joinpath(ProcessingTrackers.FORGING)
+        if not tracker_path.is_file():
+            continue
         dataset_name = dataset_path.name
         try:
-            status = read_tracker_status(tracker_path=found_tracker_path)
+            status = read_tracker_status(tracker_path=tracker_path)
             summary = status.get("summary", {})
 
             # Accumulates cross-dataset totals for the aggregate summary.
@@ -678,7 +682,7 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
                 {
                     "dataset_name": dataset_name,
                     "dataset_path": str(dataset_path),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": dataset_status,
                     **status,
                 }
@@ -688,7 +692,7 @@ def get_forging_batch_status_overview_tool(root_directory: str) -> dict[str, Any
                 {
                     "dataset_name": dataset_name,
                     "dataset_path": str(dataset_path),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": "error",
                     "error": "Unable to read tracker file.",
                 }
@@ -810,7 +814,7 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
         animal_results.append(animal_entry)
 
     # Reads the forging tracker to include per-job pipeline statuses alongside file checks.
-    tracker_path = dataset.dataset_data_path.parent / TRACKER_FILENAME
+    tracker_path = dataset.dataset_data_path.parent / ProcessingTrackers.FORGING
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:

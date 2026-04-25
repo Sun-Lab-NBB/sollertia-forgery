@@ -12,6 +12,8 @@ import polars as pl
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
@@ -57,20 +59,21 @@ class _ModuleSpecification:
 def find_module_feathers(data_directory: Path) -> list[Path]:
     """Discovers microcontroller module feather files under the data directory.
 
-    Recursively searches the data_directory for feather files matching the ``controller_*_module_*.feather`` naming
-    convention used by ataraxis-communication-interface.
+    Searches ``data_directory`` non-recursively for feather files matching the ``controller_*_module_*.feather``
+    naming convention used by ataraxis-communication-interface. The directory is expected to be the session's
+    canonical ``processed_data/microcontroller_data`` location exposed by
+    ``SessionData.microcontroller_data_path``.
 
     Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively, so feather
-            files may be nested at any depth below this path.
+        data_directory: The path to the session's microcontroller data directory.
 
     Returns:
         A sorted list of paths to the discovered module feather files. Returns an empty list if the directory does
         not exist or if no matching files are found.
     """
-    if not data_directory.exists() or not data_directory.is_dir():
+    if not data_directory.is_dir():
         return []
-    return sorted(data_directory.rglob(_MODULE_FEATHER_PATTERN))
+    return sorted(data_directory.glob(_MODULE_FEATHER_PATTERN))
 
 
 def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
@@ -715,42 +718,42 @@ def _parse_screen_data(
 _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
     (2, 1): _ModuleSpecification(
         parse_function=_parse_encoder_data,
-        output_filename="encoder_data.feather",
+        output_filename=BehaviorDataFiles.ENCODER,
         required_fields=("cm_per_pulse",),
     ),
     (1, 1): _ModuleSpecification(
         parse_function=_parse_ttl_data,
-        output_filename="mesoscope_frame_data.feather",
+        output_filename=BehaviorDataFiles.MESOSCOPE_FRAME,
         required_fields=("recorded_mesoscope_ttl",),
     ),
     (3, 1): _ModuleSpecification(
         parse_function=_parse_brake_data,
-        output_filename="brake_data.feather",
+        output_filename=BehaviorDataFiles.BRAKE,
         required_fields=("maximum_brake_strength", "minimum_brake_strength"),
     ),
     (5, 1): _ModuleSpecification(
         parse_function=_parse_valve_data,
-        output_filename="valve_data.feather",
+        output_filename=BehaviorDataFiles.VALVE,
         required_fields=("valve_scale_coefficient", "valve_nonlinearity_exponent"),
     ),
     (5, 2): _ModuleSpecification(
         parse_function=_parse_gas_puff_data,
-        output_filename="gas_puff_data.feather",
+        output_filename=BehaviorDataFiles.GAS_PUFF,
         required_fields=("delivered_gas_puffs",),
     ),
     (4, 1): _ModuleSpecification(
         parse_function=_parse_lick_data,
-        output_filename="lick_data.feather",
+        output_filename=BehaviorDataFiles.LICK,
         required_fields=("lick_threshold",),
     ),
     (6, 1): _ModuleSpecification(
         parse_function=_parse_torque_data,
-        output_filename="torque_data.feather",
+        output_filename=BehaviorDataFiles.TORQUE,
         required_fields=("torque_per_adc_unit",),
     ),
     (7, 1): _ModuleSpecification(
         parse_function=_parse_screen_data,
-        output_filename="screen_data.feather",
+        output_filename=BehaviorDataFiles.SCREEN,
         required_fields=("screens_initially_on",),
     ),
 }

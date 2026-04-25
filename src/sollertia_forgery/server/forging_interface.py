@@ -12,11 +12,11 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     Directories,
     SessionTypes,
-    DatasetTrackers,
     SessionMetadata,
     ProcessingStatus,
     ProcessingTracker,
     AcquisitionSystems,
+    ProcessingTrackers,
     ProcessingPipelines,
     get_working_directory,
 )
@@ -29,9 +29,11 @@ from . import (
     get_remote_job_work_directory,
     get_server_configuration,
 )
+from sollertia_shared_assets import filter_sessions
+
 from ..forging import DatasetData
 from .pipeline import execute_pipelines, check_session_eligibility
-from ..shared_assets import ProjectManifest, delay_timer, delay_terminal, filter_sessions
+from ..shared_assets import ProjectManifest, delay_timer, delay_terminal
 from ..forging.pipeline import FORGING_JOB_NAME
 from .managing_interface import resolve_project_manifest
 
@@ -340,8 +342,8 @@ def _construct_data_assembly_pipeline(
         stage_1.append((job, working_directory))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = remote_dataset_path.joinpath(DatasetTrackers.FORGING)
-    local_tracker_path = local_working_directory.joinpath(project, dataset.name, DatasetTrackers.FORGING)
+    remote_tracker_path = remote_dataset_path.joinpath(ProcessingTrackers.FORGING)
+    local_tracker_path = local_working_directory.joinpath(project, dataset.name, ProcessingTrackers.FORGING)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
@@ -434,17 +436,23 @@ def forge_dataset(
     # Tracks all pipelines executed across all processing phases for final outcome reporting.
     all_pipelines: list[ProcessingPipeline] = []
 
-    # Applies the filtering rules to the provided sessions.
-    filtered_sessions = filter_sessions(
-        sessions=set(sessions),
-        start_date=start_date,
-        end_date=end_date,
-        include_sessions=include_sessions,
-        exclude_sessions=exclude_sessions,
-        include_animals=include_animals,
-        exclude_animals=exclude_animals,
-        utc_timezone=True,
-    )
+    # Applies the filtering rules to the provided sessions. sollertia-shared-assets' filter_sessions
+    # operates on plain (session_name, animal) tuples; the map rehydrates the filtered keys back to
+    # SessionMetadata.
+    session_map = {(session.session, session.animal): session for session in sessions}
+    filtered_sessions = {
+        session_map[key]
+        for key in filter_sessions(
+            sessions=set(session_map.keys()),
+            start_date=start_date,
+            end_date=end_date,
+            include_sessions=include_sessions,
+            exclude_sessions=exclude_sessions,
+            include_animals=include_animals,
+            exclude_animals=exclude_animals,
+            utc_timezone=True,
+        )
+    }
 
     # Ensures at least one session passed the filtering.
     if not filtered_sessions:

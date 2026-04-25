@@ -12,6 +12,8 @@ import polars as pl
 from sollertia_shared_assets import RawDataFiles, MesoscopeExperimentConfiguration
 from ataraxis_data_structures import interpolate_data
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -59,11 +61,15 @@ def assemble_runtime_dataset(
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(source=behavior_data_path.joinpath("encoder_data.feather"), memory_map=True)
-    trigger_zones_df = pl.read_ipc(source=behavior_data_path.joinpath("vr_trigger_zone_data.feather"), memory_map=True)
-    cue_df = pl.read_ipc(source=behavior_data_path.joinpath("vr_cue_data.feather"), memory_map=True)
-    trial_df = pl.read_ipc(source=behavior_data_path.joinpath("trial_data.feather"), memory_map=True)
-    runtime_state_df = pl.read_ipc(source=behavior_data_path.joinpath("runtime_state_data.feather"), memory_map=True)
+    encoder_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True)
+    trigger_zones_df = pl.read_ipc(
+        source=behavior_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
+    )
+    cue_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
+    trial_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
+    runtime_state_df = pl.read_ipc(
+        source=behavior_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
+    )
 
     # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
     # intermediate Polars DataFrame since both are only consumed by interpolate_data.
@@ -81,8 +87,8 @@ def assemble_runtime_dataset(
 
     # Loads guidance state data. The processing pipeline produces separate reinforcing and aversive guidance files,
     # each conditional on whether the corresponding events were recorded during the session.
-    reinforcing_guidance_file = behavior_data_path.joinpath("reinforcing_guidance_state_data.feather")
-    aversive_guidance_file = behavior_data_path.joinpath("aversive_guidance_state_data.feather")
+    reinforcing_guidance_file = behavior_data_path.joinpath(BehaviorDataFiles.REINFORCING_GUIDANCE)
+    aversive_guidance_file = behavior_data_path.joinpath(BehaviorDataFiles.AVERSIVE_GUIDANCE)
 
     # Aligns all data sources to the reference time (or distance) and builds an aligned data dictionary.
     aligned_data: dict[str, NDArray[Any]] = {

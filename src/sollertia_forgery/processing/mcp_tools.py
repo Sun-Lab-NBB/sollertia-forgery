@@ -17,7 +17,7 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count
-from sollertia_shared_assets import Directories, SessionData, ProcessingTrackers
+from sollertia_shared_assets import Directories, SessionData, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .pipeline import (
@@ -29,7 +29,6 @@ from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
-    validate_directory,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -636,12 +635,11 @@ def reset_behavior_processing_jobs_tool(
 def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes behavior processing status for all sessions under a root directory.
 
-    Recursively searches for ``behavior_processing_tracker.yaml`` files and aggregates their status. Each
-    tracker lives at ``{session_root}/processed_data/behavior_data/behavior_processing_tracker.yaml``, so
-    walking up three parents from each tracker yields the session root.
+    Iterates every session marker under the root via :func:`iterate_sessions` and, for each session whose
+    canonical ``SessionData.behavior_tracker_path`` exists, reads the tracker and aggregates its status.
 
     Args:
-        root_directory: The absolute path to the root directory to search for tracker files.
+        root_directory: The absolute path to the root directory to search for sessions.
 
     Returns:
         A dictionary containing per-session status summaries and aggregate counts.
@@ -657,15 +655,15 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for found_tracker_path in sorted(root_path.rglob(ProcessingTrackers.BEHAVIOR)):
-        # The tracker lives at ``{session_root}/processed_data/behavior_data/<tracker>``, so walking up three
-        # parents yields the session root. The caller can feed that path back into ``/session-setup`` or
-        # ``/behavior-processing`` without further resolution.
-        data_path = found_tracker_path.parent
-        processed_data_path = data_path.parent
-        session_root = processed_data_path.parent
+    for session in iterate_sessions(root_path=root_path):
+        tracker_path = session.behavior_tracker_path
+        if not tracker_path.is_file():
+            continue
+
+        data_path = session.behavior_data_path
+        session_root = session.raw_data_path.parent
         try:
-            status = read_tracker_status(tracker_path=found_tracker_path)
+            status = read_tracker_status(tracker_path=tracker_path)
             summary = status.get("summary", {})
 
             aggregate_succeeded += summary.get("succeeded", 0)
@@ -679,7 +677,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
                 {
                     "session_path": str(session_root),
                     "data_path": str(data_path),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": dir_status,
                     **status,
                 }
@@ -689,7 +687,7 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
                 {
                     "session_path": str(session_root),
                     "data_path": str(data_path),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": "error",
                     "error": "Unable to read tracker file.",
                 }
@@ -749,7 +747,7 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
     file_results: list[dict[str, Any]] = []
     all_valid = True
 
-    feather_files = sorted(data_path.rglob("*.feather"))
+    feather_files = sorted(data_path.glob("*.feather"))
 
     for feather_file in feather_files:
         # Reuses the shared feather inspector with zero sample rows, since verify only needs the row count

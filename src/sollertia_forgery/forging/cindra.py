@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -61,7 +63,7 @@ def assemble_cindra_dataset(cindra_data_path: Path, behavior_data_path: Path, mu
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during the
     # session's data acquisition.
     mesoscope_frame_data = pl.read_ipc(
-        source=behavior_data_path.joinpath("mesoscope_frame_data.feather"), memory_map=True
+        source=behavior_data_path.joinpath(BehaviorDataFiles.MESOSCOPE_FRAME), memory_map=True
     )
 
     # Sorts by time to ensure the correct order and computes TTL state transitions once.

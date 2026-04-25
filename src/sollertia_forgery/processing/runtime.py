@@ -13,6 +13,8 @@ from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba 
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import LogArchiveReader
 
+from ..shared_assets import BehaviorDataFiles
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -45,37 +47,26 @@ _DISTANCE_SNAPSHOT_CODE: int = 5
 
 
 def find_log_archive(data_directory: Path) -> Path | None:
-    """Discovers the runtime log archive under the data directory.
+    """Resolves the runtime log archive inside the canonical raw behavior data directory.
 
-    Recursively searches the data_directory for the single ``{RUNTIME_SOURCE_ID}_log.npz`` archive produced by the
-    Mesoscope-VR runtime DataLogger. The runtime DataLogger always writes to a fixed source ID, so at most one
-    archive is expected per session.
+    Looks for the single ``{RUNTIME_SOURCE_ID}_log.npz`` archive produced by the Mesoscope-VR runtime
+    DataLogger at the canonical location ``data_directory / {RUNTIME_SOURCE_ID}_log.npz``. The runtime
+    DataLogger always writes to a fixed source ID, so at most one archive is expected per session.
 
     Args:
-        data_directory: The path to the root directory to search. The directory is searched recursively, so the
-            archive may be nested at any depth below this path.
+        data_directory: The path to the session's raw behavior data directory (``session.raw_behavior_data_path``).
 
     Returns:
         The path to the runtime log archive, or None if the directory does not exist or no archive is present.
-
-    Raises:
-        ValueError: If more than one archive matching the expected name is found under the data directory.
     """
-    if not data_directory.exists() or not data_directory.is_dir():
+    if not data_directory.is_dir():
         return None
 
-    matches = sorted(data_directory.rglob(_LOG_ARCHIVE_NAME))
-    if not matches:
+    archive_path = data_directory.joinpath(_LOG_ARCHIVE_NAME)
+    if not archive_path.is_file():
         return None
 
-    if len(matches) > 1:
-        message = (
-            f"Unable to resolve the runtime log archive in '{data_directory}'. Expected exactly one file named "
-            f"'{_LOG_ARCHIVE_NAME}', but found multiple: {[str(match) for match in matches]}."
-        )
-        console.error(message=message, error=ValueError)
-
-    return matches[0]
+    return archive_path
 
 
 def process_runtime_data(
@@ -147,11 +138,11 @@ def process_runtime_data(
 
     # Exports system state data.
     system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
-    system_dataframe.write_ipc(file=output_directory / "system_state_data.feather", compression="uncompressed")
+    system_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.SYSTEM_STATE, compression="uncompressed")
 
     # Exports runtime state data.
     runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
-    runtime_dataframe.write_ipc(file=output_directory / "runtime_state_data.feather", compression="uncompressed")
+    runtime_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.RUNTIME_STATE, compression="uncompressed")
 
     # Exports experiment-specific data only for experiment sessions.
     if experiment_configuration is not None:
@@ -161,7 +152,7 @@ def process_runtime_data(
                 {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
             )
             reinforcing_dataframe.write_ipc(
-                file=output_directory / "reinforcing_guidance_state_data.feather", compression="uncompressed"
+                file=output_directory / BehaviorDataFiles.REINFORCING_GUIDANCE, compression="uncompressed"
             )
 
         # Exports aversive guidance state data if present.
@@ -170,7 +161,7 @@ def process_runtime_data(
                 {"time_us": aversive_guidance_timestamps, "aversive_guidance_state": aversive_guidance_states}
             )
             aversive_dataframe.write_ipc(
-                file=output_directory / "aversive_guidance_state_data.feather", compression="uncompressed"
+                file=output_directory / BehaviorDataFiles.AVERSIVE_GUIDANCE, compression="uncompressed"
             )
 
         # Decomposes cue sequences into trials, handling single or multiple sequences.
@@ -189,19 +180,19 @@ def process_runtime_data(
 
         # Exports VR cue-distance mapping.
         cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
-        cue_dataframe.write_ipc(file=output_directory / "vr_cue_data.feather", compression="uncompressed")
+        cue_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.VR_CUE, compression="uncompressed")
 
         # Exports trigger zone boundaries.
         trigger_zone_dataframe = pl.DataFrame(
             {"trigger_zone_start_cm": trigger_start, "trigger_zone_end_cm": trigger_end}
         )
         trigger_zone_dataframe.write_ipc(
-            file=output_directory / "vr_trigger_zone_data.feather", compression="uncompressed"
+            file=output_directory / BehaviorDataFiles.VR_TRIGGER_ZONE, compression="uncompressed"
         )
 
         # Exports trial type and start distance data.
         trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
-        trial_dataframe.write_ipc(file=output_directory / "trial_data.feather", compression="uncompressed")
+        trial_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.TRIAL, compression="uncompressed")
 
 
 def _decompose_multiple_cue_sequences_into_trials(

@@ -19,6 +19,7 @@ from sollertia_shared_assets import (
     RawDataFiles,
     SessionTypes,
     ProcessingTrackers,
+    discover_sessions,
 )
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
@@ -31,9 +32,6 @@ from ..shared_assets import prepare_tracker
 if TYPE_CHECKING:
     from pathlib import Path
 
-
-TRACKER_FILENAME: str = "forging_tracker.yaml"
-"""The filename for the processing tracker placed in the dataset directory."""
 
 FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name used to identify per-session assembly stages in forging processing trackers."""
@@ -124,7 +122,7 @@ def run_forging_pipeline(
     # Prepares the processing tracker and registers one assembly job per session. Dataset definition is not
     # tracker-managed: it has already run to completion by the time the tracker is created, so there is nothing
     # for the tracker to track.
-    tracker = ProcessingTracker(file_path=dataset_path.joinpath(TRACKER_FILENAME))
+    tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
     jobs = [(FORGING_JOB_NAME, session) for session in dataset_session_names]
     prepare_tracker(tracker=tracker, jobs=jobs)
 
@@ -253,10 +251,10 @@ def resolve_dataset(
 def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) -> DatasetData:
     """Creates a fresh dataset hierarchy by resolving the provided session names under the project root.
 
-    Each session name is resolved by recursively globbing ``project_root`` for a matching directory, with the
-    owning animal derived from the parent directory. Dataset creation is currently limited to mesoscope
-    experiment sessions, and every included session must share the first session's session type and
-    acquisition system.
+    Each session name is resolved by probing the canonical ``<project_root>/<animal>/<session_name>`` layout
+    and requiring the session's ``session_data.yaml`` marker to be present. Dataset creation is currently
+    limited to mesoscope experiment sessions, and every included session must share the first session's
+    session type and acquisition system.
 
     Args:
         name: The unique name for the dataset.
@@ -267,20 +265,26 @@ def _create_dataset(name: str, sessions: tuple[str, ...], project_root: Path) ->
         The newly created DatasetData instance.
 
     Raises:
-        FileNotFoundError: If a session name does not resolve to any directory under the project root.
-        RuntimeError: If a session name resolves to more than one directory under the project root.
+        FileNotFoundError: If a session name does not resolve to any animal directory under the project root.
+        RuntimeError: If a session name resolves to more than one animal directory under the project root.
         ValueError: If the first session's type is not MESOSCOPE_EXPERIMENT, or if any subsequent session's
             session type or acquisition system differs from the first session's.
     """
-    # Resolves each session name to its absolute directory path. The canonical project layout places every
-    # session at ``<project_root>/<animal>/<session>``, so the owning animal name is the parent's directory name.
+    # Builds a session-name → session-root index via shared-assets discovery so the project layout is not
+    # assumed here. A session name colliding across animals surfaces as a RuntimeError during lookup rather
+    # than silently selecting the first match.
+    discovered: dict[str, list[Path]] = {}
+    for session_root in discover_sessions(root_path=project_root):
+        discovered.setdefault(session_root.name, []).append(session_root)
+
     session_paths: list[Path] = []
     for session_name in sessions:
-        matches = [path for path in project_root.rglob(session_name) if path.is_dir()]
+        matches = discovered.get(session_name, [])
         if len(matches) != 1:
             message = (
                 f"Unable to resolve the directory for session '{session_name}' under '{project_root}'. "
-                f"Expected exactly one directory match, but found {len(matches)}."
+                f"Expected exactly one session named '{session_name}' to be discoverable via "
+                f"'{RawDataFiles.SESSION_DATA}' markers, but found {len(matches)}."
             )
             console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
         session_paths.append(matches[0])

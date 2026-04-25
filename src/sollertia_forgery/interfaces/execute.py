@@ -2,7 +2,7 @@
 
 import click
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import get_working_directory
+from sollertia_shared_assets import filter_sessions, get_working_directory
 
 from ..server import (
     Server,
@@ -13,7 +13,7 @@ from ..server import (
     resolve_project_manifest,
 )
 from ..forging import DatasetSession
-from ..shared_assets import ProjectManifest, filter_sessions
+from ..shared_assets import ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -138,16 +138,21 @@ def execute_cli(
         for session_name in manifest.get_sessions(animal=animal_id, exclude_incomplete=False):
             all_sessions.add(DatasetSession(session=session_name, animal=str(animal_id)))
 
-    # Applies filtering based on the provided options.
-    filtered_sessions = filter_sessions(
-        sessions=all_sessions,
-        start_date=start_date,
-        end_date=end_date,
-        include_sessions=set(include_session) if include_session else None,
-        exclude_sessions=set(exclude_session) if exclude_session else None,
-        include_animals=set(include_animal) if include_animal else None,
-        exclude_animals=set(exclude_animal) if exclude_animal else None,
-    )
+    # Applies filtering based on the provided options. sollertia-shared-assets' filter_sessions operates
+    # on plain (session_name, animal) tuples; the map rehydrates the filtered keys back to DatasetSession.
+    session_map = {(session.session, session.animal): session for session in all_sessions}
+    filtered_sessions = {
+        session_map[key]
+        for key in filter_sessions(
+            sessions=set(session_map.keys()),
+            start_date=start_date,
+            end_date=end_date,
+            include_sessions=set(include_session) if include_session else None,
+            exclude_sessions=set(exclude_session) if exclude_session else None,
+            include_animals=set(include_animal) if include_animal else None,
+            exclude_animals=set(exclude_animal) if exclude_animal else None,
+        )
+    }
 
     # If no sessions match the filter criteria, raises an error.
     if not filtered_sessions:

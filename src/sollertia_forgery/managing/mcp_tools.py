@@ -17,11 +17,11 @@ from ataraxis_time import (
     get_timestamp,
 )
 from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_capacity
-from sollertia_shared_assets import SessionData, RawDataFiles
+from sollertia_shared_assets import SessionData, ProcessingTrackers, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
-from .manifest import MANIFEST_TRACKER_FILENAME, generate_project_manifest
+from .manifest import generate_project_manifest
 from .transfer import transfer_session
 from ..interfaces import mcp
 from ..shared_assets import (
@@ -29,16 +29,11 @@ from ..shared_assets import (
     PendingJob,
     JobExecutionState,
     prepare_tracker,
-    validate_directory,
     read_tracker_status,
     derive_tracker_status,
     group_jobs_by_tracker,
     job_execution_manager,
 )
-
-_TRANSFER_TRACKER_FILENAME: str = "transfer_processing_tracker.yaml"
-"""The filename for the processing tracker created in the caller-specified directory to track transfer and deletion
-jobs. Placed outside the sessions being transferred or deleted so the tracker survives session removal."""
 
 _TRANSFER_JOB_NAME: str = "session_transfer"
 """The job name used to identify session transfer jobs in processing trackers."""
@@ -651,12 +646,11 @@ def reset_checksum_jobs_tool(
 def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     """Discovers and summarizes checksum resolution status for all sessions under a root directory.
 
-    Recursively searches for ``checksum_processing_tracker.yaml`` files and aggregates their status. Each
-    tracker lives at ``{session_root}/raw_data/checksum_processing_tracker.yaml``, so walking up one parent
-    from each tracker yields the ``raw_data`` directory and two parents yields the session root.
+    Iterates every session marker under the root via :func:`iterate_sessions` and, for each session whose
+    canonical ``SessionData.checksum_tracker_path`` exists, reads the tracker and aggregates its status.
 
     Args:
-        root_directory: The absolute path to the root directory to search for tracker files.
+        root_directory: The absolute path to the root directory to search for sessions.
 
     Returns:
         A dictionary containing per-session status summaries and aggregate counts.
@@ -672,14 +666,15 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     aggregate_running = 0
     aggregate_scheduled = 0
 
-    for found_tracker_path in sorted(root_path.rglob(RawDataFiles.CHECKSUM_TRACKER)):
-        # The tracker lives at ``{session_root}/raw_data/<tracker>``, so walking up two parents yields the
-        # session root.
-        raw_data_path = found_tracker_path.parent
-        session_root = raw_data_path.parent
+    for session in iterate_sessions(root_path=root_path):
+        tracker_path = session.checksum_tracker_path
+        if not tracker_path.is_file():
+            continue
+
+        session_root = session.raw_data_path.parent
         try:
             # Reads the tracker and accumulates per-session counts into the project-wide aggregate.
-            status = read_tracker_status(tracker_path=found_tracker_path)
+            status = read_tracker_status(tracker_path=tracker_path)
             summary = status.get("summary", {})
 
             aggregate_succeeded += summary.get("succeeded", 0)
@@ -692,7 +687,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
             session_statuses.append(
                 {
                     "session_path": str(session_root),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": dir_status,
                     **status,
                 }
@@ -701,7 +696,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
             session_statuses.append(
                 {
                     "session_path": str(session_root),
-                    "tracker_path": str(found_tracker_path),
+                    "tracker_path": str(tracker_path),
                     "status": "error",
                     "error": "Unable to read tracker file.",
                 }
@@ -827,7 +822,7 @@ def prepare_transfer_batch_tool(
     if error is not None:
         return {"error": error}
 
-    tracker_path = Path(tracker_directory) / _TRANSFER_TRACKER_FILENAME
+    tracker_path = Path(tracker_directory) / ProcessingTrackers.TRANSFER
 
     # Validates each job descriptor and builds the (job_name, specifier) tuples for tracker initialization.
     validated_jobs: list[tuple[str, str, dict[str, Any]]] = []
@@ -1408,7 +1403,7 @@ def generate_project_manifest_tool(project_directory: str) -> dict[str, Any]:
     # Resolves expected output paths so they can be reported in the response even on failure.
     project_path = Path(project_directory)
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
-    tracker_file = project_path / MANIFEST_TRACKER_FILENAME
+    tracker_file = project_path / ProcessingTrackers.MANIFEST
 
     # Delegates to the pipeline function which handles tracker lifecycle, session scanning, and feather output.
     try:
@@ -1446,7 +1441,7 @@ def get_manifest_generation_status_tool(project_directory: str) -> dict[str, Any
     if error is not None:
         return {"error": error}
 
-    tracker_path = Path(project_directory) / MANIFEST_TRACKER_FILENAME
+    tracker_path = Path(project_directory) / ProcessingTrackers.MANIFEST
 
     if not tracker_path.exists():
         return {
@@ -1487,7 +1482,7 @@ def clean_project_manifest_tool(project_directory: str) -> dict[str, Any]:
 
     # Resolves paths for all manifest artifacts: tracker, data file, and their companion lock files.
     project_path = Path(project_directory)
-    tracker_file = project_path / MANIFEST_TRACKER_FILENAME
+    tracker_file = project_path / ProcessingTrackers.MANIFEST
     manifest_file = project_path / f"{project_path.stem}_manifest.feather"
     manifest_lock = manifest_file.with_suffix(manifest_file.suffix + ".lock")
     tracker_lock = tracker_file.with_suffix(tracker_file.suffix + ".lock")
