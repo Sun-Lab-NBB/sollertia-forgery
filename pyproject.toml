@@ -58,7 +58,7 @@ dependencies = [
     "PySide6>=6,<7",  # Qt backend for matplotlib interactive plots
     "plotly>=6,<7",
 
-    # Machine Learning
+    # Trajectory plotting
     "umap-learn>=0,<1",
 
     # Remote Execution
@@ -74,8 +74,8 @@ dependencies = [
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
-    "tbb4py>=2022,<2023; sys_platform != 'darwin'",
-    "intel-cmplr-lib-rt>=2025,<2026; sys_platform != 'darwin'",
+    "tbb4py>=2023,<2024; sys_platform != 'darwin'",
+    "intel-cmplr-lib-rt>=2026,<2027; sys_platform != 'darwin'",
 ]
 
 [project.urls]
@@ -103,6 +103,7 @@ dev = [
     "types-filelock>=3,<4",
     "types-python-dateutil>=2,<3",
     "types-tabulate>=0,<1",
+    "scipy-stubs>=1,<2"
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
