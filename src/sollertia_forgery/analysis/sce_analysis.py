@@ -31,6 +31,8 @@ _MINIMUM_STABLE_FRACTION: float = 0.5
 """Minimum fraction of stable torque samples required for a rest period to be included in SCE analysis."""
 _MINIMUM_STABLE_SAMPLE_COUNT: int = 10
 """Minimum number of stable torque samples required for a rest period to be included in SCE analysis."""
+_MINIMUM_SCE_COUNT_FOR_ASSEMBLY: int = 2
+"""Minimum number of SCEs required in a period to attempt cell-assembly detection."""
 
 
 class PeriodType(StrEnum):
@@ -42,7 +44,7 @@ class PeriodType(StrEnum):
     """Indicates a run period where the animal is actively locomoting."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SCEDetectionConfiguration:
     """Defines configuration parameters for synchronous calcium event detection."""
 
@@ -68,7 +70,7 @@ class SCEDetectionConfiguration:
     """Maximum allowable rolling standard deviation of torque (in N*cm) for a rest sample to be considered stable."""
 
 
-@dataclass
+@dataclass(slots=True)
 class SCEResult:
     """Stores the results of SCE detection for a single analysis period.
 
@@ -76,8 +78,8 @@ class SCEResult:
         period_type: Identifies this result as belonging to a rest or run period.
         onset_matrix: Binary matrix of calcium transient onsets with dimensions (cell_count, sample_count). Each entry
             is True if the corresponding cell has a transient onset at that sample.
-        smoothed_fluorescence: Smoothed fluorescence traces with dimensions (cell_count, sample_count), used for plotting
-            continuous activity traces.
+        smoothed_fluorescence: Smoothed fluorescence traces with dimensions (cell_count, sample_count), used for
+            plotting continuous activity traces.
         coactive_counts: Number of co-active cells at each sample with length sample_count.
         sce_mask: Boolean mask indicating samples that belong to a detected SCE with length sample_count.
         sce_labels: Integer labels assigning each SCE sample to an SCE event index (1-indexed) with length sample_count.
@@ -108,7 +110,7 @@ class SCEResult:
     """Timestamps in minutes for each sample with length sample_count."""
 
 
-@dataclass
+@dataclass(slots=True)
 class SCEAssembly:
     """Represents a group of cells that frequently co-activate during SCEs.
 
@@ -146,7 +148,8 @@ def _enforce_minimum_interval(
     """
     cell_count = above_threshold.shape[0]
     sample_count = above_threshold.shape[1]
-    onsets = np.zeros((cell_count, sample_count), dtype=np.bool_)
+    # noinspection PyTypeChecker
+    onsets: NDArray[np.bool_] = np.zeros((cell_count, sample_count), dtype=np.bool_)
 
     for cell_index in prange(cell_count):
         # Offsets the last onset beyond the refractory period so the first threshold crossing is always accepted.
@@ -175,7 +178,8 @@ def _label_contiguous_regions(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
         Integer label array with length sample_count, where each contiguous True region receives a unique label
         starting from 1.
     """
-    labels = np.zeros(len(mask), dtype=np.int32)
+    # noinspection PyTypeChecker
+    labels: NDArray[np.int32] = np.zeros(len(mask), dtype=np.int32)
     current_label = 0
 
     for index in range(len(mask)):
@@ -211,11 +215,13 @@ def _compute_shuffled_max_counts(
         Array of peak co-active counts with length shuffle_count.
     """
     shuffle_count = shift_amounts.shape[0]
-    max_counts = np.empty(shuffle_count, dtype=np.float32)
+    # noinspection PyTypeChecker
+    max_counts: NDArray[np.float32] = np.empty(shuffle_count, dtype=np.float32)
 
     for shuffle_index in prange(shuffle_count):
         # Builds a difference array from sparse onset positions so that a prefix sum recovers the co-active count.
-        diff = np.zeros(sample_count + 1, dtype=np.int32)
+        # noinspection PyTypeChecker
+        diff: NDArray[np.int32] = np.zeros(sample_count + 1, dtype=np.int32)
 
         # Applies a circular shift to each cell's onsets and marks the affected window in the difference array.
         for cell_index in range(cell_count):
@@ -258,13 +264,16 @@ def _detect_transient_onsets(
         Binary onset matrix with dimensions (cell_count, sample_count).
     """
     # Computes the first derivative and pads to preserve the original sample count.
-    derivative = np.diff(smoothed, axis=1)
+    # noinspection PyTypeChecker
+    derivative: NDArray[np.float32] = np.diff(smoothed, axis=1)
+    # noinspection PyTypeChecker
     derivative = np.concatenate([np.zeros((smoothed.shape[0], 1), dtype=smoothed.dtype), derivative], axis=1)
 
     # Thresholds each cell's derivative at mean + scale * std.
     cell_mean = np.mean(derivative, axis=1, keepdims=True)
     cell_std = np.std(derivative, axis=1, keepdims=True)
-    above_threshold = derivative > (cell_mean + derivative_threshold_scale * cell_std)
+    # noinspection PyTypeChecker
+    above_threshold: NDArray[np.bool_] = derivative > (cell_mean + derivative_threshold_scale * cell_std)
 
     # Suppresses repeated crossings within the refractory period.
     return _enforce_minimum_interval(
@@ -287,8 +296,14 @@ def _count_coactive_cells(
         Array of co-active cell counts with length sample_count.
     """
     effective_window = 2 * (window_samples // 2) + 1
-    has_onset_in_window = maximum_filter1d(input=onsets.view(np.uint8), size=effective_window, axis=1) > 0
-    return np.sum(has_onset_in_window, axis=0, dtype=np.int32)
+    # noinspection PyTypeChecker
+    has_onset_in_window: NDArray[np.bool_] = (
+        maximum_filter1d(input=onsets.view(np.uint8), size=effective_window, axis=1) > 0
+    )
+    # np.sum overloads return scalar | ndarray; the axis=0 path always yields an array, so the cast is safe.
+    # noinspection PyTypeChecker
+    coactive_counts: NDArray[np.int32] = np.asarray(np.sum(has_onset_in_window, axis=0, dtype=np.int32), dtype=np.int32)
+    return coactive_counts
 
 
 def _compute_shuffled_threshold(
@@ -314,16 +329,24 @@ def _compute_shuffled_threshold(
 
     # Packs per-cell onset sample indices into a flat array with offsets for sparse iteration.
     onset_lists: list[NDArray[np.int32]] = []
-    onset_offsets = np.zeros(cell_count + 1, dtype=np.int32)
+    # noinspection PyTypeChecker
+    onset_offsets: NDArray[np.int32] = np.zeros(cell_count + 1, dtype=np.int32)
 
     for cell_index in range(cell_count):
-        cell_onsets = np.nonzero(onsets[cell_index])[0]
+        # noinspection PyTypeChecker
+        cell_onsets: NDArray[np.int32] = np.nonzero(onsets[cell_index])[0].astype(np.int32)
         onset_lists.append(cell_onsets)
         onset_offsets[cell_index + 1] = onset_offsets[cell_index] + len(cell_onsets)
-    onset_positions = np.concatenate(onset_lists).astype(np.int32) if onset_lists else np.empty(0, dtype=np.int32)
+    # noinspection PyTypeChecker
+    onset_positions: NDArray[np.int32] = (
+        np.concatenate(onset_lists).astype(np.int32) if onset_lists else np.empty(0, dtype=np.int32)
+    )
 
     rng = np.random.default_rng(seed=42)
-    shift_amounts = rng.integers(low=1, high=sample_count, size=(shuffle_count, cell_count)).astype(np.int32)
+    # noinspection PyTypeChecker
+    shift_amounts: NDArray[np.int32] = rng.integers(low=1, high=sample_count, size=(shuffle_count, cell_count)).astype(
+        np.int32
+    )
 
     shuffled_max_counts = _compute_shuffled_max_counts(
         onset_positions=onset_positions,
@@ -393,7 +416,8 @@ def _detect_sces(
     )
 
     # Marks samples where the co-active count exceeds both the shuffled threshold and the minimum cell count.
-    sce_mask = (coactive_counts > threshold) & (coactive_counts >= configuration.minimum_cell_count)
+    # noinspection PyTypeChecker
+    sce_mask: NDArray[np.bool_] = (coactive_counts > threshold) & (coactive_counts >= configuration.minimum_cell_count)
 
     # Assigns sequential labels to contiguous SCE regions.
     sce_labels = _label_contiguous_regions(mask=sce_mask)
@@ -504,7 +528,8 @@ class SCEDetector:
         self._elapsed_minutes = (time_us - time_us[0]).astype(np.float32) / np.float32(60_000_000.0)
 
         # Extracts fluorescence data and transposes from (sample, cell) to (cell, sample).
-        self._fluorescence = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
+        # noinspection PyTypeChecker
+        self._fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
         self._torque = df[DatasetColumn.TORQUE_N_CM.value].to_numpy()
 
         # Precomputes the within-trial position once so per-period slicing matches the rest of the analysis
@@ -532,7 +557,7 @@ class SCEDetector:
         """Returns the subset of results belonging to run periods in temporal order."""
         return [r for r in self._results if r.period_type == PeriodType.RUN]
 
-    def detect_events(self, progress: bool = True) -> list[SCEResult]:
+    def detect_events(self, *, progress: bool = True) -> list[SCEResult]:
         """Detects SCEs separately in rest and run periods across the session.
 
         Notes:
@@ -581,17 +606,20 @@ class SCEDetector:
                             )
 
                     elif current_state == PeriodType.RUN:
-                        run_fluorescence = period_fluorescence.copy()
+                        # noinspection PyTypeChecker
+                        run_fluorescence: NDArray[np.float32] = period_fluorescence.copy()
 
                         # Masks place field activity at the animal's current position for each sample.
                         if self._place_fields is not None:
                             period_position = self._position[period_start:sample_index]
-                            valid_position = ~np.isnan(period_position)
+                            # noinspection PyTypeChecker
+                            valid_position: NDArray[np.bool_] = ~np.isnan(period_position)
 
                             if valid_position.any():
                                 bin_size = self._place_fields.bin_size
                                 bin_count = self._place_fields.label_image.shape[1]
-                                bin_edges = np.arange(
+                                # noinspection PyTypeChecker
+                                bin_edges: NDArray[np.float32] = np.arange(
                                     0,
                                     self._track_length + bin_size,
                                     bin_size,
@@ -599,7 +627,10 @@ class SCEDetector:
                                 )
                                 # Substitutes 0 for NaN positions so searchsorted does not push them to the last bin;
                                 # the corresponding mask columns are reset to False below.
-                                safe_position = np.where(valid_position, period_position, np.float32(0.0))
+                                # noinspection PyTypeChecker
+                                safe_position: NDArray[np.float32] = np.where(
+                                    valid_position, period_position, np.float32(0.0)
+                                )
                                 position_bins = np.clip(
                                     np.searchsorted(bin_edges, safe_position, side="right") - 1,
                                     0,
@@ -609,7 +640,10 @@ class SCEDetector:
                                 # Builds a (cell_count, sample_count) mask from the label image indexed by each
                                 # sample's position bin, then zeros out all masked entries in a single vectorized
                                 # operation. Samples belonging to incomplete trials carry no place-field gating.
-                                place_field_mask = self._place_fields.label_image[:, position_bins] > 0
+                                # noinspection PyTypeChecker
+                                place_field_mask: NDArray[np.bool_] = (
+                                    self._place_fields.label_image[:, position_bins] > 0
+                                )
                                 place_field_mask[:, ~valid_position] = False
                                 run_fluorescence[place_field_mask] = 0.0
 
@@ -658,15 +692,17 @@ class SCEDetector:
         result = results[period_index]
         total_sce_count = int(np.max(result.sce_labels))
 
-        if total_sce_count < 2:
+        if total_sce_count < _MINIMUM_SCE_COUNT_FOR_ASSEMBLY:
             return []
 
         participation = self._build_participation_matrix(result=result)
 
         # Filters to cells that participate in at least one SCE.
         cell_participation_count = np.sum(participation, axis=0)
-        active_cell_mask = cell_participation_count > 0
-        active_cell_indices = np.where(active_cell_mask)[0].astype(np.int32)
+        # noinspection PyTypeChecker
+        active_cell_mask: NDArray[np.bool_] = cell_participation_count > 0
+        # noinspection PyTypeChecker
+        active_cell_indices: NDArray[np.int32] = np.where(active_cell_mask)[0].astype(np.int32)
 
         if len(active_cell_indices) < minimum_assembly_size:
             return []
@@ -686,7 +722,8 @@ class SCEDetector:
         # Builds assemblies from clusters that meet the minimum size requirement.
         assemblies: list[SCEAssembly] = []
         for cluster_id in range(1, n_clusters + 1):
-            member_mask = cluster_labels == cluster_id
+            # noinspection PyTypeChecker
+            member_mask: NDArray[np.bool_] = cluster_labels == cluster_id
             if int(np.sum(member_mask)) < minimum_assembly_size:
                 continue
 
@@ -695,7 +732,8 @@ class SCEDetector:
 
             # Marks SCEs where enough assembly members were co-active as activations.
             active_fraction = np.mean(member_participation, axis=1)
-            activating_sces = np.where(active_fraction >= activation_threshold)[0].astype(np.int32)
+            # noinspection PyTypeChecker
+            activating_sces: NDArray[np.int32] = np.where(active_fraction >= activation_threshold)[0].astype(np.int32)
 
             if len(activating_sces) == 0:
                 continue
@@ -750,8 +788,10 @@ class SCEDetector:
         # Chooses a mix of rest-active and rest-quiet cells that are also active during run.
         if cell_indices is None:
             cell_total = sequence_results[0].onset_matrix.shape[0]
-            rest_onsets = np.zeros(cell_total, dtype=np.int32)
-            run_onsets = np.zeros(cell_total, dtype=np.int32)
+            # noinspection PyTypeChecker
+            rest_onsets: NDArray[np.int32] = np.zeros(cell_total, dtype=np.int32)
+            # noinspection PyTypeChecker
+            run_onsets: NDArray[np.int32] = np.zeros(cell_total, dtype=np.int32)
 
             for result in sequence_results:
                 counts = np.sum(result.onset_matrix, axis=1).astype(np.int32)
@@ -761,10 +801,13 @@ class SCEDetector:
                     run_onsets += counts
 
             # Filters cells with at least one transient onset during run to ensure visible activity in traces.
-            run_active_mask = run_onsets > 0
-            run_active_indices = np.where(run_active_mask)[0]
+            # noinspection PyTypeChecker
+            run_active_mask: NDArray[np.bool_] = run_onsets > 0
+            # noinspection PyTypeChecker
+            run_active_indices: NDArray[np.int64] = np.where(run_active_mask)[0]
 
             if len(run_active_indices) == 0:
+                # noinspection PyTypeChecker
                 run_active_indices = np.arange(cell_total)
 
             # Splits run-active cells into the most and least rest-active halves.
@@ -772,13 +815,17 @@ class SCEDetector:
             rest_calm = cell_count - rest_spikers
 
             rest_onsets_subset = rest_onsets[run_active_indices]
-            sorted_by_rest = np.argsort(rest_onsets_subset)
+            # noinspection PyTypeChecker
+            sorted_by_rest: NDArray[np.int64] = np.argsort(rest_onsets_subset)
 
             calm_indices = run_active_indices[sorted_by_rest[:rest_calm]]
             spiker_indices = run_active_indices[sorted_by_rest[-rest_spikers:]]
 
-            cell_indices = np.unique(np.concatenate([calm_indices, spiker_indices])).astype(np.int32)
-            cell_indices = cell_indices[:cell_count]
+            # noinspection PyTypeChecker
+            selected_indices: NDArray[np.int32] = np.unique(np.concatenate([calm_indices, spiker_indices])).astype(
+                np.int32
+            )
+            cell_indices = selected_indices[:cell_count]
 
         else:
             cell_indices = np.asarray(cell_indices, dtype=np.int32)
@@ -1013,10 +1060,13 @@ class SCEDetector:
 
         # Maps each sample to its SCE label via scatter indexing, then uses a matrix multiply to determine which cells
         # had at least one onset during each SCE.
-        sce_sample_mask = result.sce_labels > 0
-        sce_sample_indices = np.where(sce_sample_mask)[0]
+        # noinspection PyTypeChecker
+        sce_sample_mask: NDArray[np.bool_] = result.sce_labels > 0
+        # noinspection PyTypeChecker
+        sce_sample_indices: NDArray[np.int64] = np.where(sce_sample_mask)[0]
 
-        sample_to_sce = np.zeros((sample_count, total_sce_count), dtype=np.float32)
+        # noinspection PyTypeChecker
+        sample_to_sce: NDArray[np.float32] = np.zeros((sample_count, total_sce_count), dtype=np.float32)
         sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
 
         return (result.onset_matrix.astype(np.float32) @ sample_to_sce > 0).T

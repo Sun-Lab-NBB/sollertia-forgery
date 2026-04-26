@@ -13,8 +13,8 @@ from ..forging import (
     DATA_FILENAME,
     TRIAL_GEOMETRY_FILENAME,
     DatasetColumn,
-    FluorescenceColumn,
     TrialGeometry,
+    FluorescenceColumn,
     TrialGeometryEntry,
 )
 
@@ -84,8 +84,7 @@ def assemble_run_session_data(
         ],
     )
     df = df.filter(
-        (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run")
-        & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type),
+        (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run") & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type),
     )
 
     # noinspection PyTypeChecker
@@ -101,7 +100,8 @@ def assemble_run_session_data(
         trial_ids=trial_ids,
         track_length=geometry_entry.trial_length_cm,
     )
-    valid = ~np.isnan(position)
+    # noinspection PyTypeChecker
+    valid: NDArray[np.bool_] = ~np.isnan(position)
 
     return RunSessionData(
         fluorescence=fluorescence[:, valid],
@@ -137,20 +137,26 @@ def compute_within_trial_position(
         Per-sample within-trial position in centimeters, with NaN at samples belonging to incomplete trials.
     """
     # Brackets every contiguous trial block with (start, end) index pairs by detecting trial_ids transitions.
-    change_indices = np.flatnonzero(np.diff(trial_ids)) + 1
-    starts = np.concatenate(([0], change_indices))
-    ends = np.concatenate((change_indices, [distance.size]))
+    # noinspection PyTypeChecker
+    change_indices: NDArray[np.int64] = np.flatnonzero(np.diff(trial_ids)) + 1
+    # noinspection PyTypeChecker
+    starts: NDArray[np.int64] = np.concatenate(([0], change_indices))
+    # noinspection PyTypeChecker
+    ends: NDArray[np.int64] = np.concatenate((change_indices, [distance.size]))
 
     # Broadcasts each trial's starting distance back to one value per sample for a single vectorized subtraction.
     counts = ends - starts
     per_trial_start = distance[starts]
     per_trial_length = distance[ends - 1] - per_trial_start
-    per_sample_start = np.repeat(per_trial_start, counts)
-    position = (distance - per_sample_start).astype(np.float32)
+    # noinspection PyTypeChecker
+    per_sample_start: NDArray[np.float32] = np.repeat(per_trial_start, counts)
+    # noinspection PyTypeChecker
+    position: NDArray[np.float32] = (distance - per_sample_start).astype(np.float32)
 
     # Masks samples in below-threshold trials with NaN so downstream consumers can drop them in one step.
     minimum_length = np.float32(completeness_threshold * track_length)
-    per_sample_incomplete = np.repeat(per_trial_length < minimum_length, counts)
+    # noinspection PyTypeChecker
+    per_sample_incomplete: NDArray[np.bool_] = np.repeat(per_trial_length < minimum_length, counts)
     position[per_sample_incomplete] = np.float32("nan")
     # noinspection PyTypeChecker
     return position
@@ -160,6 +166,7 @@ def bin_fluorescence_by_position(
     fluorescence: NDArray[np.float32],
     position: NDArray[np.float32],
     position_bin_edges: NDArray[np.float32],
+    *,
     compute_mean: bool = True,
 ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
     """Bins neural fluorescence data by animal position along the linear track.
@@ -176,16 +183,18 @@ def bin_fluorescence_by_position(
         per bin with length bin_count.
     """
     # Assigns each position to a spatial bin and clips to the range [0, bin_count - 1].
-    bin_indices = np.searchsorted(position_bin_edges, position, side="right") - 1
     # noinspection PyTypeChecker
-    bin_indices: NDArray[np.int32] = np.clip(bin_indices, 0, len(position_bin_edges) - 2).astype(np.int32)
+    raw_bin_indices: NDArray[np.int64] = np.searchsorted(position_bin_edges, position, side="right") - 1
+    # noinspection PyTypeChecker
+    bin_indices: NDArray[np.int32] = np.clip(raw_bin_indices, 0, len(position_bin_edges) - 2).astype(np.int32)
 
     bin_count = len(position_bin_edges) - 1
     cell_count = fluorescence.shape[0]
     # noinspection PyTypeChecker
     sample_counts: NDArray[np.int32] = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
 
-    output = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
+    # noinspection PyTypeChecker
+    output: NDArray[np.float32] = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
 
     # Hands off to vectorized and compiled accumulator.
     _accumulate_binned_fluorescence(
@@ -204,7 +213,7 @@ def _accumulate_binned_fluorescence(
     fluorescence: NDArray[np.float32],
     bin_indices: NDArray[np.int32],
     sample_counts: NDArray[np.int32],
-    use_mean: bool,
+    use_mean: bool,  # noqa: FBT001
     output: NDArray[np.float32],
 ) -> None:
     """Accumulates cell fluorescence values into spatial position bins for each cell, writing into output in place.

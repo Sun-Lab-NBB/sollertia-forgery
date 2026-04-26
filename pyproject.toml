@@ -122,7 +122,7 @@ target-version = "py314"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the root source code directory
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
-extend-exclude = ["conf.py", "src/sollertia_forgery/analysis", "src/sollertia_forgery/server"]
+extend-exclude = ["conf.py", "src/sollertia_forgery/server"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.
 lint.select = ["ALL"]
@@ -193,8 +193,13 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["sollertia_forgery.server.*", "sollertia_forgery.analysis.*"]
+module = ["sollertia_forgery.server.*"]
 ignore_errors = true
+
+# Suppresses missing-stub warnings for third-party libraries that do not ship type information.
+[[tool.mypy.overrides]]
+module = ["numba", "numba.*", "tqdm", "tqdm.*"]
+ignore_missing_imports = true
 
 # Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
 # inside a live MCP server or CLI invocation.

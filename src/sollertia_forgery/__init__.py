@@ -5,7 +5,7 @@
 # Apple Silicon wheel; all other platforms use TBB for lower overhead on flat prange loops.
 import sys
 
-from numba import config  # type: ignore[import-untyped]
+from numba import config
 
 config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"
 

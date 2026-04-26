@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import console

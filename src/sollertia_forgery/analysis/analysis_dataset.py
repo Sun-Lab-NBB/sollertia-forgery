@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
-from pathlib import Path
 
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from ..forging import TRIAL_GEOMETRY_FILENAME, FluorescenceColumn, TrialGeometry
+from ..forging import TRIAL_GEOMETRY_FILENAME, TrialGeometry, FluorescenceColumn
 from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
     from .sce_analysis import SCEResult
@@ -64,8 +65,10 @@ def _build_per_cell_rows(cell_count: int, place_fields: PlaceFields) -> _PerCell
     max_intensities = place_fields.max_intensity
     binned_per_trial = place_fields.binned_fluorescence_per_trial
 
-    cell_ids = np.arange(cell_count, dtype=np.int32)
-    is_place = np.zeros(cell_count, dtype=np.bool_)
+    # noinspection PyTypeChecker
+    cell_ids: NDArray[np.int32] = np.arange(cell_count, dtype=np.int32)
+    # noinspection PyTypeChecker
+    is_place: NDArray[np.bool_] = np.zeros(cell_count, dtype=np.bool_)
 
     pf_start_cm: list[list[float]] = [[] for _ in range(cell_count)]
     pf_end_cm: list[list[float]] = [[] for _ in range(cell_count)]
@@ -78,10 +81,12 @@ def _build_per_cell_rows(cell_count: int, place_fields: PlaceFields) -> _PerCell
     for field_index in range(region_count):
         label = field_index + 1
         cell_index = int(field_cell_ids[field_index])
-        bins = np.where(label_image[cell_index, :] == label)[0]
+        # noinspection PyTypeChecker
+        bins: NDArray[np.int64] = np.where(label_image[cell_index, :] == label)[0]
 
         # Identifies wrapped fields by a gap in the sorted bin indices.
-        gap_indices = np.where(np.diff(bins) > 1)[0]
+        # noinspection PyTypeChecker
+        gap_indices: NDArray[np.int64] = np.where(np.diff(bins) > 1)[0]
         if len(gap_indices) > 0:
             gap = gap_indices[0]
             start_bin = bins[gap + 1]
@@ -147,11 +152,16 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
         A dictionary mapping column names to numpy arrays or lists of per-cell values.
     """
     # Uses PeriodType as row index (REST=0, RUN=1) and cell as column index.
-    participation = np.zeros((2, cell_count), dtype=np.int32)
-    rank_sum = np.zeros((2, cell_count), dtype=np.float32)
-    rank_count = np.zeros((2, cell_count), dtype=np.int32)
-    total_sces = np.zeros(2, dtype=np.int32)
-    period_counter = np.zeros(2, dtype=np.int32)
+    # noinspection PyTypeChecker
+    participation: NDArray[np.int32] = np.zeros((2, cell_count), dtype=np.int32)
+    # noinspection PyTypeChecker
+    rank_sum: NDArray[np.float32] = np.zeros((2, cell_count), dtype=np.float32)
+    # noinspection PyTypeChecker
+    rank_count: NDArray[np.int32] = np.zeros((2, cell_count), dtype=np.int32)
+    # noinspection PyTypeChecker
+    total_sces: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
+    # noinspection PyTypeChecker
+    period_counter: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
     sce_events: list[list[list[tuple[int, int]]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
 
     for result in sce_results:
@@ -167,17 +177,21 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
 
         # Builds a (sample_count, sce_count) binary matrix mapping samples to their SCE label, then computes a
         # (cell_count, sce_count) participation matrix via matrix multiplication with the onset matrix.
-        sce_sample_indices = np.where(result.sce_labels > 0)[0]
-        sample_to_sce = np.zeros((result.onset_matrix.shape[1], sce_count), dtype=np.float32)
+        # noinspection PyTypeChecker
+        sce_sample_indices: NDArray[np.int64] = np.where(result.sce_labels > 0)[0]
+        # noinspection PyTypeChecker
+        sample_to_sce: NDArray[np.float32] = np.zeros((result.onset_matrix.shape[1], sce_count), dtype=np.float32)
         sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
-        cell_sce_participation = (result.onset_matrix.astype(np.float32) @ sample_to_sce) > 0
+        # noinspection PyTypeChecker
+        cell_sce_participation: NDArray[np.bool_] = (result.onset_matrix.astype(np.float32) @ sample_to_sce) > 0
 
         # Accumulates participation counts per cell across all SCEs in this period.
         participation[period] += cell_sce_participation.sum(axis=1).astype(np.int32)
 
         # Records per-cell (period_index, sce_label) tuples and computes onset ranks for each SCE.
         for sce_label in range(1, sce_count + 1):
-            participating_indices = np.where(cell_sce_participation[:, sce_label - 1])[0]
+            # noinspection PyTypeChecker
+            participating_indices: NDArray[np.int64] = np.where(cell_sce_participation[:, sce_label - 1])[0]
             participant_count = len(participating_indices)
 
             for cell in participating_indices:
@@ -185,10 +199,14 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
 
             if participant_count > 1:
                 # Computes normalized onset ranks from the first onset sample within this SCE.
-                sce_samples = np.where(result.sce_labels == sce_label)[0]
+                # noinspection PyTypeChecker
+                sce_samples: NDArray[np.int64] = np.where(result.sce_labels == sce_label)[0]
                 onset_window = result.onset_matrix[participating_indices][:, sce_samples]
                 first_onset = np.argmax(onset_window, axis=1)
-                normalized_ranks = np.argsort(np.argsort(first_onset)).astype(np.float32) / (participant_count - 1)
+                # noinspection PyTypeChecker
+                normalized_ranks: NDArray[np.float32] = (
+                    np.argsort(np.argsort(first_onset)).astype(np.float32) / (participant_count - 1)
+                ).astype(np.float32)
                 rank_sum[period, participating_indices] += normalized_ranks
                 rank_count[period, participating_indices] += 1
             elif participant_count == 1:
@@ -196,12 +214,15 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
                 rank_count[period, participating_indices] += 1
 
     # Computes participation rates and mean onset ranks per period type.
-    rate = np.full((2, cell_count), np.nan, dtype=np.float32)
-    mean_rank = np.full((2, cell_count), np.nan, dtype=np.float32)
+    # noinspection PyTypeChecker
+    rate: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
+    # noinspection PyTypeChecker
+    mean_rank: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
     for period in range(2):
         if total_sces[period] > 0:
             rate[period] = (participation[period] / total_sces[period]).astype(np.float32)
-        has_ranks = rank_count[period] > 0
+        # noinspection PyTypeChecker
+        has_ranks: NDArray[np.bool_] = rank_count[period] > 0
         mean_rank[period, has_ranks] = rank_sum[period, has_ranks] / rank_count[period, has_ranks]
 
     return {
@@ -245,7 +266,8 @@ def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> Place
         bin_count = 1
     bin_size = track_length / bin_count
 
-    label_image = np.zeros((cell_count, bin_count), dtype=np.int32)
+    # noinspection PyTypeChecker
+    label_image: NDArray[np.int32] = np.zeros((cell_count, bin_count), dtype=np.int32)
     centers_list: list[list[float]] = []
 
     cell_id_column = dataframe["cell_id"].to_list()
@@ -278,7 +300,8 @@ def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> Place
             centers_list.append([float(cell_index), float(centers[field_index])])
             next_label += 1
 
-    centers_array = (
+    # noinspection PyTypeChecker
+    centers_array: NDArray[np.float32] = (
         np.array(centers_list, dtype=np.float32) if centers_list else np.array([], dtype=np.float32).reshape(0, 2)
     )
 
@@ -421,7 +444,8 @@ def append_reward_cell_columns(
 
     # Reads without memory-mapping so Windows allows writing back to the same path after appending columns.
     dataframe = pl.read_ipc(source=output_path, memory_map=False)
-    is_place_row = dataframe["is_place"].to_numpy()
+    # noinspection PyTypeChecker
+    is_place_row: NDArray[np.bool_] = dataframe["is_place"].to_numpy()
 
     # Runs the reward cell detection pipeline. The detector resolves the canonical track length and the reward zone
     # position from the session's trial geometry data file.
@@ -443,7 +467,8 @@ def append_reward_cell_columns(
 
     # Nulls reward columns for place cells to preserve mutual exclusion.
     reward_columns = _aggregate_reward_cell_columns(reward_results=reward_results)
-    place_indices = np.where(is_place_row)[0]
+    # noinspection PyTypeChecker
+    place_indices: NDArray[np.int64] = np.where(is_place_row)[0]
     reward_series: list[pl.Series] = []
     for name, cell_array in reward_columns.items():
         series = pl.Series(name=name, values=cell_array)
@@ -571,12 +596,10 @@ def generate_analysis_dataframe(
         reward_configuration=reward_configuration,
     )
 
-    dataframe = append_sce_columns(
+    return append_sce_columns(
         session_path=session_path,
         output_directory=output_directory,
         fluorescence_column=fluorescence_column,
         trial_type=trial_type,
         sce_configuration=sce_configuration,
     )
-
-    return dataframe

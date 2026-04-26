@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 import numpy as np
 import polars as pl
 from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba type introspection

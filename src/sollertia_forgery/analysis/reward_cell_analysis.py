@@ -1,24 +1,36 @@
 """Identifies reward-associated and reward-predictive neurons from spatial and speed-activity data."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
-from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 from sollertia_forgery.forging import FluorescenceColumn
 from sollertia_forgery.analysis.utilities import (
-    bin_fluorescence_by_position,
     assemble_run_session_data,
+    bin_fluorescence_by_position,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@dataclass
+    from numpy.typing import NDArray
+
+
+_MINIMUM_PRE_REWARD_BIN_COUNT: int = 2
+"""Minimum number of pre-reward spatial bins required for slowing-correlation analysis."""
+_MINIMUM_VALID_SAMPLE_COUNT: int = 3
+"""Minimum number of speed/activity sample pairs required to compute a reliable Pearson correlation."""
+
+
+@dataclass(slots=True)
 class RewardCellConfiguration:
     """Defines configuration parameters for reward cell detection."""
 
@@ -48,7 +60,7 @@ class RewardCellConfiguration:
     """P-value threshold for slowing-correlation significance testing."""
 
 
-@dataclass
+@dataclass(slots=True)
 class SpatiallyModulatedNeurons:
     """Stores results of spatial modulation analysis for neurons on a linear or circular track."""
 
@@ -80,7 +92,7 @@ class SpatiallyModulatedNeurons:
         return int(np.sum(self.is_significant))
 
 
-@dataclass
+@dataclass(slots=True)
 class RewardCellResults:
     """Stores the complete results of reward cell analysis including spatial modulation and reward classification."""
 
@@ -190,10 +202,10 @@ def _compute_shuffled_source_indices(
     Returns:
         Source-sample indices with length filtered_sample_count.
     """
-    np.random.seed(seed)
-    shift_amount = np.random.randint(minimum_shift, sample_count - minimum_shift)
+    np.random.seed(seed)  # noqa: NPY002
+    shift_amount = np.random.randint(minimum_shift, sample_count - minimum_shift)  # noqa: NPY002
     chunk_size = sample_count // chunk_count
-    permutation = np.random.permutation(chunk_count)
+    permutation = np.random.permutation(chunk_count)  # noqa: NPY002
 
     # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
     output_chunk_starts = np.empty(chunk_count + 1, dtype=np.int32)
@@ -488,12 +500,16 @@ class RewardCellDetector:
         cell_count = self.fluorescence.shape[0]
 
         # Applies speed filtering and computes bin assignments.
-        speed_mask = self.speed > configuration.minimum_speed
+        # noinspection PyTypeChecker
+        speed_mask: NDArray[np.bool_] = self.speed > configuration.minimum_speed
         filtered_position = self.position[speed_mask]
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
         # Reuses place_1d binning to compute mean fluorescence per spatial bin.
-        bin_edges = np.arange(0, self.track_length + configuration.bin_size, configuration.bin_size, dtype=np.float32)
+        # noinspection PyTypeChecker
+        bin_edges: NDArray[np.float32] = np.arange(
+            0, self.track_length + configuration.bin_size, configuration.bin_size, dtype=np.float32
+        )
 
         rate_maps, sample_counts = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
@@ -510,7 +526,8 @@ class RewardCellDetector:
         smoothed_maps = _apply_smooth_rate_maps_wrapped(rate_maps=rate_maps, sigma_bins=sigma_bins)
 
         # Computes spatial information for the observed data.
-        observed_information = np.zeros(cell_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        observed_information: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
         _compute_spatial_information(
             rate_maps=smoothed_maps,
             occupancy=sample_counts,
@@ -521,16 +538,18 @@ class RewardCellDetector:
         p_values = self._compute_shuffle_significance(
             filtered_position=filtered_position,
             speed_mask=speed_mask,
-            position_bin_edges=bin_edges,
+            bin_edges=bin_edges,
             occupancy=sample_counts,
             sigma_bins=sigma_bins,
             observed_information=observed_information,
         )
 
-        is_significant = p_values < configuration.significance_threshold
+        # noinspection PyTypeChecker
+        is_significant: NDArray[np.bool_] = p_values < configuration.significance_threshold
 
         # Computes the circular center of mass for each neuron.
-        centers_of_mass = np.full(cell_count, -1.0, dtype=np.float32)
+        # noinspection PyTypeChecker
+        centers_of_mass: NDArray[np.float32] = np.full(cell_count, -1.0, dtype=np.float32)
         _compute_circular_center_of_mass(
             rate_maps=smoothed_maps,
             track_length=self.track_length,
@@ -581,14 +600,20 @@ class RewardCellDetector:
         bin_count = len(bin_edges) - 1
 
         # Precomputes destination-sample indices and their spatial bin assignments; both are invariant across shuffles.
-        filtered_sample_indices = np.nonzero(speed_mask)[0].astype(np.int32)
-        filtered_bin_indices = np.clip(
+        # noinspection PyTypeChecker
+        filtered_sample_indices: NDArray[np.int32] = np.nonzero(speed_mask)[0].astype(np.int32)
+        # noinspection PyTypeChecker
+        filtered_bin_indices: NDArray[np.int32] = np.clip(
             np.searchsorted(bin_edges, filtered_position, side="right") - 1, 0, bin_count - 1
         ).astype(np.int32)
 
         # Reuses rate-map and information buffers across iterations.
-        rate_maps = np.empty((cell_count, bin_count), dtype=np.float32)
-        shuffled_information = np.zeros((configuration.shuffle_count, cell_count), dtype=np.float32)
+        # noinspection PyTypeChecker
+        rate_maps: NDArray[np.float32] = np.empty((cell_count, bin_count), dtype=np.float32)
+        # noinspection PyTypeChecker
+        shuffled_information: NDArray[np.float32] = np.zeros(
+            (configuration.shuffle_count, cell_count), dtype=np.float32
+        )
 
         for iteration in tqdm(range(configuration.shuffle_count), desc="Running shuffling", unit="iter"):
             source_indices = _compute_shuffled_source_indices(
@@ -617,7 +642,8 @@ class RewardCellDetector:
 
         # Computes p-values as the fraction of shuffles exceeding observed.
         exceed_count = np.sum(shuffled_information >= observed_information[np.newaxis, :], axis=0)
-        p_values = (exceed_count / configuration.shuffle_count).astype(np.float32)
+        # noinspection PyTypeChecker
+        p_values: NDArray[np.float32] = (exceed_count / configuration.shuffle_count).astype(np.float32)
 
         return p_values
 
@@ -640,7 +666,8 @@ class RewardCellDetector:
         circular_distance = np.minimum(direct_distance, self.track_length - direct_distance)
 
         # Marks neurons with invalid COM (-1) as non-reward-proximal.
-        is_valid = centers_of_mass >= 0.0
+        # noinspection PyTypeChecker
+        is_valid: NDArray[np.bool_] = centers_of_mass >= 0.0
         return is_valid & (circular_distance <= half_zone)
 
     def _bin_trials_in_pre_reward_window(
@@ -666,17 +693,21 @@ class RewardCellDetector:
         """
         bin_count = len(bin_edges) - 1
         trial_count = len(unique_trials)
-        sums = np.zeros((trial_count, bin_count), dtype=np.float32)
-        counts = np.zeros((trial_count, bin_count), dtype=np.int32)
+        # noinspection PyTypeChecker
+        sums: NDArray[np.float32] = np.zeros((trial_count, bin_count), dtype=np.float32)
+        # noinspection PyTypeChecker
+        counts: NDArray[np.int32] = np.zeros((trial_count, bin_count), dtype=np.int32)
 
         for trial_index, trial_id in enumerate(unique_trials):
-            trial_mask = self.trial_ids == trial_id
+            # noinspection PyTypeChecker
+            trial_mask: NDArray[np.bool_] = self.trial_ids == trial_id
             trial_positions = self.position[trial_mask]
             trial_speeds = self.speed[trial_mask]
             trial_signal = signal[trial_mask]
 
             # Restricts to the pre-reward window and speed-filtered samples.
-            window_mask = (
+            # noinspection PyTypeChecker
+            window_mask: NDArray[np.bool_] = (
                 (trial_positions >= window_start)
                 & (trial_positions < window_end)
                 & (trial_speeds > self.configuration.minimum_speed)
@@ -684,7 +715,10 @@ class RewardCellDetector:
             window_positions = trial_positions[window_mask]
             window_signal = trial_signal[window_mask]
 
-            bin_indices = np.clip(np.searchsorted(bin_edges, window_positions, side="right") - 1, 0, bin_count - 1)
+            # noinspection PyTypeChecker
+            bin_indices: NDArray[np.int64] = np.clip(
+                np.searchsorted(bin_edges, window_positions, side="right") - 1, 0, bin_count - 1
+            )
 
             for sample_index in range(len(bin_indices)):
                 bin_index = bin_indices[sample_index]
@@ -717,17 +751,20 @@ class RewardCellDetector:
         configuration = self.configuration
         cell_count = self.fluorescence.shape[0]
 
-        observed_correlations = np.zeros(cell_count, dtype=np.float32)
-        is_slowing_correlated = np.zeros(cell_count, dtype=np.bool_)
+        # noinspection PyTypeChecker
+        observed_correlations: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        is_slowing_correlated: NDArray[np.bool_] = np.zeros(cell_count, dtype=np.bool_)
 
         # Defines the pre-reward spatial window.
         window_start = self.reward_position - configuration.pre_reward_window
         window_end = self.reward_position
-        pre_reward_bin_edges = np.arange(
+        # noinspection PyTypeChecker
+        pre_reward_bin_edges: NDArray[np.float32] = np.arange(
             window_start, window_end + configuration.bin_size, configuration.bin_size, dtype=np.float32
         )
 
-        if len(pre_reward_bin_edges) - 1 < 2:
+        if len(pre_reward_bin_edges) - 1 < _MINIMUM_PRE_REWARD_BIN_COUNT:
             return observed_correlations, is_slowing_correlated
 
         # Identifies candidate neurons: reward-proximal and spatially significant.
@@ -735,18 +772,20 @@ class RewardCellDetector:
         if len(candidate_indices) == 0:
             return observed_correlations, is_slowing_correlated
 
-        unique_trials = np.unique(self.trial_ids)
+        # noinspection PyTypeChecker
+        unique_trials: NDArray[np.int32] = np.unique(self.trial_ids).astype(np.int32)
         trial_count = len(unique_trials)
 
         # Builds the shared per-trial speed matrix in the pre-reward window.
         speed_sums, speed_counts = self._bin_trials_in_pre_reward_window(
             signal=self.speed,
             unique_trials=unique_trials,
-            position_bin_edges=pre_reward_bin_edges,
+            bin_edges=pre_reward_bin_edges,
             window_start=window_start,
             window_end=window_end,
         )
-        valid_speed = speed_counts > 0
+        # noinspection PyTypeChecker
+        valid_speed: NDArray[np.bool_] = speed_counts > 0
         speed_sums[valid_speed] /= speed_counts[valid_speed]
         speed_flat = speed_sums.flatten()
 
@@ -755,7 +794,7 @@ class RewardCellDetector:
             activity_sums, activity_counts = self._bin_trials_in_pre_reward_window(
                 signal=self.fluorescence[neuron_index],
                 unique_trials=unique_trials,
-                position_bin_edges=pre_reward_bin_edges,
+                bin_edges=pre_reward_bin_edges,
                 window_start=window_start,
                 window_end=window_end,
             )
@@ -766,13 +805,15 @@ class RewardCellDetector:
                 continue
 
             # Converts activity sums to means.
-            valid_activity = activity_counts > 0
+            # noinspection PyTypeChecker
+            valid_activity: NDArray[np.bool_] = activity_counts > 0
             activity_sums[valid_activity] /= activity_counts[valid_activity]
             activity_flat = activity_sums.flatten()
 
             # Selects entries where both speed and activity have data.
-            valid_mask = (speed_flat != 0) & (activity_flat != 0)
-            if np.sum(valid_mask) < 3:
+            # noinspection PyTypeChecker
+            valid_mask: NDArray[np.bool_] = (speed_flat != 0) & (activity_flat != 0)
+            if np.sum(valid_mask) < _MINIMUM_VALID_SAMPLE_COUNT:
                 continue
 
             speed_valid = speed_flat[valid_mask]
@@ -782,7 +823,8 @@ class RewardCellDetector:
             observed_correlations[neuron_index] = observed_correlation
 
             # Generates shuffle distribution by permuting trial labels of the activity matrix.
-            shuffle_correlations = np.zeros(configuration.slowing_shuffle_count, dtype=np.float32)
+            # noinspection PyTypeChecker
+            shuffle_correlations: NDArray[np.float32] = np.zeros(configuration.slowing_shuffle_count, dtype=np.float32)
             for shuffle_index in range(configuration.slowing_shuffle_count):
                 random_generator = np.random.default_rng(seed=shuffle_index)
                 permuted_flat = activity_sums[random_generator.permutation(trial_count)].flatten()
@@ -822,12 +864,17 @@ class RewardCellDetector:
         figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
 
         # Plots the histogram of COM positions for spatially significant neurons.
-        hist_bins = np.linspace(0, self.track_length, bin_count + 1)
-        axes.hist(valid_centers, bins=hist_bins, color="0.7", edgecolor="0.5", density=True, label="Observed COMs")
+        # noinspection PyTypeChecker
+        hist_bins: NDArray[np.float64] = np.linspace(0, self.track_length, bin_count + 1)
+        axes.hist(
+            valid_centers, bins=hist_bins.tolist(), color="0.7", edgecolor="0.5", density=True, label="Observed COMs"
+        )
 
         # Overlays the fitted mixture model components.
-        positions = np.linspace(0, self.track_length, 200)
-        uniform_density = np.full_like(positions, 1.0 / self.track_length)
+        # noinspection PyTypeChecker
+        positions: NDArray[np.float64] = np.linspace(0, self.track_length, 200)
+        # noinspection PyTypeChecker
+        uniform_density: NDArray[np.float64] = np.full_like(positions, 1.0 / self.track_length)
         gaussian_density = np.exp(-0.5 * ((positions - results.gaussian_mean) / results.gaussian_std) ** 2) / (
             results.gaussian_std * np.sqrt(2.0 * np.pi)
         )
@@ -871,7 +918,7 @@ class RewardCellDetector:
             fontsize=7,
             verticalalignment="top",
             horizontalalignment="right",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "alpha": 0.8},
         )
 
         if title:
@@ -906,11 +953,15 @@ class RewardCellDetector:
         place_mask = significant_mask & ~results.is_reward_proximal
 
         # Recomputes rate maps at finer resolution for visualization.
-        speed_mask = self.speed > self.configuration.minimum_speed
+        # noinspection PyTypeChecker
+        speed_mask: NDArray[np.bool_] = self.speed > self.configuration.minimum_speed
         filtered_position = self.position[speed_mask]
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
-        plot_bin_edges = np.arange(0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32)
+        # noinspection PyTypeChecker
+        plot_bin_edges: NDArray[np.float32] = np.arange(
+            0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32
+        )
         plot_maps, _ = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
@@ -942,7 +993,8 @@ class RewardCellDetector:
             coms = spatial.centers_of_mass[mask]
 
             # Sorts neurons by their COM position along the track.
-            sort_order = np.argsort(coms)
+            # noinspection PyTypeChecker
+            sort_order: NDArray[np.int64] = np.argsort(coms)
             sorted_maps = maps[sort_order]
 
             # Normalizes each row to [0, 1] so that field structure is visible regardless of absolute rate.
@@ -972,7 +1024,7 @@ class RewardCellDetector:
 
         if title:
             figure.suptitle(title, fontsize=9)
-            figure.tight_layout(rect=[0, 0, 1, 0.96])
+            figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
         else:
             figure.tight_layout()
 
@@ -1002,11 +1054,15 @@ class RewardCellDetector:
         spatial = results.spatial_results
 
         # Recomputes rate maps at fine resolution.
-        speed_mask = self.speed > self.configuration.minimum_speed
+        # noinspection PyTypeChecker
+        speed_mask: NDArray[np.bool_] = self.speed > self.configuration.minimum_speed
         filtered_position = self.position[speed_mask]
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
-        plot_bin_edges = np.arange(0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32)
+        # noinspection PyTypeChecker
+        plot_bin_edges: NDArray[np.float32] = np.arange(
+            0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32
+        )
         plot_maps, _ = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
@@ -1112,14 +1168,20 @@ class RewardCellDetector:
             return figure
 
         # Bins speed by position across all samples.
-        bin_edges = np.arange(0, self.track_length + position_bin_size, position_bin_size, dtype=np.float32)
+        # noinspection PyTypeChecker
+        bin_edges: NDArray[np.float32] = np.arange(
+            0, self.track_length + position_bin_size, position_bin_size, dtype=np.float32
+        )
         bin_count = len(bin_edges) - 1
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
 
-        speed_sums = np.zeros(bin_count, dtype=np.float32)
-        speed_counts = np.zeros(bin_count, dtype=np.int32)
+        # noinspection PyTypeChecker
+        speed_sums: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        speed_counts: NDArray[np.int32] = np.zeros(bin_count, dtype=np.int32)
 
-        bin_indices = np.clip(
+        # noinspection PyTypeChecker
+        bin_indices: NDArray[np.int64] = np.clip(
             np.searchsorted(bin_edges, self.position, side="right") - 1,
             0,
             bin_count - 1,
@@ -1130,15 +1192,18 @@ class RewardCellDetector:
             speed_sums[bin_index] += self.speed[sample_index]
             speed_counts[bin_index] += 1
 
-        mean_speed = np.zeros(bin_count, dtype=np.float32)
-        valid = speed_counts > 0
+        # noinspection PyTypeChecker
+        mean_speed: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        valid: NDArray[np.bool_] = speed_counts > 0
         mean_speed[valid] = speed_sums[valid] / speed_counts[valid]
 
         sigma_bins = position_sigma / position_bin_size
         mean_speed = gaussian_filter1d(input=mean_speed, sigma=sigma_bins, mode="wrap")
 
         # Computes mean fluorescence for reward-predictive cells at the same resolution.
-        speed_mask = self.speed > self.configuration.minimum_speed
+        # noinspection PyTypeChecker
+        speed_mask: NDArray[np.bool_] = self.speed > self.configuration.minimum_speed
         filtered_position = self.position[speed_mask]
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
@@ -1248,9 +1313,13 @@ class RewardCellDetector:
         mid_distances = np.abs(place_coms - track_midpoint)
         best_place = place_indices[np.argmin(mid_distances)]
 
-        unique_trials = np.unique(self.trial_ids)
+        # noinspection PyTypeChecker
+        unique_trials: NDArray[np.int64] = np.unique(self.trial_ids)
         trial_count = len(unique_trials)
-        bin_edges = np.arange(0, self.track_length + position_bin_size, position_bin_size, dtype=np.float32)
+        # noinspection PyTypeChecker
+        bin_edges: NDArray[np.float32] = np.arange(
+            0, self.track_length + position_bin_size, position_bin_size, dtype=np.float32
+        )
         bin_count = len(bin_edges) - 1
         sigma_bins = position_sigma / position_bin_size
 
@@ -1273,29 +1342,40 @@ class RewardCellDetector:
         pre_reward_start = self.reward_position - self.configuration.pre_reward_window
 
         for axes, cell_index, label, colormap in cells:
-            activity_image = np.zeros((trial_count, bin_count), dtype=np.float32)
-            slowing_onsets = np.full(trial_count, np.nan, dtype=np.float32)
+            # noinspection PyTypeChecker
+            activity_image: NDArray[np.float32] = np.zeros((trial_count, bin_count), dtype=np.float32)
+            # noinspection PyTypeChecker
+            slowing_onsets: NDArray[np.float32] = np.full(trial_count, np.nan, dtype=np.float32)
 
             for trial_index, trial_id in enumerate(unique_trials):
-                trial_mask = self.trial_ids == trial_id
+                # noinspection PyTypeChecker
+                trial_mask: NDArray[np.bool_] = self.trial_ids == trial_id
                 trial_positions = self.position[trial_mask]
                 trial_speeds = self.speed[trial_mask]
                 trial_fluorescence = self.fluorescence[cell_index, trial_mask]
 
                 # Bins fluorescence by position using vectorized accumulation.
-                trial_bin_indices = np.clip(
+                # noinspection PyTypeChecker
+                trial_bin_indices: NDArray[np.int64] = np.clip(
                     np.searchsorted(bin_edges, trial_positions, side="right") - 1, 0, bin_count - 1
                 )
-                activity_sums = np.zeros(bin_count, dtype=np.float32)
-                activity_counts = np.zeros(bin_count, dtype=np.int32)
+                # noinspection PyTypeChecker
+                activity_sums: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+                # noinspection PyTypeChecker
+                activity_counts: NDArray[np.int32] = np.zeros(bin_count, dtype=np.int32)
                 np.add.at(activity_sums, trial_bin_indices, trial_fluorescence)
                 np.add.at(activity_counts, trial_bin_indices, 1)
-                valid = activity_counts > 0
+                # noinspection PyTypeChecker
+                valid: NDArray[np.bool_] = activity_counts > 0
                 activity_image[trial_index, valid] = activity_sums[valid] / activity_counts[valid]
 
                 # Detects slowing onset: first sample below threshold in the pre-reward window.
-                pre_reward = (trial_positions >= pre_reward_start) & (trial_positions < self.reward_position)
-                below = pre_reward & (trial_speeds < slowing_threshold_cm_s)
+                # noinspection PyTypeChecker
+                pre_reward: NDArray[np.bool_] = (trial_positions >= pre_reward_start) & (
+                    trial_positions < self.reward_position
+                )
+                # noinspection PyTypeChecker
+                below: NDArray[np.bool_] = pre_reward & (trial_speeds < slowing_threshold_cm_s)
                 if np.any(below):
                     slowing_onsets[trial_index] = trial_positions[below][0]
 
@@ -1318,7 +1398,8 @@ class RewardCellDetector:
             )
 
             # Overlays slowing onset markers.
-            onset_trials = np.argwhere(~np.isnan(slowing_onsets)).flatten()
+            # noinspection PyTypeChecker
+            onset_trials: NDArray[np.int64] = np.argwhere(~np.isnan(slowing_onsets)).flatten()
             for i, trial_index in enumerate(onset_trials):
                 onset_label = f"Slowing onset (<{slowing_threshold_cm_s:.0f} cm/s)" if i == 0 else None
                 axes.plot(
@@ -1345,7 +1426,7 @@ class RewardCellDetector:
 
         if title:
             figure.suptitle(title, fontsize=9)
-            figure.tight_layout(rect=[0, 0, 1, 0.96])
+            figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
         else:
             figure.tight_layout()
 
