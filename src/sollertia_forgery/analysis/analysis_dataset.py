@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from .utilities import compute_track_length, compute_stimulus_zone_center
+from ..forging import TRIAL_GEOMETRY_FILENAME, TrialGeometry
 from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
@@ -290,6 +290,20 @@ def _reconstruct_place_fields(analysis_path: Path, track_length: float) -> Place
     )
 
 
+def _get_track_length(session_path: Path, trial_type: str) -> float:
+    """Returns the canonical track length for the given trial type read from the session's trial_geometry.yaml file.
+
+    Args:
+        session_path: Path to the session's data.feather file.
+        trial_type: Trial type name to look up in the trial geometry sidecar.
+
+    Returns:
+        Canonical track length in centimeters.
+    """
+    geometry = TrialGeometry.from_yaml(file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
+    return geometry.entries[trial_type].trial_length_cm
+
+
 def _resolve_output_path(session_path: Path, output_directory: Path | None) -> Path:
     """Resolves the output feather file path for a given session.
 
@@ -316,7 +330,7 @@ def generate_place_field_dataframe(
 
     Args:
         session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Computed automatically from the session file if None.
+        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
         output_directory: Directory to save the analysis feather file. Defaults to the session file's directory.
         fluorescence_column: Name of the fluorescence column to read from the feather file.
         trial_type: Trial type to analyze.
@@ -327,8 +341,8 @@ def generate_place_field_dataframe(
         binned fluorescence.
     """
     if track_length is None:
-        track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Computed track length: {track_length} cm.", level=LogLevel.INFO)
+        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
+        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
 
     # Runs the place field detection pipeline.
     console.echo(message="Running place field detection...", level=LogLevel.INFO)
@@ -401,7 +415,7 @@ def append_reward_cell_columns(
 
     Args:
         session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Computed automatically from the session file if None.
+        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
         output_directory: Directory containing the analysis feather file. Defaults to the session file's directory.
         fluorescence_column: Name of the fluorescence column to read from the feather file.
         trial_type: Trial type to analyze.
@@ -417,15 +431,19 @@ def append_reward_cell_columns(
     is_place_row = dataframe["is_place"].to_numpy()
 
     if track_length is None:
-        track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Computed track length: {track_length} cm.", level=LogLevel.INFO)
+        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
+        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
 
-    # Runs the reward cell detection pipeline.
+    # Runs the reward cell detection pipeline. The reward position is the center of the lick-active reward zone,
+    # used as the representative position for reward-cell analysis since water is delivered wherever in the zone the
+    # animal happens to lick (no single delivery point exists).
     console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
-    reward_position = compute_stimulus_zone_center(
-        session_path=session_path,
-        trial_type=trial_type,
-    )
+    geometry_entry = TrialGeometry.from_yaml(
+        file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME)
+    ).entries[trial_type]
+    reward_position = (
+        geometry_entry.stimulus_trigger_zone_start_cm + geometry_entry.stimulus_trigger_zone_end_cm
+    ) / 2.0
     reward_detector = RewardCellDetector(
         session_path=session_path,
         track_length=track_length,
@@ -474,7 +492,7 @@ def append_sce_columns(
 
     Args:
         session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Computed automatically from the session file if None.
+        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
         output_directory: Directory containing the analysis feather file. Defaults to the session file's directory.
         fluorescence_column: Name of the fluorescence column to read from the feather file.
         trial_type: Trial type to analyze.
@@ -490,8 +508,8 @@ def append_sce_columns(
     cell_count = len(dataframe)
 
     if track_length is None:
-        track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Computed track length: {track_length} cm.", level=LogLevel.INFO)
+        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
+        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
 
     # Reconstructs place fields from the feather data for run-period masking during SCE detection.
     console.echo(message="Reconstructing place fields from feather...", level=LogLevel.INFO)
@@ -547,7 +565,7 @@ def generate_analysis_dataframe(
 
     Args:
         session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Computed automatically from the session file if None.
+        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
         output_directory: Directory to save the analysis feather file. Defaults to the session file's directory.
         fluorescence_column: Name of the fluorescence column to read from the feather file.
         trial_type: Trial type to analyze.
@@ -559,8 +577,8 @@ def generate_analysis_dataframe(
         A polars DataFrame with one row per place field and columns for place field, reward cell, and SCE metrics.
     """
     if track_length is None:
-        track_length = compute_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Computed track length: {track_length} cm.", level=LogLevel.INFO)
+        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
+        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
 
     generate_place_field_dataframe(
         session_path=session_path,

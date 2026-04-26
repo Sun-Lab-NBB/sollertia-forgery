@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
-from sollertia_forgery.analysis.utilities import compute_canonical_position
+from sollertia_forgery.analysis.utilities import compute_within_trial_position
 from sollertia_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
 
 
@@ -421,14 +421,14 @@ class RewardCellDetector:
         if trial_type is not None:
             df = df.filter(pl.col("trial_type") == trial_type)
 
-        # Extracts per-frame data, computes canonical position, then drops frames belonging to incomplete trials
+        # Extracts per-frame data, computes within-trial position, then drops frames belonging to incomplete trials
         # in lockstep across all per-frame arrays so downstream binning never sees NaN positions.
         fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
         distance = df["distance_cm"].to_numpy().astype(np.float32)
         trial_ids = df["trial"].to_numpy().astype(np.int32)
         speed = df["speed_cm_s"].to_numpy().astype(np.float32)
-        position = compute_canonical_position(
-            distance=distance, trial_ids=trial_ids, canonical_track_length=track_length
+        position = compute_within_trial_position(
+            distance=distance, trial_ids=trial_ids, track_length=track_length
         )
         valid = ~np.isnan(position)
 

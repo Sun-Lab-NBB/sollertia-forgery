@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
-from .utilities import compute_canonical_position
+from .utilities import compute_within_trial_position
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -496,12 +496,12 @@ class SCEDetector:
         self._fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
         self._torque = df["torque_N_cm"].to_numpy()
 
-        # Precomputes the canonical per-trial position once so per-period slicing matches the rest of the analysis
+        # Precomputes the within-trial position once so per-period slicing matches the rest of the analysis
         # surface. Replaces the prior modulo-based wrap that drifted with per-lap encoder noise.
         distance = df["distance_cm"].to_numpy().astype(np.float32)
         trial_ids = df["trial"].to_numpy().astype(np.int32)
-        self._position = compute_canonical_position(
-            distance=distance, trial_ids=trial_ids, canonical_track_length=track_length
+        self._position = compute_within_trial_position(
+            distance=distance, trial_ids=trial_ids, track_length=track_length
         )
 
         self._track_length: float = track_length
