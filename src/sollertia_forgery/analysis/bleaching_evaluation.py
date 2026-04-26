@@ -1,15 +1,15 @@
 """Quantifies photobleaching across a chronologically ordered set of two-photon imaging sessions for the same animal.
 
-Implements the canonical three-metric protocol for chronic GCaMP imaging: per-cell session-median baseline F0
-trend across days fit to a single exponential, within-session bleaching slope, and per-cell signal-to-noise change
-on the multi-recording registered cell intersection. Per-step methodological references are attached to the
-top-level functions that implement each step.
+Implements the canonical three-metric protocol for chronic GCaMP imaging: per-cell session-median baseline
+fluorescence (estimated as a low percentile of the raw trace within a baseline window) trend across days fit to a
+single exponential, within-session bleaching slope, and per-cell signal-to-noise change on the multi-recording
+registered cell intersection. Per-step methodological references are attached to the top-level functions that
+implement each step.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from datetime import datetime
 from itertools import pairwise
 from dataclasses import dataclass
 
@@ -17,6 +17,7 @@ from numba import njit, prange
 import numpy as np
 import polars as pl
 from scipy.stats import wilcoxon
+from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp, interval_to_rate
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
 from ataraxis_base_utilities import LogLevel, console
@@ -29,47 +30,52 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-_MICROSECONDS_PER_SECOND: float = 1.0e6
-"""Conversion factor between microsecond timestamps and seconds."""
-_SECONDS_PER_DAY: float = 86400.0
-"""Conversion factor between seconds and days."""
 _MAD_TO_STD_SCALE: np.float32 = np.float32(1.4826)
 """Scaling that maps the median absolute deviation of Gaussian noise to its standard deviation."""
-_SESSION_NAME_FIELD_COUNT: int = 7
-"""Number of dash-separated fields produced by the canonical session timestamp format."""
 _MINIMUM_SESSIONS_FOR_DECAY_FIT: int = 3
 """Minimum number of sessions required to fit a single-exponential decay model."""
 _MINIMUM_SESSIONS_FOR_EVALUATION: int = 2
 """Minimum number of sessions required to evaluate any across-session bleaching metric."""
 _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE: int = 2
 """Minimum number of timestamp samples required to estimate the inter-sample sampling rate."""
+_SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
+"""``strptime`` format string for the canonical session-directory timestamp."""
 
 
 @dataclass(frozen=True, slots=True)
 class BleachingConfiguration:
     """Defines configuration parameters for the chronic photobleaching evaluation protocol."""
 
-    baseline_percentile: float = 8.0
-    """Per-cell baseline percentile applied within each non-overlapping baseline window. Suite2p convention is the 8th
-    percentile, which is robust to large transients while still tracking slow drift."""
-    baseline_window_seconds: float = 60.0
-    """Width of each non-overlapping baseline window in seconds. Suite2p default for chronic imaging is 60 seconds."""
-    within_session_bin_seconds: float = 10.0
-    """Bin width in seconds for the within-session bleaching trace. Coarser bins suppress transient leakage into the
-    baseline estimate."""
-    snr_signal_percentile: float = 95.0
-    """Percentile of the detrended trace treated as the per-cell event amplitude when computing SNR."""
-    f0_loss_threshold: float = 0.30
-    """Fractional drop in median across-session F0 (relative to the first session) above which a session is flagged
-    as chronically bleached."""
+    baseline_percentile: int = 8
+    """Per-cell percentile (0-100) of the fluorescence values within each baseline window taken as the baseline
+    fluorescence. Low percentiles approximate the resting trace below transient calcium events; the percentile is
+    reused for the across-session trend and for detrending the trace prior to the SNR estimate."""
+    cell_baseline_window_seconds: int = 60
+    """Width of each non-overlapping window in seconds over which ``baseline_percentile`` is evaluated per cell to
+    produce the per-cell baseline fluorescence trace used for the across-session trend and for SNR detrending."""
+    session_baseline_window_seconds: int = 10
+    """Width of each non-overlapping window in seconds over which ``baseline_percentile`` is evaluated on the FOV-mean
+    trace (fluorescence averaged across all cells first) to produce the within-session baseline curve used to quantify
+    acute, single-session bleaching."""
+    snr_signal_percentile: int = 95
+    """Per-cell percentile (0-100) of the detrended trace (raw minus baseline) treated as the typical calcium-event
+    amplitude — the upper-tail counterpart to ``baseline_percentile`` and the SNR numerator. The denominator is the
+    median absolute deviation (MAD) of the same trace as a transient-robust noise floor; ``snr_loss_threshold`` and
+    ``snr_significance_threshold`` use the resulting SNR to flag sessions where events lose contrast against the
+    noise."""
+    baseline_fluorescence_loss_threshold: float = 0.30
+    """Fractional drop in population-median baseline fluorescence from the first session above which the session 
+    is flagged as chronically bleached."""
     within_session_loss_threshold: float = 0.20
-    """Fractional drop in within-session FOV-mean baseline (start to end of session) above which a session is flagged
-    as acutely bleaching."""
+    """Fractional drop in the within-session FOV-mean baseline from the first to the last bin above which the session
+    is flagged as acutely bleaching within itself."""
     snr_loss_threshold: float = 0.30
-    """Fractional drop in median per-cell SNR (relative to the first session) above which a session is flagged when
-    accompanied by a significant Wilcoxon test."""
+    """Fractional drop in population-median per-cell SNR (transient amplitude over noise floor) from the first session
+    above which the session is flagged, provided the paired Wilcoxon comparison is also significant at
+    ``snr_significance_threshold``."""
     snr_significance_threshold: float = 0.01
-    """P-value threshold for the paired Wilcoxon test comparing per-cell SNR distributions to the first session."""
+    """Significance level for the paired Wilcoxon signed-rank test comparing each session's per-cell SNR distribution
+    to the first session, applied alongside ``snr_loss_threshold`` as the second criterion for SNR-based flagging."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +89,7 @@ class SessionBleachingMetrics:
     session timestamp."""
     sampling_rate_hz: float
     """Effective fluorescence sampling rate in Hz, derived from the median inter-sample period in the session."""
-    cell_baseline_f0: NDArray[np.float32]
+    cell_baseline_fluorescence: NDArray[np.float32]
     """Per-cell session-median baseline fluorescence with length cell_count, computed as the median over time of
     the per-bin baseline percentile."""
     cell_snr: NDArray[np.float32]
@@ -100,7 +106,9 @@ class SessionBleachingMetrics:
 
 @dataclass(frozen=True, slots=True)
 class ExponentialDecayFit:
-    """Stores the result of fitting ``F0(d) = amplitude * exp(-d / tau_days) + offset`` to per-session F0."""
+    """Stores the result of fitting ``amplitude * exp(-d / tau_days) + offset`` (with ``d`` in days since the first
+    session) to the per-session population-median baseline fluorescence.
+    """
 
     amplitude: float
     """Decaying-component amplitude in raw fluorescence units."""
@@ -121,13 +129,15 @@ class BleachingReport:
     """Per-session metrics in the chronological order they were supplied."""
     cell_count: int
     """Number of registered cells common to every session in the evaluation set."""
-    f0_population_trend: NDArray[np.float32]
-    """Population-median per-session F0 with length session_count, computed across the registered cell intersection."""
-    f0_decay_fit: ExponentialDecayFit
-    """Single-exponential decay fit applied to ``f0_population_trend`` versus ``days_since_first``."""
-    f0_fractional_loss: float
-    """Fractional drop of the last session's population-median F0 relative to the first session
-    ``(F0_first - F0_last) / F0_first``."""
+    baseline_fluorescence_population_trend: NDArray[np.float32]
+    """Population-median per-session baseline fluorescence with length session_count, computed across the registered
+    cell intersection."""
+    baseline_fluorescence_decay_fit: ExponentialDecayFit
+    """Single-exponential decay fit applied to ``baseline_fluorescence_population_trend`` versus
+    ``days_since_first``."""
+    baseline_fluorescence_fractional_loss: float
+    """Fractional drop of the last session's population-median baseline fluorescence relative to the first session,
+    computed as ``(first - last) / first``."""
     snr_population_trend: NDArray[np.float32]
     """Population-median per-session SNR with length session_count."""
     snr_paired_p_values: NDArray[np.float64]
@@ -139,10 +149,11 @@ class BleachingReport:
     """The configuration used to produce the report."""
 
     def plot_baseline_trend(self) -> plt.Figure:
-        """Plots the population-median per-session F0 trend, the exponential fit, and per-cell baseline distributions.
+        """Plots the population-median per-session baseline fluorescence trend, the exponential fit, and per-cell
+        baseline fluorescence distributions.
 
         Returns:
-            A matplotlib Figure showing the across-session F0 trend.
+            A matplotlib Figure showing the across-session baseline fluorescence trend.
         """
         figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
 
@@ -154,20 +165,28 @@ class BleachingReport:
         box_width = 0.4 * max(minimum_day_step, 0.1)
 
         # Draws the per-cell distributions as boxplots so the population spread is visible alongside the median trend.
-        boxplot_data = [session.cell_baseline_f0 for session in self.sessions]
+        boxplot_data = [session.cell_baseline_fluorescence for session in self.sessions]
         axes.boxplot(boxplot_data, positions=days, widths=box_width, showfliers=False)
 
         # Overlays the population-median trend used for the exponential fit.
-        axes.plot(days, self.f0_population_trend, marker="o", color="tab:blue", linewidth=1.5, label="Median F0")
+        axes.plot(
+            days,
+            self.baseline_fluorescence_population_trend,
+            marker="o",
+            color="tab:blue",
+            linewidth=1.5,
+            label="Population median",
+        )
 
         # Draws the fitted exponential when the fit converged.
-        if self.f0_decay_fit.fit_succeeded:
+        if self.baseline_fluorescence_decay_fit.fit_succeeded:
             # noinspection PyTypeChecker
             dense_days: NDArray[np.float32] = np.linspace(days.min(), days.max(), num=200, dtype=np.float32)
             # noinspection PyTypeChecker
             fit_curve: NDArray[np.float32] = (
-                self.f0_decay_fit.amplitude * np.exp(-dense_days / self.f0_decay_fit.tau_days)
-                + self.f0_decay_fit.offset
+                self.baseline_fluorescence_decay_fit.amplitude
+                * np.exp(-dense_days / self.baseline_fluorescence_decay_fit.tau_days)
+                + self.baseline_fluorescence_decay_fit.offset
             )
             axes.plot(
                 dense_days,
@@ -175,12 +194,15 @@ class BleachingReport:
                 color="tab:red",
                 linestyle="--",
                 linewidth=1.0,
-                label=f"Exp fit (tau = {self.f0_decay_fit.tau_days:.1f} d)",
+                label=f"Exp fit (tau = {self.baseline_fluorescence_decay_fit.tau_days:.1f} d)",
             )
 
         axes.set_xlabel("Days since first session")
-        axes.set_ylabel("Baseline fluorescence F0 (a.u.)")
-        axes.set_title(f"Across-session F0 trend (n={self.cell_count} registered cells)", fontsize=10)
+        axes.set_ylabel("Baseline fluorescence (a.u.)")
+        axes.set_title(
+            f"Across-session baseline fluorescence trend (n={self.cell_count} registered cells)",
+            fontsize=10,
+        )
         axes.legend(loc="best", fontsize=8)
         figure.tight_layout()
         return figure
@@ -276,8 +298,8 @@ def evaluate_bleaching(
         configuration: Bleaching evaluation parameters. Uses defaults if None.
 
     Returns:
-        A BleachingReport containing per-session metrics, the across-session F0 decay fit, paired SNR Wilcoxon
-        results, and the list of sessions that exceeded any threshold.
+        A BleachingReport containing per-session metrics, the across-session baseline fluorescence decay fit, paired
+        SNR Wilcoxon results, and the list of sessions that exceeded any threshold.
     """
     # Resolves the optional configuration into a non-None local with an explicit type so PyCharm narrows the type
     # downstream; the parameter itself stays Optional for the public signature.
@@ -302,12 +324,20 @@ def evaluate_bleaching(
         )
         console.error(message=message, error=ValueError)
 
-    session_dates = tuple(_parse_session_date(session_path=path) for path in session_paths)
-    _validate_chronological_order(session_paths=session_paths, session_dates=session_dates)
+    session_microseconds = tuple(_parse_session_microseconds(session_path=path) for path in session_paths)
+    _validate_chronological_order(session_paths=session_paths, session_microseconds=session_microseconds)
 
-    first_date = session_dates[0]
+    first_microseconds = session_microseconds[0]
     days_since_first_list = [
-        (session_date - first_date).total_seconds() / _SECONDS_PER_DAY for session_date in session_dates
+        float(
+            convert_time(
+                time=session_us - first_microseconds,
+                from_units=TimeUnits.MICROSECOND,
+                to_units=TimeUnits.DAY,
+                as_float=True,
+            )
+        )
+        for session_us in session_microseconds
     ]
 
     # Processes sessions sequentially so the per-cell numba kernels can use every available core for one session at
@@ -315,33 +345,33 @@ def evaluate_bleaching(
     # threads, while also blocking progress reporting until every session finished.
     session_count = len(session_paths)
     metrics: list[SessionBleachingMetrics] = []
-    for index, (session_path, days_since_first) in enumerate(
-        zip(session_paths, days_since_first_list, strict=True),
-    ):
-        console.echo(
-            message=f"Evaluating bleaching for session {index + 1}/{session_count}: {session_path.name}",
-            level=LogLevel.INFO,
-        )
-        session_metrics = _compute_session_metrics(
-            session_path=session_path,
-            fluorescence_column=fluorescence_column,
-            days_since_first=days_since_first,
-            configuration=resolved_configuration,
-        )
-        metrics.append(session_metrics)
-        console.echo(
-            message=(
-                f"  session {index + 1}/{session_count} done: "
-                f"cells={session_metrics.cell_baseline_f0.shape[0]}, "
-                f"sampling_rate={session_metrics.sampling_rate_hz:.2f} Hz, "
-                f"within-session drop={session_metrics.within_session_fractional_drop:.1%}"
-            ),
-            level=LogLevel.INFO,
-        )
+    with console.progress(
+        total=session_count,
+        description="Evaluating bleaching",
+        unit="session",
+    ) as progress_bar:
+        for session_path, days_since_first in zip(session_paths, days_since_first_list, strict=True):
+            session_metrics = _compute_session_metrics(
+                session_path=session_path,
+                fluorescence_column=fluorescence_column,
+                days_since_first=days_since_first,
+                configuration=resolved_configuration,
+            )
+            metrics.append(session_metrics)
+            console.echo(
+                message=(
+                    f"  {session_path.name}: "
+                    f"cells={session_metrics.cell_baseline_fluorescence.shape[0]}, "
+                    f"sampling_rate={session_metrics.sampling_rate_hz:.2f} Hz, "
+                    f"within-session drop={session_metrics.within_session_fractional_drop:.1%}"
+                ),
+                level=LogLevel.INFO,
+            )
+            progress_bar.update()
 
-    cell_count_reference = int(metrics[0].cell_baseline_f0.shape[0])
+    cell_count_reference = int(metrics[0].cell_baseline_fluorescence.shape[0])
     for session_metrics in metrics[1:]:
-        other_count = int(session_metrics.cell_baseline_f0.shape[0])
+        other_count = int(session_metrics.cell_baseline_fluorescence.shape[0])
         if other_count != cell_count_reference:
             message = (
                 f"Unable to evaluate bleaching across the supplied sessions. The cell count must match across all "
@@ -354,8 +384,8 @@ def evaluate_bleaching(
     metrics_tuple = tuple(metrics)
 
     # noinspection PyTypeChecker
-    f0_population_trend: NDArray[np.float32] = np.fromiter(
-        (np.median(session.cell_baseline_f0) for session in metrics_tuple),
+    baseline_fluorescence_population_trend: NDArray[np.float32] = np.fromiter(
+        (np.median(session.cell_baseline_fluorescence) for session in metrics_tuple),
         dtype=np.float32,
         count=len(metrics_tuple),
     )
@@ -365,9 +395,12 @@ def evaluate_bleaching(
         dtype=np.float32,
         count=len(metrics_tuple),
     )
-    decay_fit = _fit_exponential_decay(days=days_array, baseline=f0_population_trend)
+    decay_fit = _fit_exponential_decay(days=days_array, baseline=baseline_fluorescence_population_trend)
 
-    f0_fractional_loss = float((f0_population_trend[0] - f0_population_trend[-1]) / f0_population_trend[0])
+    baseline_fluorescence_fractional_loss = float(
+        (baseline_fluorescence_population_trend[0] - baseline_fluorescence_population_trend[-1])
+        / baseline_fluorescence_population_trend[0]
+    )
 
     # noinspection PyTypeChecker
     snr_population_trend: NDArray[np.float32] = np.fromiter(
@@ -379,7 +412,7 @@ def evaluate_bleaching(
 
     flagged_sessions = _flag_sessions(
         metrics=metrics_tuple,
-        f0_population_trend=f0_population_trend,
+        baseline_fluorescence_population_trend=baseline_fluorescence_population_trend,
         snr_population_trend=snr_population_trend,
         snr_paired_p_values=snr_paired_p_values,
         configuration=resolved_configuration,
@@ -388,9 +421,9 @@ def evaluate_bleaching(
     return BleachingReport(
         sessions=metrics_tuple,
         cell_count=cell_count_reference,
-        f0_population_trend=f0_population_trend,
-        f0_decay_fit=decay_fit,
-        f0_fractional_loss=f0_fractional_loss,
+        baseline_fluorescence_population_trend=baseline_fluorescence_population_trend,
+        baseline_fluorescence_decay_fit=decay_fit,
+        baseline_fluorescence_fractional_loss=baseline_fluorescence_fractional_loss,
         snr_population_trend=snr_population_trend,
         snr_paired_p_values=snr_paired_p_values,
         flagged_sessions=flagged_sessions,
@@ -398,46 +431,42 @@ def evaluate_bleaching(
     )
 
 
-def _parse_session_date(session_path: Path) -> datetime:
-    """Parses the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session-directory name into a datetime instance.
+def _parse_session_microseconds(session_path: Path) -> int:
+    """Parses the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session-directory name into UTC microseconds.
 
     Args:
         session_path: Path whose final component encodes the session timestamp in the canonical dash-separated format.
 
     Returns:
-        A datetime built from the parsed year, month, day, hour, minute, second, and microsecond fields.
+        Microseconds elapsed since the UTC epoch corresponding to the session timestamp.
     """
-    parts = session_path.name.split("-")
-    if len(parts) < _SESSION_NAME_FIELD_COUNT:
+    try:
+        microseconds = parse_timestamp(
+            date_string=session_path.name,
+            format_string=_SESSION_TIMESTAMP_FORMAT,
+            output_format=TimestampFormats.INTEGER,
+        )
+    except ValueError:
         message = (
             f"Unable to parse the session timestamp from path {str(session_path)!r}. The session directory name must "
             f"follow the 'YYYY-MM-DD-HH-MM-SS-microseconds' format, but got {session_path.name!r}."
         )
         console.error(message=message, error=ValueError)
-    year, month, day, hour, minute, second, microsecond = parts[:_SESSION_NAME_FIELD_COUNT]
-    return datetime(  # noqa: DTZ001
-        year=int(year),
-        month=int(month),
-        day=int(day),
-        hour=int(hour),
-        minute=int(minute),
-        second=int(second),
-        microsecond=int(microsecond),
-    )
+    return int(microseconds)
 
 
 def _validate_chronological_order(
     session_paths: tuple[Path, ...],
-    session_dates: tuple[datetime, ...],
+    session_microseconds: tuple[int, ...],
 ) -> None:
-    """Verifies that the supplied session dates are non-decreasing, which the across-session metrics assume.
+    """Verifies that the supplied session timestamps are non-decreasing, which the across-session metrics assume.
 
     Args:
         session_paths: Session directory paths in the order they were supplied; used in the error message.
-        session_dates: Parsed session timestamps in the same order as ``session_paths``.
+        session_microseconds: Parsed session timestamps as UTC microseconds, in the same order as ``session_paths``.
     """
-    for previous_index, (previous_date, current_date) in enumerate(pairwise(session_dates)):
-        if current_date < previous_date:
+    for previous_index, (previous_us, current_us) in enumerate(pairwise(session_microseconds)):
+        if current_us < previous_us:
             current_index = previous_index + 1
             message = (
                 f"Unable to evaluate bleaching across the supplied sessions. The session paths must be sorted in "
@@ -472,18 +501,18 @@ def _compute_session_metrics(
     fluorescence, time_us = raw_session
     sampling_rate_hz = _estimate_sampling_rate_hz(time_us=time_us)
 
-    baseline_window_samples = max(round(configuration.baseline_window_seconds * sampling_rate_hz), 1)
+    baseline_window_samples = max(round(configuration.cell_baseline_window_seconds * sampling_rate_hz), 1)
     cell_count = fluorescence.shape[0]
     bin_count = fluorescence.shape[1] // baseline_window_samples
 
     # Declares the array locals up front with explicit fp32 types so PyCharm narrows the dataclass-constructor call
     # below regardless of which branch produced them.
-    cell_baseline_f0: NDArray[np.float32]
+    cell_baseline_fluorescence: NDArray[np.float32]
     cell_snr: NDArray[np.float32]
 
     if bin_count == 0:
         # noinspection PyTypeChecker
-        cell_baseline_f0 = np.full(cell_count, np.nan, dtype=np.float32)
+        cell_baseline_fluorescence = np.full(cell_count, np.nan, dtype=np.float32)
         # noinspection PyTypeChecker
         cell_snr = np.zeros(cell_count, dtype=np.float32)
     else:
@@ -494,9 +523,9 @@ def _compute_session_metrics(
             percentile=configuration.baseline_percentile,
         )
         # noinspection PyTypeChecker
-        cell_baseline_f0 = np.empty(cell_count, dtype=np.float32)
+        cell_baseline_fluorescence = np.empty(cell_count, dtype=np.float32)
         # noinspection PyTypeChecker
-        _per_cell_median_along_axis1(matrix=binned_baseline, output=cell_baseline_f0)
+        _per_cell_median_along_axis1(matrix=binned_baseline, output=cell_baseline_fluorescence)
         # noinspection PyTypeChecker
         cell_snr = _compute_cell_snr(
             fluorescence=fluorescence,
@@ -505,7 +534,7 @@ def _compute_session_metrics(
             signal_percentile=configuration.snr_signal_percentile,
         )
 
-    within_session_bin_samples = max(round(configuration.within_session_bin_seconds * sampling_rate_hz), 1)
+    within_session_bin_samples = max(round(configuration.session_baseline_window_seconds * sampling_rate_hz), 1)
     # Routes through an annotated local so PyCharm narrows the unpacked elements to the declared fp32 NDArray pair.
     within_session_result: tuple[NDArray[np.float32], NDArray[np.float32]] = _compute_within_session_baseline(
         fluorescence=fluorescence,
@@ -526,7 +555,7 @@ def _compute_session_metrics(
         session_path=session_path,
         days_since_first=days_since_first,
         sampling_rate_hz=sampling_rate_hz,
-        cell_baseline_f0=cell_baseline_f0,
+        cell_baseline_fluorescence=cell_baseline_fluorescence,
         cell_snr=cell_snr,
         within_session_time_seconds=within_session_time_seconds,
         within_session_baseline=within_session_baseline,
@@ -596,13 +625,13 @@ def _estimate_sampling_rate_hz(time_us: NDArray[np.int64]) -> float:
     median_delta_us = float(np.median(deltas_us))
     if median_delta_us <= 0:
         return float("nan")
-    return _MICROSECONDS_PER_SECOND / median_delta_us
+    return float(interval_to_rate(interval=median_delta_us, from_units=TimeUnits.MICROSECOND, as_float=True))
 
 
 def _compute_binned_baseline(
     fluorescence: NDArray[np.float32],
     bin_size_samples: int,
-    percentile: float,
+    percentile: int,
 ) -> NDArray[np.float32]:
     """Computes a per-cell, per-bin percentile baseline using non-overlapping windows along the time axis.
 
@@ -649,7 +678,7 @@ def _compute_cell_snr(
     fluorescence: NDArray[np.float32],
     binned_baseline: NDArray[np.float32],
     bin_size_samples: int,
-    signal_percentile: float,
+    signal_percentile: int,
 ) -> NDArray[np.float32]:
     """Computes per-cell SNR by detrending the raw trace with the per-bin baseline.
 
@@ -706,7 +735,7 @@ def _compute_within_session_baseline(
     fluorescence: NDArray[np.float32],
     sampling_rate_hz: float,
     bin_size_samples: int,
-    percentile: float,
+    percentile: int,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Computes the within-session FOV-mean baseline percentile across non-overlapping time bins.
 
@@ -806,6 +835,7 @@ def _binned_percentile_kernel(
                 for scan_index in range(lower_index + 2, bin_size_samples):
                     # noinspection PyTypeChecker
                     upper_value = min(upper_value, scratch[scan_index])
+                # noinspection PyTypeChecker
                 output[cell_index, bin_index] = lower_value + weight * (upper_value - lower_value)
 
 
@@ -926,6 +956,7 @@ def _cell_snr_kernel(
             for scan_index in range(signal_lower_index + 2, sample_count):
                 # noinspection PyTypeChecker
                 upper_value = min(upper_value, scratch[scan_index])
+            # noinspection PyTypeChecker
             signal = signal_lower_value + signal_weight * (upper_value - signal_lower_value)
 
         # Reuses scratch for the absolute deviations from the detrended median, then quickselects the MAD.
@@ -1009,7 +1040,7 @@ def _fit_exponential_decay(
     days: NDArray[np.float32],
     baseline: NDArray[np.float32],
 ) -> ExponentialDecayFit:
-    """Fits ``F0(d) = amplitude * exp(-d / tau_days) + offset`` to per-session F0 across days.
+    """Fits ``amplitude * exp(-d / tau_days) + offset`` (with ``d`` in days) to the per-session baseline fluorescence.
 
     Notes:
         Returns a sentinel ExponentialDecayFit with ``fit_succeeded=False`` and NaN parameters when fewer than the
@@ -1018,7 +1049,7 @@ def _fit_exponential_decay(
 
     Args:
         days: Per-session day offsets relative to the first session.
-        baseline: Per-session population-median F0 values aligned with ``days``.
+        baseline: Per-session population-median baseline fluorescence values aligned with ``days``.
 
     Returns:
         An ExponentialDecayFit holding the fitted amplitude, tau, and offset, or the failure sentinel described
@@ -1111,16 +1142,17 @@ def _compute_paired_snr_p_values(metrics: tuple[SessionBleachingMetrics, ...]) -
 
 def _flag_sessions(
     metrics: tuple[SessionBleachingMetrics, ...],
-    f0_population_trend: NDArray[np.float32],
+    baseline_fluorescence_population_trend: NDArray[np.float32],
     snr_population_trend: NDArray[np.float32],
     snr_paired_p_values: NDArray[np.float64],
     configuration: BleachingConfiguration,
 ) -> tuple[Path, ...]:
-    """Selects sessions that violate any of the configured F0, within-session, or SNR thresholds.
+    """Selects sessions that violate any of the configured baseline-fluorescence, within-session, or SNR thresholds.
 
     Args:
         metrics: Per-session metrics in chronological order.
-        f0_population_trend: Population-median per-session F0 aligned with ``metrics``.
+        baseline_fluorescence_population_trend: Population-median per-session baseline fluorescence aligned with
+            ``metrics``.
         snr_population_trend: Population-median per-session SNR aligned with ``metrics``.
         snr_paired_p_values: Paired Wilcoxon p-values aligned with ``metrics``; the first entry is NaN.
         configuration: Bleaching evaluation parameters that supply the threshold values.
@@ -1129,15 +1161,20 @@ def _flag_sessions(
         Paths of every session that exceeded at least one configured threshold, in chronological order.
     """
     flagged: list[Path] = []
-    f0_reference = float(f0_population_trend[0])
+    baseline_fluorescence_reference = float(baseline_fluorescence_population_trend[0])
     snr_reference = float(snr_population_trend[0])
 
     for index, session in enumerate(metrics):
-        f0_loss = (f0_reference - float(f0_population_trend[index])) / f0_reference if f0_reference > 0 else 0.0
+        baseline_fluorescence_loss = (
+            (baseline_fluorescence_reference - float(baseline_fluorescence_population_trend[index]))
+            / baseline_fluorescence_reference
+            if baseline_fluorescence_reference > 0
+            else 0.0
+        )
         snr_loss = (snr_reference - float(snr_population_trend[index])) / snr_reference if snr_reference > 0 else 0.0
         snr_p_value = float(snr_paired_p_values[index])
 
-        f0_flagged = f0_loss > configuration.f0_loss_threshold
+        baseline_fluorescence_flagged = baseline_fluorescence_loss > configuration.baseline_fluorescence_loss_threshold
         within_flagged = (
             np.isfinite(session.within_session_fractional_drop)
             and session.within_session_fractional_drop > configuration.within_session_loss_threshold
@@ -1148,7 +1185,7 @@ def _flag_sessions(
             and snr_p_value < configuration.snr_significance_threshold
         )
 
-        if f0_flagged or within_flagged or snr_flagged:
+        if baseline_fluorescence_flagged or within_flagged or snr_flagged:
             flagged.append(session.session_path)
 
     return tuple(flagged)
