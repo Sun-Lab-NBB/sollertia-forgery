@@ -2,52 +2,24 @@
 
 Implements the canonical three-metric protocol for chronic GCaMP imaging: per-cell session-median baseline F0
 trend across days fit to a single exponential, within-session bleaching slope, and per-cell signal-to-noise change
-on the multi-recording registered cell intersection.
-
-References:
-    Suite2p baseline convention (8th-percentile baseline within a 60-second window):
-        Pachitariu et al. (2017). Suite2p: beyond 10,000 neurons with standard two-photon microscopy. bioRxiv.
-        https://doi.org/10.1101/061507
-    Multi-day registered cell intersection for longitudinal comparisons:
-        Ziv et al. (2013). Long-term dynamics of CA1 hippocampal place codes. Nature Neuroscience.
-        https://doi.org/10.1038/nn.3329
-        Rubin et al. (2015). Hippocampal ensemble dynamics timestamp events in long-term memory. eLife.
-        https://doi.org/10.7554/eLife.12247
-    Robust MAD-based noise estimation underlying the per-cell SNR computation:
-        Pnevmatikakis et al. (2016). Simultaneous denoising, deconvolution, and demixing of calcium imaging
-        data. Neuron. https://doi.org/10.1016/j.neuron.2015.11.037
-        Hampel (1974). The influence curve and its role in robust estimation. Journal of the American
-        Statistical Association. https://doi.org/10.2307/2285666
-    GCaMP signal-to-noise characterization informing the ~30% per-cell SNR degradation threshold:
-        Dana et al. (2019). High-performance calcium sensors for imaging activity in neuronal populations and
-        microcompartments. Nature Methods. https://doi.org/10.1038/s41592-019-0435-6
-        Zhang et al. (2023). Fast and sensitive GCaMP calcium indicators for imaging neural populations.
-        Nature. https://doi.org/10.1038/s41586-023-05828-9
-    Within-session bleaching control common to the Dombeck/Tank chronic-imaging lineage:
-        Sheffield & Dombeck (2015). Calcium transient prevalence across the dendritic arbour predicts place
-        field properties. Nature. https://doi.org/10.1038/nature14066
-        Driscoll et al. (2017). Dynamic reorganization of neuronal activity patterns in parietal cortex.
-        Cell. https://doi.org/10.1016/j.cell.2017.05.021
-    Standardized longitudinal-imaging quality-control framework that motivates the combined-flagging strategy:
-        de Vries et al. (2020). A large-scale standardized physiological survey reveals functional
-        organization of the mouse visual cortex. Nature Neuroscience.
-        https://doi.org/10.1038/s41593-019-0550-9
+on the multi-recording registered cell intersection. Per-step methodological references are attached to the
+top-level functions that implement each step.
 """
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 from datetime import datetime
+from itertools import pairwise
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
 
+from numba import njit, prange
 import numpy as np
 import polars as pl
 from scipy.stats import wilcoxon
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import LogLevel, console
 
 from ..forging import DATA_FILENAME, DatasetColumn
 
@@ -61,7 +33,7 @@ _MICROSECONDS_PER_SECOND: float = 1.0e6
 """Conversion factor between microsecond timestamps and seconds."""
 _SECONDS_PER_DAY: float = 86400.0
 """Conversion factor between seconds and days."""
-_MAD_TO_STD_SCALE: float = 1.4826
+_MAD_TO_STD_SCALE: np.float32 = np.float32(1.4826)
 """Scaling that maps the median absolute deviation of Gaussian noise to its standard deviation."""
 _SESSION_NAME_FIELD_COUNT: int = 7
 """Number of dash-separated fields produced by the canonical session timestamp format."""
@@ -71,8 +43,6 @@ _MINIMUM_SESSIONS_FOR_EVALUATION: int = 2
 """Minimum number of sessions required to evaluate any across-session bleaching metric."""
 _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE: int = 2
 """Minimum number of timestamp samples required to estimate the inter-sample sampling rate."""
-_WORKER_RESERVE: int = 4
-"""Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,10 +50,10 @@ class BleachingConfiguration:
     """Defines configuration parameters for the chronic photobleaching evaluation protocol."""
 
     baseline_percentile: float = 8.0
-    """Per-cell baseline percentile applied within each rolling baseline window. Suite2p convention is the 8th
+    """Per-cell baseline percentile applied within each non-overlapping baseline window. Suite2p convention is the 8th
     percentile, which is robust to large transients while still tracking slow drift."""
     baseline_window_seconds: float = 60.0
-    """Width of the rolling baseline window in seconds. Suite2p default for chronic imaging is 60 seconds."""
+    """Width of each non-overlapping baseline window in seconds. Suite2p default for chronic imaging is 60 seconds."""
     within_session_bin_seconds: float = 10.0
     """Bin width in seconds for the within-session bleaching trace. Coarser bins suppress transient leakage into the
     baseline estimate."""
@@ -91,7 +61,7 @@ class BleachingConfiguration:
     """Percentile of the detrended trace treated as the per-cell event amplitude when computing SNR."""
     f0_loss_threshold: float = 0.30
     """Fractional drop in median across-session F0 (relative to the first session) above which a session is flagged
-    as chronically bleached. Aligned with the GENIE/Janelia GCaMP characterization papers."""
+    as chronically bleached."""
     within_session_loss_threshold: float = 0.20
     """Fractional drop in within-session FOV-mean baseline (start to end of session) above which a session is flagged
     as acutely bleaching."""
@@ -115,7 +85,7 @@ class SessionBleachingMetrics:
     """Effective fluorescence sampling rate in Hz, derived from the median inter-sample period in the session."""
     cell_baseline_f0: NDArray[np.float32]
     """Per-cell session-median baseline fluorescence with length cell_count, computed as the median over time of
-    the rolling-window baseline percentile."""
+    the per-bin baseline percentile."""
     cell_snr: NDArray[np.float32]
     """Per-cell signal-to-noise ratio with length cell_count, computed as the configured signal percentile of the
     detrended trace divided by the robust noise standard deviation."""
@@ -140,7 +110,7 @@ class ExponentialDecayFit:
     offset: float
     """Asymptotic baseline component in raw fluorescence units."""
     fit_succeeded: bool
-    """Whether scipy.optimize.curve_fit converged on a finite, in-bounds solution."""
+    """Determines whether scipy.optimize.curve_fit converged on a finite, in-bounds solution."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +139,7 @@ class BleachingReport:
     """The configuration used to produce the report."""
 
     def plot_baseline_trend(self) -> plt.Figure:
-        """Plots the population-median per-session F0 versus days, overlaid with the exponential decay fit and
-        per-cell baseline distributions.
+        """Plots the population-median per-session F0 trend, the exponential fit, and per-cell baseline distributions.
 
         Returns:
             A matplotlib Figure showing the across-session F0 trend.
@@ -179,14 +148,13 @@ class BleachingReport:
 
         days = np.array([session.days_since_first for session in self.sessions], dtype=np.float32)
 
+        # Computes a non-zero box width that scales with the smallest day step so adjacent boxes do not overlap.
+        minimum_day_step = float(np.diff(days).min()) if len(days) > 1 else 1.0
+        box_width = 0.4 * max(minimum_day_step, 0.1)
+
         # Draws the per-cell distributions as boxplots so the population spread is visible alongside the median trend.
         boxplot_data = [session.cell_baseline_f0 for session in self.sessions]
-        axes.boxplot(
-            boxplot_data,
-            positions=days,
-            widths=0.4 * max(np.diff(days).min() if len(days) > 1 else 1.0, 0.1),
-            showfliers=False,
-        )
+        axes.boxplot(boxplot_data, positions=days, widths=box_width, showfliers=False)
 
         # Overlays the population-median trend used for the exponential fit.
         axes.plot(days, self.f0_population_trend, marker="o", color="tab:blue", linewidth=1.5, label="Median F0")
@@ -194,8 +162,9 @@ class BleachingReport:
         # Draws the fitted exponential when the fit converged.
         if self.f0_decay_fit.fit_succeeded:
             dense_days = np.linspace(days.min(), days.max(), num=200)
-            fit_curve = self.f0_decay_fit.amplitude * np.exp(-dense_days / self.f0_decay_fit.tau_days) + (
-                self.f0_decay_fit.offset
+            fit_curve = (
+                self.f0_decay_fit.amplitude * np.exp(-dense_days / self.f0_decay_fit.tau_days)
+                + self.f0_decay_fit.offset
             )
             axes.plot(
                 dense_days,
@@ -223,6 +192,7 @@ class BleachingReport:
 
         colormap = plt.get_cmap("viridis")
         for index, session in enumerate(self.sessions):
+            # Guards against division by zero when the report contains a single session.
             color = colormap(index / max(len(self.sessions) - 1, 1))
             label = f"Day {session.days_since_first:.1f} (drop={session.within_session_fractional_drop:.1%})"
             axes.plot(
@@ -273,7 +243,6 @@ def evaluate_bleaching(
     fluorescence_column: DatasetColumn = DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE,
     *,
     configuration: BleachingConfiguration | None = None,
-    worker_count: int = -1,
 ) -> BleachingReport:
     """Quantifies photobleaching across the supplied chronologically ordered sessions for a single animal.
 
@@ -281,7 +250,20 @@ def evaluate_bleaching(
         Sessions must share a multi-recording cindra registration so the cell axis is comparable across days. The
         function rejects mismatched cell counts. By default, the multi-recording raw cell-fluorescence column is used,
         which carries the cell correspondence required for a defensible across-session comparison; passing the
-        single-recording column is supported but only yields valid within-session metrics.
+        single-recording column is supported but only yields valid within-session metrics. Sessions are processed
+        sequentially so the heavy per-cell percentile and SNR kernels can saturate every available CPU core via
+        Numba's thread pool; a per-session progress line is emitted as each session completes.
+
+    References:
+        Multi-day registered cell intersection for longitudinal comparisons:
+            Ziv et al. (2013). Long-term dynamics of CA1 hippocampal place codes. Nature Neuroscience.
+            https://doi.org/10.1038/nn.3329
+            Rubin et al. (2015). Hippocampal ensemble dynamics timestamp events in long-term memory. eLife.
+            https://doi.org/10.7554/eLife.12247
+        Standardized longitudinal-imaging quality-control framework that motivates the combined-flagging strategy:
+            de Vries et al. (2020). A large-scale standardized physiological survey reveals functional
+            organization of the mouse visual cortex. Nature Neuroscience.
+            https://doi.org/10.1038/s41593-019-0550-9
 
     Args:
         session_paths: Chronologically ordered tuple of session directory paths. Sessions are validated to be in
@@ -289,16 +271,13 @@ def evaluate_bleaching(
         fluorescence_column: The raw cell-fluorescence column to load. Must be one of the raw cindra columns;
             baseline-corrected dF/F0 columns are rejected because bleaching is defined on raw signal decay.
         configuration: Bleaching evaluation parameters. Uses defaults if None.
-        worker_count: Number of parallel worker threads used to compute per-session metrics. Set to -1 to derive
-            the count automatically from the available CPU cores minus a small reserve. Per-session computation
-            mostly executes in GIL-releasing C/Rust code (polars I/O, NumPy reductions), so threads scale near
-            linearly up to the count of supplied sessions.
 
     Returns:
         A BleachingReport containing per-session metrics, the across-session F0 decay fit, paired SNR Wilcoxon
         results, and the list of sessions that exceeded any threshold.
     """
-    configuration = configuration if configuration is not None else BleachingConfiguration()
+    if configuration is None:
+        configuration = BleachingConfiguration()
 
     if len(session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
         message = (
@@ -325,30 +304,39 @@ def evaluate_bleaching(
         (session_date - first_date).total_seconds() / _SECONDS_PER_DAY for session_date in session_dates
     ]
 
-    if worker_count == -1:
-        worker_count = max(1, (os.cpu_count() or 1) - _WORKER_RESERVE)
-    worker_count = min(worker_count, len(session_paths))
-
-    # Computes per-session metrics in parallel. Each call loads the session feather and runs vectorized NumPy
-    # reductions, both of which release the GIL, so threads scale efficiently across sessions without paying the
-    # serialization cost of process-based parallelism.
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
-                _compute_session_metrics,
-                session_path=session_path,
-                fluorescence_column=fluorescence_column,
-                days_since_first=days_since_first,
-                configuration=configuration,
-            )
-            for session_path, days_since_first in zip(session_paths, days_since_first_list, strict=True)
-        ]
-        metrics: list[SessionBleachingMetrics] = [future.result() for future in futures]
+    # Processes sessions sequentially so the per-cell numba kernels can use every available core for one session at
+    # a time. Spreading sessions across threads here would just oversubscribe the CPU and starve the kernels of
+    # threads, while also blocking progress reporting until every session finished.
+    session_count = len(session_paths)
+    metrics: list[SessionBleachingMetrics] = []
+    for index, (session_path, days_since_first) in enumerate(
+        zip(session_paths, days_since_first_list, strict=True),
+    ):
+        console.echo(
+            message=f"Evaluating bleaching for session {index + 1}/{session_count}: {session_path.name}",
+            level=LogLevel.INFO,
+        )
+        session_metrics = _compute_session_metrics(
+            session_path=session_path,
+            fluorescence_column=fluorescence_column,
+            days_since_first=days_since_first,
+            configuration=configuration,
+        )
+        metrics.append(session_metrics)
+        console.echo(
+            message=(
+                f"  session {index + 1}/{session_count} done: "
+                f"cells={session_metrics.cell_baseline_f0.shape[0]}, "
+                f"sampling_rate={session_metrics.sampling_rate_hz:.2f} Hz, "
+                f"within-session drop={session_metrics.within_session_fractional_drop:.1%}"
+            ),
+            level=LogLevel.INFO,
+        )
 
     cell_count_reference = int(metrics[0].cell_baseline_f0.shape[0])
     for session_metrics in metrics[1:]:
-        if int(session_metrics.cell_baseline_f0.shape[0]) != cell_count_reference:
-            other_count = int(session_metrics.cell_baseline_f0.shape[0])
+        other_count = int(session_metrics.cell_baseline_f0.shape[0])
+        if other_count != cell_count_reference:
             message = (
                 f"Unable to evaluate bleaching across the supplied sessions. The cell count must match across all "
                 f"sessions for the multi-recording registered comparison, but session "
@@ -360,22 +348,26 @@ def evaluate_bleaching(
     metrics_tuple = tuple(metrics)
 
     # noinspection PyTypeChecker
-    f0_population_trend: NDArray[np.float32] = np.array(
-        [float(np.median(session.cell_baseline_f0)) for session in metrics_tuple],
+    f0_population_trend: NDArray[np.float32] = np.fromiter(
+        (np.median(session.cell_baseline_f0) for session in metrics_tuple),
         dtype=np.float32,
+        count=len(metrics_tuple),
     )
     # noinspection PyTypeChecker
-    days_array: NDArray[np.float32] = np.array(
-        [session.days_since_first for session in metrics_tuple], dtype=np.float32
+    days_array: NDArray[np.float32] = np.fromiter(
+        (session.days_since_first for session in metrics_tuple),
+        dtype=np.float32,
+        count=len(metrics_tuple),
     )
     decay_fit = _fit_exponential_decay(days=days_array, baseline=f0_population_trend)
 
     f0_fractional_loss = float((f0_population_trend[0] - f0_population_trend[-1]) / f0_population_trend[0])
 
     # noinspection PyTypeChecker
-    snr_population_trend: NDArray[np.float32] = np.array(
-        [float(np.median(session.cell_snr)) for session in metrics_tuple],
+    snr_population_trend: NDArray[np.float32] = np.fromiter(
+        (np.median(session.cell_snr) for session in metrics_tuple),
         dtype=np.float32,
+        count=len(metrics_tuple),
     )
     snr_paired_p_values = _compute_paired_snr_p_values(metrics=metrics_tuple)
 
@@ -389,7 +381,7 @@ def evaluate_bleaching(
 
     return BleachingReport(
         sessions=metrics_tuple,
-        cell_count=cell_count_reference if cell_count_reference is not None else 0,
+        cell_count=cell_count_reference,
         f0_population_trend=f0_population_trend,
         f0_decay_fit=decay_fit,
         f0_fractional_loss=f0_fractional_loss,
@@ -401,7 +393,14 @@ def evaluate_bleaching(
 
 
 def _parse_session_date(session_path: Path) -> datetime:
-    """Parses the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session-directory name into a datetime instance."""
+    """Parses the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session-directory name into a datetime instance.
+
+    Args:
+        session_path: Path whose final component encodes the session timestamp in the canonical dash-separated format.
+
+    Returns:
+        A datetime built from the parsed year, month, day, hour, minute, second, and microsecond fields.
+    """
     parts = session_path.name.split("-")
     if len(parts) < _SESSION_NAME_FIELD_COUNT:
         message = (
@@ -425,13 +424,19 @@ def _validate_chronological_order(
     session_paths: tuple[Path, ...],
     session_dates: tuple[datetime, ...],
 ) -> None:
-    """Verifies that the supplied session dates are non-decreasing, which the across-session metrics assume."""
-    for index in range(1, len(session_dates)):
-        if session_dates[index] < session_dates[index - 1]:
+    """Verifies that the supplied session dates are non-decreasing, which the across-session metrics assume.
+
+    Args:
+        session_paths: Session directory paths in the order they were supplied; used in the error message.
+        session_dates: Parsed session timestamps in the same order as ``session_paths``.
+    """
+    for previous_index, (previous_date, current_date) in enumerate(pairwise(session_dates)):
+        if current_date < previous_date:
+            current_index = previous_index + 1
             message = (
                 f"Unable to evaluate bleaching across the supplied sessions. The session paths must be sorted in "
-                f"chronological order, but {session_paths[index].name!r} is older than "
-                f"{session_paths[index - 1].name!r}."
+                f"chronological order, but {session_paths[current_index].name!r} is older than "
+                f"{session_paths[previous_index].name!r}."
             )
             console.error(message=message, error=ValueError)
 
@@ -442,30 +447,45 @@ def _compute_session_metrics(
     days_since_first: float,
     configuration: BleachingConfiguration,
 ) -> SessionBleachingMetrics:
-    """Loads a single session's raw fluorescence and computes its bleaching metrics."""
+    """Loads a single session's raw fluorescence and computes its bleaching metrics.
+
+    Args:
+        session_path: Path to the forged session directory containing the data feather.
+        fluorescence_column: The raw cell-fluorescence column to load from the feather.
+        days_since_first: Calendar days elapsed since the first session in the evaluation set.
+        configuration: Bleaching evaluation parameters that drive window sizes and percentile choices.
+
+    Returns:
+        A SessionBleachingMetrics instance populated with the per-cell baseline, per-cell SNR, and within-session
+        baseline trace for the session.
+    """
     fluorescence, time_us = _load_session_raw(session_path=session_path, fluorescence_column=fluorescence_column)
     sampling_rate_hz = _estimate_sampling_rate_hz(time_us=time_us)
 
     baseline_window_samples = max(round(configuration.baseline_window_seconds * sampling_rate_hz), 1)
-    binned_baseline = _compute_binned_baseline(
-        fluorescence=fluorescence,
-        bin_size_samples=baseline_window_samples,
-        percentile=configuration.baseline_percentile,
-    )
+    cell_count = fluorescence.shape[0]
+    bin_count = fluorescence.shape[1] // baseline_window_samples
 
-    if binned_baseline.shape[1] == 0:
+    if bin_count == 0:
         # noinspection PyTypeChecker
-        cell_baseline_f0: NDArray[np.float32] = np.full(fluorescence.shape[0], np.nan, dtype=np.float32)
+        cell_baseline_f0: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+        # noinspection PyTypeChecker
+        cell_snr: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
     else:
+        binned_baseline = _compute_binned_baseline(
+            fluorescence=fluorescence,
+            bin_size_samples=baseline_window_samples,
+            percentile=configuration.baseline_percentile,
+        )
         # noinspection PyTypeChecker
-        cell_baseline_f0 = np.median(binned_baseline, axis=1).astype(np.float32)
-
-    cell_snr = _compute_cell_snr(
-        fluorescence=fluorescence,
-        binned_baseline=binned_baseline,
-        bin_size_samples=baseline_window_samples,
-        signal_percentile=configuration.snr_signal_percentile,
-    )
+        cell_baseline_f0 = np.empty(cell_count, dtype=np.float32)
+        _per_cell_median_along_axis1(matrix=binned_baseline, output=cell_baseline_f0)
+        cell_snr = _compute_cell_snr(
+            fluorescence=fluorescence,
+            binned_baseline=binned_baseline,
+            bin_size_samples=baseline_window_samples,
+            signal_percentile=configuration.snr_signal_percentile,
+        )
 
     within_session_bin_samples = max(round(configuration.within_session_bin_seconds * sampling_rate_hz), 1)
     within_session_time_seconds, within_session_baseline = _compute_within_session_baseline(
@@ -497,24 +517,59 @@ def _compute_session_metrics(
 def _load_session_raw(
     session_path: Path,
     fluorescence_column: DatasetColumn,
-) -> tuple[NDArray[np.float32], NDArray[np.uint64]]:
-    """Loads the raw per-cell fluorescence trace and per-sample timestamps from a forged session feather."""
+) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+    """Loads the raw per-cell fluorescence trace and per-sample timestamps from a forged session feather.
+
+    Notes:
+        The fluorescence column is stored as a polars list-of-float32, one list per sample. Converting via
+        ``Series.to_list()`` and ``np.array`` materializes a Python list of lists for every sample, which is
+        single-threaded, GIL-bound, and dominates load time for multi-thousand-cell sessions. Exploding the list
+        column to a flat fp32 series and reshaping in NumPy stays in compiled code and runs roughly an order of
+        magnitude faster while producing the same (cell_count, sample_count) C-contiguous layout.
+
+    Args:
+        session_path: Path to the forged session directory containing the data feather.
+        fluorescence_column: The raw cell-fluorescence column to load.
+
+    Returns:
+        A tuple containing the (cell_count, sample_count) fp32 fluorescence array and the per-sample int64
+        microsecond timestamps.
+    """
     df = pl.read_ipc(
         source=session_path.joinpath(DATA_FILENAME),
         columns=[DatasetColumn.TIME_US.value, fluorescence_column.value],
     )
     # noinspection PyTypeChecker
-    time_us: NDArray[np.uint64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.uint64)
+    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.int64, copy=False)
+
+    sample_count = df.height
+    flat = df[fluorescence_column.value].explode().to_numpy()
+    if flat.dtype != np.float32:
+        flat = flat.astype(np.float32, copy=False)
+    cell_count = flat.size // sample_count
+    # Reshapes the flattened (sample_count * cell_count) buffer into (sample_count, cell_count) and transposes to
+    # the analysis-canonical (cell_count, sample_count) layout. The transpose is a non-contiguous view, so a single
+    # ascontiguousarray copy materializes the C-contiguous result that downstream reshapes need.
     # noinspection PyTypeChecker
-    fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
+    fluorescence: NDArray[np.float32] = np.ascontiguousarray(flat.reshape(sample_count, cell_count).T)
     return fluorescence, time_us
 
 
-def _estimate_sampling_rate_hz(time_us: NDArray[np.uint64]) -> float:
-    """Estimates the sampling rate in Hz from the median inter-sample interval of the timestamp array."""
+def _estimate_sampling_rate_hz(time_us: NDArray[np.int64]) -> float:
+    """Estimates the sampling rate in Hz from the median inter-sample interval of the timestamp array.
+
+    Args:
+        time_us: Per-sample acquisition timestamps in microseconds.
+
+    Returns:
+        The estimated sampling rate in Hz. NaN when fewer than two samples are supplied or the median inter-sample
+        interval is non-positive.
+    """
     if time_us.size < _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE:
         return float("nan")
-    deltas_us = np.diff(time_us.astype(np.float64))
+    # Diffs the int64 timestamps directly (intervals are positive and small enough to never overflow) and lets the
+    # median materialize as a Python float for the final scalar division.
+    deltas_us = np.diff(time_us)
     median_delta_us = float(np.median(deltas_us))
     if median_delta_us <= 0:
         return float("nan")
@@ -530,11 +585,14 @@ def _compute_binned_baseline(
 
     Notes:
         Replaces the per-sample rolling-window percentile of the original Suite2p convention with a non-overlapping
-        binned percentile of the same window size. The session-median estimator is unbiased and statistically
-        equivalent to the rolling-window estimator while running orders of magnitude faster: total cost drops from
-        O(cell_count * sample_count * window * log(window)) to O(cell_count * sample_count * log(window)). The
-        trailing partial bin is dropped so the operation reduces to a single contiguous reshape plus a vectorized
-        ``np.percentile`` call along the bin axis.
+        binned percentile of the same window size. Dispatches to a numba parallel-over-cells kernel that performs
+        the percentile via in-place quickselect; the previous ``np.percentile`` call was single-threaded and
+        dominated session compute on multi-thousand-cell traces.
+
+    References:
+        Suite2p baseline convention (8th-percentile baseline within a 60-second window):
+            Pachitariu et al. (2017). Suite2p: beyond 10,000 neurons with standard two-photon microscopy. bioRxiv.
+            https://doi.org/10.1101/061507
 
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
@@ -552,11 +610,15 @@ def _compute_binned_baseline(
         empty_binned: NDArray[np.float32] = np.zeros((cell_count, 0), dtype=np.float32)
         return empty_binned
 
-    # Trims trailing samples that do not fill a complete bin so the reshape is exact and contiguous.
-    trimmed = fluorescence[:, : bin_count * bin_size_samples]
-    reshaped = trimmed.reshape(cell_count, bin_count, bin_size_samples)
     # noinspection PyTypeChecker
-    binned: NDArray[np.float32] = np.percentile(reshaped, percentile, axis=2).astype(np.float32)
+    binned: NDArray[np.float32] = np.empty((cell_count, bin_count), dtype=np.float32)
+    _binned_percentile_kernel(
+        fluorescence=fluorescence,
+        bin_size_samples=np.int64(bin_size_samples),
+        bin_count=np.int64(bin_count),
+        percentile=np.float32(percentile),
+        output=binned,
+    )
     return binned
 
 
@@ -566,61 +628,54 @@ def _compute_cell_snr(
     bin_size_samples: int,
     signal_percentile: float,
 ) -> NDArray[np.float32]:
-    """Computes per-cell SNR by detrending the raw trace with the upsampled binned baseline.
+    """Computes per-cell SNR by detrending the raw trace with the per-bin baseline.
 
     Notes:
-        The per-cell, per-bin baseline is upsampled to per-sample by repeating each bin's value ``bin_size_samples``
-        times, then padded with the final bin's value if the original trace length was not a multiple of the bin
-        size. SNR is the configured upper percentile of the detrended trace divided by a MAD-based robust noise
-        standard deviation.
+        Hands the heavy work to a single numba parallel-over-cells kernel that computes the detrended trace into a
+        thread-local scratch buffer, runs three quickselects (median for the noise center, MAD median, signal
+        percentile), and writes the SNR. Avoiding the explicit ``np.repeat`` upsample saves a (cell_count *
+        sample_count) allocation and a memory-bound pass over it, and replacing the three single-threaded
+        ``np.median`` / ``np.percentile`` reductions with one parallel kernel scales the operation across cores.
+
+    References:
+        Robust MAD-based noise estimation underlying the per-cell SNR computation:
+            Pnevmatikakis et al. (2016). Simultaneous denoising, deconvolution, and demixing of calcium imaging
+            data. Neuron. https://doi.org/10.1016/j.neuron.2015.11.037
+            Hampel (1974). The influence curve and its role in robust estimation. Journal of the American
+            Statistical Association. https://doi.org/10.2307/2285666
+        GCaMP signal-to-noise characterization informing the ~30% per-cell SNR degradation threshold:
+            Dana et al. (2019). High-performance calcium sensors for imaging activity in neuronal populations and
+            microcompartments. Nature Methods. https://doi.org/10.1038/s41592-019-0435-6
+            Zhang et al. (2023). Fast and sensitive GCaMP calcium indicators for imaging neural populations.
+            Nature. https://doi.org/10.1038/s41586-023-05828-9
 
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
         binned_baseline: Per-cell, per-bin baseline with dimensions (cell_count, bin_count) returned by
             ``_compute_binned_baseline``.
-        bin_size_samples: Width of each baseline bin in samples, used to upsample the binned baseline back to
-            per-sample resolution.
+        bin_size_samples: Width of each baseline bin in samples, used to map sample indices to bin indices when
+            detrending on the fly.
         signal_percentile: Upper percentile of the detrended trace treated as the per-cell event amplitude.
 
     Returns:
         Per-cell SNR with length cell_count. Cells with zero estimated noise are reported as 0 to avoid division
         by zero rather than NaN or infinity.
     """
-    cell_count, sample_count = fluorescence.shape
+    cell_count = fluorescence.shape[0]
     if binned_baseline.shape[1] == 0:
         # noinspection PyTypeChecker
         empty_snr: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
         return empty_snr
 
-    # Upsamples the per-bin baseline back to per-sample by repeating each bin's value, then pads the trailing partial
-    # bin with the last bin's value so the detrending shape matches the input.
     # noinspection PyTypeChecker
-    baseline_per_sample: NDArray[np.float32] = np.repeat(binned_baseline, bin_size_samples, axis=1)
-    if baseline_per_sample.shape[1] < sample_count:
-        pad_width = sample_count - baseline_per_sample.shape[1]
-        # noinspection PyTypeChecker
-        last_bin: NDArray[np.float32] = baseline_per_sample[:, -1:]
-        # noinspection PyTypeChecker
-        padding: NDArray[np.float32] = np.tile(last_bin, (1, pad_width))
-        baseline_per_sample = np.concatenate([baseline_per_sample, padding], axis=1)
-
-    # noinspection PyTypeChecker
-    detrended: NDArray[np.float32] = fluorescence - baseline_per_sample
-
-    # noinspection PyTypeChecker
-    detrended_median: NDArray[np.float32] = np.median(detrended, axis=1, keepdims=True).astype(np.float32)
-    # noinspection PyTypeChecker
-    mad: NDArray[np.float32] = np.median(np.abs(detrended - detrended_median), axis=1).astype(np.float32)
-    noise_std = mad * _MAD_TO_STD_SCALE
-
-    # noinspection PyTypeChecker
-    signal: NDArray[np.float32] = np.percentile(detrended, signal_percentile, axis=1).astype(np.float32)
-
-    # Avoids division by zero by gating the divisor; cells with zero noise return SNR=0 rather than NaN/inf.
-    # noinspection PyTypeChecker
-    safe_noise: NDArray[np.float32] = np.where(noise_std > 0, noise_std, 1.0).astype(np.float32)
-    # noinspection PyTypeChecker
-    snr: NDArray[np.float32] = np.where(noise_std > 0, signal / safe_noise, 0.0).astype(np.float32)
+    snr: NDArray[np.float32] = np.empty(cell_count, dtype=np.float32)
+    _cell_snr_kernel(
+        fluorescence=fluorescence,
+        binned_baseline=binned_baseline,
+        bin_size_samples=np.int64(bin_size_samples),
+        signal_percentile=np.float32(signal_percentile),
+        output=snr,
+    )
     return snr
 
 
@@ -636,6 +691,13 @@ def _compute_within_session_baseline(
         Reduces what was a Python loop over per-bin masks to a single contiguous reshape plus one vectorized
         ``np.percentile`` call along the bin axis, which is orders of magnitude faster on multi-thousand-sample
         traces.
+
+    References:
+        Within-session bleaching control common to the Dombeck/Tank chronic-imaging lineage:
+            Sheffield & Dombeck (2015). Calcium transient prevalence across the dendritic arbour predicts place
+            field properties. Nature. https://doi.org/10.1038/nature14066
+            Driscoll et al. (2017). Dynamic reorganization of neuronal activity patterns in parietal cortex.
+            Cell. https://doi.org/10.1016/j.cell.2017.05.021
 
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
@@ -663,35 +725,286 @@ def _compute_within_session_baseline(
         empty_baseline = np.zeros(0, dtype=np.float32)
         return empty_time, empty_baseline
 
-    # noinspection PyTypeChecker
-    fov_mean: NDArray[np.float32] = np.mean(fluorescence, axis=0).astype(np.float32)
+    fov_mean = np.mean(fluorescence, axis=0).astype(np.float32, copy=False)
     trimmed = fov_mean[: bin_count * bin_size_samples]
     reshaped = trimmed.reshape(bin_count, bin_size_samples)
     # noinspection PyTypeChecker
-    baseline: NDArray[np.float32] = np.percentile(reshaped, percentile, axis=1).astype(np.float32)
+    baseline: NDArray[np.float32] = np.percentile(reshaped, percentile, axis=1).astype(np.float32, copy=False)
     # noinspection PyTypeChecker
     bin_centers: NDArray[np.float32] = (
-        (np.arange(bin_count, dtype=np.float64) + 0.5) * bin_size_samples / sampling_rate_hz
-    ).astype(np.float32)
+        (np.arange(bin_count, dtype=np.float32) + np.float32(0.5))
+        * np.float32(bin_size_samples)
+        / np.float32(sampling_rate_hz)
+    )
     return bin_centers, baseline
+
+
+@njit(cache=True, parallel=True)
+def _binned_percentile_kernel(
+    fluorescence: NDArray[np.float32],
+    bin_size_samples: int,
+    bin_count: int,
+    percentile: float,
+    output: NDArray[np.float32],
+) -> None:
+    """Computes per-cell, per-bin percentile of the fluorescence trace via in-place quickselect.
+
+    Notes:
+        Parallelizes over cells. Each thread allocates a single scratch buffer sized to one bin and reuses it
+        across that cell's bins; the buffer fits in L2 for typical 60-second windows and avoids per-bin
+        allocations that would otherwise dominate kernel time.
+
+    Args:
+        fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count), C-contiguous fp32.
+        bin_size_samples: Width of each non-overlapping bin in samples.
+        bin_count: Number of complete bins that fit in the input.
+        percentile: Percentile (0-100) evaluated within each bin via NumPy linear interpolation.
+        output: Pre-allocated (cell_count, bin_count) fp32 array. Modified in place.
+    """
+    cell_count = fluorescence.shape[0]
+    fractional_position = (percentile / np.float32(100.0)) * np.float32(bin_size_samples - 1)
+    lower_index = int(np.floor(fractional_position))
+    lower_index = max(lower_index, 0)
+    lower_index = min(lower_index, bin_size_samples - 1)
+    upper_index = lower_index + 1 if lower_index < bin_size_samples - 1 else lower_index
+    weight = np.float32(fractional_position - lower_index)
+
+    for cell_index in prange(cell_count):
+        scratch = np.empty(bin_size_samples, dtype=np.float32)
+        for bin_index in range(bin_count):
+            offset = bin_index * bin_size_samples
+            for sample_index in range(bin_size_samples):
+                scratch[sample_index] = fluorescence[cell_index, offset + sample_index]
+
+            lower_value = _quickselect_inplace(buffer=scratch, target_index=lower_index)
+            if upper_index == lower_index:
+                output[cell_index, bin_index] = lower_value
+            else:
+                # The values strictly above the lower-rank pivot are concentrated in scratch[lower_index + 1:];
+                # quickselect did not fully sort, so the upper rank is the minimum of that suffix.
+                upper_value = scratch[lower_index + 1]
+                for scan_index in range(lower_index + 2, bin_size_samples):
+                    upper_value = min(upper_value, scratch[scan_index])
+                output[cell_index, bin_index] = lower_value + weight * (upper_value - lower_value)
+
+
+@njit(cache=True, parallel=True)
+def _per_cell_median_along_axis1(
+    matrix: NDArray[np.float32],
+    output: NDArray[np.float32],
+) -> None:
+    """Computes the median of each row of ``matrix`` and writes it to ``output``.
+
+    Notes:
+        Replaces ``np.median(matrix, axis=1)``, which is single-threaded. Quickselect is O(n) per row and runs in
+        parallel across rows.
+
+    Args:
+        matrix: Input array with dimensions (row_count, column_count), C-contiguous fp32.
+        output: Pre-allocated fp32 array with length row_count. Modified in place.
+    """
+    row_count = matrix.shape[0]
+    column_count = matrix.shape[1]
+    if column_count == 0:
+        output[:] = np.float32(np.nan)
+        return
+    lower_index = (column_count - 1) // 2
+    is_even = column_count % 2 == 0
+    for row_index in prange(row_count):
+        scratch = np.empty(column_count, dtype=np.float32)
+        for column_index in range(column_count):
+            scratch[column_index] = matrix[row_index, column_index]
+        lower_value = _quickselect_inplace(buffer=scratch, target_index=lower_index)
+        if not is_even:
+            output[row_index] = lower_value
+        else:
+            upper_value = scratch[lower_index + 1]
+            for scan_index in range(lower_index + 2, column_count):
+                upper_value = min(upper_value, scratch[scan_index])
+            output[row_index] = np.float32(0.5) * (lower_value + upper_value)
+
+
+@njit(cache=True, parallel=True)
+def _cell_snr_kernel(
+    fluorescence: NDArray[np.float32],
+    binned_baseline: NDArray[np.float32],
+    bin_size_samples: int,
+    signal_percentile: float,
+    output: NDArray[np.float32],
+) -> None:
+    """Computes per-cell SNR with detrending fused into one parallel-over-cells pass.
+
+    Notes:
+        Each cell allocates a single scratch buffer sized to ``sample_count`` and reuses it for the detrended
+        trace, then for the absolute deviations from the median. The baseline is referenced from ``binned_baseline``
+        on the fly so the (cell_count * sample_count) upsampled buffer that the previous implementation built is
+        never materialized. Three quickselects (median for noise center, MAD median, signal percentile) cost O(n)
+        each instead of three full sorts at O(n log n).
+
+    Args:
+        fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count), C-contiguous fp32.
+        binned_baseline: Per-cell, per-bin baseline with dimensions (cell_count, bin_count) from the binned-baseline
+            kernel. Bins indexed past ``bin_count - 1`` reuse the last bin so the trailing samples that do not fill
+            a complete window stay aligned with the input length.
+        bin_size_samples: Width of each baseline bin in samples.
+        signal_percentile: Upper percentile of the detrended trace treated as the per-cell event amplitude.
+        output: Pre-allocated fp32 array with length cell_count. Modified in place.
+    """
+    cell_count = fluorescence.shape[0]
+    sample_count = fluorescence.shape[1]
+    bin_count = binned_baseline.shape[1]
+    last_bin_index = bin_count - 1
+
+    median_lower = (sample_count - 1) // 2
+    median_is_even = sample_count % 2 == 0
+
+    signal_position = (signal_percentile / np.float32(100.0)) * np.float32(sample_count - 1)
+    signal_lower_index = int(np.floor(signal_position))
+    signal_lower_index = max(signal_lower_index, 0)
+    signal_lower_index = min(signal_lower_index, sample_count - 1)
+    signal_upper_index = signal_lower_index + 1 if signal_lower_index < sample_count - 1 else signal_lower_index
+    signal_weight = np.float32(signal_position - signal_lower_index)
+
+    mad_scale = _MAD_TO_STD_SCALE
+
+    for cell_index in prange(cell_count):
+        scratch = np.empty(sample_count, dtype=np.float32)
+
+        # Detrends on the fly; bins beyond bin_count - 1 reuse the last bin to mirror the previous repeat-and-pad
+        # behavior of the materialized upsample.
+        for sample_index in range(sample_count):
+            bin_index = min(sample_index // bin_size_samples, last_bin_index)
+            scratch[sample_index] = fluorescence[cell_index, sample_index] - binned_baseline[cell_index, bin_index]
+
+        # Computes the median of the detrended trace via quickselect.
+        median_lower_value = _quickselect_inplace(buffer=scratch, target_index=median_lower)
+        if not median_is_even:
+            detrended_median = median_lower_value
+        else:
+            upper_value = scratch[median_lower + 1]
+            for scan_index in range(median_lower + 2, sample_count):
+                upper_value = min(upper_value, scratch[scan_index])
+            detrended_median = np.float32(0.5) * (median_lower_value + upper_value)
+
+        # Refills scratch with the detrended values; quickselect partially sorted them, and recomputing on the fly
+        # is cheaper than holding a second copy.
+        for sample_index in range(sample_count):
+            bin_index = min(sample_index // bin_size_samples, last_bin_index)
+            scratch[sample_index] = fluorescence[cell_index, sample_index] - binned_baseline[cell_index, bin_index]
+
+        # Signal percentile via quickselect with linear interpolation between the two bracketing ranks.
+        signal_lower_value = _quickselect_inplace(buffer=scratch, target_index=signal_lower_index)
+        if signal_upper_index == signal_lower_index:
+            signal = signal_lower_value
+        else:
+            upper_value = scratch[signal_lower_index + 1]
+            for scan_index in range(signal_lower_index + 2, sample_count):
+                upper_value = min(upper_value, scratch[scan_index])
+            signal = signal_lower_value + signal_weight * (upper_value - signal_lower_value)
+
+        # Reuses scratch for the absolute deviations from the detrended median, then quickselects the MAD.
+        for sample_index in range(sample_count):
+            bin_index = min(sample_index // bin_size_samples, last_bin_index)
+            value = fluorescence[cell_index, sample_index] - binned_baseline[cell_index, bin_index]
+            deviation = value - detrended_median
+            scratch[sample_index] = deviation if deviation >= 0 else -deviation
+
+        mad_lower_value = _quickselect_inplace(buffer=scratch, target_index=median_lower)
+        if not median_is_even:
+            mad = mad_lower_value
+        else:
+            upper_value = scratch[median_lower + 1]
+            for scan_index in range(median_lower + 2, sample_count):
+                upper_value = min(upper_value, scratch[scan_index])
+            mad = np.float32(0.5) * (mad_lower_value + upper_value)
+
+        noise_std = mad * mad_scale
+        if noise_std > 0:
+            output[cell_index] = signal / noise_std
+        else:
+            output[cell_index] = np.float32(0.0)
+
+
+@njit(cache=True)
+def _quickselect_inplace(buffer: NDArray[np.float32], target_index: int) -> np.float32:
+    """Partitions ``buffer`` in place so the element with ordinal ``target_index`` lands at that index.
+
+    Notes:
+        Lomuto-partition quickselect with median-of-three pivot selection. Average O(n), worst-case O(n^2);
+        median-of-three keeps the worst case from showing up on monotone or nearly-sorted inputs that the
+        baseline-percentile workload sees. After return, every element at index < target_index is <=
+        ``buffer[target_index]`` and every element at index > target_index is >= ``buffer[target_index]``, so the
+        caller can recover the next-larger value as ``min(buffer[target_index + 1:])`` for percentile interpolation.
+
+    Args:
+        buffer: 1D fp32 array. Modified in place.
+        target_index: 0-based index whose ordinal value should land at ``buffer[target_index]``.
+
+    Returns:
+        The value that ends up at ``buffer[target_index]`` after partitioning, equivalent to the
+        ``target_index``-th order statistic.
+    """
+    left = 0
+    right = buffer.shape[0] - 1
+    while left < right:
+        # Sorts (left, mid, right) so buffer[left] <= buffer[mid] <= buffer[right] for median-of-three pivot
+        # selection, then stages the pivot at the right end so the Lomuto scan can run over [left, right - 1] with
+        # the pivot value held constant in buffer[right].
+        mid = (left + right) // 2
+        if buffer[left] > buffer[mid]:
+            buffer[left], buffer[mid] = buffer[mid], buffer[left]
+        if buffer[left] > buffer[right]:
+            buffer[left], buffer[right] = buffer[right], buffer[left]
+        if buffer[mid] > buffer[right]:
+            buffer[mid], buffer[right] = buffer[right], buffer[mid]
+        buffer[mid], buffer[right] = buffer[right], buffer[mid]
+        pivot = buffer[right]
+
+        store_index = left
+        for scan_index in range(left, right):
+            if buffer[scan_index] < pivot:
+                buffer[scan_index], buffer[store_index] = buffer[store_index], buffer[scan_index]
+                store_index += 1
+        # Swaps the pivot into its final position. Everything in [left, store_index) is < pivot, everything in
+        # (store_index, right] is >= pivot, and buffer[store_index] is the pivot value.
+        buffer[store_index], buffer[right] = buffer[right], buffer[store_index]
+
+        if store_index == target_index:
+            return buffer[store_index]
+        if store_index < target_index:
+            left = store_index + 1
+        else:
+            right = store_index - 1
+    return buffer[target_index]
 
 
 def _fit_exponential_decay(
     days: NDArray[np.float32],
     baseline: NDArray[np.float32],
 ) -> ExponentialDecayFit:
-    """Fits ``F0(d) = amplitude * exp(-d / tau_days) + offset`` to per-session F0 across days."""
+    """Fits ``F0(d) = amplitude * exp(-d / tau_days) + offset`` to per-session F0 across days.
+
+    Notes:
+        Returns a sentinel ExponentialDecayFit with ``fit_succeeded=False`` and NaN parameters when fewer than the
+        required number of sessions are supplied, when ``curve_fit`` raises, or when any fitted parameter is
+        non-finite.
+
+    Args:
+        days: Per-session day offsets relative to the first session.
+        baseline: Per-session population-median F0 values aligned with ``days``.
+
+    Returns:
+        An ExponentialDecayFit holding the fitted amplitude, tau, and offset, or the failure sentinel described
+        above.
+    """
     if days.size < _MINIMUM_SESSIONS_FOR_DECAY_FIT:
-        return ExponentialDecayFit(
-            amplitude=float("nan"),
-            tau_days=float("nan"),
-            offset=float("nan"),
-            fit_succeeded=False,
-        )
+        return _failed_decay_fit()
 
     initial_amplitude = float(baseline[0] - baseline[-1])
-    span = float(days[-1] - days[0]) if float(days[-1] - days[0]) > 0 else 1.0
-    initial_tau = max(span / 2.0, 1e-3)
+    day_span = float(days[-1] - days[0])
+    if day_span <= 0:
+        day_span = 1.0
+    initial_tau = max(day_span / 2.0, 1e-3)
     initial_offset = float(baseline[-1])
 
     try:
@@ -704,23 +1017,23 @@ def _fit_exponential_decay(
             maxfev=10000,
         )
     except RuntimeError, ValueError:
-        return ExponentialDecayFit(
-            amplitude=float("nan"),
-            tau_days=float("nan"),
-            offset=float("nan"),
-            fit_succeeded=False,
-        )
+        return _failed_decay_fit()
 
     amplitude, tau_days, offset = (float(parameter) for parameter in parameters)
     if not (np.isfinite(amplitude) and np.isfinite(tau_days) and np.isfinite(offset)):
-        return ExponentialDecayFit(
-            amplitude=float("nan"),
-            tau_days=float("nan"),
-            offset=float("nan"),
-            fit_succeeded=False,
-        )
+        return _failed_decay_fit()
 
     return ExponentialDecayFit(amplitude=amplitude, tau_days=tau_days, offset=offset, fit_succeeded=True)
+
+
+def _failed_decay_fit() -> ExponentialDecayFit:
+    """Returns the sentinel ExponentialDecayFit used when the decay fit cannot be produced."""
+    return ExponentialDecayFit(
+        amplitude=float("nan"),
+        tau_days=float("nan"),
+        offset=float("nan"),
+        fit_succeeded=False,
+    )
 
 
 def _exponential_decay_model(
@@ -729,20 +1042,37 @@ def _exponential_decay_model(
     tau_days: float,
     offset: float,
 ) -> NDArray[np.float64]:
-    """Single-exponential decay model used by ``_fit_exponential_decay``."""
+    """Single-exponential decay model used by ``_fit_exponential_decay``.
+
+    Args:
+        days: Day offsets at which to evaluate the model.
+        amplitude: Decaying-component amplitude.
+        tau_days: Decay time constant in days.
+        offset: Asymptotic baseline component.
+
+    Returns:
+        The model values at each day in ``days``.
+    """
     return amplitude * np.exp(-days / tau_days) + offset
 
 
 def _compute_paired_snr_p_values(metrics: tuple[SessionBleachingMetrics, ...]) -> NDArray[np.float64]:
-    """Computes paired Wilcoxon signed-rank p-values comparing each session's per-cell SNR to the first session."""
+    """Computes paired Wilcoxon signed-rank p-values comparing each session's per-cell SNR to the first session.
+
+    Args:
+        metrics: Per-session metrics in chronological order; the first entry serves as the reference.
+
+    Returns:
+        An array with length len(metrics) holding the per-session paired Wilcoxon p-values. The first entry is NaN
+        because it would compare the reference to itself, and entries are also NaN for sessions whose SNR is
+        identical to the reference or for which the test raises.
+    """
     # noinspection PyTypeChecker
     p_values: NDArray[np.float64] = np.full(len(metrics), np.nan, dtype=np.float64)
     reference_snr = metrics[0].cell_snr
     for index in range(1, len(metrics)):
         target_snr = metrics[index].cell_snr
-        # noinspection PyTypeChecker
-        difference: NDArray[np.float32] = target_snr - reference_snr
-        if np.all(difference == 0):
+        if np.all(target_snr == reference_snr):
             continue
         try:
             result = wilcoxon(x=target_snr, y=reference_snr, zero_method="wilcox", alternative="two-sided")
@@ -759,7 +1089,18 @@ def _flag_sessions(
     snr_paired_p_values: NDArray[np.float64],
     configuration: BleachingConfiguration,
 ) -> tuple[Path, ...]:
-    """Selects sessions that violate any of the configured F0, within-session, or SNR thresholds."""
+    """Selects sessions that violate any of the configured F0, within-session, or SNR thresholds.
+
+    Args:
+        metrics: Per-session metrics in chronological order.
+        f0_population_trend: Population-median per-session F0 aligned with ``metrics``.
+        snr_population_trend: Population-median per-session SNR aligned with ``metrics``.
+        snr_paired_p_values: Paired Wilcoxon p-values aligned with ``metrics``; the first entry is NaN.
+        configuration: Bleaching evaluation parameters that supply the threshold values.
+
+    Returns:
+        Paths of every session that exceeded at least one configured threshold, in chronological order.
+    """
     flagged: list[Path] = []
     f0_reference = float(f0_population_trend[0])
     snr_reference = float(snr_population_trend[0])
