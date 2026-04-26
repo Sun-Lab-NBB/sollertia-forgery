@@ -1,13 +1,14 @@
-"""Provides utility functions for computing track geometry and session metadata from feather files."""
+"""Provides utility functions for reading trial geometry data and reconstructing canonical position from forged
+session feather files.
+"""
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 import numpy as np
-import polars as pl
-from ataraxis_base_utilities import console
+
+from ..forging import TRIAL_GEOMETRY_FILENAME, TrialGeometry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,107 +17,98 @@ if TYPE_CHECKING:
 
 
 def compute_track_length(session_path: Path, trial_type: str) -> float:
-    """Computes track length for a given trial type in a session feather file.
+    """Returns the canonical track length for the given trial type read from the session's trial_geometry.yaml file.
 
     Args:
-        session_path: Path to the session feather file.
-        trial_type: Trial type to compute track length for (e.g., "ABC", "ABCD").
+        session_path: Path to the session's data.feather file.
+        trial_type: Trial type name to look up in the trial geometry sidecar.
 
     Returns:
-        Estimated track length in centimeters (ceiling of the mean distance traveled across trials of that type).
+        Canonical track length in centimeters.
     """
-    dataframe = pl.read_ipc(source=session_path, columns=["system_state", "trial", "trial_type", "distance_cm"])
-    running_dataframe = dataframe.filter((pl.col("system_state") == "run") & (pl.col("trial_type") == trial_type))
-
-    # Computes the total distance traveled within each trial as the difference between the maximum and minimum
-    # cumulative distance values.
-    trial_stats = running_dataframe.group_by("trial").agg(
-        pl.col("distance_cm").min().alias("minimum_distance"),
-        pl.col("distance_cm").max().alias("maximum_distance"),
-    )
-    trial_stats = trial_stats.with_columns(
-        (pl.col("maximum_distance") - pl.col("minimum_distance")).alias("distance_traveled")
-    )
-
-    mean_distance = trial_stats["distance_traveled"].mean()
-    return float(math.ceil(mean_distance))
+    geometry = TrialGeometry.from_yaml(file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
+    return geometry.entries[trial_type].trial_length_cm
 
 
-def compute_within_trial_position(
-    distance: NDArray[np.float32],
-    trial_ids: NDArray[np.int32],
-) -> NDArray[np.float32]:
-    """Computes within-trial position by subtracting each trial's starting distance.
+def compute_stimulus_zone_center(session_path: Path, trial_type: str) -> float:
+    """Returns the canonical center of the stimulus trigger zone for the given trial type.
 
     Notes:
-        Global modulo (distance % track_length) drifts on circular tracks since lap lengths vary per trial. Computing
-        distance relative to each trial's start position eliminates inter-trial drift.
+        For LICK-triggered (REWARD) trials this is the center of the lick-active reward zone, used as the
+        representative position for reward-cell analysis since water is delivered wherever in the zone the
+        animal happens to lick (no single delivery point exists). For OCCUPANCY-triggered (AVERSIVE) trials
+        this is the center of the occupancy zone, distinct from the collider boundary at stimulus_location_cm
+        where automated puff delivery happens. Callers gate on the relevant stimulus_mode when interpreting
+        the returned value.
+
+    Args:
+        session_path: Path to the session's data.feather file.
+        trial_type: Trial type name to look up in the trial geometry sidecar.
+
+    Returns:
+        Center of the stimulus trigger zone in centimeters, in trial-relative canonical coordinates.
+    """
+    geometry = TrialGeometry.from_yaml(file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
+    entry = geometry.entries[trial_type]
+    return (entry.stimulus_trigger_zone_start_cm + entry.stimulus_trigger_zone_end_cm) / 2.0
+
+
+def compute_canonical_position(
+    distance: NDArray[np.float32],
+    trial_ids: NDArray[np.int32],
+    canonical_track_length: float,
+    completeness_threshold: float = 0.9,
+) -> NDArray[np.float32]:
+    """Computes per-frame canonical position by subtracting each trial's starting cumulative distance, returning
+    NaN for frames belonging to incomplete trials.
+
+    Notes:
+        Each frame's position is the encoder-honest offset from where its trial began (distance - distance at the
+        trial's first frame). The animal's measured per-trial length only deviates from the VR's canonical length
+        by sub-sample artifacts from photometry's 10 Hz downsampling, which falls well within the default
+        completeness_threshold of 0.9. Trials whose measured length falls below
+        completeness_threshold * canonical_track_length emit NaN for every frame so downstream binning can drop
+        them via a single ~np.isnan(position) mask. This catches the partial first or last trial of a session
+        and any trial where the animal got stuck. Assumes frames are time-ordered so each trial's frames form one
+        contiguous block, which holds after the forging pipeline's run-state filtering.
 
     Args:
         distance: Cumulative distance in centimeters, with one value per frame.
         trial_ids: Trial identity for each frame, with one value per frame.
+        canonical_track_length: The canonical track length in centimeters from the trial geometry sidecar, used
+            to identify incomplete trials.
+        completeness_threshold: Minimum fraction of canonical_track_length that a trial's measured length must
+            reach to be considered complete. Frames in below-threshold trials are returned as NaN.
 
     Returns:
-        Within-trial position in centimeters, with one value per frame.
+        Per-frame canonical position in centimeters as the trial-relative encoder offset, with NaN at every frame
+        belonging to a trial whose measured length is below completeness_threshold * canonical_track_length.
     """
-    position = np.empty(len(distance), dtype=np.float32)
-    unique_trials = np.unique(trial_ids)
+    if distance.size == 0:
+        # noinspection PyTypeChecker
+        return np.empty(0, dtype=np.float32)
 
-    for trial_id in unique_trials:
-        trial_mask = trial_ids == trial_id
-        trial_distance = distance[trial_mask]
-        position[trial_mask] = trial_distance - trial_distance[0]
+    # Detects each trial's first frame as a transition in trial_ids; brackets every contiguous trial block with
+    # (start, end) index pairs that span the whole input.
+    change_indices = np.flatnonzero(np.diff(trial_ids)) + 1
+    starts = np.concatenate(([0], change_indices))
+    ends = np.concatenate((change_indices, [distance.size]))
 
+    # Computes each trial's first cumulative distance and measured length once, then broadcasts the per-trial
+    # start back out to one value per frame so the offset subtraction is a single vectorized arithmetic.
+    counts = ends - starts
+    per_trial_start = distance[starts]
+    per_trial_length = distance[ends - 1] - per_trial_start
+    per_frame_start = np.repeat(per_trial_start, counts)
+
+    # Computes raw trial-relative position; the animal's encoder reading minus where the trial began.
+    position = (distance - per_frame_start).astype(np.float32)
+
+    # Marks frames in below-threshold trials with NaN so downstream binning can drop them with a single
+    # ~np.isnan(position) filter. This catches the partial first or last trial of a session and any trial where
+    # the animal got stuck or did not complete a lap.
+    minimum_length = np.float32(completeness_threshold * canonical_track_length)
+    per_frame_incomplete = np.repeat(per_trial_length < minimum_length, counts)
+    position[per_frame_incomplete] = np.float32("nan")
+    # noinspection PyTypeChecker
     return position
-
-
-def compute_reward_position(session_path: Path, trial_type: str | None = None) -> float:
-    """Computes the mean reward zone center position across trials.
-
-    Notes:
-        Estimates each trial's reward zone center as the midpoint between the first and last frame whose
-        in_reward_zone flag is set, using within-trial distances, then averages the centers across trials.
-
-    Args:
-        session_path: Path to the session feather file.
-        trial_type: Trial type to filter by. If None, includes all trial types.
-
-    Returns:
-        The mean reward zone center position in centimeters from trial start.
-    """
-    dataframe = pl.read_ipc(
-        source=session_path,
-        columns=["system_state", "trial_type", "distance_cm", "trial", "in_reward_zone"],
-    )
-    dataframe = dataframe.filter(pl.col("system_state") == "run")
-
-    if trial_type is not None:
-        dataframe = dataframe.filter(pl.col("trial_type") == trial_type)
-
-    distance = dataframe["distance_cm"].to_numpy().astype(np.float32)
-    trial_ids = dataframe["trial"].to_numpy().astype(np.int32)
-    in_reward_zone = dataframe["in_reward_zone"].to_numpy().astype(np.uint8)
-
-    position = compute_within_trial_position(distance=distance, trial_ids=trial_ids)
-    unique_trials = np.unique(trial_ids)
-
-    centers: list[float] = []
-    for trial_id in unique_trials:
-        trial_mask = trial_ids == trial_id
-        trial_reward_zone = in_reward_zone[trial_mask]
-        trial_position = position[trial_mask]
-
-        in_zone_mask = trial_reward_zone == 1
-        if np.any(in_zone_mask):
-            # Estimates the center as the midpoint between the first and last reward zone frame positions.
-            reward_zone_positions = trial_position[in_zone_mask]
-            centers.append(float((reward_zone_positions[0] + reward_zone_positions[-1]) / 2.0))
-
-    if not centers:
-        message = (
-            f"Unable to compute the reward zone center position from session feather file {session_path}. None of "
-            f"the trials matching trial_type {trial_type} contain frames inside the reward zone."
-        )
-        console.error(message=message, error=ValueError)
-
-    return float(np.mean(centers))

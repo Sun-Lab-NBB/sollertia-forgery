@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from .utilities import compute_track_length, compute_reward_position
+from .utilities import compute_track_length, compute_stimulus_zone_center
 from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
@@ -422,7 +422,7 @@ def append_reward_cell_columns(
 
     # Runs the reward cell detection pipeline.
     console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
-    reward_position = compute_reward_position(
+    reward_position = compute_stimulus_zone_center(
         session_path=session_path,
         trial_type=trial_type,
     )

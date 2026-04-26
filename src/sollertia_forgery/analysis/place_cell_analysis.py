@@ -23,6 +23,8 @@ from scipy.ndimage import (
 )
 from ataraxis_base_utilities import console
 
+from .utilities import compute_canonical_position
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -849,17 +851,25 @@ class PlaceFieldDetector:
         if trial_type is not None:
             df = df.filter(pl.col("trial_type") == trial_type)
 
-        # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        # noinspection PyTypeChecker
-        self.fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
+        # Extracts per-frame data, computes canonical position, then drops frames belonging to incomplete trials
+        # in lockstep across all per-frame arrays so downstream binning never sees NaN positions.
+        fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
+        distance = df["distance_cm"].to_numpy().astype(np.float32)
+        trial_ids = df["trial"].to_numpy().astype(np.int32)
+        speed = df["speed_cm_s"].to_numpy().astype(np.float32)
+        position = compute_canonical_position(
+            distance=distance, trial_ids=trial_ids, canonical_track_length=track_length
+        )
+        valid = ~np.isnan(position)
 
-        # Converts the cumulative distance to track position using modulus to wrap within a single lap.
         # noinspection PyTypeChecker
-        self.position: NDArray[np.float32] = df["distance_cm"].to_numpy().astype(np.float32) % track_length
+        self.fluorescence: NDArray[np.float32] = fluorescence[:, valid]
         # noinspection PyTypeChecker
-        self.speed: NDArray[np.float32] = df["speed_cm_s"].to_numpy().astype(np.float32)
+        self.position: NDArray[np.float32] = position[valid]
         # noinspection PyTypeChecker
-        self.trial_ids: NDArray[np.int32] = df["trial"].to_numpy().astype(np.int32)
+        self.speed: NDArray[np.float32] = speed[valid]
+        # noinspection PyTypeChecker
+        self.trial_ids: NDArray[np.int32] = trial_ids[valid]
         self.track_length = track_length
         self.bin_size = bin_size
         self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()

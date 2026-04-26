@@ -16,6 +16,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
+from .utilities import compute_canonical_position
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -478,7 +480,7 @@ class SCEDetector:
         """
         df = pl.read_ipc(
             source=session_path,
-            columns=["system_state", "time_us", fluorescence_column, "torque_N_cm", "distance_cm"],
+            columns=["system_state", "time_us", fluorescence_column, "torque_N_cm", "distance_cm", "trial"],
             memory_map=True,
         )
 
@@ -493,7 +495,14 @@ class SCEDetector:
         # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
         self._fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
         self._torque = df["torque_N_cm"].to_numpy()
-        self._distance = df["distance_cm"].to_numpy().astype(np.float32)
+
+        # Precomputes the canonical per-trial position once so per-period slicing matches the rest of the analysis
+        # surface. Replaces the prior modulo-based wrap that drifted with per-lap encoder noise.
+        distance = df["distance_cm"].to_numpy().astype(np.float32)
+        trial_ids = df["trial"].to_numpy().astype(np.int32)
+        self._position = compute_canonical_position(
+            distance=distance, trial_ids=trial_ids, canonical_track_length=track_length
+        )
 
         self._track_length: float = track_length
         self._place_fields: PlaceFields | None = place_fields
@@ -565,27 +574,33 @@ class SCEDetector:
 
                         # Masks place field activity at the animal's current position for each frame.
                         if self._place_fields is not None:
-                            period_distance = self._distance[period_start:frame_index]
-                            period_position = period_distance % self._track_length
+                            period_position = self._position[period_start:frame_index]
+                            valid_position = ~np.isnan(period_position)
 
-                            bin_size = self._place_fields.bin_size
-                            bin_count = self._place_fields.label_image.shape[1]
-                            bin_edges = np.arange(
-                                0,
-                                self._track_length + bin_size,
-                                bin_size,
-                                dtype=np.float32,
-                            )
-                            position_bins = np.clip(
-                                np.searchsorted(bin_edges, period_position, side="right") - 1,
-                                0,
-                                bin_count - 1,
-                            ).astype(np.int32)
+                            if valid_position.any():
+                                bin_size = self._place_fields.bin_size
+                                bin_count = self._place_fields.label_image.shape[1]
+                                bin_edges = np.arange(
+                                    0,
+                                    self._track_length + bin_size,
+                                    bin_size,
+                                    dtype=np.float32,
+                                )
+                                # Substitutes 0 for NaN positions so searchsorted does not push them to the last bin;
+                                # the corresponding mask columns are reset to False below.
+                                safe_position = np.where(valid_position, period_position, np.float32(0.0))
+                                position_bins = np.clip(
+                                    np.searchsorted(bin_edges, safe_position, side="right") - 1,
+                                    0,
+                                    bin_count - 1,
+                                ).astype(np.int32)
 
-                            # Builds a (cell_count, frame_count) mask from the label image indexed by each frame's
-                            # position bin, then zeros out all masked entries in a single vectorized operation.
-                            place_field_mask = self._place_fields.label_image[:, position_bins] > 0
-                            run_fluorescence[place_field_mask] = 0.0
+                                # Builds a (cell_count, frame_count) mask from the label image indexed by each
+                                # frame's position bin, then zeros out all masked entries in a single vectorized
+                                # operation. Frames belonging to incomplete trials carry no place-field gating.
+                                place_field_mask = self._place_fields.label_image[:, position_bins] > 0
+                                place_field_mask[:, ~valid_position] = False
+                                run_fluorescence[place_field_mask] = 0.0
 
                         pending.append((run_fluorescence, period_timestamps, PeriodType.RUN))
 
