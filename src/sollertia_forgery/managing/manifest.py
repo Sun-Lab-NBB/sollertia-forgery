@@ -42,6 +42,7 @@ _DESCRIPTOR_CLASSES: dict[
 """Maps each session type to its corresponding descriptor class. All descriptor classes share the
 ``experimenter_notes`` and ``incomplete`` attributes used by manifest generation."""
 
+
 def generate_project_manifest(project_directory: Path) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 

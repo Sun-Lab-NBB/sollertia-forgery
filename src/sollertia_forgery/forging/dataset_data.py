@@ -11,6 +11,8 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import RawDataFiles, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import YamlConfig
 
+from .trial_geometry import TRIAL_GEOMETRY_FILENAME
+
 DATA_FILENAME: str = "data.feather"
 """The filename of the assembled session data inside each session directory of a forged dataset."""
 
@@ -41,6 +43,11 @@ class DatasetSession:
     def descriptor_path(self) -> Path:
         """Returns the path to the session's ``session_descriptor.yaml`` file within the dataset hierarchy."""
         return self.session_path.joinpath(RawDataFiles.SESSION_DESCRIPTOR)
+
+    @property
+    def geometry_path(self) -> Path:
+        """Returns the path to the session's ``trial_geometry.yaml`` sidecar within the dataset hierarchy."""
+        return self.session_path.joinpath(TRIAL_GEOMETRY_FILENAME)
 
 
 @dataclass

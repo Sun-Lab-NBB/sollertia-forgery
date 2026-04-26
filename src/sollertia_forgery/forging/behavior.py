@@ -68,9 +68,7 @@ def assemble_behavior_dataset(
 
     # Loads the core behavior data present for all session types.
     valve_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
-    system_state_df = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
-    )
+    system_state_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True)
     lick_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 

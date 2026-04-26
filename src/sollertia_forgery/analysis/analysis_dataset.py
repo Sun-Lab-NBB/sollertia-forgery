@@ -424,7 +424,6 @@ def append_reward_cell_columns(
     console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
     reward_position = compute_reward_position(
         session_path=session_path,
-        track_length=track_length,
         trial_type=trial_type,
     )
     reward_detector = RewardCellDetector(

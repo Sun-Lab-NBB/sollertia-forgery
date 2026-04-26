@@ -19,6 +19,7 @@ from sollertia_shared_assets import (
     RawDataFiles,
     SessionTypes,
     ProcessingTrackers,
+    MesoscopeExperimentConfiguration,
     discover_sessions,
 )
 from ataraxis_data_structures import ProcessingTracker, delete_directory
@@ -28,6 +29,7 @@ from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
 from .dataset_data import DatasetData, DatasetSession
 from ..shared_assets import prepare_tracker
+from .trial_geometry import TRIAL_GEOMETRY_FILENAME, TrialGeometry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -485,6 +487,12 @@ def _assemble_session_dataset(
     else:
         console.disable_progress()
 
+    # Loads the experiment configuration once so the runtime assembly and the trial geometry sidecar share a single
+    # parsed instance instead of reading the same YAML twice.
+    experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
+        file_path=session_paths.raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
+    )
+
     try:
         # Assembles the fluorescence data first, which is needed to generate the reference time vector for the
         # behavior and runtime datasets.
@@ -513,7 +521,7 @@ def _assemble_session_dataset(
                 "runtime": partial(
                     assemble_runtime_dataset,
                     behavior_data_path=session_paths.behavior_data_path,
-                    raw_data_path=session_paths.raw_data_path,
+                    experiment_configuration=experiment_configuration,
                     reference_time=reference_time,
                 ),
             }
@@ -548,6 +556,11 @@ def _assemble_session_dataset(
             src=source_descriptor_path,
             dst=output_path.parent.joinpath(RawDataFiles.SESSION_DESCRIPTOR),
         )
+
+        # Projects the canonical trial geometry out of the experiment configuration and writes it next to data.feather
+        # so downstream analysis can reconstruct per-trial position without re-reading the raw experiment configuration.
+        trial_geometry = TrialGeometry.from_experiment_configuration(experiment_configuration=experiment_configuration)
+        trial_geometry.to_yaml(file_path=output_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
     finally:
         # Restores the previous progress bar visibility state.
         if prior_progress:

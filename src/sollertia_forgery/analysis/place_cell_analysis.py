@@ -5,22 +5,49 @@ track.
 from __future__ import annotations
 
 import os
-from copy import deepcopy
-from pathlib import Path
-from dataclasses import field, dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING
+from dataclasses import field, dataclass, replace
 from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray
-from scipy.ndimage import filters
 import matplotlib.pyplot as plt
+from scipy.ndimage import (
+    gaussian_filter,
+    maximum_filter1d,
+    minimum_filter1d,
+    uniform_filter1d,
+)
 from ataraxis_base_utilities import console
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@dataclass
+    from numpy.typing import NDArray
+
+
+_NO_TRIAL_SENTINEL: int = 255
+"""Sentinel trial id used by the acquisition pipeline to mark frames outside of any trial."""
+_WORKER_RESERVE: int = 4
+"""Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
+_PLOT_TICK_INTERVAL_CM: float = 25.0
+"""Spacing in centimeters between x-axis ticks on the position-ordered heatmap."""
+
+
+class BaselineMethod(StrEnum):
+    """Defines the baseline (F0) calculation method for dF/F0 normalization."""
+
+    MAXIMIN = "maximin"
+    """Applies Gaussian smoothing along the time axis followed by minimum then maximum filtering to extract a slow
+    drifting baseline."""
+    AVERAGE = "average"
+    """Uses the per-cell mean across all timepoints as a constant baseline."""
+
+
+@dataclass(frozen=True)
 class PlaceFieldDetectionConfiguration:
     """Defines configuration parameters for Tank lab place field detection algorithm."""
 
@@ -43,6 +70,130 @@ class PlaceFieldDetectionConfiguration:
     """Number of temporal chunks used for shuffle-based validation."""
     significance_threshold: float = 0.05
     """P-value threshold for determining statistically significant place fields."""
+
+
+@dataclass(frozen=True)
+class PlaceFields:
+    """Stores detected place fields in one-dimensional space."""
+
+    label_image: NDArray[np.int32]
+    """Labeled image of detected place fields with dimensions (cell_count, bin_count)."""
+    binned_fluorescence: NDArray[np.float32]
+    """Binned fluorescence data with dimensions (cell_count, bin_count)."""
+    binned_fluorescence_per_trial: NDArray[np.float32] = field(
+        default_factory=lambda: np.zeros((0, 0, 0), dtype=np.float32),
+    )
+    """Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count). Empty when per-trial
+    binning was not computed."""
+    centers: NDArray[np.float32] = field(default_factory=lambda: np.zeros((0, 2), dtype=np.float32))
+    """Centers of detected place fields with dimensions (field_count, 2)."""
+    bin_size: float = 5.0
+    """Size of spatial bins in centimeters."""
+
+    @property
+    def mean_intensity(self) -> NDArray[np.float32]:
+        """Returns the mean intensity for each detected place field."""
+        return _compute_mean_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
+
+    @property
+    def max_intensity(self) -> NDArray[np.float32]:
+        """Returns the maximum intensity for each detected place field."""
+        return _compute_max_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
+
+    @property
+    def cell_id(self) -> NDArray[np.int32]:
+        """Returns the cell ID for each detected place field."""
+        # noinspection PyTypeChecker
+        return self.centers[:, 0].astype(np.int32)
+
+    @property
+    def has_place_field(self) -> NDArray[np.bool_]:
+        """Returns a boolean array indicating whether each cell has a detected place field."""
+        return np.any(self.label_image > 0, axis=1)
+
+    @property
+    def order(self) -> NDArray[np.int32]:
+        """Returns cell ordering indices based on place field centers.
+
+        For cells with multiple place fields, the field with the highest mean intensity is used for ordering.
+        """
+        cell_count = self.binned_fluorescence.shape[0]
+
+        # With no detected fields, falls back to the natural cell order so callers can rely on a length-cell_count
+        # permutation regardless of detection results.
+        if self.centers.size == 0:
+            # noinspection PyTypeChecker
+            return np.arange(cell_count, dtype=np.int32)
+
+        # Initializes sort order with infinity to ensure cells without place fields are sorted to the end.
+        sort_order = np.full(cell_count, np.inf, dtype=np.float32)
+        intensity = self.mean_intensity
+        field_centers = self.centers
+        # noinspection PyTypeChecker
+        field_cell_id: NDArray[np.int32] = field_centers[:, 0].astype(np.int32)
+
+        # Orders cells with multiple place fields based on the field with the highest mean intensity.
+        for cell_index in range(cell_count):
+            cell_field_mask = field_cell_id == cell_index
+            cell_field_indices = np.flatnonzero(cell_field_mask)
+            if cell_field_indices.size > 0:
+                max_intensity_index = np.argmax(intensity[cell_field_mask])
+                # Assigns the position coordinate of the highest intensity field as the sort key.
+                sort_order[cell_index] = field_centers[cell_field_indices[max_intensity_index], 1]
+
+        # Returns indices that would sort cells by their place field position along the track.
+        # noinspection PyTypeChecker
+        return np.argsort(sort_order).astype(np.int32)
+
+    def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields:
+        """Removes specified place fields and returns a new PlaceFields object.
+
+        Args:
+            indices: Indices of place fields to remove.
+
+        Returns:
+            A new PlaceFields object with the specified fields removed.
+        """
+        # Zeros out the labels for the fields to be removed on a fresh copy so the source instance remains immutable.
+        new_label_image = self.label_image.copy()
+        new_label_image[np.isin(new_label_image, indices + 1)] = 0
+        _renumber_labels(new_label_image)
+
+        return replace(
+            self,
+            label_image=new_label_image,
+            centers=_compute_centers_from_labels(
+                label_image=new_label_image,
+                binned_fluorescence=self.binned_fluorescence,
+                bin_size=self.bin_size,
+            ),
+        )
+
+    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields:
+        """Filters to keep only specified cells and returns a new PlaceFields object.
+
+        Args:
+            indices: Indices of cells to keep.
+
+        Returns:
+            A new PlaceFields object containing only the specified cells.
+        """
+        # Zeros out labels for cells that are not in the list of cells to keep on a fresh copy so the source instance
+        # remains immutable.
+        new_label_image = self.label_image.copy()
+        all_indices = np.arange(new_label_image.shape[0])
+        new_label_image[~np.isin(all_indices, indices), :] = 0
+        _renumber_labels(new_label_image)
+
+        return replace(
+            self,
+            label_image=new_label_image,
+            centers=_compute_centers_from_labels(
+                label_image=new_label_image,
+                binned_fluorescence=self.binned_fluorescence,
+                bin_size=self.bin_size,
+            ),
+        )
 
 
 @njit(cache=True)
@@ -175,7 +326,7 @@ def _accumulate_binned_fluorescence(
         bin_count: Total number of bins.
         sample_counts: Number of samples per bin with length bin_count.
         use_mean: If True, computes the mean fluorescence per bin by dividing the accumulated fluorescence sum by
-                  sample count; otherwise returns the raw sum of fluorescence values per bin.
+            sample count; otherwise returns the raw sum of fluorescence values per bin.
         output: Pre-allocated output array with dimensions (cell_count, bin_count).
 
     Returns:
@@ -266,7 +417,7 @@ def _label_place_field_regions(
     """Labels contiguous above-threshold bins as place field regions and extracts their area and centroid.
 
     Args:
-        thresholded: Binary image with dimensions (cell_count, bin_count).
+        thresholded: Binary (bool) image with dimensions (cell_count, bin_count).
         intensity_image: Intensity image for weighted centroid calculation.
         labels: Pre-allocated output array for component labels with dimensions (cell_count, bin_count).
         cell_indices: Pre-allocated output for cell indices with dimensions (cell_count, max_regions_per_row).
@@ -345,146 +496,46 @@ def _flatten_region_properties(
     return flat_cell_indices, flat_areas, flat_centroids
 
 
-@dataclass
-class PlaceFields:
-    """Stores detected place fields in one-dimensional space.
+def _renumber_labels(label_image: NDArray[np.int32]) -> None:
+    """Renumbers label_image values sequentially starting from 1 in place after removing or filtering fields."""
+    new_label = 1
+    for value in np.unique(label_image):
+        if value != 0:
+            label_image[label_image == value] = new_label
+            new_label += 1
 
-    Attributes:
-        label_image: Labeled image of detected place fields with dimensions (cell_count, bin_count).
-        binned_fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
-        binned_fluorescence_per_trial: Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count).
-        centers: Centers of detected place fields with dimensions (field_count, 2).
-        bin_size: Size of spatial bins in centimeters.
+
+def _compute_centers_from_labels(
+    label_image: NDArray[np.int32],
+    binned_fluorescence: NDArray[np.float32],
+    bin_size: float,
+) -> NDArray[np.float32]:
+    """Computes the (cell_index, position_cm) centers array from a label image and its intensity image.
+
+    Args:
+        label_image: Labeled image with dimensions (cell_count, bin_count).
+        binned_fluorescence: Intensity image with the same dimensions used to weight centroid positions.
+        bin_size: Size of spatial bins in centimeters used to convert bin indices to centimeters.
+
+    Returns:
+        Centers array with dimensions (field_count, 2) where each row is (cell_index, position_cm). Returns an empty
+        (0, 2) array when no labeled regions are present.
     """
-
-    label_image: NDArray[np.int32]
-    """Labeled image of detected place fields with dimensions (cell_count, bin_count)."""
-    binned_fluorescence: NDArray[np.float32]
-    """Binned fluorescence data with dimensions (cell_count, bin_count)."""
-    binned_fluorescence_per_trial: NDArray[np.float32] = field(
-        default_factory=lambda: np.zeros((0, 0, 0), dtype=np.float32),
+    cell_indices, weighted_centroids = _compute_label_centers(
+        label_image=label_image, intensity_image=binned_fluorescence
     )
-    """Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count). Empty when per-trial
-    binning was not computed."""
-    centers: NDArray[np.float32] = field(default_factory=lambda: np.array([], dtype=np.float32))
-    """Centers of detected place fields with dimensions (field_count, 2)."""
-    bin_size: float = 5.0
-    """Size of spatial bins in centimeters."""
 
-    @property
-    def mean_intensity(self) -> NDArray[np.float32]:
-        """Returns the mean intensity for each detected place field."""
-        return _compute_mean_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
+    if len(cell_indices) == 0:
+        return np.zeros((0, 2), dtype=np.float32)
 
-    @property
-    def max_intensity(self) -> NDArray[np.float32]:
-        """Returns the maximum intensity for each detected place field."""
-        return _compute_max_intensity(label_image=self.label_image, intensity_image=self.binned_fluorescence)
-
-    @property
-    def cell_id(self) -> NDArray[np.int32]:
-        """Returns the cell ID for each detected place field."""
-        return self.centers[:, 0].astype(np.int32)
-
-    @property
-    def has_place_field(self) -> NDArray[np.bool_]:
-        """Returns a boolean array indicating whether each cell has a detected place field."""
-        return np.any(self.label_image > 0, axis=1)
-
-    @property
-    def order(self) -> NDArray[np.int32]:
-        """Returns cell ordering indices based on place field centers.
-
-        For cells with multiple place fields, the field with the highest mean intensity is used for ordering.
-        """
-        cell_count = self.binned_fluorescence.shape[0]
-        # Initializes sort order with infinity to ensure cells without place fields are sorted to the end.
-        sort_order = np.full(cell_count, np.inf, dtype=np.float32)
-        intensity = self.mean_intensity
-        field_centers = self.centers
-
-        if not field_centers.any():
-            return sort_order.astype(np.int32)
-
-        # Extracts the cell index from the first coordinate of each field center.
-        field_cell_id = field_centers[:, 0].astype(np.int32)
-
-        # Orders cells with multiple place fields based on the field with the highest mean intensity.
-        for cell_index in range(cell_count):
-            cell_field_indices = np.argwhere(field_cell_id == cell_index)
-            if cell_field_indices.size > 0:
-                max_intensity_index = np.argmax(intensity[field_cell_id == cell_index])
-                # Assigns the position coordinate of the highest intensity field as the sort key.
-                sort_order[cell_index] = field_centers[cell_field_indices[max_intensity_index], 1]
-
-        # Returns indices that would sort cells by their place field position along the track.
-        return np.argsort(sort_order).astype(np.int32)
-
-    def _realign_field_centers(self) -> None:
-        """Recomputes centers array to align with label_image after modifications in remove_fields and filter_cells."""
-        # Extracts cell indices and intensity-weighted centroids from the current label_image.
-        cell_indices, weighted_centroids = _compute_label_centers(
-            label_image=self.label_image, intensity_image=self.binned_fluorescence
-        )
-
-        # Converts bin indices to centimeters and combines with cell indices into a (field_count, 2) array.
-        self.centers = (
-            np.column_stack((cell_indices.astype(np.float32), weighted_centroids * self.bin_size))
-            if len(cell_indices) > 0
-            else np.array([], dtype=np.float32).reshape(0, 2)
-        )
-
-    def _renumber_labels(self) -> None:
-        """Renumbers label_image values sequentially starting from 1 after removing or filtering fields."""
-        new_label = 1
-        for value in np.unique(self.label_image):
-            if value != 0:
-                self.label_image[self.label_image == value] = new_label
-                new_label += 1
-
-    def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields:
-        """Removes specified place fields and returns a new PlaceFields object.
-
-        Args:
-            indices: Indices of place fields to remove.
-
-        Returns:
-            A new PlaceFields object with the specified fields removed.
-        """
-        place_fields = deepcopy(self)
-
-        # Zeros out the labels for the fields to be removed.
-        place_fields.label_image[np.isin(place_fields.label_image, indices + 1)] = 0
-
-        place_fields._renumber_labels()
-        place_fields._realign_field_centers()
-
-        return place_fields
-
-    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields:
-        """Filters to keep only specified cells and returns a new PlaceFields object.
-
-        Args:
-            indices: Indices of cells to keep.
-
-        Returns:
-            A new PlaceFields object containing only the specified cells.
-        """
-        place_fields = deepcopy(self)
-
-        # Zeros out labels for cells that are not in the list of cells to keep.
-        all_indices = np.arange(0, place_fields.label_image.shape[0])
-        place_fields.label_image[~np.isin(all_indices, indices), :] = 0
-
-        place_fields._renumber_labels()
-        place_fields._realign_field_centers()
-
-        return place_fields
+    # Converts bin indices to centimeters and combines with cell indices into a (field_count, 2) array.
+    # noinspection PyTypeChecker
+    return np.column_stack((cell_indices.astype(np.float32), weighted_centroids * bin_size))
 
 
 def _compute_baseline_fluorescence(
     fluorescence: NDArray[np.float32],
-    method: str = "maximin",
+    method: BaselineMethod = BaselineMethod.MAXIMIN,
     gaussian_sigma: float = 20.0,
     filter_window_size: int = 600,
 ) -> NDArray[np.float32]:
@@ -492,10 +543,9 @@ def _compute_baseline_fluorescence(
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        method: The baseline calculation method. Uses either 'maximin' for Gaussian smoothing followed by min and max
-            filtering, or 'average' for computing the mean of each row.
-        gaussian_sigma: Standard deviation of the Gaussian filter for 'maximin' method.
-        filter_window_size: Window size for min/max filtering in 'maximin' method.
+        method: The baseline calculation method. See BaselineMethod for valid values.
+        gaussian_sigma: Standard deviation of the Gaussian filter for the MAXIMIN method.
+        filter_window_size: Window size for min/max filtering in the MAXIMIN method.
 
     Returns:
         Baseline array with the same shape as fluorescence.
@@ -503,12 +553,12 @@ def _compute_baseline_fluorescence(
     Raises:
         ValueError: If an unknown method is provided or fluorescence has invalid dimensions.
     """
-    if method == "maximin":
+    if method == BaselineMethod.MAXIMIN:
         # Applies Gaussian smoothing along the time axis only (sigma=0 for cell axis).
         if fluorescence.ndim == 2:
-            baseline = filters.gaussian_filter(input=fluorescence, sigma=[0.0, gaussian_sigma])
+            baseline = gaussian_filter(input=fluorescence, sigma=[0.0, gaussian_sigma])
         elif fluorescence.ndim == 1:
-            baseline = filters.gaussian_filter(input=fluorescence, sigma=[gaussian_sigma])
+            baseline = gaussian_filter(input=fluorescence, sigma=[gaussian_sigma])
         else:
             message = (
                 f"Unable to compute baseline fluorescence. Expected fluorescence to be 1D or 2D, "
@@ -518,25 +568,27 @@ def _compute_baseline_fluorescence(
 
         # Applies minimum then maximum filtering to extract the slow-varying baseline fluorescence (F0) used for
         # computing dF/F0.
-        baseline = filters.minimum_filter1d(input=baseline, size=filter_window_size)
-        baseline = filters.maximum_filter1d(input=baseline, size=filter_window_size)
+        baseline = minimum_filter1d(input=baseline, size=filter_window_size)
+        baseline = maximum_filter1d(input=baseline, size=filter_window_size)
 
-    elif method == "average":
+    elif method == BaselineMethod.AVERAGE:
         # Computes a constant baseline fluorescence (F0) per cell using the mean across all timepoints.
-        baseline = np.tile(np.mean(fluorescence, axis=1), (fluorescence.shape[1], 1)).T
+        baseline = np.broadcast_to(np.mean(fluorescence, axis=1)[:, np.newaxis], fluorescence.shape).copy()
 
     else:
         message = (
-            f"Unable to compute baseline fluorescence. The method must be 'maximin' or 'average', but got '{method}'."
+            f"Unable to compute baseline fluorescence. The method must be one of "
+            f"{[entry.value for entry in BaselineMethod]}, but got '{method}'."
         )
         console.error(message=message, error=ValueError)
 
+    # noinspection PyTypeChecker
     return baseline
 
 
 def _compute_delta_fluorescence(
     fluorescence: NDArray[np.float32],
-    baseline_method: str = "maximin",
+    baseline_method: BaselineMethod = BaselineMethod.MAXIMIN,
     subtract_minimum: bool = False,
     gaussian_sigma: float = 20.0,
     filter_window_size: int = 600,
@@ -592,11 +644,13 @@ def _bin_fluorescence_by_position(
     """
     # Assigns each position to a spatial bin and clips to the range [0, bin_count - 1].
     bin_indices = np.searchsorted(bin_edges, position, side="right") - 1
-    bin_indices = np.clip(bin_indices, 0, len(bin_edges) - 2).astype(np.int32)
+    # noinspection PyTypeChecker
+    bin_indices: NDArray[np.int32] = np.clip(bin_indices, 0, len(bin_edges) - 2).astype(np.int32)
 
     bin_count = len(bin_edges) - 1
     cell_count = fluorescence.shape[0]
-    sample_counts = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
+    # noinspection PyTypeChecker
+    sample_counts: NDArray[np.int32] = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
 
     output = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
 
@@ -621,15 +675,17 @@ def _compute_quantile_max_threshold(
     """Thresholds binned fluorescence using a fractional difference between baseline quantile and peak activity.
 
     Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        base_quantile: Quantile used as baseline.
-        threshold_factor: Fraction of (max_val - base_val).
+        fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
+        base_quantile: Quantile of the per-cell fluorescence distribution used as the baseline reference.
+        threshold_factor: Fraction of (max - baseline) added to the baseline to form the per-cell threshold.
 
     Returns:
         Boolean mask of the same shape as fluorescence. Returns True if values exceed the computed threshold.
     """
-    max_values = np.nanmax(fluorescence, axis=1).astype(np.float32)
-    quantile_values = np.nanquantile(fluorescence, base_quantile, axis=1).astype(np.float32)
+    # noinspection PyTypeChecker
+    max_values: NDArray[np.float32] = np.nanmax(fluorescence, axis=1).astype(np.float32)
+    # noinspection PyTypeChecker
+    quantile_values: NDArray[np.float32] = np.nanquantile(fluorescence, base_quantile, axis=1).astype(np.float32)
     output = np.empty(fluorescence.shape, dtype=np.bool_)
 
     return _apply_place_field_threshold(
@@ -641,10 +697,11 @@ def _compute_quantile_max_threshold(
     )
 
 
-def compute_circular_connected_place_fields(
+def _compute_circular_connected_place_fields(
     thresholded_image: NDArray[np.bool_],
     binned_fluorescence: NDArray[np.float32],
     minimum_bins: int = 3,
+    bin_size: float = 5.0,
 ) -> PlaceFields:
     """Detects place fields as circularly connected above-threshold regions along the linear track.
 
@@ -653,6 +710,7 @@ def compute_circular_connected_place_fields(
             (cell_count, bin_count).
         binned_fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
         minimum_bins: Minimal required size of a connected region in bins.
+        bin_size: Size of spatial bins in centimeters propagated into the returned PlaceFields.
 
     Returns:
         The detected one-dimensional place fields.
@@ -693,7 +751,7 @@ def compute_circular_connected_place_fields(
     )
 
     # Filters to components whose centroids fall within the original track region and that span at least the minimum
-    #  number of contiguous bins.
+    # number of contiguous bins.
     valid_mask = (centroids >= bin_count) & (centroids < bin_count * 2) & (areas >= minimum_bins)
     valid_indices = np.where(valid_mask)[0]
 
@@ -718,20 +776,20 @@ def compute_circular_connected_place_fields(
         adjusted_centers.append([float(cell_index), target_centroid - bin_count])
 
     # Converts adjusted centers list to a 2D array, or creates an empty array if no valid regions were found.
-    centers = (
-        np.array(adjusted_centers, dtype=np.float32)
-        if adjusted_centers
-        else np.array([], dtype=np.float32).reshape(0, 2)
+    # noinspection PyTypeChecker
+    centers: NDArray[np.float32] = (
+        np.array(adjusted_centers, dtype=np.float32) if adjusted_centers else np.zeros((0, 2), dtype=np.float32)
     )
 
     return PlaceFields(
         label_image=result_label_image,
         binned_fluorescence=binned_fluorescence,
         centers=centers,
+        bin_size=bin_size,
     )
 
 
-def outside_field_threshold(place_fields: PlaceFields, threshold_factor: float = 3) -> PlaceFields:
+def _outside_field_threshold(place_fields: PlaceFields, threshold_factor: float = 3.0) -> PlaceFields:
     """Filters place fields by requiring in-field activity to exceed out-of-field baseline by a threshold factor.
 
     Removes false positives by requiring that detected place fields have significantly higher activity than the
@@ -752,7 +810,10 @@ def outside_field_threshold(place_fields: PlaceFields, threshold_factor: float =
 
     # Identifies fields where in-field activity does not exceed the outside-field baseline by the threshold factor.
     threshold_values = outside_values[place_fields.cell_id] * threshold_factor
-    invalid_regions = np.concatenate(np.argwhere(place_fields.mean_intensity < threshold_values))
+    # noinspection PyTypeChecker
+    invalid_regions: NDArray[np.int32] = np.flatnonzero(place_fields.mean_intensity < threshold_values).astype(
+        np.int32
+    )
 
     return place_fields.remove_fields(indices=invalid_regions)
 
@@ -789,15 +850,22 @@ class PlaceFieldDetector:
             df = df.filter(pl.col("trial_type") == trial_type)
 
         # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        self.fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
+        # noinspection PyTypeChecker
+        self.fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
 
         # Converts the cumulative distance to track position using modulus to wrap within a single lap.
-        self.position = df["distance_cm"].to_numpy().astype(np.float32) % track_length
-        self.speed = df["speed_cm_s"].to_numpy().astype(np.float32)
-        self.trial_ids = df["trial"].to_numpy().astype(np.int32)
+        # noinspection PyTypeChecker
+        self.position: NDArray[np.float32] = df["distance_cm"].to_numpy().astype(np.float32) % track_length
+        # noinspection PyTypeChecker
+        self.speed: NDArray[np.float32] = df["speed_cm_s"].to_numpy().astype(np.float32)
+        # noinspection PyTypeChecker
+        self.trial_ids: NDArray[np.int32] = df["trial"].to_numpy().astype(np.int32)
         self.track_length = track_length
         self.bin_size = bin_size
         self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
+
+        # Caches the bin edges shared by `_run_detection` and `_bin_fluorescence_per_trial`.
+        self._bin_edges = np.arange(0, track_length + bin_size, bin_size, dtype=np.float32)
 
     def detect(self, run_shuffle: bool = False) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
@@ -826,18 +894,19 @@ class PlaceFieldDetector:
             place_fields = place_fields.filter_cells(indices=significant_cells)
 
         # Computes per-lap binned fluorescence using the same speed filter and smoothing as the pooled computation.
-        place_fields.binned_fluorescence_per_trial = self._bin_fluorescence_per_trial(fluorescence=fluorescence)
-
-        return place_fields
+        return replace(
+            place_fields,
+            binned_fluorescence_per_trial=self._bin_fluorescence_per_trial(fluorescence=fluorescence),
+        )
 
     def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
         """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.
 
         Notes:
-            Excludes trial id 255, which the acquisition pipeline uses as a sentinel for "no trial" frames. Applies
-            the same speed filter and uniform_filter1d smoothing used for the pooled binned fluorescence so that
-            averaging the returned array across the trial axis reproduces the pooled binned_fluorescence within
-            numerical rounding.
+            Excludes the trial id sentinel that the acquisition pipeline uses to mark "no trial" frames. Applies the
+            same speed filter and uniform_filter1d smoothing used for the pooled binned fluorescence so that averaging
+            the returned array across the trial axis reproduces the pooled binned_fluorescence within numerical
+            rounding.
 
         Args:
             fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, frame_count).
@@ -846,14 +915,13 @@ class PlaceFieldDetector:
             Per-lap binned fluorescence array with dimensions (cell_count, trial_count, bin_count). Bins and lap
             slices with no valid speed-filtered frames are filled with NaN.
         """
-        # Collects valid trial identifiers, excluding the 255 sentinel that marks "no trial" frames.
-        valid_trial_mask = self.trial_ids != 255
+        # Collects valid trial identifiers, excluding the sentinel that marks "no trial" frames.
+        valid_trial_mask = self.trial_ids != _NO_TRIAL_SENTINEL
         unique_trials = np.unique(self.trial_ids[valid_trial_mask])
         trial_count = len(unique_trials)
 
         cell_count = fluorescence.shape[0]
-        bin_edges = np.arange(0, self.track_length + self.bin_size, self.bin_size, dtype=np.float32)
-        bin_count = len(bin_edges) - 1
+        bin_count = len(self._bin_edges) - 1
 
         output = np.full((cell_count, trial_count, bin_count), np.nan, dtype=np.float32)
 
@@ -869,10 +937,11 @@ class PlaceFieldDetector:
             trial_binned, _ = _bin_fluorescence_by_position(
                 fluorescence=trial_fluorescence,
                 position=trial_position,
-                bin_edges=bin_edges,
+                bin_edges=self._bin_edges,
             )
 
-            trial_binned = filters.uniform_filter1d(
+            # noinspection PyTypeChecker
+            trial_binned: NDArray[np.float32] = uniform_filter1d(
                 input=trial_binned,
                 size=self.configuration.smooth_size,
                 axis=1,
@@ -888,18 +957,19 @@ class PlaceFieldDetector:
         repeat_count: int = 100,
         worker_count: int = -1,
     ) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
-        """Validates place fields using a shuffle test by comparing observed fields with shuffled data to compute
-        p-values.
+        """Validates place fields by comparing observed fields against shuffled data via per-cell p-values.
 
         Args:
             repeat_count: Number of shuffles to perform.
-            worker_count: Number of parallel workers for shuffle iterations. If -1, uses all CPU cores minus 4.
+            worker_count: Number of parallel workers for shuffle iterations. If -1, uses all CPU cores minus a
+                small reserve.
 
         Returns:
             A tuple containing the significant cell indices and p-values arrays.
         """
         fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
 
+        # Replaces NaN speed values with 0 so they fall below the minimum-speed gate without raising in comparisons.
         speed = self.speed.copy()
         speed[np.isnan(speed)] = 0
 
@@ -910,34 +980,30 @@ class PlaceFieldDetector:
             speed=speed,
         ).has_place_field
 
-        # Spawns a thread for each shuffle iteration to parallelize detection.
         if worker_count == -1:
-            worker_count = max(1, os.cpu_count() - 4)
+            worker_count = max(1, os.cpu_count() - _WORKER_RESERVE)
 
+        # Spawns a thread for each shuffle iteration to parallelize detection.
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(
-                    lambda i=i: (
-                        self._run_detection(
-                            fluorescence=self._shuffle(data=fluorescence, iteration=i),
-                            position=self.position,
-                            speed=speed,
-                        ).has_place_field
-                    ),
-                )
-                for i in range(repeat_count)
+                executor.submit(self._shuffle_iteration_has_field, fluorescence, speed, iteration)
+                for iteration in range(repeat_count)
             ]
             shuffled_results = [future.result() for future in tqdm(futures, desc="Shuffle significance", unit="iter")]
 
         shuffled_results = np.vstack(shuffled_results).T
 
         # Computes p-values as the proportion of shuffles where a place field was detected by chance.
-        p_values = (np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]).astype(np.float32)
+        # noinspection PyTypeChecker
+        p_values: NDArray[np.float32] = (np.sum(shuffled_results, axis=1) / shuffled_results.shape[1]).astype(
+            np.float32
+        )
 
         # Selects cells with an observed place field and a p-value below the significance threshold.
-        significant_cells = (
-            np.argwhere((observed) & (p_values < self.configuration.significance_threshold)).flatten().astype(np.int32)
-        )
+        # noinspection PyTypeChecker
+        significant_cells: NDArray[np.int32] = np.flatnonzero(
+            observed & (p_values < self.configuration.significance_threshold)
+        ).astype(np.int32)
 
         return significant_cells, p_values
 
@@ -963,7 +1029,7 @@ class PlaceFieldDetector:
             sort_by_position: Whether to order cells by their place field center location along the track.
             show_only_place_cells: Whether to display only cells that have detected place fields.
             cell_mask: Boolean mask with length cell_count specifying which cells to include in the plot. If provided,
-                       this overrides show_only_place_cells.
+                this overrides show_only_place_cells.
             figure_dpi: Resolution of the figure in dots per inch.
             minimum_percentile: Percentile of the data used to set the lower bound of the color scale.
             maximum_percentile: Percentile of the data used to set the upper bound of the color scale.
@@ -975,13 +1041,13 @@ class PlaceFieldDetector:
         data = place_fields.binned_fluorescence
 
         # Determines cell ordering based on place field position or original order.
-        sort_order = place_fields.order if sort_by_position else np.arange(0, data.shape[0])
+        sort_order = place_fields.order if sort_by_position else np.arange(data.shape[0])
 
         # Filters to include only cells with place fields or those specified in the mask.
         if cell_mask is not None:
-            sort_order = sort_order[np.isin(sort_order, np.argwhere(cell_mask))]
+            sort_order = sort_order[np.isin(sort_order, np.flatnonzero(cell_mask))]
         elif show_only_place_cells:
-            sort_order = sort_order[np.isin(sort_order, np.argwhere(place_fields.has_place_field))]
+            sort_order = sort_order[np.isin(sort_order, np.flatnonzero(place_fields.has_place_field))]
 
         data = data[sort_order, :]
 
@@ -991,12 +1057,12 @@ class PlaceFieldDetector:
 
         figure, axes = plt.subplots(1, 1, figsize=(8, 4), facecolor="white", dpi=figure_dpi)
 
-        if title:
-            plt.title(title, fontsize=8)
+        if title is not None:
+            axes.set_title(title, fontsize=8)
 
         # Sets axis extent where x-axis shows the position in centimeters and y-axis shows the cell number.
         extent = [0, place_fields.bin_size * data.shape[1], data.shape[0], 0]
-        plt.imshow(
+        image = axes.imshow(
             data,
             cmap=cmap,
             extent=extent,
@@ -1007,16 +1073,16 @@ class PlaceFieldDetector:
         )
 
         axes.set_aspect("auto")
-        plt.xlabel("Position (cm)")
-        plt.ylabel("Cell number")
+        axes.set_xlabel("Position (cm)")
+        axes.set_ylabel("Cell number")
 
-        # Sets x-axis ticks at 25 cm intervals for consistent position labeling.
+        # Sets x-axis ticks at fixed centimeter intervals for consistent position labeling.
         track_length = place_fields.bin_size * data.shape[1]
-        x_ticks = np.arange(0, track_length + 1, 25)
+        x_ticks = np.arange(0, track_length + 1, _PLOT_TICK_INTERVAL_CM)
         axes.set_xticks(x_ticks)
 
         if show_color_bar:
-            cbar = plt.colorbar()
+            cbar = figure.colorbar(image, ax=axes)
             cbar.set_label("ΔF/F₀")
 
             # Sets colorbar ticks at 0.5 ΔF/F₀ intervals for consistent fluorescence labeling.
@@ -1049,21 +1115,21 @@ class PlaceFieldDetector:
             fields.
         """
         # Excludes timepoints where the animal is moving below the minimum speed threshold.
-        speed_indices = speed > self.configuration.minimum_speed
-        position = position[speed_indices]
-        fluorescence = fluorescence[:, speed_indices]
+        speed_mask = speed > self.configuration.minimum_speed
+        position = position[speed_mask]
+        fluorescence = fluorescence[:, speed_mask]
 
         # Bins fluorescence by spatial position along the track.
-        bin_edges = np.arange(0, self.track_length + self.bin_size, self.bin_size, dtype=np.float32)
         binned_fluorescence, _ = _bin_fluorescence_by_position(
             fluorescence=fluorescence,
             position=position,
-            bin_edges=bin_edges,
+            bin_edges=self._bin_edges,
         )
 
         # Applies a moving average filter to smooth binned fluorescence across spatial bins. Casts back to float32
         # because uniform_filter1d promotes to float64.
-        binned_fluorescence = filters.uniform_filter1d(
+        # noinspection PyTypeChecker
+        binned_fluorescence: NDArray[np.float32] = uniform_filter1d(
             input=binned_fluorescence, size=self.configuration.smooth_size, axis=1, mode="wrap"
         ).astype(np.float32)
 
@@ -1075,25 +1141,39 @@ class PlaceFieldDetector:
         )
 
         # Detects place fields as horizontally connected regions in the thresholded binary mask.
-        place_fields = compute_circular_connected_place_fields(
+        place_fields = _compute_circular_connected_place_fields(
             thresholded_image=thresholded_fluorescence,
             binned_fluorescence=binned_fluorescence,
             minimum_bins=self.configuration.minimum_bins,
+            bin_size=self.bin_size,
         )
-        place_fields.bin_size = self.bin_size
 
         # Removes fields where in-field activity does not sufficiently exceed outside-field activity.
-        place_fields = outside_field_threshold(
+        place_fields = _outside_field_threshold(
             place_fields=place_fields,
             threshold_factor=self.configuration.outside_threshold,
         )
 
         # Removes fields with peak intensity below the minimum threshold.
-        place_fields = place_fields.remove_fields(
-            indices=np.argwhere(place_fields.max_intensity < self.configuration.maximum_intensity_threshold)
-        )
+        # noinspection PyTypeChecker
+        invalid_indices: NDArray[np.int32] = np.flatnonzero(
+            place_fields.max_intensity < self.configuration.maximum_intensity_threshold
+        ).astype(np.int32)
 
-        return place_fields
+        return place_fields.remove_fields(indices=invalid_indices)
+
+    def _shuffle_iteration_has_field(
+        self,
+        fluorescence: NDArray[np.float32],
+        speed: NDArray[np.float32],
+        iteration: int,
+    ) -> NDArray[np.bool_]:
+        """Runs detection on a single shuffled fluorescence trace and returns the per-cell place field flag."""
+        return self._run_detection(
+            fluorescence=self._shuffle(data=fluorescence, iteration=iteration),
+            position=self.position,
+            speed=speed,
+        ).has_place_field
 
     def _shuffle(self, data: NDArray[np.float32], iteration: int) -> NDArray[np.float32]:
         """Shuffles fluorescence traces by circular time-shifting to disrupt spatial tuning for significance testing.
@@ -1115,6 +1195,4 @@ class PlaceFieldDetector:
         shift_amount = random_generator.integers(minimum_shift, total_frames - minimum_shift)
 
         # Applies circular shift along the time axis to disrupt position-fluorescence correlations.
-        shuffled_data = np.roll(data, shift=shift_amount, axis=1)
-
-        return shuffled_data
+        return np.roll(data, shift=shift_amount, axis=1)

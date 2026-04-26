@@ -5,10 +5,18 @@ from .pipeline import (
     run_forging_pipeline,
 )
 from .dataset_data import DatasetData, DatasetSession
+from .trial_geometry import (
+    TRIAL_GEOMETRY_FILENAME,
+    TrialGeometry,
+    TrialGeometryEntry,
+)
 
 __all__ = [
     "FORGING_JOB_NAME",
+    "TRIAL_GEOMETRY_FILENAME",
     "DatasetData",
     "DatasetSession",
+    "TrialGeometry",
+    "TrialGeometryEntry",
     "run_forging_pipeline",
 ]

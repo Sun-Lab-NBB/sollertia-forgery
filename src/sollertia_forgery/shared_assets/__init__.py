@@ -1,8 +1,7 @@
 """Provides shared assets that support multiple library packages and modules."""
 
-from .metadata import ProjectManifest
+from .metadata import StimulusMode, ProjectManifest, BehaviorDataFiles
 from .utilities import delay_timer, delay_terminal
-from .data_files import BehaviorDataFiles
 from .mcp_orchestration import (
     RESERVED_CORES,
     ActiveJob,
@@ -24,6 +23,7 @@ __all__ = [
     "JobExecutionState",
     "PendingJob",
     "ProjectManifest",
+    "StimulusMode",
     "analyze_feather_file",
     "clean_output_subdirectory",
     "delay_terminal",
