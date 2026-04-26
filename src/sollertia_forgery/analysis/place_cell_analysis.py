@@ -5,7 +5,6 @@ track.
 from __future__ import annotations
 
 import os
-from enum import StrEnum
 from typing import TYPE_CHECKING
 from dataclasses import field, dataclass, replace
 from concurrent.futures import ThreadPoolExecutor
@@ -13,17 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
-import polars as pl
 import matplotlib.pyplot as plt
-from scipy.ndimage import (
-    gaussian_filter,
-    maximum_filter1d,
-    minimum_filter1d,
-    uniform_filter1d,
-)
-from ataraxis_base_utilities import console
+from scipy.ndimage import uniform_filter1d
 
-from .utilities import compute_within_trial_position
+from ..forging import FluorescenceColumn
+from .utilities import bin_fluorescence_by_position, assemble_run_session_data
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -32,21 +25,11 @@ if TYPE_CHECKING:
 
 
 _NO_TRIAL_SENTINEL: int = 255
-"""Sentinel trial id used by the acquisition pipeline to mark frames outside of any trial."""
+"""Sentinel trial id used by the acquisition pipeline to mark samples outside of any trial."""
 _WORKER_RESERVE: int = 4
 """Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
 _PLOT_TICK_INTERVAL_CM: float = 25.0
-"""Spacing in centimeters between x-axis ticks on the position-ordered heatmap."""
-
-
-class BaselineMethod(StrEnum):
-    """Defines the baseline (F0) calculation method for dF/F0 normalization."""
-
-    MAXIMIN = "maximin"
-    """Applies Gaussian smoothing along the time axis followed by minimum then maximum filtering to extract a slow
-    drifting baseline."""
-    AVERAGE = "average"
-    """Uses the per-cell mean across all timepoints as a constant baseline."""
+"""Spacing in centimeters between x-axis ticks on the position-ordered place-field heatmap."""
 
 
 @dataclass(frozen=True)
@@ -312,54 +295,6 @@ def _compute_max_intensity(
 
 
 @njit(cache=True, parallel=True)
-def _accumulate_binned_fluorescence(
-    fluorescence: NDArray[np.float32],
-    bin_indices: NDArray[np.int32],
-    bin_count: int,
-    sample_counts: NDArray[np.int32],
-    use_mean: bool,
-    output: NDArray[np.float32],
-) -> NDArray[np.float32]:
-    """Accumulates neural fluorescence values into spatial position bins for each cell.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        bin_indices: Bin index for each frame with length frame_count.
-        bin_count: Total number of bins.
-        sample_counts: Number of samples per bin with length bin_count.
-        use_mean: If True, computes the mean fluorescence per bin by dividing the accumulated fluorescence sum by
-            sample count; otherwise returns the raw sum of fluorescence values per bin.
-        output: Pre-allocated output array with dimensions (cell_count, bin_count).
-
-    Returns:
-        The output array filled with binned fluorescence values.
-    """
-    cell_count = fluorescence.shape[0]
-    frame_count = fluorescence.shape[1]
-
-    for cell_index in prange(cell_count):
-        # Initializes a temporary array to accumulate fluorescence values for each spatial bin.
-        bin_sums = np.zeros(bin_count, dtype=np.float32)
-
-        # Adds each fluorescence value to its corresponding spatial bin based on the animal's position at that frame.
-        for frame_index in range(frame_count):
-            bin_index = bin_indices[frame_index]
-            bin_sums[bin_index] += fluorescence[cell_index, frame_index]
-
-        # Converts accumulated sums to mean values (if requested) by dividing by the number of samples in each bin.
-        for bin_index in range(bin_count):
-            if sample_counts[bin_index] > 0:
-                if use_mean:
-                    output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
-                else:
-                    output[cell_index, bin_index] = bin_sums[bin_index]
-            else:
-                output[cell_index, bin_index] = np.nan
-
-    return output
-
-
-@njit(cache=True, parallel=True)
 def _apply_place_field_threshold(
     fluorescence: NDArray[np.float32],
     quantile_values: NDArray[np.float32],
@@ -535,140 +470,6 @@ def _compute_centers_from_labels(
     return np.column_stack((cell_indices.astype(np.float32), weighted_centroids * bin_size))
 
 
-def _compute_baseline_fluorescence(
-    fluorescence: NDArray[np.float32],
-    method: BaselineMethod = BaselineMethod.MAXIMIN,
-    gaussian_sigma: float = 20.0,
-    filter_window_size: int = 600,
-) -> NDArray[np.float32]:
-    """Computes the baseline (F0) of neural fluorescence traces for dF/F0 normalization.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        method: The baseline calculation method. See BaselineMethod for valid values.
-        gaussian_sigma: Standard deviation of the Gaussian filter for the MAXIMIN method.
-        filter_window_size: Window size for min/max filtering in the MAXIMIN method.
-
-    Returns:
-        Baseline array with the same shape as fluorescence.
-
-    Raises:
-        ValueError: If an unknown method is provided or fluorescence has invalid dimensions.
-    """
-    if method == BaselineMethod.MAXIMIN:
-        # Applies Gaussian smoothing along the time axis only (sigma=0 for cell axis).
-        if fluorescence.ndim == 2:
-            baseline = gaussian_filter(input=fluorescence, sigma=[0.0, gaussian_sigma])
-        elif fluorescence.ndim == 1:
-            baseline = gaussian_filter(input=fluorescence, sigma=[gaussian_sigma])
-        else:
-            message = (
-                f"Unable to compute baseline fluorescence. Expected fluorescence to be 1D or 2D, "
-                f"but got {fluorescence.ndim}D."
-            )
-            console.error(message=message, error=ValueError)
-
-        # Applies minimum then maximum filtering to extract the slow-varying baseline fluorescence (F0) used for
-        # computing dF/F0.
-        baseline = minimum_filter1d(input=baseline, size=filter_window_size)
-        baseline = maximum_filter1d(input=baseline, size=filter_window_size)
-
-    elif method == BaselineMethod.AVERAGE:
-        # Computes a constant baseline fluorescence (F0) per cell using the mean across all timepoints.
-        baseline = np.broadcast_to(np.mean(fluorescence, axis=1)[:, np.newaxis], fluorescence.shape).copy()
-
-    else:
-        message = (
-            f"Unable to compute baseline fluorescence. The method must be one of "
-            f"{[entry.value for entry in BaselineMethod]}, but got '{method}'."
-        )
-        console.error(message=message, error=ValueError)
-
-    # noinspection PyTypeChecker
-    return baseline
-
-
-def _compute_delta_fluorescence(
-    fluorescence: NDArray[np.float32],
-    baseline_method: BaselineMethod = BaselineMethod.MAXIMIN,
-    subtract_minimum: bool = False,
-    gaussian_sigma: float = 20.0,
-    filter_window_size: int = 600,
-) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
-    """Computes the relative fluorescence change (ΔF/F0) normalized to baseline fluorescence.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        baseline_method: Baseline calculation method. See _compute_baseline_fluorescence() for valid methods.
-        subtract_minimum: Whether to subtract the minimum fluorescence from each row before baseline calculation.
-        gaussian_sigma: Standard deviation of the Gaussian filter for 'maximin' baseline method.
-        filter_window_size: Window size for min/max filtering in 'maximin' baseline method.
-
-    Returns:
-        A tuple containing the delta fluorescence array (F - F0) / F0 and the baseline F0 array,
-        both with the same shape as the input fluorescence.
-    """
-    # Removes any negative offset by shifting each cell's trace so its minimum is zero.
-    if subtract_minimum:
-        fluorescence = fluorescence - np.min(fluorescence, axis=1)[..., np.newaxis]
-
-    # Estimates the baseline fluorescence (F0) representing the resting or non-active state of each cell.
-    baseline = _compute_baseline_fluorescence(
-        fluorescence=fluorescence,
-        method=baseline_method,
-        gaussian_sigma=gaussian_sigma,
-        filter_window_size=filter_window_size,
-    )
-
-    # Computes the relative fluorescence change.
-    delta_fluorescence = (fluorescence - baseline) / baseline
-
-    return delta_fluorescence, baseline
-
-
-def _bin_fluorescence_by_position(
-    fluorescence: NDArray[np.float32],
-    position: NDArray[np.float32],
-    bin_edges: NDArray[np.float32],
-    compute_mean: bool = True,
-) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
-    """Bins neural fluorescence data by animal position along the linear track.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        position: Position values used for binning with length matching frame_count.
-        bin_edges: Bin edges for spatial binning.
-        compute_mean: Determines whether to compute mean or sum for each bin.
-
-    Returns:
-        A tuple containing the binned fluorescence array with dimensions (cell_count, bin_count)
-        and the sample count per bin with length bin_count.
-    """
-    # Assigns each position to a spatial bin and clips to the range [0, bin_count - 1].
-    bin_indices = np.searchsorted(bin_edges, position, side="right") - 1
-    # noinspection PyTypeChecker
-    bin_indices: NDArray[np.int32] = np.clip(bin_indices, 0, len(bin_edges) - 2).astype(np.int32)
-
-    bin_count = len(bin_edges) - 1
-    cell_count = fluorescence.shape[0]
-    # noinspection PyTypeChecker
-    sample_counts: NDArray[np.int32] = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
-
-    output = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
-
-    # Accumulates fluorescence values into spatial bins for each cell.
-    _accumulate_binned_fluorescence(
-        fluorescence=fluorescence,
-        bin_indices=bin_indices,
-        bin_count=bin_count,
-        sample_counts=sample_counts,
-        use_mean=compute_mean,
-        output=output,
-    )
-
-    return output, sample_counts
-
-
 def _compute_quantile_max_threshold(
     fluorescence: NDArray[np.float32],
     base_quantile: float = 0.25,
@@ -826,56 +627,42 @@ class PlaceFieldDetector:
     def __init__(
         self,
         session_path: Path,
-        track_length: float,
-        fluorescence_column: str = "single_day_dff",
-        trial_type: str | None = None,
+        trial_type: str,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
         bin_size: float = 5.0,
         configuration: PlaceFieldDetectionConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, position, speed, and trial data from a memory-mapped feather file for place field
-        detection. Filters to 'run' state frames and converts cumulative distance to track position via modulo.
+        """Loads fluorescence, position, speed, and trial data from the session feather and trial geometry data file
+        for place field detection.
 
         Args:
-            session_path: Path to the session feather file.
-            track_length: Length of the track in centimeters.
-            fluorescence_column: Name of the fluorescence column to use.
-            trial_type: Trial type to filter by (e.g. "ABC", "ABCD"). If None, includes all trial types.
+            session_path: Path to the session's dataset directory.
+            trial_type: Trial type to analyze (e.g. "ABC", "ABCD"). Must match an entry in the session's trial
+                geometry data file.
+            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
+                analysis input.
             bin_size: Size of spatial bins in centimeters.
             configuration: Configuration parameters for place field detection. Uses defaults if None.
         """
-        df = pl.read_ipc(
-            session_path,
-            columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s", "trial"],
+        session = assemble_run_session_data(
+            session_path=session_path,
+            trial_type=trial_type,
+            fluorescence_column=fluorescence_column,
         )
-        df = df.filter(pl.col("system_state") == "run")
-        if trial_type is not None:
-            df = df.filter(pl.col("trial_type") == trial_type)
-
-        # Extracts per-frame data, computes within-trial position, then drops frames belonging to incomplete trials
-        # in lockstep across all per-frame arrays so downstream binning never sees NaN positions.
-        fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
-        distance = df["distance_cm"].to_numpy().astype(np.float32)
-        trial_ids = df["trial"].to_numpy().astype(np.int32)
-        speed = df["speed_cm_s"].to_numpy().astype(np.float32)
-        position = compute_within_trial_position(
-            distance=distance, trial_ids=trial_ids, track_length=track_length
-        )
-        valid = ~np.isnan(position)
-
         # noinspection PyTypeChecker
-        self.fluorescence: NDArray[np.float32] = fluorescence[:, valid]
+        self.fluorescence: NDArray[np.float32] = session.fluorescence
         # noinspection PyTypeChecker
-        self.position: NDArray[np.float32] = position[valid]
+        self.position: NDArray[np.float32] = session.position
         # noinspection PyTypeChecker
-        self.speed: NDArray[np.float32] = speed[valid]
+        self.speed: NDArray[np.float32] = session.speed
         # noinspection PyTypeChecker
-        self.trial_ids: NDArray[np.int32] = trial_ids[valid]
-        self.track_length = track_length
+        self.trial_ids: NDArray[np.int32] = session.trial_ids
+        self.track_length = session.geometry.trial_length_cm
         self.bin_size = bin_size
         self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
 
         # Caches the bin edges shared by `_run_detection` and `_bin_fluorescence_per_trial`.
-        self._bin_edges = np.arange(0, track_length + bin_size, bin_size, dtype=np.float32)
+        self._bin_edges = np.arange(0, self.track_length + bin_size, bin_size, dtype=np.float32)
 
     def detect(self, run_shuffle: bool = False) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
@@ -888,12 +675,9 @@ class PlaceFieldDetector:
             A PlaceFields instance containing the labeled regions, pooled and per-lap binned fluorescence, and centers
             of detected place fields. If run_shuffle is True, only significant cells are included.
         """
-        # Computes dF/F0 to normalize fluorescence relative to baseline.
-        fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
-
         # Bins fluorescence by spatial position, applies thresholding, and detects connected regions as place fields.
         place_fields = self._run_detection(
-            fluorescence=fluorescence,
+            fluorescence=self.fluorescence,
             position=self.position,
             speed=self.speed,
         )
@@ -906,26 +690,26 @@ class PlaceFieldDetector:
         # Computes per-lap binned fluorescence using the same speed filter and smoothing as the pooled computation.
         return replace(
             place_fields,
-            binned_fluorescence_per_trial=self._bin_fluorescence_per_trial(fluorescence=fluorescence),
+            binned_fluorescence_per_trial=self._bin_fluorescence_per_trial(fluorescence=self.fluorescence),
         )
 
     def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
         """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.
 
         Notes:
-            Excludes the trial id sentinel that the acquisition pipeline uses to mark "no trial" frames. Applies the
+            Excludes the trial id sentinel that the acquisition pipeline uses to mark "no trial" samples. Applies the
             same speed filter and uniform_filter1d smoothing used for the pooled binned fluorescence so that averaging
             the returned array across the trial axis reproduces the pooled binned_fluorescence within numerical
             rounding.
 
         Args:
-            fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, frame_count).
+            fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
 
         Returns:
             Per-lap binned fluorescence array with dimensions (cell_count, trial_count, bin_count). Bins and lap
-            slices with no valid speed-filtered frames are filled with NaN.
+            slices with no valid speed-filtered samples are filled with NaN.
         """
-        # Collects valid trial identifiers, excluding the sentinel that marks "no trial" frames.
+        # Collects valid trial identifiers, excluding the sentinel that marks "no trial" samples.
         valid_trial_mask = self.trial_ids != _NO_TRIAL_SENTINEL
         unique_trials = np.unique(self.trial_ids[valid_trial_mask])
         trial_count = len(unique_trials)
@@ -944,10 +728,10 @@ class PlaceFieldDetector:
             trial_position = self.position[trial_mask]
             trial_fluorescence = fluorescence[:, trial_mask]
 
-            trial_binned, _ = _bin_fluorescence_by_position(
+            trial_binned, _ = bin_fluorescence_by_position(
                 fluorescence=trial_fluorescence,
                 position=trial_position,
-                bin_edges=self._bin_edges,
+                position_bin_edges=self._bin_edges,
             )
 
             # noinspection PyTypeChecker
@@ -977,15 +761,13 @@ class PlaceFieldDetector:
         Returns:
             A tuple containing the significant cell indices and p-values arrays.
         """
-        fluorescence, _ = _compute_delta_fluorescence(fluorescence=self.fluorescence)
-
         # Replaces NaN speed values with 0 so they fall below the minimum-speed gate without raising in comparisons.
         speed = self.speed.copy()
         speed[np.isnan(speed)] = 0
 
         # Detects place fields in the original dataset.
         observed = self._run_detection(
-            fluorescence=fluorescence,
+            fluorescence=self.fluorescence,
             position=self.position,
             speed=speed,
         ).has_place_field
@@ -996,7 +778,7 @@ class PlaceFieldDetector:
         # Spawns a thread for each shuffle iteration to parallelize detection.
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(self._shuffle_iteration_has_field, fluorescence, speed, iteration)
+                executor.submit(self._shuffle_iteration_has_field, self.fluorescence, speed, iteration)
                 for iteration in range(repeat_count)
             ]
             shuffled_results = [future.result() for future in tqdm(futures, desc="Shuffle significance", unit="iter")]
@@ -1130,10 +912,10 @@ class PlaceFieldDetector:
         fluorescence = fluorescence[:, speed_mask]
 
         # Bins fluorescence by spatial position along the track.
-        binned_fluorescence, _ = _bin_fluorescence_by_position(
+        binned_fluorescence, _ = bin_fluorescence_by_position(
             fluorescence=fluorescence,
             position=position,
-            bin_edges=self._bin_edges,
+            position_bin_edges=self._bin_edges,
         )
 
         # Applies a moving average filter to smooth binned fluorescence across spatial bins. Casts back to float32
@@ -1197,12 +979,12 @@ class PlaceFieldDetector:
         """
         random_generator = np.random.default_rng(iteration)
 
-        # Computes the minimum shift as a fraction of total frames based on chunk_count configuration.
-        total_frames = data.shape[1]
-        minimum_shift = total_frames // self.configuration.chunk_count
+        # Computes the minimum shift as a fraction of total samples based on chunk_count configuration.
+        total_samples = data.shape[1]
+        minimum_shift = total_samples // self.configuration.chunk_count
 
         # Generates a random shift amount that ensures at least minimum_shift displacement in either direction.
-        shift_amount = random_generator.integers(minimum_shift, total_frames - minimum_shift)
+        shift_amount = random_generator.integers(minimum_shift, total_samples - minimum_shift)
 
         # Applies circular shift along the time axis to disrupt position-fluorescence correlations.
         return np.roll(data, shift=shift_amount, axis=1)

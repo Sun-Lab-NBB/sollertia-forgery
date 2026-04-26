@@ -4,6 +4,7 @@ processing pipeline outputs.
 
 from __future__ import annotations
 
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,6 +29,17 @@ _MICROSECONDS_PER_MINUTE: int = 60 * 1_000_000
 
 _SCAN_PULSE_TOLERANCE_MS: int = 20
 """The tolerance, in milliseconds, applied around the expected scan pulse duration when filtering logged pulses."""
+
+
+class FluorescenceColumn(StrEnum):
+    """Defines the neuropil-subtracted, baseline-corrected fluorescence columns produced by the forging pipeline that
+    are valid analysis inputs for the place-cell, reward-cell, and SCE detectors.
+    """
+
+    SINGLE_DAY_SUBTRACTED = "single_day_subtracted_fluorescence"
+    """Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence."""
+    MULTI_DAY_SUBTRACTED = "multi_day_subtracted_fluorescence"
+    """Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days."""
 
 
 def assemble_cindra_dataset(cindra_data_path: Path, behavior_data_path: Path, multiday_data_path: Path) -> pl.DataFrame:
@@ -124,11 +136,11 @@ def assemble_cindra_dataset(cindra_data_path: Path, behavior_data_path: Path, mu
     fluorescence_sources: tuple[tuple[Path, str, str, NDArray[np.bool_] | None], ...] = (
         (cindra_data_path, "cell_fluorescence.npy", "single_day_cell_fluorescence", is_cell_mask),
         (cindra_data_path, "neuropil_fluorescence.npy", "single_day_neuropil_fluorescence", is_cell_mask),
-        (cindra_data_path, "subtracted_fluorescence.npy", "single_day_subtracted_fluorescence", is_cell_mask),
+        (cindra_data_path, "subtracted_fluorescence.npy", FluorescenceColumn.SINGLE_DAY_SUBTRACTED.value, is_cell_mask),
         (cindra_data_path, "spikes.npy", "single_day_spikes", is_cell_mask),
         (multiday_data_path, "cell_fluorescence.npy", "multi_day_cell_fluorescence", None),
         (multiday_data_path, "neuropil_fluorescence.npy", "multi_day_neuropil_fluorescence", None),
-        (multiday_data_path, "subtracted_fluorescence.npy", "multi_day_subtracted_fluorescence", None),
+        (multiday_data_path, "subtracted_fluorescence.npy", FluorescenceColumn.MULTI_DAY_SUBTRACTED.value, None),
         (multiday_data_path, "spikes.npy", "multi_day_spikes", None),
     )
     for source_path, filename, column_name, mask in fluorescence_sources:

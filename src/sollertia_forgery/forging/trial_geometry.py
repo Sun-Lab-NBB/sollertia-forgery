@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 
 TRIAL_GEOMETRY_FILENAME: str = "trial_geometry.yaml"
-"""The filename of the trial geometry sidecar inside each session directory of a forged dataset."""
+"""The filename of the trial geometry data file inside each session directory of a forged dataset."""
 
 # noinspection PyUnhashable
 _TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[BaseTrial], StimulusMode] = {
@@ -45,7 +45,7 @@ class TrialGeometryEntry:
 
 @dataclass
 class TrialGeometry(YamlConfig):
-    """Maps each trial type name to its canonical geometry, written as a sidecar to data.feather.
+    """Maps each trial type name to its canonical geometry, written as a data file alongside data.feather.
 
     Notes:
         Projects the analysis-relevant slice of MesoscopeExperimentConfiguration.trial_structures so that downstream
@@ -76,7 +76,7 @@ class TrialGeometry(YamlConfig):
             stimulus_mode = _TRIAL_CLASS_TO_STIMULUS_MODE.get(type(trial))
             if stimulus_mode is None:
                 message = (
-                    f"Unable to project trial '{trial_type_name}' into the trial geometry sidecar. The trial class "
+                    f"Unable to project trial '{trial_type_name}' into the trial geometry data file. The trial class "
                     f"'{type(trial).__name__}' has no entry in _TRIAL_CLASS_TO_STIMULUS_MODE. Add a mapping for any "
                     f"new trial subclass added to MesoscopeExperimentConfiguration."
                 )

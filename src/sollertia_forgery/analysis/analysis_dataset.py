@@ -9,7 +9,7 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from ..forging import TRIAL_GEOMETRY_FILENAME, TrialGeometry
+from ..forging import TRIAL_GEOMETRY_FILENAME, FluorescenceColumn, TrialGeometry
 from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
@@ -165,12 +165,12 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
         if sce_count == 0:
             continue
 
-        # Builds a (frame_count, sce_count) binary matrix mapping frames to their SCE label, then computes a
+        # Builds a (sample_count, sce_count) binary matrix mapping samples to their SCE label, then computes a
         # (cell_count, sce_count) participation matrix via matrix multiplication with the onset matrix.
-        sce_frame_indices = np.where(result.sce_labels > 0)[0]
-        frame_to_sce = np.zeros((result.onset_matrix.shape[1], sce_count), dtype=np.float32)
-        frame_to_sce[sce_frame_indices, result.sce_labels[sce_frame_indices] - 1] = 1.0
-        cell_sce_participation = (result.onset_matrix.astype(np.float32) @ frame_to_sce) > 0
+        sce_sample_indices = np.where(result.sce_labels > 0)[0]
+        sample_to_sce = np.zeros((result.onset_matrix.shape[1], sce_count), dtype=np.float32)
+        sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
+        cell_sce_participation = (result.onset_matrix.astype(np.float32) @ sample_to_sce) > 0
 
         # Accumulates participation counts per cell across all SCEs in this period.
         participation[period] += cell_sce_participation.sum(axis=1).astype(np.int32)
@@ -184,9 +184,9 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list[SCEResult]) -> dic
                 sce_events[period][cell].append((period_index, sce_label))
 
             if participant_count > 1:
-                # Computes normalized onset ranks from the first onset frame within this SCE.
-                sce_frames = np.where(result.sce_labels == sce_label)[0]
-                onset_window = result.onset_matrix[participating_indices][:, sce_frames]
+                # Computes normalized onset ranks from the first onset sample within this SCE.
+                sce_samples = np.where(result.sce_labels == sce_label)[0]
+                onset_window = result.onset_matrix[participating_indices][:, sce_samples]
                 first_onset = np.argmax(onset_window, axis=1)
                 normalized_ranks = np.argsort(np.argsort(first_onset)).astype(np.float32) / (participant_count - 1)
                 rank_sum[period, participating_indices] += normalized_ranks
@@ -294,13 +294,13 @@ def _get_track_length(session_path: Path, trial_type: str) -> float:
     """Returns the canonical track length for the given trial type read from the session's trial_geometry.yaml file.
 
     Args:
-        session_path: Path to the session's data.feather file.
-        trial_type: Trial type name to look up in the trial geometry sidecar.
+        session_path: Path to the session's dataset directory containing the trial geometry data file.
+        trial_type: Trial type name to look up in the trial geometry data file.
 
     Returns:
         Canonical track length in centimeters.
     """
-    geometry = TrialGeometry.from_yaml(file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
+    geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(TRIAL_GEOMETRY_FILENAME))
     return geometry.entries[trial_type].trial_length_cm
 
 
@@ -308,31 +308,30 @@ def _resolve_output_path(session_path: Path, output_directory: Path | None) -> P
     """Resolves the output feather file path for a given session.
 
     Args:
-        session_path: Path to the session feather file.
-        output_directory: Directory to save the analysis feather file. Defaults to the session file's directory.
+        session_path: Path to the session's dataset directory.
+        output_directory: Directory to save the analysis feather file. Defaults to the session's dataset directory.
 
     Returns:
         The resolved output path for the analysis feather file.
     """
-    save_directory = output_directory if output_directory is not None else session_path.parent
-    return save_directory / f"{session_path.stem}_analysis.feather"
+    save_directory = output_directory if output_directory is not None else session_path
+    return save_directory / f"{session_path.name}_analysis.feather"
 
 
 def generate_place_field_dataframe(
     session_path: Path,
-    track_length: float | None = None,
     output_directory: Path | None = None,
-    fluorescence_column: str = "single_day_dff",
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
     trial_type: str = "ABC",
     place_configuration: PlaceFieldDetectionConfiguration | None = None,
 ) -> pl.DataFrame:
     """Runs the place field detection pipeline and writes a per-place-field analysis feather file.
 
     Args:
-        session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
+        session_path: Path to the session's dataset directory.
         output_directory: Directory to save the analysis feather file. Defaults to the session file's directory.
-        fluorescence_column: Name of the fluorescence column to read from the feather file.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the analysis
+            input.
         trial_type: Trial type to analyze.
         place_configuration: Place field detection parameters. Uses defaults if None.
 
@@ -340,17 +339,12 @@ def generate_place_field_dataframe(
         A polars DataFrame with one row per place field and columns for place field boundaries, intensities, and
         binned fluorescence.
     """
-    if track_length is None:
-        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
-
     # Runs the place field detection pipeline.
     console.echo(message="Running place field detection...", level=LogLevel.INFO)
     place_detector = PlaceFieldDetector(
         session_path=session_path,
-        track_length=track_length,
-        fluorescence_column=fluorescence_column,
         trial_type=trial_type,
+        fluorescence_column=fluorescence_column,
         configuration=place_configuration,
     )
     place_fields = place_detector.detect(run_shuffle=False)
@@ -405,19 +399,18 @@ def generate_place_field_dataframe(
 
 def append_reward_cell_columns(
     session_path: Path,
-    track_length: float | None = None,
     output_directory: Path | None = None,
-    fluorescence_column: str = "single_day_dff",
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
     trial_type: str = "ABC",
     reward_configuration: RewardCellConfiguration | None = None,
 ) -> pl.DataFrame:
     """Runs the reward cell detection pipeline and appends reward cell columns to an existing analysis feather file.
 
     Args:
-        session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
+        session_path: Path to the session's dataset directory.
         output_directory: Directory containing the analysis feather file. Defaults to the session file's directory.
-        fluorescence_column: Name of the fluorescence column to read from the feather file.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the analysis
+            input.
         trial_type: Trial type to analyze.
         reward_configuration: Reward cell detection parameters. Uses defaults if None.
 
@@ -430,26 +423,13 @@ def append_reward_cell_columns(
     dataframe = pl.read_ipc(source=output_path, memory_map=False)
     is_place_row = dataframe["is_place"].to_numpy()
 
-    if track_length is None:
-        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
-
-    # Runs the reward cell detection pipeline. The reward position is the center of the lick-active reward zone,
-    # used as the representative position for reward-cell analysis since water is delivered wherever in the zone the
-    # animal happens to lick (no single delivery point exists).
+    # Runs the reward cell detection pipeline. The detector resolves the canonical track length and the reward zone
+    # position from the session's trial geometry data file.
     console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
-    geometry_entry = TrialGeometry.from_yaml(
-        file_path=session_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME)
-    ).entries[trial_type]
-    reward_position = (
-        geometry_entry.stimulus_trigger_zone_start_cm + geometry_entry.stimulus_trigger_zone_end_cm
-    ) / 2.0
     reward_detector = RewardCellDetector(
         session_path=session_path,
-        track_length=track_length,
-        reward_position=reward_position,
-        fluorescence_column=fluorescence_column,
         trial_type=trial_type,
+        fluorescence_column=fluorescence_column,
         configuration=reward_configuration,
     )
     reward_results = reward_detector.detect()
@@ -482,19 +462,18 @@ def append_reward_cell_columns(
 
 def append_sce_columns(
     session_path: Path,
-    track_length: float | None = None,
     output_directory: Path | None = None,
-    fluorescence_column: str = "single_day_dff",
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
     trial_type: str = "ABC",
     sce_configuration: SCEDetectionConfiguration | None = None,
 ) -> pl.DataFrame:
     """Runs the SCE detection pipeline and appends SCE columns to an existing analysis feather file.
 
     Args:
-        session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
+        session_path: Path to the session's dataset directory.
         output_directory: Directory containing the analysis feather file. Defaults to the session file's directory.
-        fluorescence_column: Name of the fluorescence column to read from the feather file.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the analysis
+            input.
         trial_type: Trial type to analyze.
         sce_configuration: SCE detection parameters. Uses defaults if None.
 
@@ -507,9 +486,10 @@ def append_sce_columns(
     dataframe = pl.read_ipc(source=output_path, memory_map=False)
     cell_count = len(dataframe)
 
-    if track_length is None:
-        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
+    # Resolves the canonical track length from the trial geometry data file for SCE detection and place field
+    # reconstruction. SCEDetector still receives track_length explicitly because it does not share the
+    # assemble_run_session_data pipeline with the place- and reward-cell detectors.
+    track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
 
     # Reconstructs place fields from the feather data for run-period masking during SCE detection.
     console.echo(message="Reconstructing place fields from feather...", level=LogLevel.INFO)
@@ -553,9 +533,8 @@ def append_sce_columns(
 
 def generate_analysis_dataframe(
     session_path: Path,
-    track_length: float | None = None,
     output_directory: Path | None = None,
-    fluorescence_column: str = "single_day_dff",
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
     trial_type: str = "ABC",
     place_configuration: PlaceFieldDetectionConfiguration | None = None,
     reward_configuration: RewardCellConfiguration | None = None,
@@ -564,10 +543,10 @@ def generate_analysis_dataframe(
     """Runs all three analysis pipelines sequentially and assembles a unified per-place-field DataFrame.
 
     Args:
-        session_path: Path to the session feather file.
-        track_length: Length of the track in centimeters. Read from the session's trial geometry sidecar if None.
+        session_path: Path to the session's dataset directory.
         output_directory: Directory to save the analysis feather file. Defaults to the session file's directory.
-        fluorescence_column: Name of the fluorescence column to read from the feather file.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the analysis
+            input.
         trial_type: Trial type to analyze.
         place_configuration: Place field detection parameters. Uses defaults if None.
         reward_configuration: Reward cell detection parameters. Uses defaults if None.
@@ -576,13 +555,8 @@ def generate_analysis_dataframe(
     Returns:
         A polars DataFrame with one row per place field and columns for place field, reward cell, and SCE metrics.
     """
-    if track_length is None:
-        track_length = _get_track_length(session_path=session_path, trial_type=trial_type)
-        console.echo(message=f"Track length: {track_length} cm.", level=LogLevel.INFO)
-
     generate_place_field_dataframe(
         session_path=session_path,
-        track_length=track_length,
         output_directory=output_directory,
         fluorescence_column=fluorescence_column,
         trial_type=trial_type,
@@ -591,7 +565,6 @@ def generate_analysis_dataframe(
 
     append_reward_cell_columns(
         session_path=session_path,
-        track_length=track_length,
         output_directory=output_directory,
         fluorescence_column=fluorescence_column,
         trial_type=trial_type,
@@ -600,7 +573,6 @@ def generate_analysis_dataframe(
 
     dataframe = append_sce_columns(
         session_path=session_path,
-        track_length=track_length,
         output_directory=output_directory,
         fluorescence_column=fluorescence_column,
         trial_type=trial_type,

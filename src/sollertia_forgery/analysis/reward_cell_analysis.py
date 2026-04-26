@@ -6,14 +6,16 @@ from dataclasses import dataclass
 from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
-import polars as pl
 from numpy.typing import NDArray
 from scipy.ndimage import gaussian_filter1d
 from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
-from sollertia_forgery.analysis.utilities import compute_within_trial_position
-from sollertia_forgery.analysis.place_cell_analysis import _bin_fluorescence_by_position
+from sollertia_forgery.forging import FluorescenceColumn
+from sollertia_forgery.analysis.utilities import (
+    bin_fluorescence_by_position,
+    assemble_run_session_data,
+)
 
 
 @dataclass
@@ -23,13 +25,13 @@ class RewardCellConfiguration:
     bin_size: float = 10.0
     """Spatial bin size in centimeters for position binning."""
     minimum_speed: float = 5.0
-    """Minimum speed threshold in cm/s for including frames in analysis."""
+    """Minimum speed threshold in cm/s for including samples in analysis."""
     gaussian_sigma: float = 20.0
     """Standard deviation in centimeters for Gaussian spatial smoothing of rate maps."""
     shuffle_count: int = 100
     """Number of shuffle iterations for significance testing."""
-    minimum_shift_frames: int = 500
-    """Minimum circular shift in frames applied during shuffle."""
+    minimum_shift_samples: int = 500
+    """Minimum circular shift in samples applied during shuffle."""
     chunk_count: int = 6
     """Number of chunks for chunk-and-permute shuffle method."""
     significance_threshold: float = 0.05
@@ -53,7 +55,7 @@ class SpatiallyModulatedNeurons:
     rate_maps: NDArray[np.float32]
     """Smoothed spatial rate maps with dimensions (cell_count, bin_count)."""
     occupancy: NDArray[np.int32]
-    """Per-bin occupancy sample counts with length bin_count (from _bin_fluorescence_by_position)."""
+    """Per-bin occupancy sample counts with length bin_count (from bin_fluorescence_by_position)."""
     spatial_information: NDArray[np.float32]
     """Spatial information content in bits/event with length cell_count."""
     is_significant: NDArray[np.bool_]
@@ -165,32 +167,32 @@ def _compute_spatial_information(
 
 @njit(cache=True, nogil=True)
 def _compute_shuffled_source_indices(
-    filtered_frame_indices: NDArray[np.int32],
-    frame_count: int,
+    filtered_sample_indices: NDArray[np.int32],
+    sample_count: int,
     minimum_shift: int,
     chunk_count: int,
     seed: int,
 ) -> NDArray[np.int32]:
-    """Maps each speed-filtered destination frame back to the source frame it pulls from under the shuffle.
+    """Maps each speed-filtered destination sample back to the source sample it pulls from under the shuffle.
 
     Notes:
         Encodes the circular shift and chunk permutation as an indirection array rather than materializing a full
         shuffled fluorescence matrix.
 
     Args:
-        filtered_frame_indices: Destination-frame indices retained by the speed filter with length
-            filtered_frame_count.
-        frame_count: Total number of frames in the original fluorescence time series.
-        minimum_shift: Minimum number of frames for the circular shift.
+        filtered_sample_indices: Destination-sample indices retained by the speed filter with length
+            filtered_sample_count.
+        sample_count: Total number of samples in the original fluorescence time series.
+        minimum_shift: Minimum number of samples for the circular shift.
         chunk_count: Number of chunks to split the shifted trace into for permutation.
         seed: Random seed for reproducibility.
 
     Returns:
-        Source-frame indices with length filtered_frame_count.
+        Source-sample indices with length filtered_sample_count.
     """
     np.random.seed(seed)
-    shift_amount = np.random.randint(minimum_shift, frame_count - minimum_shift)
-    chunk_size = frame_count // chunk_count
+    shift_amount = np.random.randint(minimum_shift, sample_count - minimum_shift)
+    chunk_size = sample_count // chunk_count
     permutation = np.random.permutation(chunk_count)
 
     # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
@@ -201,22 +203,22 @@ def _compute_shuffled_source_indices(
         if source_chunk_index < chunk_count - 1:
             chunk_size_local = chunk_size
         else:
-            chunk_size_local = frame_count - source_chunk_index * chunk_size
+            chunk_size_local = sample_count - source_chunk_index * chunk_size
         output_chunk_starts[output_chunk_position + 1] = output_chunk_starts[output_chunk_position] + chunk_size_local
 
-    filtered_count = filtered_frame_indices.shape[0]
+    filtered_count = filtered_sample_indices.shape[0]
     source_indices = np.empty(filtered_count, dtype=np.int32)
 
-    # Resolves each destination back through the permutation and shift to its source frame.
+    # Resolves each destination back through the permutation and shift to its source sample.
     for filtered_index in range(filtered_count):
-        destination = filtered_frame_indices[filtered_index]
+        destination = filtered_sample_indices[filtered_index]
         output_chunk_position = 0
         while output_chunk_position + 1 < chunk_count and output_chunk_starts[output_chunk_position + 1] <= destination:
             output_chunk_position += 1
         offset_within_chunk = destination - output_chunk_starts[output_chunk_position]
         source_chunk_index = permutation[output_chunk_position]
         shifted_index = source_chunk_index * chunk_size + offset_within_chunk
-        source_indices[filtered_index] = (shifted_index - shift_amount) % frame_count
+        source_indices[filtered_index] = (shifted_index - shift_amount) % sample_count
 
     return source_indices
 
@@ -229,12 +231,12 @@ def _accumulate_shuffled_rate_maps(
     sample_counts: NDArray[np.int32],
     output: NDArray[np.float32],
 ) -> None:
-    """Bins fluorescence into a per-cell rate map by gathering source frames through an indirection array.
+    """Bins fluorescence into a per-cell rate map by gathering source samples through an indirection array.
 
     Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        source_indices: Source-frame indices per filtered destination frame with length filtered_frame_count.
-        bin_indices: Spatial bin indices per filtered destination frame with length filtered_frame_count.
+        fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
+        source_indices: Source-sample indices per filtered destination sample with length filtered_sample_count.
+        bin_indices: Spatial bin indices per filtered destination sample with length filtered_sample_count.
         sample_counts: Per-bin occupancy counts with length bin_count.
         output: Pre-allocated output rate maps with dimensions (cell_count, bin_count).
     """
@@ -396,48 +398,39 @@ class RewardCellDetector:
     def __init__(
         self,
         session_path: Path,
-        track_length: float,
-        reward_position: float,
-        fluorescence_column: str = "single_day_dff",
-        trial_type: str | None = None,
+        trial_type: str,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
         configuration: RewardCellConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, position, speed, and trial data from a memory-mapped feather file for reward cell
-        detection. Filters to 'run' state frames and computes within-trial position.
+        """Loads fluorescence, position, speed, and trial data from the session feather and trial geometry data file
+        for reward cell detection.
+
+        Notes:
+            The reward position is taken as the midpoint of the stimulus trigger zone defined in the session's
+            trial geometry data file, since water is delivered wherever in the lick-active zone the animal happens to
+            lick rather than at a single point.
 
         Args:
-            session_path: Path to the session feather file.
-            track_length: Length of the track in centimeters.
-            reward_position: Position of the reward zone in centimeters.
-            fluorescence_column: Name of the fluorescence column to use.
-            trial_type: Trial type to filter by (e.g. "ABC", "ABCD"). If None, includes all trial types.
+            session_path: Path to the session's dataset directory.
+            trial_type: Trial type to analyze (e.g. "ABC", "ABCD"). Must match an entry in the session's trial
+                geometry data file.
+            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
+                analysis input.
             configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if None.
         """
-        df = pl.read_ipc(
-            session_path,
-            columns=["system_state", "trial_type", fluorescence_column, "distance_cm", "speed_cm_s", "trial"],
+        session = assemble_run_session_data(
+            session_path=session_path,
+            trial_type=trial_type,
+            fluorescence_column=fluorescence_column,
         )
-        df = df.filter(pl.col("system_state") == "run")
-        if trial_type is not None:
-            df = df.filter(pl.col("trial_type") == trial_type)
-
-        # Extracts per-frame data, computes within-trial position, then drops frames belonging to incomplete trials
-        # in lockstep across all per-frame arrays so downstream binning never sees NaN positions.
-        fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
-        distance = df["distance_cm"].to_numpy().astype(np.float32)
-        trial_ids = df["trial"].to_numpy().astype(np.int32)
-        speed = df["speed_cm_s"].to_numpy().astype(np.float32)
-        position = compute_within_trial_position(
-            distance=distance, trial_ids=trial_ids, track_length=track_length
-        )
-        valid = ~np.isnan(position)
-
-        self.fluorescence = fluorescence[:, valid]
-        self.position = position[valid]
-        self.speed = speed[valid]
-        self.trial_ids = trial_ids[valid]
-        self.track_length = track_length
-        self.reward_position = reward_position
+        self.fluorescence = session.fluorescence
+        self.position = session.position
+        self.speed = session.speed
+        self.trial_ids = session.trial_ids
+        self.track_length = session.geometry.trial_length_cm
+        self.reward_position = (
+            session.geometry.stimulus_trigger_zone_start_cm + session.geometry.stimulus_trigger_zone_end_cm
+        ) / 2.0
         self.configuration = configuration if configuration is not None else RewardCellConfiguration()
 
     def detect(self) -> RewardCellResults:
@@ -502,10 +495,10 @@ class RewardCellDetector:
         # Reuses place_1d binning to compute mean fluorescence per spatial bin.
         bin_edges = np.arange(0, self.track_length + configuration.bin_size, configuration.bin_size, dtype=np.float32)
 
-        rate_maps, sample_counts = _bin_fluorescence_by_position(
+        rate_maps, sample_counts = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
-            bin_edges=bin_edges,
+            position_bin_edges=bin_edges,
             compute_mean=True,
         )
 
@@ -528,7 +521,7 @@ class RewardCellDetector:
         p_values = self._compute_shuffle_significance(
             filtered_position=filtered_position,
             speed_mask=speed_mask,
-            bin_edges=bin_edges,
+            position_bin_edges=bin_edges,
             occupancy=sample_counts,
             sigma_bins=sigma_bins,
             observed_information=observed_information,
@@ -568,12 +561,12 @@ class RewardCellDetector:
 
         Notes:
             For each shuffle iteration, the fluorescence time series is circularly shifted by at least minimum_shift
-            frames and then split into chunks that are randomly permuted. Only the speed-filtered
+            samples and then split into chunks that are randomly permuted. Only the speed-filtered
             subset of fluorescence is shuffled and rebinned using the shared place_1d binning function.
 
         Args:
-            filtered_position: Speed-filtered position values with length filtered_frame_count.
-            speed_mask: Boolean mask indicating speed-filtered frames with length frame_count.
+            filtered_position: Speed-filtered position values with length filtered_sample_count.
+            speed_mask: Boolean mask indicating speed-filtered samples with length sample_count.
             bin_edges: Spatial bin edges with length bin_count + 1.
             occupancy: Per-bin occupancy sample counts with length bin_count.
             sigma_bins: Gaussian smoothing kernel width in bin units.
@@ -584,11 +577,11 @@ class RewardCellDetector:
         """
         configuration = self.configuration
         cell_count = self.fluorescence.shape[0]
-        frame_count = self.fluorescence.shape[1]
+        sample_count = self.fluorescence.shape[1]
         bin_count = len(bin_edges) - 1
 
-        # Precomputes destination-frame indices and their spatial bin assignments; both are invariant across shuffles.
-        filtered_frame_indices = np.nonzero(speed_mask)[0].astype(np.int32)
+        # Precomputes destination-sample indices and their spatial bin assignments; both are invariant across shuffles.
+        filtered_sample_indices = np.nonzero(speed_mask)[0].astype(np.int32)
         filtered_bin_indices = np.clip(
             np.searchsorted(bin_edges, filtered_position, side="right") - 1, 0, bin_count - 1
         ).astype(np.int32)
@@ -599,9 +592,9 @@ class RewardCellDetector:
 
         for iteration in tqdm(range(configuration.shuffle_count), desc="Running shuffling", unit="iter"):
             source_indices = _compute_shuffled_source_indices(
-                filtered_frame_indices=filtered_frame_indices,
-                frame_count=frame_count,
-                minimum_shift=configuration.minimum_shift_frames,
+                filtered_sample_indices=filtered_sample_indices,
+                sample_count=sample_count,
+                minimum_shift=configuration.minimum_shift_samples,
                 chunk_count=configuration.chunk_count,
                 seed=iteration,
             )
@@ -658,10 +651,10 @@ class RewardCellDetector:
         window_start: float,
         window_end: float,
     ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
-        """Bins a per-frame signal into a (trial_count, bin_count) matrix within the pre-reward spatial window.
+        """Bins a per-sample signal into a (trial_count, bin_count) matrix within the pre-reward spatial window.
 
         Args:
-            signal: Per-frame values to bin with length frame_count.
+            signal: Per-sample values to bin with length sample_count.
             unique_trials: Sorted unique trial identifiers.
             bin_edges: Spatial bin edges for the pre-reward window with length bin_count + 1.
             window_start: Start of the pre-reward spatial window in centimeters.
@@ -669,7 +662,7 @@ class RewardCellDetector:
 
         Returns:
             A tuple of (sums, counts) where sums has the accumulated signal per bin and counts has the number of
-            frames per bin, both with dimensions (trial_count, bin_count).
+            samples per bin, both with dimensions (trial_count, bin_count).
         """
         bin_count = len(bin_edges) - 1
         trial_count = len(unique_trials)
@@ -682,7 +675,7 @@ class RewardCellDetector:
             trial_speeds = self.speed[trial_mask]
             trial_signal = signal[trial_mask]
 
-            # Restricts to the pre-reward window and speed-filtered frames.
+            # Restricts to the pre-reward window and speed-filtered samples.
             window_mask = (
                 (trial_positions >= window_start)
                 & (trial_positions < window_end)
@@ -693,9 +686,9 @@ class RewardCellDetector:
 
             bin_indices = np.clip(np.searchsorted(bin_edges, window_positions, side="right") - 1, 0, bin_count - 1)
 
-            for frame_index in range(len(bin_indices)):
-                bin_index = bin_indices[frame_index]
-                sums[trial_index, bin_index] += window_signal[frame_index]
+            for sample_index in range(len(bin_indices)):
+                bin_index = bin_indices[sample_index]
+                sums[trial_index, bin_index] += window_signal[sample_index]
                 counts[trial_index, bin_index] += 1
 
         return sums, counts
@@ -749,7 +742,7 @@ class RewardCellDetector:
         speed_sums, speed_counts = self._bin_trials_in_pre_reward_window(
             signal=self.speed,
             unique_trials=unique_trials,
-            bin_edges=pre_reward_bin_edges,
+            position_bin_edges=pre_reward_bin_edges,
             window_start=window_start,
             window_end=window_end,
         )
@@ -762,7 +755,7 @@ class RewardCellDetector:
             activity_sums, activity_counts = self._bin_trials_in_pre_reward_window(
                 signal=self.fluorescence[neuron_index],
                 unique_trials=unique_trials,
-                bin_edges=pre_reward_bin_edges,
+                position_bin_edges=pre_reward_bin_edges,
                 window_start=window_start,
                 window_end=window_end,
             )
@@ -918,10 +911,10 @@ class RewardCellDetector:
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
         plot_bin_edges = np.arange(0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32)
-        plot_maps, _ = _bin_fluorescence_by_position(
+        plot_maps, _ = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
-            bin_edges=plot_bin_edges,
+            position_bin_edges=plot_bin_edges,
             compute_mean=True,
         )
         plot_maps = np.nan_to_num(plot_maps, nan=0.0)
@@ -1014,10 +1007,10 @@ class RewardCellDetector:
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
         plot_bin_edges = np.arange(0, self.track_length + plot_bin_size, plot_bin_size, dtype=np.float32)
-        plot_maps, _ = _bin_fluorescence_by_position(
+        plot_maps, _ = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
-            bin_edges=plot_bin_edges,
+            position_bin_edges=plot_bin_edges,
             compute_mean=True,
         )
         plot_maps = np.nan_to_num(plot_maps, nan=0.0)
@@ -1118,7 +1111,7 @@ class RewardCellDetector:
             )
             return figure
 
-        # Bins speed by position across all frames.
+        # Bins speed by position across all samples.
         bin_edges = np.arange(0, self.track_length + position_bin_size, position_bin_size, dtype=np.float32)
         bin_count = len(bin_edges) - 1
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
@@ -1132,9 +1125,9 @@ class RewardCellDetector:
             bin_count - 1,
         )
 
-        for frame_index in range(len(self.position)):
-            bin_index = bin_indices[frame_index]
-            speed_sums[bin_index] += self.speed[frame_index]
+        for sample_index in range(len(self.position)):
+            bin_index = bin_indices[sample_index]
+            speed_sums[bin_index] += self.speed[sample_index]
             speed_counts[bin_index] += 1
 
         mean_speed = np.zeros(bin_count, dtype=np.float32)
@@ -1149,10 +1142,10 @@ class RewardCellDetector:
         filtered_position = self.position[speed_mask]
         filtered_fluorescence = self.fluorescence[:, speed_mask]
 
-        plot_maps, _ = _bin_fluorescence_by_position(
+        plot_maps, _ = bin_fluorescence_by_position(
             fluorescence=filtered_fluorescence,
             position=filtered_position,
-            bin_edges=bin_edges,
+            position_bin_edges=bin_edges,
             compute_mean=True,
         )
         plot_maps = np.nan_to_num(plot_maps, nan=0.0)
@@ -1300,7 +1293,7 @@ class RewardCellDetector:
                 valid = activity_counts > 0
                 activity_image[trial_index, valid] = activity_sums[valid] / activity_counts[valid]
 
-                # Detects slowing onset: first frame below threshold in the pre-reward window.
+                # Detects slowing onset: first sample below threshold in the pre-reward window.
                 pre_reward = (trial_positions >= pre_reward_start) & (trial_positions < self.reward_position)
                 below = pre_reward & (trial_speeds < slowing_threshold_cm_s)
                 if np.any(below):

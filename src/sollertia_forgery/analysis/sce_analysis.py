@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
+from ..forging import DATA_FILENAME, DatasetColumn, FluorescenceColumn
 from .utilities import compute_within_trial_position
 
 if TYPE_CHECKING:
@@ -27,9 +28,9 @@ if TYPE_CHECKING:
 
 
 _MINIMUM_STABLE_FRACTION: float = 0.5
-"""Minimum fraction of stable torque frames required for a rest period to be included in SCE analysis."""
-_MINIMUM_STABLE_FRAME_COUNT: int = 10
-"""Minimum number of stable torque frames required for a rest period to be included in SCE analysis."""
+"""Minimum fraction of stable torque samples required for a rest period to be included in SCE analysis."""
+_MINIMUM_STABLE_SAMPLE_COUNT: int = 10
+"""Minimum number of stable torque samples required for a rest period to be included in SCE analysis."""
 
 
 class PeriodType(StrEnum):
@@ -64,7 +65,7 @@ class SCEDetectionConfiguration:
     torque_stability_window_seconds: float = 5.0
     """Window length in seconds for computing the rolling standard deviation of torque during rest periods."""
     torque_stability_threshold: float = 0.1
-    """Maximum allowable rolling standard deviation of torque (in N*cm) for a rest frame to be considered stable."""
+    """Maximum allowable rolling standard deviation of torque (in N*cm) for a rest sample to be considered stable."""
 
 
 @dataclass
@@ -73,38 +74,38 @@ class SCEResult:
 
     Attributes:
         period_type: Identifies this result as belonging to a rest or run period.
-        onset_matrix: Binary matrix of calcium transient onsets with dimensions (cell_count, frame_count). Each entry
-            is True if the corresponding cell has a transient onset at that frame.
-        smoothed_fluorescence: Smoothed fluorescence traces with dimensions (cell_count, frame_count), used for plotting
+        onset_matrix: Binary matrix of calcium transient onsets with dimensions (cell_count, sample_count). Each entry
+            is True if the corresponding cell has a transient onset at that sample.
+        smoothed_fluorescence: Smoothed fluorescence traces with dimensions (cell_count, sample_count), used for plotting
             continuous activity traces.
-        coactive_counts: Number of co-active cells at each frame with length frame_count.
-        sce_mask: Boolean mask indicating frames that belong to a detected SCE with length frame_count.
-        sce_labels: Integer labels assigning each SCE frame to an SCE event index (1-indexed) with length frame_count.
-            Frames outside SCEs have label 0.
+        coactive_counts: Number of co-active cells at each sample with length sample_count.
+        sce_mask: Boolean mask indicating samples that belong to a detected SCE with length sample_count.
+        sce_labels: Integer labels assigning each SCE sample to an SCE event index (1-indexed) with length sample_count.
+            Samples outside SCEs have label 0.
         threshold: Significance threshold (mean + significance_scale * SD of shuffled distribution) used for SCE
             detection.
-        frame_rate: Sampling rate in Hz used for the analysis.
-        timestamps: Timestamps in minutes for each frame with length frame_count.
+        sampling_rate: Sampling rate in Hz used for the analysis.
+        timestamps: Timestamps in minutes for each sample with length sample_count.
     """
 
     period_type: PeriodType
     """Identifies this result as belonging to a rest or run period."""
     onset_matrix: NDArray[np.bool_]
-    """Binary matrix of transient onsets with dimensions (cell_count, frame_count)."""
+    """Binary matrix of transient onsets with dimensions (cell_count, sample_count)."""
     smoothed_fluorescence: NDArray[np.float32]
-    """Smoothed fluorescence traces with dimensions (cell_count, frame_count)."""
+    """Smoothed fluorescence traces with dimensions (cell_count, sample_count)."""
     coactive_counts: NDArray[np.int32]
-    """Number of co-active cells per frame with length frame_count."""
+    """Number of co-active cells per sample with length sample_count."""
     sce_mask: NDArray[np.bool_]
-    """Boolean mask for SCE frames with length frame_count."""
+    """Boolean mask for SCE samples with length sample_count."""
     sce_labels: NDArray[np.int32]
-    """Integer SCE event labels (1-indexed) with length frame_count."""
+    """Integer SCE event labels (1-indexed) with length sample_count."""
     threshold: float
     """Significance threshold used for SCE detection."""
-    frame_rate: float
+    sampling_rate: float
     """Sampling rate in Hz."""
     timestamps: NDArray[np.float32]
-    """Timestamps in minutes for each frame with length frame_count."""
+    """Timestamps in minutes for each sample with length sample_count."""
 
 
 @dataclass
@@ -128,37 +129,37 @@ class SCEAssembly:
 @njit(cache=True, parallel=True)
 def _enforce_minimum_interval(
     above_threshold: NDArray[np.bool_],
-    minimum_inter_event_frames: int,
+    minimum_inter_event_samples: int,
 ) -> NDArray[np.bool_]:
     """Suppresses threshold crossings that fall within the refractory period of a preceding onset so that each
     accepted onset represents a distinct calcium transient rather than repeated crossings from the same event.
 
     Args:
         above_threshold: Binary matrix where True indicates the trace exceeds the adaptive threshold, with dimensions
-            (cell_count, frame_count).
-        minimum_inter_event_frames: Refractory period in frames after an accepted onset during which subsequent
+            (cell_count, sample_count).
+        minimum_inter_event_samples: Refractory period in samples after an accepted onset during which subsequent
             crossings are suppressed.
 
     Returns:
-        Binary onset matrix with dimensions (cell_count, frame_count) where consecutive onsets are separated by at
-        least minimum_inter_event_frames.
+        Binary onset matrix with dimensions (cell_count, sample_count) where consecutive onsets are separated by at
+        least minimum_inter_event_samples.
     """
     cell_count = above_threshold.shape[0]
-    frame_count = above_threshold.shape[1]
-    onsets = np.zeros((cell_count, frame_count), dtype=np.bool_)
+    sample_count = above_threshold.shape[1]
+    onsets = np.zeros((cell_count, sample_count), dtype=np.bool_)
 
     for cell_index in prange(cell_count):
         # Offsets the last onset beyond the refractory period so the first threshold crossing is always accepted.
-        last_onset_frame = -minimum_inter_event_frames - 1
+        last_onset_sample = -minimum_inter_event_samples - 1
 
-        # Accepts each crossing only if enough frames have elapsed since the last accepted onset.
-        for frame_index in range(frame_count):
+        # Accepts each crossing only if enough samples have elapsed since the last accepted onset.
+        for sample_index in range(sample_count):
             if (
-                above_threshold[cell_index, frame_index]
-                and (frame_index - last_onset_frame) >= minimum_inter_event_frames
+                above_threshold[cell_index, sample_index]
+                and (sample_index - last_onset_sample) >= minimum_inter_event_samples
             ):
-                onsets[cell_index, frame_index] = True
-                last_onset_frame = frame_index
+                onsets[cell_index, sample_index] = True
+                last_onset_sample = sample_index
 
     return onsets
 
@@ -168,10 +169,10 @@ def _label_contiguous_regions(mask: NDArray[np.bool_]) -> NDArray[np.int32]:
     """Assigns sequential integer labels to contiguous True regions in a boolean mask.
 
     Args:
-        mask: Boolean mask with length frame_count.
+        mask: Boolean mask with length sample_count.
 
     Returns:
-        Integer label array with length frame_count, where each contiguous True region receives a unique label
+        Integer label array with length sample_count, where each contiguous True region receives a unique label
         starting from 1.
     """
     labels = np.zeros(len(mask), dtype=np.int32)
@@ -191,19 +192,19 @@ def _compute_shuffled_max_counts(
     onset_positions: NDArray[np.int32],
     onset_offsets: NDArray[np.int32],
     cell_count: int,
-    frame_count: int,
+    sample_count: int,
     half_window: int,
     shift_amounts: NDArray[np.int32],
 ) -> NDArray[np.float32]:
     """Computes the peak co-active cell count for each temporal shuffle iteration using sparse onset positions.
 
     Args:
-        onset_positions: Flat array of onset frame indices for all cells, ordered by cell.
+        onset_positions: Flat array of onset sample indices for all cells, ordered by cell.
         onset_offsets: Array of length cell_count + 1 where onset_offsets[i]:onset_offsets[i+1] indexes into
             onset_positions for cell i.
         cell_count: Number of cells.
-        frame_count: Number of frames in the trace.
-        half_window: Half-width of the co-activation sliding window in frames.
+        sample_count: Number of samples in the trace.
+        half_window: Half-width of the co-activation sliding window in samples.
         shift_amounts: Pre-generated random shift amounts with dimensions (shuffle_count, cell_count).
 
     Returns:
@@ -214,7 +215,7 @@ def _compute_shuffled_max_counts(
 
     for shuffle_index in prange(shuffle_count):
         # Builds a difference array from sparse onset positions so that a prefix sum recovers the co-active count.
-        diff = np.zeros(frame_count + 1, dtype=np.int32)
+        diff = np.zeros(sample_count + 1, dtype=np.int32)
 
         # Applies a circular shift to each cell's onsets and marks the affected window in the difference array.
         for cell_index in range(cell_count):
@@ -223,17 +224,17 @@ def _compute_shuffled_max_counts(
             shift = shift_amounts[shuffle_index, cell_index]
 
             for onset_index in range(onset_start, onset_end):
-                shifted_frame = (onset_positions[onset_index] + shift) % frame_count
-                win_start = max(0, shifted_frame - half_window)
-                win_end = min(frame_count - 1, shifted_frame + half_window)
+                shifted_sample = (onset_positions[onset_index] + shift) % sample_count
+                win_start = max(0, shifted_sample - half_window)
+                win_end = min(sample_count - 1, shifted_sample + half_window)
                 diff[win_start] += 1
                 diff[win_end + 1] -= 1
 
-        # Recovers the co-active count via prefix sum and tracks the peak across all frames.
+        # Recovers the co-active count via prefix sum and tracks the peak across all samples.
         running = 0
         peak = 0
-        for frame_index in range(frame_count):
-            running += diff[frame_index]
+        for sample_index in range(sample_count):
+            running += diff[sample_index]
             peak = max(peak, running)
         max_counts[shuffle_index] = peak
 
@@ -243,20 +244,20 @@ def _compute_shuffled_max_counts(
 def _detect_transient_onsets(
     smoothed: NDArray[np.float32],
     derivative_threshold_scale: float,
-    minimum_inter_event_frames: int,
+    minimum_inter_event_samples: int,
 ) -> NDArray[np.bool_]:
-    """Detects calcium transient onsets as frames where the first derivative of the smoothed trace exceeds a per-cell
+    """Detects calcium transient onsets as samples where the first derivative of the smoothed trace exceeds a per-cell
     threshold defined as mean + derivative_threshold_scale * standard deviation.
 
     Args:
-        smoothed: Filtered fluorescence with dimensions (cell_count, frame_count).
+        smoothed: Filtered fluorescence with dimensions (cell_count, sample_count).
         derivative_threshold_scale: Number of standard deviations above the mean derivative for the threshold.
-        minimum_inter_event_frames: Minimum number of frames between consecutive transient onsets for the same cell.
+        minimum_inter_event_samples: Minimum number of samples between consecutive transient onsets for the same cell.
 
     Returns:
-        Binary onset matrix with dimensions (cell_count, frame_count).
+        Binary onset matrix with dimensions (cell_count, sample_count).
     """
-    # Computes the first derivative and pads to preserve the original frame count.
+    # Computes the first derivative and pads to preserve the original sample count.
     derivative = np.diff(smoothed, axis=1)
     derivative = np.concatenate([np.zeros((smoothed.shape[0], 1), dtype=smoothed.dtype), derivative], axis=1)
 
@@ -268,31 +269,31 @@ def _detect_transient_onsets(
     # Suppresses repeated crossings within the refractory period.
     return _enforce_minimum_interval(
         above_threshold=above_threshold,
-        minimum_inter_event_frames=minimum_inter_event_frames,
+        minimum_inter_event_samples=minimum_inter_event_samples,
     )
 
 
 def _count_coactive_cells(
     onsets: NDArray[np.bool_],
-    window_frames: int,
+    window_samples: int,
 ) -> NDArray[np.int32]:
-    """Counts the number of cells with at least one transient onset within a sliding window at each frame.
+    """Counts the number of cells with at least one transient onset within a sliding window at each sample.
 
     Args:
-        onsets: Binary onset matrix with dimensions (cell_count, frame_count).
-        window_frames: Width of the sliding window in frames.
+        onsets: Binary onset matrix with dimensions (cell_count, sample_count).
+        window_samples: Width of the sliding window in samples.
 
     Returns:
-        Array of co-active cell counts with length frame_count.
+        Array of co-active cell counts with length sample_count.
     """
-    effective_window = 2 * (window_frames // 2) + 1
+    effective_window = 2 * (window_samples // 2) + 1
     has_onset_in_window = maximum_filter1d(input=onsets.view(np.uint8), size=effective_window, axis=1) > 0
     return np.sum(has_onset_in_window, axis=0, dtype=np.int32)
 
 
 def _compute_shuffled_threshold(
     onsets: NDArray[np.bool_],
-    window_frames: int,
+    window_samples: int,
     shuffle_count: int,
     significance_scale: float,
 ) -> float:
@@ -300,18 +301,18 @@ def _compute_shuffled_threshold(
     shuffle iteration and recording the peak co-active count.
 
     Args:
-        onsets: Binary onset matrix with dimensions (cell_count, frame_count).
-        window_frames: Width of the co-activation sliding window in frames.
+        onsets: Binary onset matrix with dimensions (cell_count, sample_count).
+        window_samples: Width of the co-activation sliding window in samples.
         shuffle_count: Number of shuffle iterations.
         significance_scale: Number of standard deviations above the shuffled mean for the threshold.
 
     Returns:
         The significance threshold for SCE detection.
     """
-    cell_count, frame_count = onsets.shape
-    half_window = window_frames // 2
+    cell_count, sample_count = onsets.shape
+    half_window = window_samples // 2
 
-    # Packs per-cell onset frame indices into a flat array with offsets for sparse iteration.
+    # Packs per-cell onset sample indices into a flat array with offsets for sparse iteration.
     onset_lists: list[NDArray[np.int32]] = []
     onset_offsets = np.zeros(cell_count + 1, dtype=np.int32)
 
@@ -322,13 +323,13 @@ def _compute_shuffled_threshold(
     onset_positions = np.concatenate(onset_lists).astype(np.int32) if onset_lists else np.empty(0, dtype=np.int32)
 
     rng = np.random.default_rng(seed=42)
-    shift_amounts = rng.integers(low=1, high=frame_count, size=(shuffle_count, cell_count)).astype(np.int32)
+    shift_amounts = rng.integers(low=1, high=sample_count, size=(shuffle_count, cell_count)).astype(np.int32)
 
     shuffled_max_counts = _compute_shuffled_max_counts(
         onset_positions=onset_positions,
         onset_offsets=onset_offsets,
         cell_count=cell_count,
-        frame_count=frame_count,
+        sample_count=sample_count,
         half_window=half_window,
         shift_amounts=shift_amounts,
     )
@@ -339,7 +340,7 @@ def _compute_shuffled_threshold(
 
 def _detect_sces(
     fluorescence: NDArray[np.float32],
-    frame_rate: float,
+    sampling_rate: float,
     timestamps: NDArray[np.float32],
     configuration: SCEDetectionConfiguration,
     period_type: PeriodType,
@@ -347,28 +348,28 @@ def _detect_sces(
     """Runs the full SCE detection pipeline on fluorescence data for a single analysis period.
 
     Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, frame_count).
-        frame_rate: Sampling rate in Hz.
-        timestamps: Timestamps in minutes for each frame with length frame_count.
+        fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
+        sampling_rate: Sampling rate in Hz.
+        timestamps: Timestamps in minutes for each sample with length sample_count.
         configuration: SCE detection parameters.
         period_type: Identifies this period as rest or run.
 
     Returns:
         An SCEResult containing the detected SCEs, onset matrix, and co-active counts.
     """
-    # Converts time-based configuration parameters to frame counts.
-    smoothing_window_frames = int(configuration.smoothing_window_seconds * frame_rate)
-    if smoothing_window_frames % 2 == 0:
-        smoothing_window_frames += 1
-    smoothing_window_frames = max(smoothing_window_frames, configuration.smoothing_order + 2)
+    # Converts time-based configuration parameters to sample counts.
+    smoothing_window_samples = int(configuration.smoothing_window_seconds * sampling_rate)
+    if smoothing_window_samples % 2 == 0:
+        smoothing_window_samples += 1
+    smoothing_window_samples = max(smoothing_window_samples, configuration.smoothing_order + 2)
 
-    minimum_inter_event_frames = int(configuration.minimum_inter_event_seconds * frame_rate)
-    coactivation_window_frames = max(1, int(configuration.coactivation_window_seconds * frame_rate))
+    minimum_inter_event_samples = int(configuration.minimum_inter_event_seconds * sampling_rate)
+    coactivation_window_samples = max(1, int(configuration.coactivation_window_seconds * sampling_rate))
 
     # Applies polynomial smoothing to each cell's fluorescence trace.
     smoothed = savgol_filter(
         x=fluorescence,
-        window_length=smoothing_window_frames,
+        window_length=smoothing_window_samples,
         polyorder=configuration.smoothing_order,
         axis=1,
     )
@@ -377,21 +378,21 @@ def _detect_sces(
     onsets = _detect_transient_onsets(
         smoothed=smoothed,
         derivative_threshold_scale=configuration.derivative_threshold_scale,
-        minimum_inter_event_frames=minimum_inter_event_frames,
+        minimum_inter_event_samples=minimum_inter_event_samples,
     )
 
-    # Counts co-active cells per frame using the sliding window.
-    coactive_counts = _count_coactive_cells(onsets=onsets, window_frames=coactivation_window_frames)
+    # Counts co-active cells per sample using the sliding window.
+    coactive_counts = _count_coactive_cells(onsets=onsets, window_samples=coactivation_window_samples)
 
     # Computes the significance threshold from temporal shuffling.
     threshold = _compute_shuffled_threshold(
         onsets=onsets,
-        window_frames=coactivation_window_frames,
+        window_samples=coactivation_window_samples,
         shuffle_count=configuration.shuffle_count,
         significance_scale=configuration.significance_scale,
     )
 
-    # Marks frames where the co-active count exceeds both the shuffled threshold and the minimum cell count.
+    # Marks samples where the co-active count exceeds both the shuffled threshold and the minimum cell count.
     sce_mask = (coactive_counts > threshold) & (coactive_counts >= configuration.minimum_cell_count)
 
     # Assigns sequential labels to contiguous SCE regions.
@@ -405,38 +406,38 @@ def _detect_sces(
         sce_mask=sce_mask,
         sce_labels=sce_labels,
         threshold=threshold,
-        frame_rate=frame_rate,
+        sampling_rate=sampling_rate,
         timestamps=timestamps,
     )
 
 
-def _identify_stable_rest_frames(
+def _identify_stable_rest_samples(
     torque: NDArray[np.float32],
-    frame_rate: float,
+    sampling_rate: float,
     stability_window_seconds: float,
     stability_threshold: float,
 ) -> NDArray[np.bool_]:
-    """Identifies rest frames with stable torque baseline by computing a rolling standard deviation.
+    """Identifies rest samples with stable torque baseline by computing a rolling standard deviation.
 
     Notes:
-        Frames where the rolling standard deviation of the torque signal exceeds the stability threshold are excluded
+        Samples where the rolling standard deviation of the torque signal exceeds the stability threshold are excluded
         from rest-period analysis. This removes periods where the animal is fidgeting or producing inconsistent torque
         outputs that could introduce noise into SCE detection.
 
     Args:
-        torque: Torque signal in N*cm with length frame_count.
-        frame_rate: Sampling rate in Hz.
+        torque: Torque signal in N*cm with length sample_count.
+        sampling_rate: Sampling rate in Hz.
         stability_window_seconds: Window length in seconds for computing rolling standard deviation.
-        stability_threshold: Maximum allowable rolling standard deviation for a frame to be considered stable.
+        stability_threshold: Maximum allowable rolling standard deviation for a sample to be considered stable.
 
     Returns:
-        Boolean mask with length frame_count, True for frames with stable torque.
+        Boolean mask with length sample_count, True for samples with stable torque.
     """
-    window_frames = max(1, int(stability_window_seconds * frame_rate))
+    window_samples = max(1, int(stability_window_seconds * sampling_rate))
 
     # Computes rolling standard deviation from the rolling mean and mean of squares.
-    rolling_mean = uniform_filter1d(input=torque, size=window_frames, mode="nearest")
-    rolling_mean_sq = uniform_filter1d(input=torque**2, size=window_frames, mode="nearest")
+    rolling_mean = uniform_filter1d(input=torque, size=window_samples, mode="nearest")
+    rolling_mean_sq = uniform_filter1d(input=torque**2, size=window_samples, mode="nearest")
     rolling_variance = rolling_mean_sq - rolling_mean**2
 
     # Clamps negative values caused by floating-point precision before taking the square root.
@@ -453,9 +454,10 @@ class SCEDetector:
     visualizing the temporal sequence of rest-run-rest periods and SCE raster plots.
 
     Args:
-        session_path: Path to the session feather file.
+        session_path: Path to the session's dataset directory containing the data feather.
         track_length: Length of the track in centimeters, used to convert distance to position for place field masking.
-        fluorescence_column: Name of the fluorescence column to read from the feather file.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to read from the data
+            feather.
         place_fields: Detected place fields from PlaceFieldDetector, used to mask place field activity at the animal's
             current position during run periods. If None, no masking is applied during run.
         configuration: SCE detection parameters. Uses defaults if None.
@@ -465,41 +467,50 @@ class SCEDetector:
         self,
         session_path: Path,
         track_length: float,
-        fluorescence_column: str = "single_day_dff",
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
         place_fields: PlaceFields | None = None,
         configuration: SCEDetectionConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, torque, distance, and system state data from a feather file for SCE detection.
+        """Loads fluorescence, torque, distance, and system state data from the session's data feather for SCE
+        detection.
 
         Args:
-            session_path: Path to the session feather file.
+            session_path: Path to the session's dataset directory containing the data feather.
             track_length: Length of the track in centimeters.
-            fluorescence_column: Name of the fluorescence column to use.
+            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
+                analysis input.
             place_fields: Detected place fields for run-period masking. If None, no masking is applied.
             configuration: SCE detection parameters. Uses defaults if None.
         """
         df = pl.read_ipc(
-            source=session_path,
-            columns=["system_state", "time_us", fluorescence_column, "torque_N_cm", "distance_cm", "trial"],
+            source=session_path.joinpath(DATA_FILENAME),
+            columns=[
+                DatasetColumn.SYSTEM_STATE.value,
+                DatasetColumn.TIME_US.value,
+                fluorescence_column.value,
+                DatasetColumn.TORQUE_N_CM.value,
+                DatasetColumn.DISTANCE_CM.value,
+                DatasetColumn.TRIAL.value,
+            ],
             memory_map=True,
         )
 
-        # Estimates the frame rate from the median inter-frame interval.
-        time_us = df["time_us"].to_numpy()
+        # Estimates the sampling rate from the median inter-sample interval.
+        time_us = df[DatasetColumn.TIME_US.value].to_numpy()
         median_interval_us = np.median(np.diff(time_us))
-        self._frame_rate: float = 1_000_000.0 / float(median_interval_us)
+        self._sampling_rate: float = 1_000_000.0 / float(median_interval_us)
 
-        self._system_state = df["system_state"].to_list()
+        self._system_state = df[DatasetColumn.SYSTEM_STATE.value].to_list()
         self._elapsed_minutes = (time_us - time_us[0]).astype(np.float32) / np.float32(60_000_000.0)
 
-        # Extracts fluorescence data and transposes from (frame, cell) to (cell, frame).
-        self._fluorescence = np.array(df[fluorescence_column].to_list(), dtype=np.float32).T
-        self._torque = df["torque_N_cm"].to_numpy()
+        # Extracts fluorescence data and transposes from (sample, cell) to (cell, sample).
+        self._fluorescence = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
+        self._torque = df[DatasetColumn.TORQUE_N_CM.value].to_numpy()
 
         # Precomputes the within-trial position once so per-period slicing matches the rest of the analysis
         # surface. Replaces the prior modulo-based wrap that drifted with per-lap encoder noise.
-        distance = df["distance_cm"].to_numpy().astype(np.float32)
-        trial_ids = df["trial"].to_numpy().astype(np.int32)
+        distance = df[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float32)
+        trial_ids = df[DatasetColumn.TRIAL.value].to_numpy().astype(np.int32)
         self._position = compute_within_trial_position(
             distance=distance, trial_ids=trial_ids, track_length=track_length
         )
@@ -539,19 +550,19 @@ class SCEDetector:
         current_state = None
         period_start = 0
 
-        for frame_index in range(len(self._system_state) + 1):
-            state = self._system_state[frame_index] if frame_index < len(self._system_state) else None
+        for sample_index in range(len(self._system_state) + 1):
+            state = self._system_state[sample_index] if sample_index < len(self._system_state) else None
 
             if state != current_state:
-                if current_state in (PeriodType.REST, PeriodType.RUN) and (frame_index - period_start) > 0:
-                    period_fluorescence = self._fluorescence[:, period_start:frame_index]
-                    period_timestamps = self._elapsed_minutes[period_start:frame_index]
+                if current_state in (PeriodType.REST, PeriodType.RUN) and (sample_index - period_start) > 0:
+                    period_fluorescence = self._fluorescence[:, period_start:sample_index]
+                    period_timestamps = self._elapsed_minutes[period_start:sample_index]
 
                     if current_state == PeriodType.REST:
-                        period_torque = self._torque[period_start:frame_index]
-                        stable_mask = _identify_stable_rest_frames(
+                        period_torque = self._torque[period_start:sample_index]
+                        stable_mask = _identify_stable_rest_samples(
                             torque=period_torque,
-                            frame_rate=self._frame_rate,
+                            sampling_rate=self._sampling_rate,
                             stability_window_seconds=self._configuration.torque_stability_window_seconds,
                             stability_threshold=self._configuration.torque_stability_threshold,
                         )
@@ -559,8 +570,8 @@ class SCEDetector:
                         stable_count = int(np.sum(stable_mask))
                         stable_fraction = stable_count / len(stable_mask)
 
-                        # Skips rest periods where fewer than half the frames have stable torque.
-                        if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_FRAME_COUNT:
+                        # Skips rest periods where fewer than half the samples have stable torque.
+                        if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_SAMPLE_COUNT:
                             pending.append(
                                 (
                                     period_fluorescence[:, stable_mask],
@@ -572,9 +583,9 @@ class SCEDetector:
                     elif current_state == PeriodType.RUN:
                         run_fluorescence = period_fluorescence.copy()
 
-                        # Masks place field activity at the animal's current position for each frame.
+                        # Masks place field activity at the animal's current position for each sample.
                         if self._place_fields is not None:
-                            period_position = self._position[period_start:frame_index]
+                            period_position = self._position[period_start:sample_index]
                             valid_position = ~np.isnan(period_position)
 
                             if valid_position.any():
@@ -595,9 +606,9 @@ class SCEDetector:
                                     bin_count - 1,
                                 ).astype(np.int32)
 
-                                # Builds a (cell_count, frame_count) mask from the label image indexed by each
-                                # frame's position bin, then zeros out all masked entries in a single vectorized
-                                # operation. Frames belonging to incomplete trials carry no place-field gating.
+                                # Builds a (cell_count, sample_count) mask from the label image indexed by each
+                                # sample's position bin, then zeros out all masked entries in a single vectorized
+                                # operation. Samples belonging to incomplete trials carry no place-field gating.
                                 place_field_mask = self._place_fields.label_image[:, position_bins] > 0
                                 place_field_mask[:, ~valid_position] = False
                                 run_fluorescence[place_field_mask] = 0.0
@@ -605,14 +616,14 @@ class SCEDetector:
                         pending.append((run_fluorescence, period_timestamps, PeriodType.RUN))
 
                 current_state = state
-                period_start = frame_index
+                period_start = sample_index
 
         # Runs SCE detection sequentially so each period's numba kernel gets full CPU access.
         periods = tqdm(pending, desc="SCE detection", unit="period") if progress else pending
         self._results = [
             _detect_sces(
                 fluorescence=fluorescence,
-                frame_rate=self._frame_rate,
+                sampling_rate=self._sampling_rate,
                 timestamps=timestamps,
                 configuration=self._configuration,
                 period_type=period_type,
@@ -998,14 +1009,14 @@ class SCEDetector:
             transient onset during SCE i+1.
         """
         total_sce_count = int(np.max(result.sce_labels))
-        frame_count = result.onset_matrix.shape[1]
+        sample_count = result.onset_matrix.shape[1]
 
-        # Maps each frame to its SCE label via scatter indexing, then uses a matrix multiply to determine which cells
+        # Maps each sample to its SCE label via scatter indexing, then uses a matrix multiply to determine which cells
         # had at least one onset during each SCE.
-        sce_frame_mask = result.sce_labels > 0
-        sce_frame_indices = np.where(sce_frame_mask)[0]
+        sce_sample_mask = result.sce_labels > 0
+        sce_sample_indices = np.where(sce_sample_mask)[0]
 
-        frame_to_sce = np.zeros((frame_count, total_sce_count), dtype=np.float32)
-        frame_to_sce[sce_frame_indices, result.sce_labels[sce_frame_indices] - 1] = 1.0
+        sample_to_sce = np.zeros((sample_count, total_sce_count), dtype=np.float32)
+        sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
 
-        return (result.onset_matrix.astype(np.float32) @ frame_to_sce > 0).T
+        return (result.onset_matrix.astype(np.float32) @ sample_to_sce > 0).T

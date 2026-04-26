@@ -487,7 +487,7 @@ def _assemble_session_dataset(
     else:
         console.disable_progress()
 
-    # Loads the experiment configuration once so the runtime assembly and the trial geometry sidecar share a single
+    # Loads the experiment configuration once so the runtime assembly and the trial geometry data file share a single
     # parsed instance instead of reading the same YAML twice.
     experiment_configuration = MesoscopeExperimentConfiguration.from_yaml(
         file_path=session_paths.raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
