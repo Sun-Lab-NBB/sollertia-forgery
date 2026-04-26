@@ -146,7 +146,8 @@ class BleachingReport:
         """
         figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
 
-        days = np.array([session.days_since_first for session in self.sessions], dtype=np.float32)
+        # noinspection PyTypeChecker
+        days: NDArray[np.float32] = np.array([session.days_since_first for session in self.sessions], dtype=np.float32)
 
         # Computes a non-zero box width that scales with the smallest day step so adjacent boxes do not overlap.
         minimum_day_step = float(np.diff(days).min()) if len(days) > 1 else 1.0
@@ -161,8 +162,10 @@ class BleachingReport:
 
         # Draws the fitted exponential when the fit converged.
         if self.f0_decay_fit.fit_succeeded:
-            dense_days = np.linspace(days.min(), days.max(), num=200)
-            fit_curve = (
+            # noinspection PyTypeChecker
+            dense_days: NDArray[np.float32] = np.linspace(days.min(), days.max(), num=200, dtype=np.float32)
+            # noinspection PyTypeChecker
+            fit_curve: NDArray[np.float32] = (
                 self.f0_decay_fit.amplitude * np.exp(-dense_days / self.f0_decay_fit.tau_days)
                 + self.f0_decay_fit.offset
             )
@@ -276,8 +279,11 @@ def evaluate_bleaching(
         A BleachingReport containing per-session metrics, the across-session F0 decay fit, paired SNR Wilcoxon
         results, and the list of sessions that exceeded any threshold.
     """
-    if configuration is None:
-        configuration = BleachingConfiguration()
+    # Resolves the optional configuration into a non-None local with an explicit type so PyCharm narrows the type
+    # downstream; the parameter itself stays Optional for the public signature.
+    resolved_configuration: BleachingConfiguration = (
+        configuration if configuration is not None else BleachingConfiguration()
+    )
 
     if len(session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
         message = (
@@ -320,7 +326,7 @@ def evaluate_bleaching(
             session_path=session_path,
             fluorescence_column=fluorescence_column,
             days_since_first=days_since_first,
-            configuration=configuration,
+            configuration=resolved_configuration,
         )
         metrics.append(session_metrics)
         console.echo(
@@ -376,7 +382,7 @@ def evaluate_bleaching(
         f0_population_trend=f0_population_trend,
         snr_population_trend=snr_population_trend,
         snr_paired_p_values=snr_paired_p_values,
-        configuration=configuration,
+        configuration=resolved_configuration,
     )
 
     return BleachingReport(
@@ -388,7 +394,7 @@ def evaluate_bleaching(
         snr_population_trend=snr_population_trend,
         snr_paired_p_values=snr_paired_p_values,
         flagged_sessions=flagged_sessions,
-        configuration=configuration,
+        configuration=resolved_configuration,
     )
 
 
@@ -459,27 +465,39 @@ def _compute_session_metrics(
         A SessionBleachingMetrics instance populated with the per-cell baseline, per-cell SNR, and within-session
         baseline trace for the session.
     """
-    fluorescence, time_us = _load_session_raw(session_path=session_path, fluorescence_column=fluorescence_column)
+    # Routes through an annotated local so PyCharm narrows the unpacked elements to the declared fp32/int64 pair.
+    raw_session: tuple[NDArray[np.float32], NDArray[np.int64]] = _load_session_raw(
+        session_path=session_path, fluorescence_column=fluorescence_column
+    )
+    fluorescence, time_us = raw_session
     sampling_rate_hz = _estimate_sampling_rate_hz(time_us=time_us)
 
     baseline_window_samples = max(round(configuration.baseline_window_seconds * sampling_rate_hz), 1)
     cell_count = fluorescence.shape[0]
     bin_count = fluorescence.shape[1] // baseline_window_samples
 
+    # Declares the array locals up front with explicit fp32 types so PyCharm narrows the dataclass-constructor call
+    # below regardless of which branch produced them.
+    cell_baseline_f0: NDArray[np.float32]
+    cell_snr: NDArray[np.float32]
+
     if bin_count == 0:
         # noinspection PyTypeChecker
-        cell_baseline_f0: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+        cell_baseline_f0 = np.full(cell_count, np.nan, dtype=np.float32)
         # noinspection PyTypeChecker
-        cell_snr: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
+        cell_snr = np.zeros(cell_count, dtype=np.float32)
     else:
-        binned_baseline = _compute_binned_baseline(
+        # noinspection PyTypeChecker
+        binned_baseline: NDArray[np.float32] = _compute_binned_baseline(
             fluorescence=fluorescence,
             bin_size_samples=baseline_window_samples,
             percentile=configuration.baseline_percentile,
         )
         # noinspection PyTypeChecker
         cell_baseline_f0 = np.empty(cell_count, dtype=np.float32)
+        # noinspection PyTypeChecker
         _per_cell_median_along_axis1(matrix=binned_baseline, output=cell_baseline_f0)
+        # noinspection PyTypeChecker
         cell_snr = _compute_cell_snr(
             fluorescence=fluorescence,
             binned_baseline=binned_baseline,
@@ -488,12 +506,14 @@ def _compute_session_metrics(
         )
 
     within_session_bin_samples = max(round(configuration.within_session_bin_seconds * sampling_rate_hz), 1)
-    within_session_time_seconds, within_session_baseline = _compute_within_session_baseline(
+    # Routes through an annotated local so PyCharm narrows the unpacked elements to the declared fp32 NDArray pair.
+    within_session_result: tuple[NDArray[np.float32], NDArray[np.float32]] = _compute_within_session_baseline(
         fluorescence=fluorescence,
         sampling_rate_hz=sampling_rate_hz,
         bin_size_samples=within_session_bin_samples,
         percentile=configuration.baseline_percentile,
     )
+    within_session_time_seconds, within_session_baseline = within_session_result
 
     if within_session_baseline.size > 0 and within_session_baseline[0] > 0:
         within_session_fractional_drop = float(
@@ -543,8 +563,10 @@ def _load_session_raw(
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.int64, copy=False)
 
     sample_count = df.height
-    flat = df[fluorescence_column.value].explode().to_numpy()
+    # noinspection PyTypeChecker
+    flat: NDArray[np.float32] = df[fluorescence_column.value].explode().to_numpy()
     if flat.dtype != np.float32:
+        # noinspection PyTypeChecker
         flat = flat.astype(np.float32, copy=False)
     cell_count = flat.size // sample_count
     # Reshapes the flattened (sample_count * cell_count) buffer into (sample_count, cell_count) and transposes to
@@ -569,7 +591,8 @@ def _estimate_sampling_rate_hz(time_us: NDArray[np.int64]) -> float:
         return float("nan")
     # Diffs the int64 timestamps directly (intervals are positive and small enough to never overflow) and lets the
     # median materialize as a Python float for the final scalar division.
-    deltas_us = np.diff(time_us)
+    # noinspection PyTypeChecker
+    deltas_us: NDArray[np.int64] = np.diff(time_us)
     median_delta_us = float(np.median(deltas_us))
     if median_delta_us <= 0:
         return float("nan")
@@ -710,24 +733,20 @@ def _compute_within_session_baseline(
         Returns two empty arrays when the trace contains fewer than one full bin or the sampling rate is unknown.
     """
     sample_count = fluorescence.shape[1]
-    if sample_count < _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE or not np.isfinite(sampling_rate_hz):
+    bin_count = sample_count // bin_size_samples
+    if sample_count < _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE or not np.isfinite(sampling_rate_hz) or bin_count == 0:
         # noinspection PyTypeChecker
         empty_time: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
         # noinspection PyTypeChecker
         empty_baseline: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
         return empty_time, empty_baseline
 
-    bin_count = sample_count // bin_size_samples
-    if bin_count == 0:
-        # noinspection PyTypeChecker
-        empty_time = np.zeros(0, dtype=np.float32)
-        # noinspection PyTypeChecker
-        empty_baseline = np.zeros(0, dtype=np.float32)
-        return empty_time, empty_baseline
-
-    fov_mean = np.mean(fluorescence, axis=0).astype(np.float32, copy=False)
-    trimmed = fov_mean[: bin_count * bin_size_samples]
-    reshaped = trimmed.reshape(bin_count, bin_size_samples)
+    # noinspection PyTypeChecker
+    fov_mean: NDArray[np.float32] = np.mean(fluorescence, axis=0).astype(np.float32, copy=False)
+    # noinspection PyTypeChecker
+    trimmed: NDArray[np.float32] = fov_mean[: bin_count * bin_size_samples]
+    # noinspection PyTypeChecker
+    reshaped: NDArray[np.float32] = trimmed.reshape(bin_count, bin_size_samples)
     # noinspection PyTypeChecker
     baseline: NDArray[np.float32] = np.percentile(reshaped, percentile, axis=1).astype(np.float32, copy=False)
     # noinspection PyTypeChecker
@@ -770,7 +789,8 @@ def _binned_percentile_kernel(
     weight = np.float32(fractional_position - lower_index)
 
     for cell_index in prange(cell_count):
-        scratch = np.empty(bin_size_samples, dtype=np.float32)
+        # noinspection PyTypeChecker
+        scratch: NDArray[np.float32] = np.empty(bin_size_samples, dtype=np.float32)
         for bin_index in range(bin_count):
             offset = bin_index * bin_size_samples
             for sample_index in range(bin_size_samples):
@@ -784,6 +804,7 @@ def _binned_percentile_kernel(
                 # quickselect did not fully sort, so the upper rank is the minimum of that suffix.
                 upper_value = scratch[lower_index + 1]
                 for scan_index in range(lower_index + 2, bin_size_samples):
+                    # noinspection PyTypeChecker
                     upper_value = min(upper_value, scratch[scan_index])
                 output[cell_index, bin_index] = lower_value + weight * (upper_value - lower_value)
 
@@ -811,7 +832,8 @@ def _per_cell_median_along_axis1(
     lower_index = (column_count - 1) // 2
     is_even = column_count % 2 == 0
     for row_index in prange(row_count):
-        scratch = np.empty(column_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        scratch: NDArray[np.float32] = np.empty(column_count, dtype=np.float32)
         for column_index in range(column_count):
             scratch[column_index] = matrix[row_index, column_index]
         lower_value = _quickselect_inplace(buffer=scratch, target_index=lower_index)
@@ -820,6 +842,7 @@ def _per_cell_median_along_axis1(
         else:
             upper_value = scratch[lower_index + 1]
             for scan_index in range(lower_index + 2, column_count):
+                # noinspection PyTypeChecker
                 upper_value = min(upper_value, scratch[scan_index])
             output[row_index] = np.float32(0.5) * (lower_value + upper_value)
 
@@ -868,7 +891,8 @@ def _cell_snr_kernel(
     mad_scale = _MAD_TO_STD_SCALE
 
     for cell_index in prange(cell_count):
-        scratch = np.empty(sample_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        scratch: NDArray[np.float32] = np.empty(sample_count, dtype=np.float32)
 
         # Detrends on the fly; bins beyond bin_count - 1 reuse the last bin to mirror the previous repeat-and-pad
         # behavior of the materialized upsample.
@@ -883,6 +907,7 @@ def _cell_snr_kernel(
         else:
             upper_value = scratch[median_lower + 1]
             for scan_index in range(median_lower + 2, sample_count):
+                # noinspection PyTypeChecker
                 upper_value = min(upper_value, scratch[scan_index])
             detrended_median = np.float32(0.5) * (median_lower_value + upper_value)
 
@@ -899,6 +924,7 @@ def _cell_snr_kernel(
         else:
             upper_value = scratch[signal_lower_index + 1]
             for scan_index in range(signal_lower_index + 2, sample_count):
+                # noinspection PyTypeChecker
                 upper_value = min(upper_value, scratch[scan_index])
             signal = signal_lower_value + signal_weight * (upper_value - signal_lower_value)
 
@@ -915,6 +941,7 @@ def _cell_snr_kernel(
         else:
             upper_value = scratch[median_lower + 1]
             for scan_index in range(median_lower + 2, sample_count):
+                # noinspection PyTypeChecker
                 upper_value = min(upper_value, scratch[scan_index])
             mad = np.float32(0.5) * (mad_lower_value + upper_value)
 
@@ -948,7 +975,7 @@ def _quickselect_inplace(buffer: NDArray[np.float32], target_index: int) -> np.f
     right = buffer.shape[0] - 1
     while left < right:
         # Sorts (left, mid, right) so buffer[left] <= buffer[mid] <= buffer[right] for median-of-three pivot
-        # selection, then stages the pivot at the right end so the Lomuto scan can run over [left, right - 1] with
+        # selection. Then stages the pivot at the right end so the Lomuto scan can run over [left, right - 1] with
         # the pivot value held constant in buffer[right].
         mid = (left + right) // 2
         if buffer[left] > buffer[mid]:
