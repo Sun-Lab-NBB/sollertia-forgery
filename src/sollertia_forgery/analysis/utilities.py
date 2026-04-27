@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from numba import njit, prange
 import numpy as np
 import polars as pl
+from ataraxis_base_utilities import console
 
 from ..forging import FluorescenceColumn
 from ..shared_assets import (
@@ -200,6 +201,44 @@ def compute_within_trial_position(
     position[per_sample_incomplete] = np.float32("nan")
     # noinspection PyTypeChecker
     return position
+
+
+def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, NDArray[np.int64]]:
+    """Resolves the integer display unit and per-session tick array used by dataset-level summaries and plots.
+
+    Notes:
+        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise
+        falls back to ``("hour", round(days_since_first * 24))``. Raises when even the hour-rounded offsets collide;
+        Sollertia acquisition protocols mandate at least one hour between consecutive sessions, so the hour-rounded
+        values are by construction distinct, and a collision indicates a violated input invariant. Storage and any
+        cross-session fits continue to operate on float days; the integer ticks returned here are display-only.
+
+    Args:
+        days_since_first: Per-session day offsets relative to the first session.
+
+    Returns:
+        A tuple of unit label (``"day"`` or ``"hour"``) and an int64 tick array aligned with ``days_since_first``.
+    """
+    # noinspection PyTypeChecker
+    rounded_days: NDArray[np.int64] = np.round(days_since_first).astype(np.int64, copy=False)
+    if int(np.unique(rounded_days).size) == int(rounded_days.size):
+        return "day", rounded_days
+
+    # Promotes through float64 first so the *24 multiplication does not lose precision near the float32 boundary.
+    # noinspection PyTypeChecker
+    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(np.int64, copy=False)
+    if int(np.unique(rounded_hours).size) == int(rounded_hours.size):
+        return "hour", rounded_hours
+
+    message = (
+        "Unable to assign unique integer day or hour labels to the supplied sessions. Sollertia acquisition "
+        "protocols require at least one hour of separation between consecutive sessions, but at least two sessions "
+        "in this set rounded to the same hour-since-first value, which violates that invariant."
+    )
+    console.error(message=message, error=ValueError)
+    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+    # noinspection PyUnreachableCode
+    raise ValueError(message)  # pragma: no cover
 
 
 def bin_fluorescence_by_position(

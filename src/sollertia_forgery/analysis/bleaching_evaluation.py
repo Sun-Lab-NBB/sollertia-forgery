@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import YamlConfig
 
-from .utilities import trim_acquisition_warmup
+from .utilities import resolve_display_units, trim_acquisition_warmup
 from ..shared_assets import DatasetData, DatasetFiles, DatasetAnimal, DatasetColumn
 
 if TYPE_CHECKING:
@@ -471,7 +471,7 @@ class BleachingReport:
         # stay in the same unit. Falls back to a "day" placeholder when the table is empty so the header column label
         # is still well-defined; the per-session loop will not execute in that case.
         if session_count > 0:
-            unit, ticks = _resolve_display_units(days_since_first=days)
+            unit, ticks = resolve_display_units(days_since_first=days)
         else:
             unit = "day"
             # noinspection PyTypeChecker
@@ -654,7 +654,7 @@ class BleachingReport:
 
         # Plots in display units (integer day or hour ticks); evaluates the model in days so ``tau_days`` keeps its
         # native scale regardless of which unit the x-axis uses.
-        unit, ticks = _resolve_display_units(days_since_first=days)
+        unit, ticks = resolve_display_units(days_since_first=days)
         days_per_unit = 1.0 if unit == "day" else 1.0 / 24.0
 
         # Computes a box width that scales with the smallest tick step. Integer ticks guarantee step >= 1, so the
@@ -740,7 +740,7 @@ class BleachingReport:
 
         # Resolves the integer display unit so per-session legend labels match the across-session plots and summary
         # rather than displaying floats. The x-axis here is within-session minutes, so only the legend changes.
-        unit, ticks = _resolve_display_units(days_since_first=days)
+        unit, ticks = resolve_display_units(days_since_first=days)
         unit_capitalized = unit.capitalize()
 
         colormap = plt.get_cmap("viridis")
@@ -849,7 +849,7 @@ class BleachingReport:
         )
 
         # Plots in display units so the SNR violins line up with the baseline-trend boxplots on the same x-axis.
-        unit, ticks = _resolve_display_units(days_since_first=days)
+        unit, ticks = resolve_display_units(days_since_first=days)
 
         axes.violinplot(snr_data, positions=ticks, showmedians=True)
 
@@ -1091,46 +1091,6 @@ def _validate_chronological_order(
                 f"{session_paths[previous_index].name!r}."
             )
             console.error(message=message, error=ValueError)
-
-
-def _resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, NDArray[np.int64]]:
-    """Resolves the integer display unit and per-session tick array used by summaries and plots.
-
-    Notes:
-        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise
-        falls back to ``("hour", round(days_since_first * 24))``. Raises when even the hour-rounded offsets collide;
-        the chronic photobleaching protocol mandates at least one hour between consecutive sessions, so the
-        hour-rounded values are by construction distinct, and a collision indicates a violated input invariant.
-        Storage and the exponential-decay fit continue to operate on the float ``days_since_first`` column;
-        the integer ticks returned here are display-only.
-
-    Args:
-        days_since_first: Per-session day offsets relative to the first session, as the float column persisted in
-            ``bleaching.feather``.
-
-    Returns:
-        A tuple of unit label (``"day"`` or ``"hour"``) and an int64 tick array aligned with ``days_since_first``.
-    """
-    # noinspection PyTypeChecker
-    rounded_days: NDArray[np.int64] = np.round(days_since_first).astype(np.int64, copy=False)
-    if int(np.unique(rounded_days).size) == int(rounded_days.size):
-        return "day", rounded_days
-
-    # Promotes through float64 first so the *24 multiplication does not lose precision near the float32 boundary.
-    # noinspection PyTypeChecker
-    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(np.int64, copy=False)
-    if int(np.unique(rounded_hours).size) == int(rounded_hours.size):
-        return "hour", rounded_hours
-
-    message = (
-        "Unable to assign unique integer day or hour labels to the supplied sessions. The chronic photobleaching "
-        "protocol requires at least one hour of separation between consecutive sessions, but at least two sessions "
-        "in this evaluation set rounded to the same hour-since-first value, which violates that invariant."
-    )
-    console.error(message=message, error=ValueError)
-    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-    # noinspection PyUnreachableCode
-    raise ValueError(message)  # pragma: no cover
 
 
 def _compute_session_row(

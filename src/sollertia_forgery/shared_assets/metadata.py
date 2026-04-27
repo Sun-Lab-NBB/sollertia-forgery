@@ -91,6 +91,16 @@ class DatasetFiles(StrEnum):
     """The per-animal chronic photobleaching evaluation summary YAML produced by the bleaching evaluation pipeline."""
     BLEACHING_TABLE = "bleaching.feather"
     """The per-animal chronic photobleaching per-session table feather paired with ``BLEACHING_SUMMARY``."""
+    CELL_ANALYSIS_SUMMARY = "cell_analysis.yaml"
+    """The per-session cell analysis summary YAML produced by the cell analysis pipeline. Carries the place-cell,
+    reward-cell, and SCE detection configurations together with session-level scalars and short binned arrays
+    consumed by plot regeneration."""
+    CELL_ANALYSIS_TABLE = "cell_analysis.feather"
+    """The per-session cell analysis per-cell table feather paired with ``CELL_ANALYSIS_SUMMARY``. Holds one row per
+    cell with place-field, reward-cell, and SCE participation metrics."""
+    SCE_PERIODS_TABLE = "sce_periods.feather"
+    """The per-session SCE detection state feather paired with ``CELL_ANALYSIS_TABLE``. Holds one row per detected
+    rest or run period and a sparse representation of the SCE onset matrix."""
 
 
 class StimulusMode(StrEnum):

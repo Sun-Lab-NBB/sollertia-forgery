@@ -13,7 +13,6 @@ from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
 from scipy.ndimage import uniform_filter1d
-import matplotlib.pyplot as plt
 
 from ..forging import FluorescenceColumn
 from .utilities import assemble_run_session_data, bin_fluorescence_by_position
@@ -28,8 +27,6 @@ _NO_TRIAL_SENTINEL: int = 255
 """Sentinel trial id used by the acquisition pipeline to mark samples outside of any trial."""
 _WORKER_RESERVE: int = 4
 """Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
-_PLOT_TICK_INTERVAL_CM: float = 25.0
-"""Spacing in centimeters between x-axis ticks on the position-ordered place-field heatmap."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,104 +310,6 @@ class PlaceFieldDetector:
         ).astype(np.int32)
 
         return significant_cells, p_values
-
-    def plot(
-        self,
-        place_fields: PlaceFields,
-        *,
-        show_color_bar: bool = True,
-        title: str | None = None,
-        sort_by_position: bool = True,
-        show_only_place_cells: bool = True,
-        cell_mask: NDArray[np.bool_] | None = None,
-        figure_dpi: int = 150,
-        minimum_percentile: float = 0.5,
-        maximum_percentile: float = 0.9,
-        cmap: str = "gray_r",
-    ) -> plt.Figure:
-        """Plots binned fluorescence activity across cells as a position-ordered heatmap.
-
-        Args:
-            place_fields: A PlaceFields instance containing the binned fluorescence data to visualize.
-            show_color_bar: Whether to display a color bar alongside the heatmap.
-            title: Optional title displayed at the top of the figure.
-            sort_by_position: Whether to order cells by their place field center location along the track.
-            show_only_place_cells: Whether to display only cells that have detected place fields.
-            cell_mask: Boolean mask with length cell_count specifying which cells to include in the plot. If provided,
-                this overrides show_only_place_cells.
-            figure_dpi: Resolution of the figure in dots per inch.
-            minimum_percentile: Percentile of the data used to set the lower bound of the color scale.
-            maximum_percentile: Percentile of the data used to set the upper bound of the color scale.
-            cmap: Matplotlib colormap name for the heatmap. Defaults to grayscale.
-
-        Returns:
-            The matplotlib Figure object containing the heatmap.
-        """
-        data = place_fields.binned_fluorescence
-
-        # Determines cell ordering based on place field position or original order. Casts the index dtype to int64 so
-        # both branches share a uniform type for downstream indexing operations.
-        # noinspection PyTypeChecker
-        sort_order: NDArray[np.int64] = (
-            place_fields.order.astype(np.int64) if sort_by_position else np.arange(data.shape[0])
-        )
-
-        # Filters to include only cells with place fields or those specified in the mask.
-        if cell_mask is not None:
-            sort_order = sort_order[np.isin(sort_order, np.flatnonzero(cell_mask))]
-        elif show_only_place_cells:
-            sort_order = sort_order[np.isin(sort_order, np.flatnonzero(place_fields.has_place_field))]
-
-        data = data[sort_order, :]
-
-        # Computes color scale limits from data percentiles to handle outliers.
-        minimum_value = np.nanquantile(data, minimum_percentile)
-        maximum_value = np.nanquantile(data, maximum_percentile)
-
-        figure, axes = plt.subplots(1, 1, figsize=(8, 4), facecolor="white", dpi=figure_dpi)
-
-        if title is not None:
-            axes.set_title(title, fontsize=8)
-
-        # Sets axis extent where x-axis shows the position in centimeters and y-axis shows the cell number.
-        extent: tuple[float, float, float, float] = (
-            0.0,
-            float(place_fields.bin_size * data.shape[1]),
-            float(data.shape[0]),
-            0.0,
-        )
-        image = axes.imshow(
-            data,
-            cmap=cmap,
-            extent=extent,
-            interpolation="none",
-            vmin=float(minimum_value),
-            vmax=float(maximum_value),
-            origin="upper",
-        )
-
-        axes.set_aspect("auto")
-        axes.set_xlabel("Position (cm)")
-        axes.set_ylabel("Cell number")
-
-        # Sets x-axis ticks at fixed centimeter intervals for consistent position labeling.
-        track_length = place_fields.bin_size * data.shape[1]
-        # noinspection PyTypeChecker
-        x_ticks: NDArray[np.float64] = np.arange(0, track_length + 1, _PLOT_TICK_INTERVAL_CM)
-        axes.set_xticks(x_ticks)
-
-        if show_color_bar:
-            cbar = figure.colorbar(image, ax=axes)
-            cbar.set_label("ΔF/F₀")
-
-            # Sets colorbar ticks at 0.5 ΔF/F₀ intervals for consistent fluorescence labeling.
-            cbar_min = np.floor(minimum_value / 0.5) * 0.5
-            cbar_max = np.ceil(maximum_value / 0.5) * 0.5
-            # noinspection PyTypeChecker
-            cbar_ticks: NDArray[np.float64] = np.arange(cbar_min, cbar_max, 0.5)
-            cbar.set_ticks(cbar_ticks.tolist())
-
-        return figure
 
     def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
         """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.

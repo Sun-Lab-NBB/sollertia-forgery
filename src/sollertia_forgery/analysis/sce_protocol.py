@@ -1,4 +1,4 @@
-"""Provides functionality for detecting and visualizing Synchronous Calcium Events (SCEs) in neural recordings."""
+"""Provides functionality for detecting Synchronous Calcium Events (SCEs) in neural recordings."""
 
 from __future__ import annotations
 
@@ -12,9 +12,6 @@ import numpy as np
 import polars as pl
 from scipy.signal import savgol_filter
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
-import matplotlib.pyplot as plt
-from scipy.spatial.distance import pdist
-from scipy.cluster.hierarchy import linkage, fcluster
 
 from ..forging import FluorescenceColumn
 from .utilities import trim_acquisition_warmup, compute_within_trial_position
@@ -25,15 +22,13 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-    from sollertia_forgery.analysis.place_cell_analysis import PlaceFields
+    from sollertia_forgery.analysis.place_cell_protocol import PlaceFields
 
 
 _MINIMUM_STABLE_FRACTION: float = 0.5
 """Minimum fraction of stable torque samples required for a rest period to be included in SCE analysis."""
 _MINIMUM_STABLE_SAMPLE_COUNT: int = 10
 """Minimum number of stable torque samples required for a rest period to be included in SCE analysis."""
-_MINIMUM_SCE_COUNT_FOR_ASSEMBLY: int = 2
-"""Minimum number of SCEs required in a period to attempt cell-assembly detection."""
 
 
 class PeriodType(StrEnum):
@@ -109,24 +104,6 @@ class SCEResult:
     """Sampling rate in Hz."""
     timestamps: NDArray[np.float32]
     """Timestamps in minutes for each sample with length sample_count."""
-
-
-@dataclass(slots=True)
-class SCEAssembly:
-    """Represents a group of cells that frequently co-activate during SCEs.
-
-    Attributes:
-        cell_indices: Indices of cells belonging to this assembly.
-        activation_sce_indices: 1-indexed SCE labels where this assembly was active.
-        activation_count: Number of SCEs where this assembly was active.
-    """
-
-    cell_indices: NDArray[np.int32]
-    """Indices of cells belonging to this assembly."""
-    activation_sce_indices: NDArray[np.int32]
-    """SCE labels (1-indexed) where this assembly was active."""
-    activation_count: int
-    """Number of SCEs where this assembly was active."""
 
 
 @njit(cache=True, parallel=True)
@@ -475,8 +452,7 @@ class SCEDetector:
     """Detects Synchronous Calcium Events (SCEs) separately in rest and run periods.
 
     Separates the session into rest and run epochs, applies torque-based stability filtering for rest periods, and
-    masks place field activity at the animal's current position during run periods. Provides plotting utilities for
-    visualizing the temporal sequence of rest-run-rest periods and SCE raster plots.
+    masks place field activity at the animal's current position during run periods.
 
     Args:
         session_path: Path to the session's dataset directory containing the data feather.
@@ -560,6 +536,16 @@ class SCEDetector:
     def run_results(self) -> list[SCEResult]:
         """Returns the subset of results belonging to run periods in temporal order."""
         return [r for r in self._results if r.period_type == PeriodType.RUN]
+
+    @property
+    def results(self) -> list[SCEResult]:
+        """Returns every detected SCE result in temporal order, with rest and run periods interleaved."""
+        return list(self._results)
+
+    @property
+    def sampling_rate_hz(self) -> float:
+        """Returns the sampling rate estimated from the median inter-sample interval at construction time."""
+        return self._sampling_rate
 
     def detect_events(self, *, progress: bool = True) -> list[SCEResult]:
         """Detects SCEs separately in rest and run periods across the session.
@@ -670,407 +656,3 @@ class SCEDetector:
         ]
 
         return self._results
-
-    def detect_cell_assemblies(
-        self,
-        period_type: PeriodType = PeriodType.REST,
-        period_index: int = 0,
-        max_clusters: int = 15,
-        activation_threshold: float = 0.3,
-        minimum_assembly_size: int = 3,
-    ) -> list[SCEAssembly]:
-        """Detects cell assemblies from SCE participation patterns using hierarchical clustering.
-
-        Args:
-            period_type: Which period type to analyze.
-            period_index: Index of the specific period within the selected period type.
-            max_clusters: Maximum number of clusters to generate from hierarchical clustering.
-            activation_threshold: Minimum fraction of assembly members that must participate in an SCE for that SCE to
-                count as an activation of the assembly.
-            minimum_assembly_size: Minimum number of cells required for a valid assembly.
-
-        Returns:
-            A list of SCEAssembly objects sorted by activation count in descending order.
-        """
-        results = self.rest_results if period_type == PeriodType.REST else self.run_results
-        result = results[period_index]
-        total_sce_count = int(np.max(result.sce_labels))
-
-        if total_sce_count < _MINIMUM_SCE_COUNT_FOR_ASSEMBLY:
-            return []
-
-        participation = self._build_participation_matrix(result=result)
-
-        # Filters to cells that participate in at least one SCE.
-        cell_participation_count = np.sum(participation, axis=0)
-        # noinspection PyTypeChecker
-        active_cell_mask: NDArray[np.bool_] = cell_participation_count > 0
-        # noinspection PyTypeChecker
-        active_cell_indices: NDArray[np.int32] = np.where(active_cell_mask)[0].astype(np.int32)
-
-        if len(active_cell_indices) < minimum_assembly_size:
-            return []
-
-        # Computes pairwise Jaccard distance between cells based on SCE participation patterns.
-        cell_vectors = participation[:, active_cell_mask].T.astype(np.float64)
-        distances = pdist(X=cell_vectors, metric="jaccard")
-        distances = np.nan_to_num(distances, nan=0.0)
-
-        # Clusters cells using average-linkage hierarchical clustering.
-        n_clusters = min(max_clusters, len(active_cell_indices) // minimum_assembly_size)
-        n_clusters = max(2, n_clusters)
-
-        linkage_matrix = linkage(distances, method="average")
-        cluster_labels = fcluster(linkage_matrix, t=n_clusters, criterion="maxclust")
-
-        # Builds assemblies from clusters that meet the minimum size requirement.
-        assemblies: list[SCEAssembly] = []
-        for cluster_id in range(1, n_clusters + 1):
-            # noinspection PyTypeChecker
-            member_mask: NDArray[np.bool_] = cluster_labels == cluster_id
-            if int(np.sum(member_mask)) < minimum_assembly_size:
-                continue
-
-            member_original_indices = active_cell_indices[member_mask]
-            member_participation = participation[:, member_original_indices]
-
-            # Marks SCEs where enough assembly members were co-active as activations.
-            active_fraction = np.mean(member_participation, axis=1)
-            # noinspection PyTypeChecker
-            activating_sces: NDArray[np.int32] = np.where(active_fraction >= activation_threshold)[0].astype(np.int32)
-
-            if len(activating_sces) == 0:
-                continue
-
-            assemblies.append(
-                SCEAssembly(
-                    cell_indices=member_original_indices,
-                    activation_sce_indices=activating_sces + 1,
-                    activation_count=len(activating_sces),
-                )
-            )
-
-        assemblies.sort(key=lambda a: a.activation_count, reverse=True)
-        return assemblies
-
-    def plot_rest_run_rest_sequence(
-        self,
-        cell_indices: NDArray[np.int32] | list[int] | None = None,
-        cell_count: int = 5,
-        trial_index: int = 0,
-        figure_dpi: int = 150,
-    ) -> plt.Figure:
-        """Plots smoothed fluorescence traces, detected onsets, and co-activation counts for selected cells across one
-        rest-run-rest trial cycle.
-
-        Args:
-            cell_indices: Specific cell indices to plot. If None, selects the cells with the most detected transient
-                onsets across all periods.
-            cell_count: Number of cells to plot when cell_indices is not provided.
-            trial_index: Which trial cycle (rest-run-rest group) to display, starting from 0.
-            figure_dpi: Resolution of the figure in dots per inch.
-
-        Returns:
-            The matplotlib Figure object containing the rest-run-rest sequence plots.
-        """
-        # Identifies the periods belonging to the requested trial cycle.
-        rest = self.rest_results
-        run = self.run_results
-
-        if trial_index >= len(run):
-            trial_index = 0
-
-        # Builds the rest-run-rest sequence for the requested trial cycle.
-        sequence_results: list[SCEResult] = []
-
-        if trial_index < len(rest):
-            sequence_results.append(rest[trial_index])
-        sequence_results.append(run[trial_index])
-        if trial_index + 1 < len(rest):
-            sequence_results.append(rest[trial_index + 1])
-
-        # Chooses a mix of rest-active and rest-quiet cells that are also active during run.
-        if cell_indices is None:
-            cell_total = sequence_results[0].onset_matrix.shape[0]
-            # noinspection PyTypeChecker
-            rest_onsets: NDArray[np.int32] = np.zeros(cell_total, dtype=np.int32)
-            # noinspection PyTypeChecker
-            run_onsets: NDArray[np.int32] = np.zeros(cell_total, dtype=np.int32)
-
-            for result in sequence_results:
-                counts = np.sum(result.onset_matrix, axis=1).astype(np.int32)
-                if result.period_type == PeriodType.REST:
-                    rest_onsets += counts
-                else:
-                    run_onsets += counts
-
-            # Filters cells with at least one transient onset during run to ensure visible activity in traces.
-            # noinspection PyTypeChecker
-            run_active_mask: NDArray[np.bool_] = run_onsets > 0
-            # noinspection PyTypeChecker
-            run_active_indices: NDArray[np.int64] = np.where(run_active_mask)[0]
-
-            if len(run_active_indices) == 0:
-                # noinspection PyTypeChecker
-                run_active_indices = np.arange(cell_total)
-
-            # Splits run-active cells into the most and least rest-active halves.
-            rest_spikers = cell_count // 2
-            rest_calm = cell_count - rest_spikers
-
-            rest_onsets_subset = rest_onsets[run_active_indices]
-            # noinspection PyTypeChecker
-            sorted_by_rest: NDArray[np.int64] = np.argsort(rest_onsets_subset)
-
-            calm_indices = run_active_indices[sorted_by_rest[:rest_calm]]
-            spiker_indices = run_active_indices[sorted_by_rest[-rest_spikers:]]
-
-            # noinspection PyTypeChecker
-            selected_indices: NDArray[np.int32] = np.unique(np.concatenate([calm_indices, spiker_indices])).astype(
-                np.int32
-            )
-            cell_indices = selected_indices[:cell_count]
-
-        else:
-            cell_indices = np.asarray(cell_indices, dtype=np.int32)
-
-        # Computes the concatenated time boundaries for each period.
-        period_boundaries = []
-        time_offset = 0.0
-        for result in sequence_results:
-            period_duration = result.timestamps[-1] - result.timestamps[0]
-            period_boundaries.append((time_offset, time_offset + period_duration, result.period_type))
-            time_offset += period_duration
-
-        total_time = time_offset
-
-        # Creates figure with a label row on top and one trace row per cell.
-        height_ratios = [0.4] + [1.0] * len(cell_indices)
-        figure, all_axes = plt.subplots(
-            nrows=1 + len(cell_indices),
-            ncols=1,
-            figsize=(14, 1.5 * len(cell_indices) + 1),
-            facecolor="white",
-            dpi=figure_dpi,
-            sharex=True,
-            gridspec_kw={"height_ratios": height_ratios},
-        )
-
-        # Draws the period label bar in the top row.
-        label_axis = all_axes[0]
-        period_colors = {PeriodType.REST: "#A8D8EA", PeriodType.RUN: "#FFE0A0"}
-        rest_label_count = 0
-
-        for start, end, period_type in period_boundaries:
-            face_color = period_colors[period_type]
-
-            # Distinguishes pre-run and post-run rest labels.
-            if period_type == PeriodType.REST:
-                rest_label_count += 1
-                display_label = f"Rest {rest_label_count}"
-            else:
-                display_label = "Run"
-
-            label_axis.axvspan(xmin=start, xmax=end, color=face_color, alpha=0.8)
-            label_axis.text(
-                x=(start + end) / 2,
-                y=0.5,
-                s=display_label,
-                ha="center",
-                va="center",
-                fontsize=10,
-                fontweight="bold",
-            )
-
-        label_axis.set_xlim(0, total_time)
-        label_axis.set_ylim(0, 1)
-        label_axis.set_yticks([])
-        label_axis.spines["top"].set_visible(False)
-        label_axis.spines["right"].set_visible(False)
-        label_axis.spines["left"].set_visible(False)
-        label_axis.spines["bottom"].set_visible(False)
-        label_axis.set_title(f"Rest-Run-Rest Sequence (Trial {trial_index + 1})", fontsize=11)
-
-        # Draws each cell's fluorescence trace across the concatenated periods.
-        trace_axes = all_axes[1:]
-        for axis_index, cell_index in enumerate(cell_indices):
-            axis = trace_axes[axis_index]
-            current_offset = 0.0
-
-            for result in sequence_results:
-                period_time = result.timestamps - result.timestamps[0] + current_offset
-                fluorescence_trace = result.smoothed_fluorescence[cell_index]
-
-                # Shades the background to match the period label bar.
-                background_color = period_colors[result.period_type]
-                axis.axvspan(xmin=period_time[0], xmax=period_time[-1], alpha=0.15, color=background_color)
-
-                # Computes the z-score for the trace per-period so that each cell's activity fills its subplot
-                # vertically.
-                trace_mean = np.mean(fluorescence_trace)
-                trace_std = np.std(fluorescence_trace)
-                if trace_std > 0:
-                    normalized_trace = (fluorescence_trace - trace_mean) / trace_std
-                else:
-                    normalized_trace = fluorescence_trace - trace_mean
-
-                # Plots the normalized fluorescence trace as a continuous line.
-                axis.plot(period_time, normalized_trace, color="black", linewidth=0.5, alpha=0.8)
-
-                current_offset = period_time[-1]
-
-            axis.set_ylabel(f"Cell {cell_index}", fontsize=9)
-            axis.spines["top"].set_visible(False)
-            axis.spines["right"].set_visible(False)
-
-        trace_axes[-1].set_xlabel("Time (minutes)")
-
-        figure.tight_layout()
-        return figure
-
-    def plot_assemblies(
-        self,
-        period_type: PeriodType = PeriodType.REST,
-        period_index: int = 0,
-        top_n: int = 5,
-        max_clusters: int = 15,
-        activation_threshold: float = 0.3,
-        minimum_assembly_size: int = 3,
-        title: str | None = None,
-        figure_dpi: int = 150,
-    ) -> plt.Figure:
-        """Detects and plots the most frequent SCE cell assemblies as raster panels.
-
-        Args:
-            period_type: Which period type to analyze.
-            period_index: Index of the specific period within the selected period type.
-            top_n: Maximum number of assemblies to display, selected by highest activation count.
-            max_clusters: Maximum number of clusters for hierarchical clustering.
-            activation_threshold: Minimum fraction of assembly members that must participate for an SCE to count as an
-                activation.
-            minimum_assembly_size: Minimum number of cells required for a valid assembly.
-            title: Optional title displayed at the top of the figure.
-            figure_dpi: Resolution of the figure in dots per inch.
-
-        Returns:
-            The matplotlib Figure object containing the assembly raster panels.
-        """
-        results = self.rest_results if period_type == PeriodType.REST else self.run_results
-        result = results[period_index]
-        total_sce_count = int(np.max(result.sce_labels))
-
-        assemblies = self.detect_cell_assemblies(
-            period_type=period_type,
-            period_index=period_index,
-            max_clusters=max_clusters,
-            activation_threshold=activation_threshold,
-            minimum_assembly_size=minimum_assembly_size,
-        )
-
-        if len(assemblies) == 0:
-            figure, axis = plt.subplots(figsize=(6, 4), facecolor="white", dpi=figure_dpi)
-            axis.text(0.5, 0.5, "No assemblies detected", ha="center", va="center", fontsize=12)
-            axis.set_xlim(0, 1)
-            axis.set_ylim(0, 1)
-            axis.axis("off")
-            return figure
-
-        display_count = min(top_n, len(assemblies))
-        displayed_assemblies = assemblies[:display_count]
-
-        total_cells = result.onset_matrix.shape[0]
-        column_width = 1.8
-        figure_width = column_width * display_count + 1.5
-        figure_height = max(5, min(12, total_cells * 0.003 + 2))
-
-        figure, axes = plt.subplots(
-            nrows=1,
-            ncols=display_count,
-            figsize=(figure_width, figure_height),
-            facecolor="white",
-            dpi=figure_dpi,
-        )
-
-        if display_count == 1:
-            axes = [axes]
-
-        # Assigns a distinct color to each assembly for both dots and border.
-        assembly_colors = ["black", "red", "blue", "green", "magenta"]
-
-        for assembly_index, assembly in enumerate(displayed_assemblies):
-            axis = axes[assembly_index]
-            color = assembly_colors[assembly_index % len(assembly_colors)]
-
-            member_cells = np.sort(assembly.cell_indices)
-
-            # Plots dots at actual cell number positions on the Y-axis.
-            axis.scatter(
-                x=np.zeros(len(member_cells)),
-                y=member_cells,
-                color=color,
-                s=13,
-                marker=".",
-                linewidths=0,
-            )
-
-            axis.set_xlim(-0.5, 0.5)
-            axis.set_ylim(total_cells - 0.5, -0.5)
-            axis.set_xticks([])
-
-            # Places tick marks at every 500 cells for positional reference.
-            yticks = list(range(0, total_cells, 500))
-            axis.set_yticks(yticks)
-            axis.set_yticklabels([str(t) for t in yticks], fontsize=6)
-
-            # Draws a colored box around each assembly panel.
-            for spine in axis.spines.values():
-                spine.set_visible(True)
-                spine.set_linewidth(0.8)
-                spine.set_color(color)
-
-            axis.set_xlabel(
-                f"Assembly {assembly_index + 1}",
-                fontsize=7,
-                color=color,
-            )
-
-        if assembly_index > 0:
-            axis.tick_params(axis="y", labelleft=False)
-
-        axes[0].set_ylabel("Cell number")
-
-        if title is None:
-            title = (
-                f"SCE Assemblies — {period_type.title()} Period {period_index + 1}  "
-                f"({total_sce_count} total SCEs, showing top {display_count} assemblies)"
-            )
-        figure.suptitle(title, fontsize=11)
-        figure.subplots_adjust(wspace=0.1, left=0.06, right=0.98, top=0.94, bottom=0.06)
-
-        return figure
-
-    def _build_participation_matrix(self, result: SCEResult) -> NDArray[np.bool_]:
-        """Builds a binary matrix indicating which cells participated in each SCE.
-
-        Args:
-            result: SCE detection result containing the onset matrix and SCE labels.
-
-        Returns:
-            Boolean matrix with dimensions (total_sce_count, cell_count), where entry (i, j) is True if cell j had a
-            transient onset during SCE i+1.
-        """
-        total_sce_count = int(np.max(result.sce_labels))
-        sample_count = result.onset_matrix.shape[1]
-
-        # Maps each sample to its SCE label via scatter indexing, then uses a matrix multiply to determine which cells
-        # had at least one onset during each SCE.
-        # noinspection PyTypeChecker
-        sce_sample_mask: NDArray[np.bool_] = result.sce_labels > 0
-        # noinspection PyTypeChecker
-        sce_sample_indices: NDArray[np.int64] = np.where(sce_sample_mask)[0]
-
-        # noinspection PyTypeChecker
-        sample_to_sce: NDArray[np.float32] = np.zeros((sample_count, total_sce_count), dtype=np.float32)
-        sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
-
-        return (result.onset_matrix.astype(np.float32) @ sample_to_sce > 0).T

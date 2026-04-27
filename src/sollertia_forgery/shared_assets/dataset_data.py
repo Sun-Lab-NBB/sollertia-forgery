@@ -116,6 +116,23 @@ class DatasetSession:
         """Returns the path to the session's ``trial_geometry.yaml`` data file within the dataset hierarchy."""
         return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
 
+    @property
+    def cell_analysis_summary_path(self) -> Path:
+        """Returns the path to the session's ``cell_analysis.yaml`` summary file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.CELL_ANALYSIS_SUMMARY)
+
+    @property
+    def cell_analysis_table_path(self) -> Path:
+        """Returns the path to the session's ``cell_analysis.feather`` per-cell table within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.CELL_ANALYSIS_TABLE)
+
+    @property
+    def sce_periods_table_path(self) -> Path:
+        """Returns the path to the session's ``sce_periods.feather`` per-period SCE-state table within the dataset
+        hierarchy.
+        """
+        return self.session_path.joinpath(DatasetFiles.SCE_PERIODS_TABLE)
+
 
 @dataclass(frozen=True, slots=True)
 class DatasetAnimal:
