@@ -23,6 +23,44 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+ACQUISITION_WARMUP_SECONDS: float = 60.0
+"""Number of leading seconds discarded from every loaded session trace before any analysis runs. Sollertia
+experiments include a multi-minute pre-imaging baseline period during which the PMT gain, resonant scanner phase,
+shutter, and laser power have not yet stabilized; the resulting initial fluorescence valley would otherwise
+contaminate downstream estimates (per-cell baselines, within-session bleaching, SCE statistics, place-field
+tuning). Trimming at load time guarantees every analyzer operates on stabilized samples without needing to know
+the artifact exists."""
+
+
+def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
+    """Drops the leading ``ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe based on the
+    ``time_us`` column.
+
+    Notes:
+        Operates on the polars dataframe directly (rather than the post-explode numpy arrays) so the warmup window
+        never enters any subsequent column-level reshape. Sessions whose entire trace falls within the warmup
+        window collapse to an empty dataframe; downstream loaders' existing length guards then produce NaN sentinels
+        for such degenerate sessions.
+
+    Args:
+        df: Session dataframe loaded from ``DatasetFiles.DATA``. Must include ``DatasetColumn.TIME_US`` among the
+            selected columns; all other columns are passed through untouched.
+
+    Returns:
+        The input dataframe sliced to drop every row whose ``time_us`` value precedes the warmup cutoff.
+    """
+    if df.height == 0:
+        return df
+    # noinspection PyTypeChecker
+    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
+    warmup_us = int(ACQUISITION_WARMUP_SECONDS * 1_000_000)
+    cutoff_us = int(time_us[0]) + warmup_us
+    warmup_index = int(np.searchsorted(time_us, cutoff_us, side="left"))
+    if warmup_index <= 0:
+        return df
+    return df.slice(warmup_index)
+
+
 @dataclass(frozen=True, slots=True)
 class RunSessionData:
     """Stores run-state arrays and trial geometry resolved from a forged session for a single trial type."""
@@ -50,8 +88,9 @@ def assemble_run_session_data(
     """Assembles run-state arrays and trial geometry from a forged session for the given trial type.
 
     Notes:
-        Resolves the canonical track length from the session's trial geometry data file, filters the session's
-        data feather to system_state == 'run' and trial_type == trial_type, computes within-trial position, and drops
+        Resolves the canonical track length from the session's trial geometry data file, drops the leading
+        acquisition-warmup window so downstream binning operates on stabilized samples, filters the session's data
+        feather to system_state == 'run' and trial_type == trial_type, computes within-trial position, and drops
         samples belonging to incomplete trials so downstream binning never sees NaN positions. All returned arrays
         share the same sample axis and are aligned in lockstep.
 
@@ -74,6 +113,7 @@ def assemble_run_session_data(
     df = pl.read_ipc(
         source=session_path.joinpath(DatasetFiles.DATA),
         columns=[
+            DatasetColumn.TIME_US.value,
             DatasetColumn.SYSTEM_STATE.value,
             DatasetColumn.TRIAL_TYPE.value,
             fluorescence_column.value,
@@ -82,6 +122,7 @@ def assemble_run_session_data(
             DatasetColumn.TRIAL.value,
         ],
     )
+    df = trim_acquisition_warmup(df)
     df = df.filter(
         (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run") & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type),
     )

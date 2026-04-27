@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import YamlConfig
 
+from .utilities import trim_acquisition_warmup
 from ..shared_assets import DatasetData, DatasetFiles, DatasetAnimal, DatasetColumn
 
 if TYPE_CHECKING:
@@ -44,13 +45,6 @@ _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE: int = 2
 """Minimum number of timestamp samples required to estimate the inter-sample sampling rate."""
 _SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
 """``strptime`` format string for the canonical session-directory timestamp."""
-_ACQUISITION_WARMUP_SECONDS: float = 60.0
-"""Number of leading seconds discarded from every loaded session trace before any analysis runs. Sollertia
-experiments include a multi-minute pre-imaging baseline period during which the PMT gain, resonant scanner phase,
-shutter, and laser power have not yet stabilized; the resulting initial fluorescence valley would otherwise
-contaminate the first within-session and per-cell baseline bins and produce artifactually negative bleaching
-fractions for nearly every session. Trimming at load time guarantees every downstream kernel operates on stabilized
-samples without needing to know the artifact exists."""
 _SIGNIFICANCE_LEVELS: tuple[tuple[float, str], ...] = (
     (0.001, "*\n**"),
     (0.01, "**"),
@@ -815,12 +809,8 @@ class BleachingReport:
             )
             for index, baseline in enumerate(usable_baselines):
                 baseline_matrix[index, : baseline.size] = baseline
-            with warnings.catch_warnings():
-                # ``np.nanmean`` emits a RuntimeWarning for any all-NaN column. The matrix is built such that every
-                # column has at least one non-NaN by construction, but the suppression keeps the contract robust.
-                warnings.simplefilter("ignore", category=RuntimeWarning)
-                # noinspection PyTypeChecker
-                mean_baseline: NDArray[np.float32] = np.nanmean(baseline_matrix, axis=0).astype(np.float32, copy=False)
+            # noinspection PyTypeChecker
+            mean_baseline: NDArray[np.float32] = np.nanmean(baseline_matrix, axis=0).astype(np.float32, copy=False)
             longest_time = max(time_seconds_list, key=lambda candidate: candidate.size)[:max_length]
             axes.plot(
                 longest_time / 60.0,
@@ -1236,7 +1226,7 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
         the list column to a flat fp32 series and reshaping in NumPy stays in compiled code and runs roughly an
         order of magnitude faster while producing the same (cell_count, sample_count) C-contiguous layout.
 
-        After loading, the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples are dropped from both arrays so every
+        Drops the acquisition warmup window at the dataframe level via ``trim_acquisition_warmup`` so every
         downstream kernel — per-cell baseline percentile, SNR, within-session bleaching — operates on stabilized
         data without needing its own warmup-aware logic. Sessions that contain no samples past the warmup window
         are returned as empty arrays; existing length guards in the per-session pipeline produce NaN sentinels for
@@ -1253,6 +1243,7 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
         source=session_path.joinpath(DatasetFiles.DATA),
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE.value],
     )
+    df = trim_acquisition_warmup(df)
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.int64, copy=False)
 
@@ -1268,18 +1259,6 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
     # ascontiguousarray copy materializes the C-contiguous result that downstream reshapes need.
     # noinspection PyTypeChecker
     fluorescence: NDArray[np.float32] = np.ascontiguousarray(flat.reshape(sample_count, cell_count).T)
-
-    # Trims the leading acquisition-warmup window. ``searchsorted`` finds the first sample at or after
-    # ``time_us[0] + warmup_us``; sessions with no samples past the warmup window collapse to empty arrays so the
-    # per-session pipeline's existing length guards produce NaN sentinels rather than spurious values.
-    if time_us.size > 0:
-        warmup_us = int(_ACQUISITION_WARMUP_SECONDS * 1_000_000)
-        cutoff_us = int(time_us[0]) + warmup_us
-        warmup_index = int(np.searchsorted(time_us, cutoff_us, side="left"))
-        if warmup_index > 0:
-            time_us = time_us[warmup_index:]
-            # noinspection PyTypeChecker
-            fluorescence = np.ascontiguousarray(fluorescence[:, warmup_index:])
 
     return fluorescence, time_us
 

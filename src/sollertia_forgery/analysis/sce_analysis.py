@@ -17,7 +17,7 @@ from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
 from ..forging import FluorescenceColumn
-from .utilities import compute_within_trial_position
+from .utilities import trim_acquisition_warmup, compute_within_trial_position
 from ..shared_assets import DatasetFiles, DatasetColumn
 
 if TYPE_CHECKING:
@@ -519,6 +519,9 @@ class SCEDetector:
             ],
             memory_map=True,
         )
+        # Drops the acquisition warmup window before extracting any per-sample arrays so SCE detection runs on
+        # stabilized samples without needing its own warmup-aware logic.
+        df = trim_acquisition_warmup(df)
 
         # Estimates the sampling rate from the median inter-sample interval.
         time_us = df[DatasetColumn.TIME_US.value].to_numpy()
