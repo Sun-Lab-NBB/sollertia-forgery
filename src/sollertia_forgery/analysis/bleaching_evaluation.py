@@ -13,9 +13,11 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 import warnings
 from itertools import pairwise
+from contextlib import nullcontext
 from dataclasses import dataclass
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from numba import njit, prange
+from numba import njit, prange, set_num_threads
 import numpy as np
 import polars as pl
 from scipy.stats import wilcoxon
@@ -23,7 +25,7 @@ from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_times
 from scipy.optimize import curve_fit
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
 from .utilities import resolve_display_units, trim_acquisition_warmup
@@ -126,21 +128,6 @@ class BleachingConfiguration:
     to the first session, applied alongside ``snr_loss_threshold`` as the second criterion for SNR-based flagging."""
 
 
-class _SessionRow(NamedTuple):
-    """Internal per-session computed values used to assemble one row of the bleaching feather.
-
-    Used only inside ``BleachingReport.evaluate``; not exposed in the public API. Values produced by
-    ``_compute_session_row`` flow directly into the polars DataFrame without an intermediate dataclass wrapper.
-    """
-
-    sampling_rate_hz: float
-    cell_baseline_fluorescence: NDArray[np.float32]
-    cell_snr: NDArray[np.float32]
-    within_session_time_seconds: NDArray[np.float32]
-    within_session_baseline: NDArray[np.float32]
-    within_session_fractional_drop: float
-
-
 @dataclass(frozen=True, slots=True)
 class ExponentialDecayFit:
     """Stores the result of fitting ``amplitude * exp(-d / tau_days) + offset`` (with ``d`` in days since the first
@@ -155,7 +142,7 @@ class ExponentialDecayFit:
     offset: float
     """Asymptotic baseline component in raw fluorescence units."""
     fit_succeeded: bool
-    """Determines whether scipy.optimize.curve_fit converged on a finite, in-bounds solution."""
+    """True when ``scipy.optimize.curve_fit`` converged on a finite, in-bounds solution; False otherwise."""
 
 
 @dataclass
@@ -201,6 +188,7 @@ class BleachingReport:
         session_paths: tuple[Path, ...],
         *,
         configuration: BleachingConfiguration | None = None,
+        display_progress: bool = True,
     ) -> BleachingReport:
         """Quantifies photobleaching across the supplied chronologically ordered sessions for a single animal.
 
@@ -211,25 +199,18 @@ class BleachingReport:
             Only the multi-recording cindra column carries that information. Single-recording fluorescence carries no
             cell correspondence across days and would silently produce mathematically valid but biologically meaningless
             paired statistics, so it is not exposed as an option. Sessions are processed sequentially so the heavy
-            per-cell percentile and SNR kernels can saturate every available CPU core via Numba's thread pool; a
-            per-session progress line is emitted as each session completes.
-
-        References:
-            Multi-day registered cell intersection for longitudinal comparisons:
-                Ziv et al. (2013). Long-term dynamics of CA1 hippocampal place codes. Nature Neuroscience.
-                https://doi.org/10.1038/nn.3329
-                Rubin et al. (2015). Hippocampal ensemble dynamics timestamp events in long-term memory. eLife.
-                https://doi.org/10.7554/eLife.12247
-            Standardized longitudinal-imaging quality-control framework that motivates the combined-flagging
-            strategy:
-                de Vries et al. (2020). A large-scale standardized physiological survey reveals functional
-                organization of the mouse visual cortex. Nature Neuroscience.
-                https://doi.org/10.1038/s41593-019-0550-9
+            per-cell percentile and SNR kernels saturate the active Numba thread pool one session at a time;
+            ``run_bleaching_analysis`` configures that pool, and across-animal parallelism is layered on top of it
+            via a separate process pool. Methodological references for every step are centralized in
+            ``run_bleaching_analysis``.
 
         Args:
             session_paths: Chronologically ordered tuple of session directory paths. Sessions are validated to be
                 in non-decreasing date order via the canonical session-name timestamp.
             configuration: Bleaching evaluation parameters. Uses defaults if None.
+            display_progress: Determines whether to display a per-session progress bar as each session completes.
+                Suppress when this method is invoked from a subprocess that already reports progress at a coarser
+                level so that the bars do not interleave on the parent terminal.
 
         Returns:
             A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
@@ -278,11 +259,12 @@ class BleachingReport:
         within_session_drops: list[float] = []
 
         cell_count_reference: int | None = None
-        with console.progress(
-            total=session_count,
-            description="Evaluating bleaching",
-            unit="session",
-        ) as progress_bar:
+        progress_context = (
+            console.progress(total=session_count, description="Evaluating bleaching", unit="session")
+            if display_progress
+            else nullcontext()
+        )
+        with progress_context as progress_bar:
             for session_path in session_paths:
                 row = _compute_session_row(
                     session_path=session_path,
@@ -308,11 +290,12 @@ class BleachingReport:
                 within_session_baseline_arrays.append(row.within_session_baseline)
                 within_session_drops.append(row.within_session_fractional_drop)
 
-                progress_bar.update()
+                if progress_bar is not None:
+                    progress_bar.update()
 
         # Cross-session aggregates derived from the per-session arrays.
-        population_baseline_values = [float(np.median(arr)) for arr in cell_baseline_arrays]
-        population_snr_values = [float(np.median(arr)) for arr in cell_snr_arrays]
+        population_baseline_values = [float(np.median(array)) for array in cell_baseline_arrays]
+        population_snr_values = [float(np.median(array)) for array in cell_snr_arrays]
 
         # noinspection PyTypeChecker
         population_baseline_array: NDArray[np.float32] = np.array(population_baseline_values, dtype=np.float32)
@@ -914,38 +897,168 @@ class BleachingReport:
         return figure
 
 
-def evaluate_and_save_bleaching(
+def run_bleaching_analysis(
     dataset: DatasetData,
-    animal: str,
     *,
+    animal: str | None = None,
+    workers: int = -1,
+    display_progress: bool = True,
     configuration: BleachingConfiguration | None = None,
-) -> BleachingReport:
-    """Resolves the animal's sessions from the dataset, evaluates bleaching, and persists the report.
+) -> tuple[BleachingReport, ...]:
+    """Evaluates bleaching for every animal in the dataset (or a single specified animal) and persists each report.
 
     Notes:
-        Sorts the animal's sessions chronologically before invoking ``BleachingReport.evaluate`` (lexicographic
-        order on the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session name is equivalent to chronological
-        order). The report is written to ``<dataset>/<animal>/bleaching.yaml`` and
-        ``<dataset>/<animal>/bleaching.feather`` and returned to the caller for in-process figure rendering.
+        When ``animal`` is omitted, every animal returned by ``DatasetData.animals`` is processed; when ``animal``
+        is provided, evaluation is scoped to that single animal. For each animal, sessions are sorted
+        chronologically before invoking ``BleachingReport.evaluate`` (lexicographic order on the canonical
+        'YYYY-MM-DD-HH-MM-SS-microseconds' session name is equivalent to chronological order). Each report is
+        written to ``<dataset>/<animal>/bleaching.yaml`` and ``<dataset>/<animal>/bleaching.feather`` as it
+        completes and returned to the caller for in-process figure rendering.
+
+        ``workers`` controls the total CPU budget used by the pipeline and is split between two layers of
+        parallelism modeled on cindra: the inner Numba thread pool that drives the per-cell percentile, MAD, and
+        SNR kernels within a session, and the outer process pool that dispatches independent animals concurrently.
+        The total core count is resolved via ``resolve_worker_count``; if more than one animal is in scope and the
+        budget allows, animals are dispatched across a ``ProcessPoolExecutor`` of size ``min(animal_count, total)``
+        and each subprocess caps its Numba pool at ``total // pool_size`` so the two layers stack without
+        oversubscribing the CPU. Single-animal scope (or a budget of one) collapses to an in-process run with all
+        threads handed to Numba, matching the original behavior.
+
+        The pipeline collapses every methodological step routed through this entry point. The multi-day registered
+        cell intersection that anchors all longitudinal per-cell comparisons follows Ziv et al. (2013) and Rubin
+        et al. (2015). Per-cell baseline fluorescence is estimated as a low percentile of the raw trace within
+        non-overlapping windows, after the Suite2p convention from Pachitariu et al. (2017). Per-cell SNR uses
+        median-absolute-deviation noise estimation as a transient-robust noise floor (Pnevmatikakis et al., 2016;
+        Hampel, 1974), and the ~30% degradation threshold is informed by GCaMP signal-to-noise characterization
+        (Dana et al., 2019; Zhang et al., 2023). Within-session FOV-mean baseline tracking follows the Dombeck/Tank
+        chronic-imaging lineage (Sheffield & Dombeck, 2015; Driscoll et al., 2017). The combined-flagging strategy
+        that unifies the three orthogonal criteria into one flag column follows the standardized longitudinal-imaging
+        quality-control framework of de Vries et al. (2020). All other functions and numba kernels in this module
+        inherit these references through this accessor.
+
+    References:
+        Multi-day registered cell intersection for longitudinal comparisons:
+            Ziv et al. (2013). Long-term dynamics of CA1 hippocampal place codes. Nature Neuroscience.
+            https://doi.org/10.1038/nn.3329
+            Rubin et al. (2015). Hippocampal ensemble dynamics timestamp events in long-term memory. eLife.
+            https://doi.org/10.7554/eLife.12247
+        Suite2p baseline convention (8th-percentile baseline within a 60-second window):
+            Pachitariu et al. (2017). Suite2p: beyond 10,000 neurons with standard two-photon microscopy. bioRxiv.
+            https://doi.org/10.1101/061507
+        Robust MAD-based noise estimation underlying the per-cell SNR computation:
+            Pnevmatikakis et al. (2016). Simultaneous denoising, deconvolution, and demixing of calcium imaging
+            data. Neuron. https://doi.org/10.1016/j.neuron.2015.11.037
+            Hampel (1974). The influence curve and its role in robust estimation. Journal of the American
+            Statistical Association. https://doi.org/10.2307/2285666
+        GCaMP signal-to-noise characterization informing the ~30% per-cell SNR degradation threshold:
+            Dana et al. (2019). High-performance calcium sensors for imaging activity in neuronal populations and
+            microcompartments. Nature Methods. https://doi.org/10.1038/s41592-019-0435-6
+            Zhang et al. (2023). Fast and sensitive GCaMP calcium indicators for imaging neural populations.
+            Nature. https://doi.org/10.1038/s41586-023-05828-9
+        Within-session bleaching control common to the Dombeck/Tank chronic-imaging lineage:
+            Sheffield & Dombeck (2015). Calcium transient prevalence across the dendritic arbour predicts place
+            field properties. Nature. https://doi.org/10.1038/nature14066
+            Driscoll et al. (2017). Dynamic reorganization of neuronal activity patterns in parietal cortex.
+            Cell. https://doi.org/10.1016/j.cell.2017.05.021
+        Standardized longitudinal-imaging quality-control framework that motivates the combined-flagging strategy:
+            de Vries et al. (2020). A large-scale standardized physiological survey reveals functional
+            organization of the mouse visual cortex. Nature Neuroscience.
+            https://doi.org/10.1038/s41593-019-0550-9
 
     Args:
-        dataset: The DatasetData instance describing the dataset that contains the animal.
-        animal: The unique identifier of the animal to evaluate.
-        configuration: Bleaching evaluation parameters. Uses defaults if None.
+        dataset: The DatasetData instance whose animals are evaluated.
+        animal: The unique identifier of a single animal to evaluate. When None, every animal in the dataset
+            is evaluated and the returned tuple preserves the order of ``DatasetData.animals``.
+        workers: The total number of CPU cores to use. A non-positive value requests every available core minus
+            the system reserve. The budget is split between across-animal processes and within-session Numba
+            threads as described in Notes; ``workers=1`` forces a fully sequential, single-threaded run.
+        display_progress: Determines whether to display a progress bar. In single-animal mode the bar tracks
+            sessions; in multi-animal mode it tracks animals and per-session bars in subprocesses are suppressed
+            to avoid interleaved output.
+        configuration: Bleaching evaluation parameters shared across animals. Uses defaults if None.
 
     Returns:
-        The BleachingReport produced for the animal, with both files persisted under the animal directory.
+        A tuple of BleachingReports in the same order as the resolved animal set, with each report's two artifacts
+        persisted under the corresponding animal directory.
     """
-    dataset_animal = dataset.get_animal(animal=animal)
-    animal_sessions = dataset.get_sessions_for_animal(animal=animal)
-    sorted_sessions = sorted(animal_sessions, key=lambda dataset_session: dataset_session.session)
-    session_paths = tuple(dataset_session.session_path for dataset_session in sorted_sessions)
-    report = BleachingReport.evaluate(
-        session_paths=session_paths,
-        configuration=configuration,
+    # Routes through annotated locals so PyCharm narrows the if/else union to a single tuple type and the per-animal
+    # name extraction lands as a plain ``tuple[str, ...]`` rather than re-deriving ``.animal`` inside every
+    # downstream comprehension.
+    target_animals: tuple[DatasetAnimal, ...] = (
+        (dataset.get_animal(animal=animal),) if animal is not None else dataset.animals
     )
-    report.save(animal=dataset_animal)
-    return report
+    animal_names: tuple[str, ...] = tuple(dataset_animal.animal for dataset_animal in target_animals)
+
+    if not animal_names:
+        message = (
+            f"Unable to run bleaching analysis on dataset {dataset.name!r}. The dataset contains no animals "
+            f"to evaluate."
+        )
+        console.error(message=message, error=ValueError)
+
+    # Splits the resolved CPU budget between the across-animal process pool (outer) and the per-session Numba
+    # thread pool (inner). ``parallel_animals`` caps the pool size at the number of animals in scope so we never
+    # spawn idle subprocesses; ``numba_threads_per_process`` divides the remaining budget so the two layers stack
+    # exactly to the resolved budget.
+    total_workers = resolve_worker_count(requested_workers=workers)
+    parallel_animals = min(len(animal_names), total_workers)
+    numba_threads_per_process = max(1, total_workers // parallel_animals)
+
+    # Single-animal or single-worker fast path: stay in-process and hand every thread to Numba so the per-cell
+    # kernels saturate the local thread pool.
+    if parallel_animals == 1:
+        set_num_threads(numba_threads_per_process)
+        reports: list[BleachingReport] = []
+        for animal_name in animal_names:
+            reports.append(
+                _evaluate_animal_bleaching(
+                    dataset=dataset,
+                    animal=animal_name,
+                    configuration=configuration,
+                    display_progress=display_progress,
+                )
+            )
+        return tuple(reports)
+
+    # Multi-animal path: dispatch animals across a process pool. Each subprocess sets its Numba thread cap via the
+    # initializer so the per-cell kernels respect the per-process share, and the parent process surfaces a single
+    # animal-level progress bar instead of a sea of interleaved per-session bars.
+    progress_context = (
+        console.progress(
+            total=len(animal_names),
+            description=f"Running bleaching analysis ({parallel_animals} animals in parallel)",
+            unit="animal",
+        )
+        if display_progress
+        else nullcontext()
+    )
+
+    reports_by_animal: dict[str, BleachingReport] = {}
+    with (
+        ProcessPoolExecutor(
+            max_workers=parallel_animals,
+            initializer=_configure_subprocess_numba_threads,
+            initargs=(numba_threads_per_process,),
+        ) as executor,
+        progress_context as progress_bar,
+    ):
+        future_to_animal = {
+            executor.submit(
+                _evaluate_animal_bleaching,
+                dataset=dataset,
+                animal=animal_name,
+                configuration=configuration,
+                display_progress=False,
+            ): animal_name
+            for animal_name in animal_names
+        }
+        for future in as_completed(future_to_animal):
+            completed_animal = future_to_animal[future]
+            reports_by_animal[completed_animal] = future.result()
+            if progress_bar is not None:
+                progress_bar.update()
+
+    return tuple(reports_by_animal[animal_name] for animal_name in animal_names)
 
 
 def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
@@ -1049,6 +1162,56 @@ def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
     return figure
 
 
+def _evaluate_animal_bleaching(
+    dataset: DatasetData,
+    animal: str,
+    configuration: BleachingConfiguration | None,
+    *,
+    display_progress: bool,
+) -> BleachingReport:
+    """Evaluates and persists a single animal's bleaching report.
+
+    Notes:
+        Used as the per-animal work unit by ``run_bleaching_analysis``. Lives at module level so that the
+        ``ProcessPoolExecutor`` used in multi-animal mode can pickle and dispatch it; arguments and the returned
+        ``BleachingReport`` are likewise picklable.
+
+    Args:
+        dataset: The DatasetData instance whose animal is evaluated.
+        animal: The unique identifier of the animal to evaluate.
+        configuration: Bleaching evaluation parameters. Uses defaults if None.
+        display_progress: Determines whether ``BleachingReport.evaluate`` shows its per-session progress bar.
+
+    Returns:
+        The BleachingReport produced for the animal, with both files persisted under the animal directory.
+    """
+    dataset_animal = dataset.get_animal(animal=animal)
+    animal_sessions = dataset.get_sessions_for_animal(animal=animal)
+    sorted_sessions = sorted(animal_sessions, key=lambda dataset_session: dataset_session.session)
+    session_paths = tuple(dataset_session.session_path for dataset_session in sorted_sessions)
+    report = BleachingReport.evaluate(
+        session_paths=session_paths,
+        configuration=configuration,
+        display_progress=display_progress,
+    )
+    report.save(animal=dataset_animal)
+    return report
+
+
+def _configure_subprocess_numba_threads(thread_count: int) -> None:
+    """Caps the active Numba thread pool inside a worker subprocess to the share assigned by the orchestrator.
+
+    Notes:
+        Used as the ``initializer`` for the ``ProcessPoolExecutor`` spawned by ``run_bleaching_analysis`` so that
+        every subprocess respects the per-process share of the resolved worker budget rather than defaulting to
+        every available core.
+
+    Args:
+        thread_count: The maximum number of threads Numba parallel kernels may use inside this subprocess.
+    """
+    set_num_threads(thread_count)
+
+
 def _parse_session_microseconds(session_path: Path) -> int:
     """Parses the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session-directory name into UTC microseconds.
 
@@ -1092,6 +1255,28 @@ def _validate_chronological_order(
                 f"{session_paths[previous_index].name!r}."
             )
             console.error(message=message, error=ValueError)
+
+
+class _SessionRow(NamedTuple):
+    """Internal per-session computed values used to assemble one row of the bleaching feather.
+
+    Used only inside ``BleachingReport.evaluate``; not exposed in the public API. Values produced by
+    ``_compute_session_row`` flow directly into the polars DataFrame without an intermediate dataclass wrapper.
+    """
+
+    sampling_rate_hz: float
+    """Effective fluorescence sampling rate in Hz, derived from the median inter-sample period."""
+    cell_baseline_fluorescence: NDArray[np.float32]
+    """Per-cell session-median baseline fluorescence with length cell_count."""
+    cell_snr: NDArray[np.float32]
+    """Per-cell signal-to-noise ratio with length cell_count."""
+    within_session_time_seconds: NDArray[np.float32]
+    """Bin-center timestamps for the within-session FOV-mean baseline trace, in seconds."""
+    within_session_baseline: NDArray[np.float32]
+    """Within-session FOV-mean baseline values, parallel to ``within_session_time_seconds``."""
+    within_session_fractional_drop: float
+    """Fraction by which the within-session FOV-mean baseline trace drops from its first to its last bin. NaN when
+    the trace is empty or its first bin is non-positive."""
 
 
 def _compute_session_row(
@@ -1204,7 +1389,7 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
         source=session_path.joinpath(DatasetFiles.DATA),
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE.value],
     )
-    df = trim_acquisition_warmup(df)
+    df = trim_acquisition_warmup(df=df)
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.int64, copy=False)
 
@@ -1259,11 +1444,6 @@ def _compute_binned_baseline(
         the percentile via in-place quickselect; the previous ``np.percentile`` call was single-threaded and
         dominated session compute on multi-thousand-cell traces.
 
-    References:
-        Suite2p baseline convention (8th-percentile baseline within a 60-second window):
-            Pachitariu et al. (2017). Suite2p: beyond 10,000 neurons with standard two-photon microscopy. bioRxiv.
-            https://doi.org/10.1101/061507
-
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
         bin_size_samples: Width of each non-overlapping bin in samples.
@@ -1307,18 +1487,6 @@ def _compute_cell_snr(
         sample_count) allocation and a memory-bound pass over it, and replacing the three single-threaded
         ``np.median`` / ``np.percentile`` reductions with one parallel kernel scales the operation across cores.
 
-    References:
-        Robust MAD-based noise estimation underlying the per-cell SNR computation:
-            Pnevmatikakis et al. (2016). Simultaneous denoising, deconvolution, and demixing of calcium imaging
-            data. Neuron. https://doi.org/10.1016/j.neuron.2015.11.037
-            Hampel (1974). The influence curve and its role in robust estimation. Journal of the American
-            Statistical Association. https://doi.org/10.2307/2285666
-        GCaMP signal-to-noise characterization informing the ~30% per-cell SNR degradation threshold:
-            Dana et al. (2019). High-performance calcium sensors for imaging activity in neuronal populations and
-            microcompartments. Nature Methods. https://doi.org/10.1038/s41592-019-0435-6
-            Zhang et al. (2023). Fast and sensitive GCaMP calcium indicators for imaging neural populations.
-            Nature. https://doi.org/10.1038/s41586-023-05828-9
-
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
         binned_baseline: Per-cell, per-bin baseline with dimensions (cell_count, bin_count) returned by
@@ -1361,13 +1529,6 @@ def _compute_within_session_baseline(
         Reduces what was a Python loop over per-bin masks to a single contiguous reshape plus one vectorized
         ``np.percentile`` call along the bin axis, which is orders of magnitude faster on multi-thousand-sample
         traces.
-
-    References:
-        Within-session bleaching control common to the Dombeck/Tank chronic-imaging lineage:
-            Sheffield & Dombeck (2015). Calcium transient prevalence across the dendritic arbour predicts place
-            field properties. Nature. https://doi.org/10.1038/nature14066
-            Driscoll et al. (2017). Dynamic reorganization of neuronal activity patterns in parietal cortex.
-            Cell. https://doi.org/10.1016/j.cell.2017.05.021
 
     Args:
         fluorescence: Raw per-cell fluorescence with dimensions (cell_count, sample_count).
@@ -1692,7 +1853,7 @@ def _fit_exponential_decay(
             bounds=((-np.inf, 1e-6, -np.inf), (np.inf, np.inf, np.inf)),
             maxfev=10000,
         )
-    except RuntimeError, ValueError:
+    except (RuntimeError, ValueError):
         return _failed_decay_fit()
 
     amplitude, tau_days, offset = (float(parameter) for parameter in parameters)

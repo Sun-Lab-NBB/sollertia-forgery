@@ -2,11 +2,11 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from sollertia_forgery.analysis import evaluate_and_save_bleaching, plot_dataset_baseline_trend
+from sollertia_forgery.analysis import run_bleaching_analysis, plot_dataset_baseline_trend
 from sollertia_forgery.shared_assets import DatasetData
 
-dataset_path = Path("/home/data/Data/MaalstroomicFlow/void")
-animal = "15"
+dataset_path = Path("/home/data/Data/StateSpaceOdyssey/extension")
+animal = "26"
 
 dataset = DatasetData.load(dataset_path=dataset_path)
 print(f"Loaded dataset {dataset.name!r} from {dataset_path}")
@@ -18,7 +18,7 @@ for session in animal_sessions:
     print(f"  {session.session}")
 print()
 
-report = evaluate_and_save_bleaching(dataset=dataset, animal=animal)
+(report,) = run_bleaching_analysis(dataset=dataset, animal=animal)
 report.print_summary()
 
 dataset_root = dataset.dataset_data_path.parent

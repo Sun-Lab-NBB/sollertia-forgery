@@ -71,11 +71,23 @@ class CellAnalysisColumn(StrEnum):
     IS_SPATIALLY_SIGNIFICANT = "is_spatially_significant"
     """True for cells whose Skaggs spatial information is significant under shuffle testing."""
     IS_REWARD_PROXIMAL = "is_reward_proximal"
-    """True for cells whose circular center of mass falls within the reward zone."""
+    """True for cells whose circular center of mass falls within the reward zone. Alias of ``IS_ZONE`` preserved
+    for backwards compatibility; bit-identical to it."""
+    IS_APPROACH = "is_approach"
+    """True for cells whose center of mass falls in the approach band immediately upstream of the reward zone
+    (Issa, Radvansky, Xuan & Dombeck 2024 anticipatory band; default 40 cm)."""
+    IS_ZONE = "is_zone"
+    """True for cells whose center of mass falls inside the reward zone (Issa et al. 2024 zone band; configured by
+    ``reward_zone_width``)."""
+    IS_DEPARTURE = "is_departure"
+    """True for cells whose center of mass falls in the departure band immediately downstream of the reward zone
+    (Issa et al. 2024 post-reward band; default 40 cm)."""
     IS_REWARD_CELL = "is_reward_cell"
-    """True for cells that are both spatially significant and reward-proximal."""
-    IS_SLOWING_CORRELATED = "is_slowing_correlated"
-    """True for cells with significant negative speed-activity correlation in the pre-reward window."""
+    """True for cells that are both spatially significant and reward-proximal (zone-band)."""
+    IS_POSITION_GLM_SIGNIFICANT = "is_position_glm_significant"
+    """True for cells whose 5-fold CV ΔR² of position over speed+acceleration exceeds the trial-label permutation
+    null at the configured ``glm_significance_threshold``. Replaces the legacy ``IS_SLOWING_CORRELATED`` flag with a
+    rigorously decoupled position-vs-speed test (Sosa, Plitt & Giocomo 2025; Hardcastle et al. 2017)."""
     PF_START_CM = "pf_start_cm"
     """Per-field place-field start position in centimeters."""
     PF_END_CM = "pf_end_cm"
@@ -96,8 +108,34 @@ class CellAnalysisColumn(StrEnum):
     """Circular center-of-mass position in centimeters; -1 for cells with invalid COM."""
     SPATIAL_INFORMATION_BITS = "spatial_information_bits"
     """Skaggs spatial information content in bits per event."""
+    SPATIAL_INFORMATION_Z = "spatial_information_z"
+    """Z-scored Skaggs spatial information ``(I_obs - mean(I_shuf)) / std(I_shuf)`` against the same circular-shift
+    null used for ``SPATIAL_P_VALUE``. Reported alongside the raw bits/event because raw Skaggs is biased at low
+    rates with calcium imaging (Souza & Tort 2018; Sheintuch et al. 2022); the z-score is calibrated to the per-cell
+    shuffled null and correlates better with Bayesian-decoder accuracy."""
     SPATIAL_P_VALUE = "spatial_p_value"
     """Shuffle-derived p-value for the spatial information statistic."""
+    SPATIAL_FDR_SURVIVED = "spatial_fdr_survived"
+    """True for cells whose ``SPATIAL_P_VALUE`` survives Benjamini-Hochberg FDR correction at the configured
+    ``fdr_q`` level. ``IS_SPATIALLY_SIGNIFICANT`` ANDs this with the lap-reliability gate; this column exposes the
+    raw FDR result for downstream consumers that want only the FDR contribution."""
+    SPATIAL_SPLIT_HALF_R = "spatial_split_half_r"
+    """Per-cell even/odd-lap Pearson r used by the reward-cell pipeline as the lap-reliability gate. Distinct from
+    ``STABILITY_EVEN_ODD`` only insofar as the reward pipeline computes it against its own bin edges; with matching
+    config (the default) the two columns are bit-identical. NaN when the trial count is below two or either half-map
+    has zero variance."""
+    REWARD_RELATIVITY_SCORE = "reward_relativity_score"
+    """Per-cell ``zone_peak / overall_peak`` of the smoothed rate map; in [0, 1]. 1.0 means the cell's peak falls
+    inside the reward zone; values < 1.0 measure how much weaker the in-zone signal is than the cell's overall
+    peak. Used by the Phase-2 mutual-exclusion winner-take-all and naturally extends to the multi-block reward-shift
+    analysis in Phase 3 (where it would be computed in reward-aligned coordinates per block)."""
+    CV_POSITION_PARTIAL_R2 = "cv_position_partial_r2"
+    """Per-cell 5-fold CV ΔR² of position over speed+acceleration in the pre-reward window. The principal A1
+    statistic; positive values indicate that position adds explanatory power beyond running-speed and acceleration,
+    decoupling reward-proximal cells from cells that simply slow at the zone (Sosa, Plitt & Giocomo 2025)."""
+    POSITION_GLM_P_VALUE = "position_glm_p_value"
+    """Per-cell trial-label permutation p-value for the ``CV_POSITION_PARTIAL_R2`` statistic. NaN where the cell
+    did not enter the GLM (insufficient active trials, untested band, etc.)."""
     STABILITY_EVEN_ODD = "stability_even_odd"
     """Pearson r between the even-trial and odd-trial mean rate maps. NaN when fewer than two trials are available
     or either half-map has zero variance."""
@@ -125,8 +163,6 @@ class CellAnalysisColumn(StrEnum):
     """True for cells that pass all three of ``IS_PLACE``, ``IS_STABLE``, and ``IS_PEAK_SIGNIFICANT`` simultaneously.
     Convenience column for downstream consumers; computed by AND-ing the three independent flags during table
     assembly."""
-    SPEED_ACTIVITY_CORRELATION = "speed_activity_correlation"
-    """Pearson correlation between binned speed and activity in the pre-reward window."""
     SCE_PARTICIPATION_COUNT_REST = "sce_participation_count_rest"
     """Total number of rest-period SCEs the cell participated in."""
     SCE_PARTICIPATION_COUNT_RUN = "sce_participation_count_run"
@@ -248,13 +284,30 @@ class CellAnalysisSummary(YamlConfig):
     """Number of cells that simultaneously pass IS_PLACE, IS_STABLE, and IS_PEAK_SIGNIFICANT. Used as the working
     place-cell population for plotting; downstream consumers can still recover any single criterion from the
     per-cell table."""
+    place_only_count: int
+    """Number of cells flagged ``IS_PLACE`` but not ``IS_REWARD_CELL``. Cached so dataset-level place-fraction plots
+    can render the mutually-exclusive view without rehydrating per-cell feathers."""
+    strict_place_only_count: int
+    """Number of cells passing ``IS_PLACE & IS_STABLE & IS_PEAK_SIGNIFICANT`` but not ``IS_REWARD_CELL``. Cached
+    counterpart of ``strict_place_cell_count`` for the mutually-exclusive view."""
 
     mixture_weight: float
-    """Reward-component weight from the uniform + Gaussian mixture model fit to the spatially significant COMs."""
+    """Reward-component weight from the four-component (uniform + reward + track-start + track-end) mixture model
+    fit to the spatially significant COMs."""
     gaussian_mean_cm: float
     """Reward-component Gaussian mean in centimeters."""
     gaussian_std_cm: float
     """Reward-component Gaussian standard deviation in centimeters."""
+    track_start_weight: float
+    """Track-start landmark Gaussian weight (centered at 0 cm). Captures over-representation of trajectory start
+    cells that would otherwise contaminate ``mixture_weight`` (Hainmueller & Bartos 2018; Sato et al. 2020)."""
+    track_end_weight: float
+    """Track-end landmark Gaussian weight (centered at ``track_length_cm``). Captures trajectory-endpoint cells
+    (Frank, Brown & Wilson 2000)."""
+    track_start_std_cm: float
+    """Track-start landmark Gaussian standard deviation in centimeters."""
+    track_end_std_cm: float
+    """Track-end landmark Gaussian standard deviation in centimeters."""
 
     rest_period_count: int
     """Number of rest periods that survived torque-stability filtering and contributed an SCE row."""
@@ -405,6 +458,14 @@ class CellAnalysisReport:
         )
         # noinspection PyTypeChecker
         is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
+        # noinspection PyTypeChecker
+        is_reward_cell_array: NDArray[np.bool_] = (
+            reward_results.spatial_results.is_significant & reward_results.is_zone
+        )
+        # noinspection PyTypeChecker
+        is_place_only: NDArray[np.bool_] = place_fields.has_place_field & ~is_reward_cell_array
+        # noinspection PyTypeChecker
+        is_strict_place_only: NDArray[np.bool_] = is_strict_place & ~is_reward_cell_array
 
         # Assembles the per-cell wide table.
         table = _build_cell_table(
@@ -446,9 +507,15 @@ class CellAnalysisReport:
             stable_count=int(np.sum(is_stable)),
             peak_significant_count=int(np.sum(is_peak_significant)),
             strict_place_cell_count=int(np.sum(is_strict_place)),
+            place_only_count=int(np.sum(is_place_only)),
+            strict_place_only_count=int(np.sum(is_strict_place_only)),
             mixture_weight=float(reward_results.mixture_weight),
             gaussian_mean_cm=float(reward_results.gaussian_mean),
             gaussian_std_cm=float(reward_results.gaussian_std),
+            track_start_weight=float(reward_results.track_start_weight),
+            track_end_weight=float(reward_results.track_end_weight),
+            track_start_std_cm=float(reward_results.track_start_std),
+            track_end_std_cm=float(reward_results.track_end_std),
             rest_period_count=rest_period_count,
             run_period_count=run_period_count,
             total_rest_sces=total_rest_sces,
@@ -495,7 +562,9 @@ class CellAnalysisReport:
             Defaults to the strict triple-AND of place / stable / peak-significant recommended by Climer & Dombeck
             (2021). When every kwarg is False the method returns an all-True mask, treating "no criteria" as "no
             filter". Skaggs spatial significance is intentionally not exposed here: it is the reward-cell pipeline's
-            broader spatial filter and overlaps heavily with Dombeck place-field morphology.
+            broader spatial filter and overlaps heavily with Dombeck place-field morphology. Use
+            :meth:`resolve_population_masks` instead when you need place / reward populations that respect mutual
+            exclusion.
 
         Args:
             require_place: Require ``IS_PLACE`` (Dombeck 2010 morphology + lap coverage).
@@ -521,12 +590,73 @@ class CellAnalysisReport:
             mask = mask & peak_flag
         return mask
 
-    def summarize(self) -> str:
-        """Returns a multi-line human-readable summary of the report's per-cell and per-period statistics."""
+    def resolve_population_masks(
+        self,
+        *,
+        require_place: bool = True,
+        require_stable: bool = True,
+        require_peak_significant: bool = True,
+        mutually_exclusive: bool = True,
+    ) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+        """Returns ``(place_mask, reward_mask)`` honoring the mutual-exclusion option.
+
+        Notes:
+            The reward mask is always ``IS_REWARD_CELL`` (i.e., spatially significant cells whose COM lies in the
+            zone band). When ``mutually_exclusive=True``, cells flagged as both place and reward are subtracted from
+            the place mask so the two populations are disjoint at the presentation layer; when ``False``, the place
+            mask is the unfiltered place population and a cell may appear in both. The persisted feather always
+            keeps both flags independently — mutual exclusion is purely a presentation-layer convention so the
+            distinction is reversible without re-running detection.
+
+        Args:
+            require_place: Require ``IS_PLACE`` for the place population.
+            require_stable: Require ``IS_STABLE`` for the place population.
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place population.
+            mutually_exclusive: When True, subtract ``IS_REWARD_CELL`` cells from the place mask. Default True for
+                visualization clarity; set False to keep both populations as recorded in the table.
+
+        Returns:
+            A tuple of (place_mask, reward_mask) per-cell boolean arrays each with length cell_count.
+        """
+        place_population = self.place_mask(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
+        # noinspection PyTypeChecker
+        reward_mask: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_CELL.value].to_numpy()
+        place_mask = place_population & ~reward_mask if mutually_exclusive else place_population
+        return place_mask, reward_mask
+
+    def summarize(self, *, mutually_exclusive: bool = True) -> str:
+        """Returns a multi-line human-readable summary of the report's per-cell and per-period statistics.
+
+        Notes:
+            With ``mutually_exclusive=True`` (default), the place-cell count subtracts cells also flagged as
+            ``IS_REWARD_CELL`` and is reported as "place-only"; the reward count is unchanged. With
+            ``mutually_exclusive=False``, the raw counts persisted in the summary YAML are reported instead and a
+            cell may contribute to both totals. The persisted summary YAML always stores raw counts so this
+            distinction is purely a display-time choice.
+
+        Args:
+            mutually_exclusive: When True (default), report ``IS_PLACE & ~IS_REWARD_CELL`` for the place count.
+        """
         summary = self.summary
         cell_count = summary.cell_count
+
+        if mutually_exclusive and cell_count > 0:
+            # noinspection PyTypeChecker
+            place_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_PLACE.value].to_numpy()
+            # noinspection PyTypeChecker
+            reward_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_CELL.value].to_numpy()
+            place_count = int(np.sum(place_flag & ~reward_flag))
+            place_label = "Place-only (Dombeck):"
+        else:
+            place_count = summary.place_cell_count
+            place_label = "Place cells (Dombeck):"
+
         spatially_pct = 100.0 * summary.spatially_significant_count / cell_count if cell_count > 0 else 0.0
-        place_pct = 100.0 * summary.place_cell_count / cell_count if cell_count > 0 else 0.0
+        place_pct = 100.0 * place_count / cell_count if cell_count > 0 else 0.0
         reward_pct = 100.0 * summary.reward_cell_count / cell_count if cell_count > 0 else 0.0
         predictive_pct = 100.0 * summary.reward_predictive_count / cell_count if cell_count > 0 else 0.0
         reliable_pct = 100.0 * summary.reliable_count / cell_count if cell_count > 0 else 0.0
@@ -538,7 +668,7 @@ class CellAnalysisReport:
             "Cell analysis report",
             "====================",
             f"Cells: {cell_count}",
-            f"  Place cells (Dombeck): {summary.place_cell_count} ({place_pct:.1f}%)",
+            f"  {place_label:<22} {place_count} ({place_pct:.1f}%)",
             f"  Reliable (lap cov.):   {summary.reliable_count} ({reliable_pct:.1f}%)",
             f"  Stable (split-half):   {summary.stable_count} ({stable_pct:.1f}%)",
             f"  Peak-significant:      {summary.peak_significant_count} ({peak_pct:.1f}%)",
@@ -547,10 +677,11 @@ class CellAnalysisReport:
             f"  Reward cells:          {summary.reward_cell_count} ({reward_pct:.1f}%)",
             f"  Reward-predictive:     {summary.reward_predictive_count} ({predictive_pct:.1f}%)",
             "",
-            "Reward mixture model:",
-            f"  Mixture weight:    {summary.mixture_weight:.3f}",
-            f"  Gaussian mean:     {summary.gaussian_mean_cm:.1f} cm",
-            f"  Gaussian std:      {summary.gaussian_std_cm:.1f} cm",
+            "Reward mixture model (uniform + reward + track-start + track-end):",
+            f"  Reward weight:     {summary.mixture_weight:.3f}",
+            f"  Reward Gaussian:   {summary.gaussian_mean_cm:.1f} cm (SD {summary.gaussian_std_cm:.1f} cm)",
+            f"  Track-start wt:    {summary.track_start_weight:.3f} (SD {summary.track_start_std_cm:.1f} cm)",
+            f"  Track-end wt:      {summary.track_end_weight:.3f} (SD {summary.track_end_std_cm:.1f} cm)",
             f"  Reward position:   {summary.reward_position_cm:.1f} cm",
             "",
             "SCE detection:",
@@ -575,6 +706,7 @@ class CellAnalysisReport:
         require_place: bool = True,
         require_stable: bool = True,
         require_peak_significant: bool = True,
+        mutually_exclusive: bool = True,
         show_significance_strip: bool = True,
         figure_dpi: int = 150,
         minimum_percentile: float = 0.5,
@@ -592,6 +724,9 @@ class CellAnalysisReport:
             require_place: Require ``IS_PLACE`` (Dombeck morphology + lap coverage).
             require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability shuffle).
             require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak shuffle).
+            mutually_exclusive: When True (default), cells also flagged as ``IS_REWARD_CELL`` are removed from the
+                place population so the panel shows only place cells that are not reward cells. Set False to display
+                the unfiltered place population.
             show_significance_strip: When True, renders one thin per-cell ``-log10(p)`` strip to the left of the main
                 heatmap for each active p-value-bearing criterion (Stable / Peak).
             figure_dpi: Figure resolution in dots per inch.
@@ -608,10 +743,11 @@ class CellAnalysisReport:
 
         # Reconstructs the per-cell pooled rate map and per-cell place-field center used for ordering.
         rate_maps = _stack_list_column(table=self.table, column=CellAnalysisColumn.RATE_MAP, target_length=bin_count)
-        cell_population: NDArray[np.bool_] = self.place_mask(
+        cell_population, _ = self.resolve_population_masks(
             require_place=require_place,
             require_stable=require_stable,
             require_peak_significant=require_peak_significant,
+            mutually_exclusive=mutually_exclusive,
         )
         order = _resolve_place_cell_order(table=self.table)
 
@@ -725,26 +861,52 @@ class CellAnalysisReport:
         # noinspection PyTypeChecker
         uniform_density: NDArray[np.float64] = np.full_like(positions, 1.0 / summary.track_length_cm)
         gaussian_std = max(summary.gaussian_std_cm, 1.0)
-        gaussian_density = np.exp(-0.5 * ((positions - summary.gaussian_mean_cm) / gaussian_std) ** 2) / (
+        gaussian_density_reward = np.exp(-0.5 * ((positions - summary.gaussian_mean_cm) / gaussian_std) ** 2) / (
             gaussian_std * np.sqrt(2.0 * np.pi)
         )
-        mixture_density = (1.0 - summary.mixture_weight) * uniform_density + summary.mixture_weight * gaussian_density
+        track_start_std = max(summary.track_start_std_cm, 1.0)
+        gaussian_density_start = np.exp(-0.5 * ((positions - 0.0) / track_start_std) ** 2) / (
+            track_start_std * np.sqrt(2.0 * np.pi)
+        )
+        track_end_std = max(summary.track_end_std_cm, 1.0)
+        gaussian_density_end = np.exp(
+            -0.5 * ((positions - summary.track_length_cm) / track_end_std) ** 2
+        ) / (track_end_std * np.sqrt(2.0 * np.pi))
+        uniform_weight = max(
+            1.0 - summary.mixture_weight - summary.track_start_weight - summary.track_end_weight, 0.0
+        )
+
+        # Stacks the four mixture components in plotting order so each band is filled cumulatively without overlap.
+        uniform_band = uniform_weight * uniform_density
+        landmark_band = uniform_band + (
+            summary.track_start_weight * gaussian_density_start
+            + summary.track_end_weight * gaussian_density_end
+        )
+        mixture_density = landmark_band + summary.mixture_weight * gaussian_density_reward
 
         axes.fill_between(
             positions,
             0,
-            (1.0 - summary.mixture_weight) * uniform_density,
+            uniform_band,
             alpha=0.3,
             color="lightblue",
             label="Uniform (place cells)",
         )
         axes.fill_between(
             positions,
-            (1.0 - summary.mixture_weight) * uniform_density,
+            uniform_band,
+            landmark_band,
+            alpha=0.3,
+            color="khaki",
+            label="Track-end Gaussians",
+        )
+        axes.fill_between(
+            positions,
+            landmark_band,
             mixture_density,
             alpha=0.4,
             color="mediumpurple",
-            label="Gaussian (reward cells)",
+            label="Reward Gaussian",
         )
         axes.plot(positions, mixture_density, color="black", linewidth=1.5, label="Mixture fit")
         axes.axvline(
@@ -785,6 +947,7 @@ class CellAnalysisReport:
         require_place: bool = True,
         require_stable: bool = True,
         require_peak_significant: bool = True,
+        mutually_exclusive: bool = True,
         figure_dpi: int = 150,
     ) -> plt.Figure:
         """Plots row-normalized rate maps for reward cells and place cells side by side, sorted by COM.
@@ -794,32 +957,30 @@ class CellAnalysisReport:
             require_place: Require ``IS_PLACE`` for the place-cell panel population.
             require_stable: Require ``IS_STABLE`` for the place-cell panel population.
             require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place-cell panel population.
+            mutually_exclusive: When True (default), cells flagged as ``IS_REWARD_CELL`` are subtracted from the
+                place panel so the two side-by-side populations are disjoint. Set False to keep both panels showing
+                their unfiltered populations.
             figure_dpi: Figure resolution in dots per inch.
 
         Notes:
-            The reward panel always uses ``IS_SPATIALLY_SIGNIFICANT & IS_REWARD_PROXIMAL`` and is unaffected by the
-            ``require_*`` flags; those flags govern only the place-cell panel.
+            The reward panel always uses ``IS_REWARD_CELL`` (= ``IS_SPATIALLY_SIGNIFICANT & IS_ZONE``) and is
+            unaffected by the ``require_*`` flags; those flags govern only the place-cell panel population.
         """
         summary = self.summary
         rate_maps = _stack_list_column(
             table=self.table, column=CellAnalysisColumn.RATE_MAP, target_length=summary.bin_count
         )
         # noinspection PyTypeChecker
-        is_significant: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
-        # noinspection PyTypeChecker
-        is_reward_proximal: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_PROXIMAL.value].to_numpy()
-        # noinspection PyTypeChecker
         centers_of_mass: NDArray[np.float32] = (
             self.table[CellAnalysisColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
         )
 
-        place_population: NDArray[np.bool_] = self.place_mask(
+        place_mask, reward_mask = self.resolve_population_masks(
             require_place=require_place,
             require_stable=require_stable,
             require_peak_significant=require_peak_significant,
+            mutually_exclusive=mutually_exclusive,
         )
-        reward_mask = is_significant & is_reward_proximal
-        place_mask = place_population & ~is_reward_proximal
 
         reward_zone_half = summary.reward_configuration.reward_zone_width / 2.0
         reward_left = summary.reward_position_cm - reward_zone_half
@@ -891,11 +1052,13 @@ class CellAnalysisReport:
         # noinspection PyTypeChecker
         is_reward_proximal: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_PROXIMAL.value].to_numpy()
         # noinspection PyTypeChecker
-        is_slowing_correlated: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_SLOWING_CORRELATED.value].to_numpy()
+        is_position_glm_significant: NDArray[np.bool_] = self.table[
+            CellAnalysisColumn.IS_POSITION_GLM_SIGNIFICANT.value
+        ].to_numpy()
 
         bin_centers = (np.arange(summary.bin_count) + 0.5) * summary.bin_size_cm
         all_significant = is_significant
-        reward_predictive_mask = all_significant & is_reward_proximal & is_slowing_correlated
+        reward_predictive_mask = all_significant & is_reward_proximal & is_position_glm_significant
 
         figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
         if int(np.sum(all_significant)) > 0:
@@ -917,7 +1080,7 @@ class CellAnalysisReport:
                 mean_predictive,
                 color="darkviolet",
                 linewidth=2.5,
-                label=f"Slowing-correlated (n={int(np.sum(reward_predictive_mask))})",
+                label=f"Reward-predictive (GLM, n={int(np.sum(reward_predictive_mask))})",
             )
 
         axes.axvline(
@@ -957,8 +1120,10 @@ class CellAnalysisReport:
         # noinspection PyTypeChecker
         is_reward_proximal: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_PROXIMAL.value].to_numpy()
         # noinspection PyTypeChecker
-        is_slowing_correlated: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_SLOWING_CORRELATED.value].to_numpy()
-        reward_predictive_mask = is_significant & is_reward_proximal & is_slowing_correlated
+        is_position_glm_significant: NDArray[np.bool_] = self.table[
+            CellAnalysisColumn.IS_POSITION_GLM_SIGNIFICANT.value
+        ].to_numpy()
+        reward_predictive_mask = is_significant & is_reward_proximal & is_position_glm_significant
 
         if int(np.sum(reward_predictive_mask)) == 0:
             figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
@@ -1031,6 +1196,7 @@ class CellAnalysisReport:
         require_place: bool = True,
         require_stable: bool = True,
         require_peak_significant: bool = True,
+        mutually_exclusive: bool = True,
         figure_dpi: int = 150,
         position_bin_size_cm: float = 2.0,
         position_sigma_cm: float = 3.0,
@@ -1048,14 +1214,17 @@ class CellAnalysisReport:
             require_place: Require ``IS_PLACE`` for the place-cell pool from which the example place cell is picked.
             require_stable: Require ``IS_STABLE`` for the place-cell pool.
             require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place-cell pool.
+            mutually_exclusive: When True (default), cells flagged as ``IS_REWARD_CELL`` are subtracted from the
+                place-cell pool so the example place cell is never also a reward cell. Set False to allow the
+                example place-cell pick to come from the unfiltered place population.
             figure_dpi: Figure resolution in dots per inch.
             position_bin_size_cm: Spatial bin size used to build the per-trial heatmaps.
             position_sigma_cm: Gaussian smoothing sigma applied along the position axis.
             slowing_threshold_cm_s: Speed cutoff (cm/s) used to mark per-trial slowing-onset locations.
 
         Notes:
-            The reward-predictive panel is unaffected by the ``require_*`` flags; those flags govern only the
-            place-cell pool.
+            The reward-predictive panel is unaffected by the ``require_*`` and ``mutually_exclusive`` flags; those
+            flags govern only the place-cell pool.
         """
         summary = self.summary
         # noinspection PyTypeChecker
@@ -1063,25 +1232,29 @@ class CellAnalysisReport:
         # noinspection PyTypeChecker
         is_reward_proximal: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_PROXIMAL.value].to_numpy()
         # noinspection PyTypeChecker
-        is_slowing_correlated: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_SLOWING_CORRELATED.value].to_numpy()
+        is_position_glm_significant: NDArray[np.bool_] = self.table[
+            CellAnalysisColumn.IS_POSITION_GLM_SIGNIFICANT.value
+        ].to_numpy()
         # noinspection PyTypeChecker
-        speed_correlations: NDArray[np.float32] = (
-            self.table[CellAnalysisColumn.SPEED_ACTIVITY_CORRELATION.value].to_numpy().astype(np.float32, copy=False)
+        cv_partial_r2: NDArray[np.float32] = (
+            self.table[CellAnalysisColumn.CV_POSITION_PARTIAL_R2.value]
+            .to_numpy()
+            .astype(np.float32, copy=False)
         )
         # noinspection PyTypeChecker
         centers_of_mass: NDArray[np.float32] = (
             self.table[CellAnalysisColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
         )
 
-        place_population: NDArray[np.bool_] = self.place_mask(
+        place_mask, _ = self.resolve_population_masks(
             require_place=require_place,
             require_stable=require_stable,
             require_peak_significant=require_peak_significant,
+            mutually_exclusive=mutually_exclusive,
         )
-        predictive_mask = is_significant & is_reward_proximal & is_slowing_correlated
+        predictive_mask = is_significant & is_reward_proximal & is_position_glm_significant
         # noinspection PyTypeChecker
         predictive_indices: NDArray[np.int64] = np.argwhere(predictive_mask).flatten()
-        place_mask = place_population & ~is_reward_proximal
         # noinspection PyTypeChecker
         place_indices: NDArray[np.int64] = np.argwhere(place_mask).flatten()
 
@@ -1098,7 +1271,9 @@ class CellAnalysisReport:
             )
             return figure
 
-        best_predictive = int(predictive_indices[np.argmin(speed_correlations[predictive_indices])])
+        # Picks the candidate with the largest CV ΔR² of position over speed+accel as the most clearly position-tuned
+        # cell beyond the speed/acceleration covariates; replaces the legacy "most-negative speed correlation" pick.
+        best_predictive = int(predictive_indices[np.argmax(cv_partial_r2[predictive_indices])])
         track_midpoint = summary.track_length_cm / 2.0
         place_distances = np.abs(centers_of_mass[place_indices] - track_midpoint)
         best_place = int(place_indices[np.argmin(place_distances)])
@@ -1205,8 +1380,10 @@ class CellAnalysisReport:
             axes.set_xlabel("Track Position (cm)")
             axes.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
             cell_com = centers_of_mass[cell_index]
-            cell_corr = speed_correlations[cell_index]
-            axes.set_title(f"{label} (cell {cell_index}, COM={cell_com:.0f} cm, r={cell_corr:.2f})", fontsize=9)
+            cell_partial_r2 = float(cv_partial_r2[cell_index]) if not np.isnan(cv_partial_r2[cell_index]) else 0.0
+            axes.set_title(
+                f"{label} (cell {cell_index}, COM={cell_com:.0f} cm, ΔR²={cell_partial_r2:.2f})", fontsize=9
+            )
 
         axes_predictive.set_ylabel("Trial")
         if title:
@@ -1489,6 +1666,7 @@ def plot_dataset_place_cell_fraction(
     require_place: bool = True,
     require_stable: bool = True,
     require_peak_significant: bool = True,
+    mutually_exclusive: bool = True,
 ) -> plt.Figure:
     """Plots the per-animal place-cell fraction trend for the criterion combination chosen by the ``require_*`` flags.
 
@@ -1496,13 +1674,18 @@ def plot_dataset_place_cell_fraction(
         Animals without saved reports are silently skipped. The y-axis label and figure title encode the active
         criterion combination so several invocations with different criteria can be saved alongside one another
         without ambiguity. Single-criterion combinations and the strict triple-AND read directly from precomputed
-        summary fields; other combinations are not currently cached and raise.
+        summary fields; other combinations are not currently cached and raise. With ``mutually_exclusive=True``
+        (default) and either the IS_PLACE-only or strict-triple combination, the plot uses the cached
+        ``place_only_count`` / ``strict_place_only_count`` summary fields so reward cells are not double-counted.
 
     Args:
         dataset: DatasetData root used to enumerate per-animal sessions.
         require_place: Require ``IS_PLACE`` (Dombeck morphology + lap coverage).
         require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability shuffle).
         require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak shuffle).
+        mutually_exclusive: When True, subtract reward cells from the place fraction. Only the IS_PLACE-only and
+            strict-triple combinations have cached mutually-exclusive counts; other combinations require
+            ``mutually_exclusive=False``.
     """
     label = _compose_population_label(
         require_place=require_place,
@@ -1513,12 +1696,14 @@ def plot_dataset_place_cell_fraction(
         require_place=require_place,
         require_stable=require_stable,
         require_peak_significant=require_peak_significant,
+        mutually_exclusive=mutually_exclusive,
     )
+    suffix = " (excl. reward)" if mutually_exclusive else ""
     return _plot_dataset_metric(
         dataset=dataset,
         metric_extractor=extractor,
-        y_label=f"{label} fraction",
-        figure_title=f"Across-animal {label.lower()} fraction",
+        y_label=f"{label}{suffix} fraction",
+        figure_title=f"Across-animal {label.lower()}{suffix} fraction",
     )
 
 
@@ -1807,11 +1992,14 @@ def _build_cell_table(
                 values=spatial.is_significant, dtype=pl.Boolean
             ),
             CellAnalysisColumn.IS_REWARD_PROXIMAL.value: pl.Series(
-                values=reward_results.is_reward_proximal, dtype=pl.Boolean
+                values=reward_results.is_zone, dtype=pl.Boolean
             ),
+            CellAnalysisColumn.IS_APPROACH.value: pl.Series(values=reward_results.is_approach, dtype=pl.Boolean),
+            CellAnalysisColumn.IS_ZONE.value: pl.Series(values=reward_results.is_zone, dtype=pl.Boolean),
+            CellAnalysisColumn.IS_DEPARTURE.value: pl.Series(values=reward_results.is_departure, dtype=pl.Boolean),
             CellAnalysisColumn.IS_REWARD_CELL.value: pl.Series(values=is_reward_cell, dtype=pl.Boolean),
-            CellAnalysisColumn.IS_SLOWING_CORRELATED.value: pl.Series(
-                values=reward_results.is_slowing_correlated, dtype=pl.Boolean
+            CellAnalysisColumn.IS_POSITION_GLM_SIGNIFICANT.value: pl.Series(
+                values=reward_results.is_position_glm_significant, dtype=pl.Boolean
             ),
             CellAnalysisColumn.IS_RELIABLE.value: pl.Series(values=place_fields.has_place_field, dtype=pl.Boolean),
             CellAnalysisColumn.IS_STABLE.value: pl.Series(values=is_stable, dtype=pl.Boolean),
@@ -1842,14 +2030,29 @@ def _build_cell_table(
             ),
             CellAnalysisColumn.RATE_MAP.value: pl.Series(values=rate_maps_list, dtype=pl.List(pl.Float32)),
             CellAnalysisColumn.CENTER_OF_MASS_CM.value: pl.Series(values=spatial.centers_of_mass, dtype=pl.Float32),
+            CellAnalysisColumn.SPATIAL_INFORMATION_Z.value: pl.Series(
+                values=spatial.spatial_information_z, dtype=pl.Float32
+            ),
+            CellAnalysisColumn.SPATIAL_FDR_SURVIVED.value: pl.Series(
+                values=spatial.fdr_survived, dtype=pl.Boolean
+            ),
+            CellAnalysisColumn.SPATIAL_SPLIT_HALF_R.value: pl.Series(
+                values=spatial.split_half_r, dtype=pl.Float32
+            ),
             CellAnalysisColumn.SPATIAL_INFORMATION_BITS.value: pl.Series(
                 values=spatial.spatial_information, dtype=pl.Float32
             ),
             CellAnalysisColumn.SPATIAL_P_VALUE.value: pl.Series(values=spatial.p_values, dtype=pl.Float32),
             CellAnalysisColumn.STABILITY_EVEN_ODD.value: pl.Series(values=stability_even_odd, dtype=pl.Float32),
             CellAnalysisColumn.STABILITY_SPLIT_HALF.value: pl.Series(values=stability_split_half, dtype=pl.Float32),
-            CellAnalysisColumn.SPEED_ACTIVITY_CORRELATION.value: pl.Series(
-                values=reward_results.speed_activity_correlations, dtype=pl.Float32
+            CellAnalysisColumn.REWARD_RELATIVITY_SCORE.value: pl.Series(
+                values=spatial.reward_relativity_score, dtype=pl.Float32
+            ),
+            CellAnalysisColumn.CV_POSITION_PARTIAL_R2.value: pl.Series(
+                values=reward_results.cv_position_partial_r2, dtype=pl.Float32
+            ),
+            CellAnalysisColumn.POSITION_GLM_P_VALUE.value: pl.Series(
+                values=reward_results.position_glm_p_values, dtype=pl.Float32
             ),
             CellAnalysisColumn.SCE_PARTICIPATION_COUNT_REST.value: sce_columns["participation_count_rest"],
             CellAnalysisColumn.SCE_PARTICIPATION_COUNT_RUN.value: sce_columns["participation_count_run"],
@@ -2487,20 +2690,29 @@ def _resolve_dataset_place_metric_extractor(
     require_place: bool,
     require_stable: bool,
     require_peak_significant: bool,
+    mutually_exclusive: bool = True,
 ) -> Callable[[CellAnalysisSummary], float]:
     """Returns a per-summary fraction extractor for the requested criterion combination, using precomputed summary
     fields when available.
 
     Notes:
         Single-criterion combinations and the default strict triple-AND each have a precomputed count in
-        :class:`CellAnalysisSummary`. Other multi-criterion combinations are not currently cached in the summary
-        and would require loading each session's per-cell feather; this helper raises in that case so callers know
-        to either request a cached combination or extend the summary schema.
+        :class:`CellAnalysisSummary`. With ``mutually_exclusive=True``, only the IS_PLACE-only and strict-triple
+        combinations have cached "_only_count" companions (cells flagged IS_PLACE but not IS_REWARD_CELL); other
+        multi-criterion combinations are not currently cached in the summary and would require loading each
+        session's per-cell feather. This helper raises in that case so callers know to either request a cached
+        combination or extend the summary schema.
     """
     bools = (require_place, require_stable, require_peak_significant)
     if bools == (True, True, True):
+        if mutually_exclusive:
+            return (
+                lambda summary: summary.strict_place_only_count / summary.cell_count if summary.cell_count else 0.0
+            )
         return lambda summary: summary.strict_place_cell_count / summary.cell_count if summary.cell_count else 0.0
     if bools == (True, False, False):
+        if mutually_exclusive:
+            return lambda summary: summary.place_only_count / summary.cell_count if summary.cell_count else 0.0
         return lambda summary: summary.place_cell_count / summary.cell_count if summary.cell_count else 0.0
     if bools == (False, True, False):
         return lambda summary: summary.stable_count / summary.cell_count if summary.cell_count else 0.0

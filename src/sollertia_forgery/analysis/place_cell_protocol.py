@@ -18,6 +18,8 @@ from scipy.ndimage import uniform_filter1d
 from ..forging import FluorescenceColumn
 from .utilities import (
     RunSessionData,
+    bin_fluorescence_per_trial,
+    per_cell_pearson_safe,
     assemble_run_session_data,
     bin_fluorescence_by_position,
     accumulate_shuffled_rate_maps,
@@ -30,14 +32,10 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-_NO_TRIAL_SENTINEL: int = 255
-"""Sentinel trial id used by the acquisition pipeline to mark samples outside of any trial."""
 _WORKER_RESERVE: int = 4
 """Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
 _MINIMUM_TRIALS_FOR_STABILITY: int = 2
 """Minimum trial count required to compute a per-cell split-half Pearson r for the stability shuffle."""
-_MINIMUM_VALID_BINS_FOR_PEARSON: int = 3
-"""Minimum number of pairwise-non-NaN bins required for a numerically stable per-cell Pearson r."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,7 +368,15 @@ class PlaceFieldDetector:
 
         # Computes per-lap binned fluorescence using the same speed filter and smoothing as the pooled computation.
         # noinspection PyTypeChecker
-        per_trial_binned: NDArray[np.float32] = self._bin_fluorescence_per_trial(fluorescence=self.fluorescence)
+        per_trial_binned: NDArray[np.float32] = bin_fluorescence_per_trial(
+            fluorescence=self.fluorescence,
+            position=self.position,
+            speed=self.speed,
+            trial_ids=self.trial_ids,
+            bin_edges=self._bin_edges,
+            minimum_speed=self.configuration.minimum_speed,
+            smooth_size=self.configuration.smooth_size,
+        )
 
         # Drops fields with insufficient lap coverage on the per-trial binned matrix, which is independent of the
         # shuffle nulls used by the multi-criterion classifier.
@@ -538,7 +544,7 @@ class PlaceFieldDetector:
                     first_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, :half_index, :], axis=1)
                     # noinspection PyTypeChecker
                     second_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, half_index:, :], axis=1)
-            shuffled_split_half[iteration] = _per_cell_pearson_safe(a=first_map, b=second_map)
+            shuffled_split_half[iteration] = per_cell_pearson_safe(a=first_map, b=second_map)
 
         with np.errstate(invalid="ignore"):
             # noinspection PyTypeChecker
@@ -547,65 +553,6 @@ class PlaceFieldDetector:
             )
         p_values = _per_cell_p_values(observed=observed_split_half_r, shuffled=shuffled_split_half)
         return thresholds, p_values
-
-    def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
-        """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.
-
-        Notes:
-            Excludes the trial id sentinel that the acquisition pipeline uses to mark "no trial" samples. Applies the
-            same speed filter and uniform_filter1d smoothing used for the pooled binned fluorescence so that averaging
-            the returned array across the trial axis reproduces the pooled binned_fluorescence within numerical
-            rounding.
-
-        Args:
-            fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
-
-        Returns:
-            Per-lap binned fluorescence array with dimensions (cell_count, trial_count, bin_count). Bins and lap
-            slices with no valid speed-filtered samples are filled with NaN.
-        """
-        # Collects valid trial identifiers, excluding the sentinel that marks "no trial" samples.
-        # noinspection PyTypeChecker
-        valid_trial_mask: NDArray[np.bool_] = self.trial_ids != _NO_TRIAL_SENTINEL
-        # noinspection PyTypeChecker
-        unique_trials: NDArray[np.int32] = np.unique(self.trial_ids[valid_trial_mask])
-        trial_count = len(unique_trials)
-
-        cell_count = fluorescence.shape[0]
-        bin_count = len(self._bin_edges) - 1
-
-        # noinspection PyTypeChecker
-        output: NDArray[np.float32] = np.full((cell_count, trial_count, bin_count), np.nan, dtype=np.float32)
-
-        # Bins each lap independently, applying the same speed filter and smoothing as the pooled computation.
-        for trial_index, trial_id in enumerate(unique_trials):
-            # noinspection PyTypeChecker
-            trial_mask: NDArray[np.bool_] = (self.trial_ids == trial_id) & (
-                self.speed > self.configuration.minimum_speed
-            )
-            if not np.any(trial_mask):
-                continue
-
-            trial_position = self.position[trial_mask]
-            trial_fluorescence = fluorescence[:, trial_mask]
-
-            raw_trial_binned, _ = bin_fluorescence_by_position(
-                fluorescence=trial_fluorescence,
-                position=trial_position,
-                position_bin_edges=self._bin_edges,
-            )
-
-            # noinspection PyTypeChecker
-            smoothed_trial_binned: NDArray[np.float32] = uniform_filter1d(
-                input=raw_trial_binned,
-                size=self.configuration.smooth_size,
-                axis=1,
-                mode="wrap",
-            ).astype(np.float32)
-
-            output[:, trial_index, :] = smoothed_trial_binned
-
-        return output
 
     def _run_detection(
         self,
@@ -1147,59 +1094,6 @@ def _compute_circular_connected_place_fields(
         centers=centers,
         bin_size=bin_size,
     )
-
-
-@njit(cache=True)
-def _per_cell_pearson_safe(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
-
-    Notes:
-        Mirrors :func:`sollertia_forgery.analysis.cell_analysis._per_cell_pearson` but compiled with numba so it runs
-        without GIL contention inside the stability shuffle loop. Returns NaN for cells with fewer than three
-        pairwise-valid bins or zero variance in either half.
-
-    Args:
-        a: First matrix with dimensions (cell_count, bin_count).
-        b: Second matrix with dimensions (cell_count, bin_count).
-
-    Returns:
-        Per-cell Pearson r with length cell_count.
-    """
-    cell_count = a.shape[0]
-    bin_count = a.shape[1]
-    out = np.full(cell_count, np.nan, dtype=np.float32)
-    for cell_index in range(cell_count):
-        valid_count = 0
-        sum_a = 0.0
-        sum_b = 0.0
-        for bin_index in range(bin_count):
-            value_a = a[cell_index, bin_index]
-            value_b = b[cell_index, bin_index]
-            if not np.isnan(value_a) and not np.isnan(value_b):
-                valid_count += 1
-                sum_a += value_a
-                sum_b += value_b
-        if valid_count < _MINIMUM_VALID_BINS_FOR_PEARSON:
-            continue
-        mean_a = sum_a / valid_count
-        mean_b = sum_b / valid_count
-
-        var_a = 0.0
-        var_b = 0.0
-        cov = 0.0
-        for bin_index in range(bin_count):
-            value_a = a[cell_index, bin_index]
-            value_b = b[cell_index, bin_index]
-            if not np.isnan(value_a) and not np.isnan(value_b):
-                diff_a = value_a - mean_a
-                diff_b = value_b - mean_b
-                var_a += diff_a * diff_a
-                var_b += diff_b * diff_b
-                cov += diff_a * diff_b
-        if var_a <= 0.0 or var_b <= 0.0:
-            continue
-        out[cell_index] = np.float32(cov / np.sqrt(var_a * var_b))
-    return out
 
 
 def _per_cell_p_values(observed: NDArray[np.float32], shuffled: NDArray[np.float32]) -> NDArray[np.float32]:

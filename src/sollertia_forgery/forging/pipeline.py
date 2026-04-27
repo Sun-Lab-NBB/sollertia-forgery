@@ -505,6 +505,7 @@ def _assemble_session_dataset(
                 cindra_data_path=session_paths.cindra_data_path,
                 behavior_data_path=session_paths.behavior_data_path,
                 multiday_data_path=session_paths.multiday_data_path,
+                raw_data_path=session_paths.raw_data_path,
             )
             pbar.update(1)
 

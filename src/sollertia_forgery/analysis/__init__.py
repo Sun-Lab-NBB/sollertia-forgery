@@ -26,11 +26,23 @@ from .bleaching_evaluation import (
     BleachingReport,
     BleachingSummary,
     ExponentialDecayFit,
+    run_bleaching_analysis,
     BleachingConfiguration,
-    evaluate_and_save_bleaching,
     plot_dataset_baseline_trend,
 )
 from .reward_cell_protocol import RewardCellResults, RewardCellDetector, RewardCellConfiguration
+from .reward_relative_analysis import (
+    RewardRelativeColumn,
+    RewardRelativeReport,
+    RewardRelativeSummary,
+    RewardRelativeConfiguration,
+)
+from .longitudinal_reward_shift import (
+    LongitudinalRewardShiftColumn,
+    LongitudinalRewardShiftReport,
+    LongitudinalRewardShiftSummary,
+    LongitudinalRewardShiftConfiguration,
+)
 
 __all__ = [
     "BleachingColumn",
@@ -42,6 +54,10 @@ __all__ = [
     "CellAnalysisReport",
     "CellAnalysisSummary",
     "ExponentialDecayFit",
+    "LongitudinalRewardShiftColumn",
+    "LongitudinalRewardShiftConfiguration",
+    "LongitudinalRewardShiftReport",
+    "LongitudinalRewardShiftSummary",
     "PeriodType",
     "PlaceFieldDetectionConfiguration",
     "PlaceFieldDetector",
@@ -49,6 +65,10 @@ __all__ = [
     "RewardCellConfiguration",
     "RewardCellDetector",
     "RewardCellResults",
+    "RewardRelativeColumn",
+    "RewardRelativeConfiguration",
+    "RewardRelativeReport",
+    "RewardRelativeSummary",
     "RunSessionData",
     "SCEDetectionConfiguration",
     "SCEDetector",
@@ -57,7 +77,6 @@ __all__ = [
     "assemble_run_session_data",
     "bin_fluorescence_by_position",
     "compute_within_trial_position",
-    "evaluate_and_save_bleaching",
     "evaluate_and_save_cell_analysis",
     "plot_dataset_baseline_trend",
     "plot_dataset_cell_count",
@@ -65,4 +84,5 @@ __all__ = [
     "plot_dataset_reward_cell_fraction",
     "plot_dataset_sce_rate",
     "resolve_display_units",
+    "run_bleaching_analysis",
 ]
