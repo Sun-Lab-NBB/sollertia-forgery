@@ -8,8 +8,9 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from ..forging import TRIAL_GEOMETRY_FILENAME, TrialGeometry, FluorescenceColumn
+from ..forging import FluorescenceColumn
 from .sce_analysis import PeriodType, SCEDetector, SCEDetectionConfiguration
+from ..shared_assets import DatasetFiles, TrialGeometry
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_analysis import RewardCellDetector, RewardCellConfiguration
 
@@ -323,7 +324,7 @@ def _get_track_length(session_path: Path, trial_type: str) -> float:
     Returns:
         Canonical track length in centimeters.
     """
-    geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(TRIAL_GEOMETRY_FILENAME))
+    geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY))
     return geometry.entries[trial_type].trial_length_cm
 
 

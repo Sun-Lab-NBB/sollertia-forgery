@@ -27,9 +27,13 @@ from ataraxis_data_structures import ProcessingTracker, delete_directory
 from .cindra import assemble_cindra_dataset
 from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior import assemble_behavior_dataset
-from .dataset_data import DatasetData, DatasetSession
-from ..shared_assets import prepare_tracker
-from .trial_geometry import TRIAL_GEOMETRY_FILENAME, TrialGeometry
+from ..shared_assets import (
+    DatasetData,
+    DatasetFiles,
+    TrialGeometry,
+    DatasetSession,
+    prepare_tracker,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -369,12 +373,10 @@ def _copy_animal_surgery_files(
     for source_path in source_session_paths:
         sessions_by_animal.setdefault(source_path.parent.name, []).append(source_path)
 
-    # The dataset hierarchy stores each animal at ``<dataset_root>/<animal>/``. DatasetData.surgery_paths
-    # resolves the per-animal destination by anchoring on the dataset_data.yaml file's parent.
-    destination_paths = dataset.surgery_paths
-
-    for animal in dataset.animals:
-        animal_sessions = sessions_by_animal[animal]
+    # The dataset hierarchy stores each animal at ``<dataset_root>/<animal>/``. DatasetAnimal.surgery_path
+    # resolves the per-animal destination relative to that directory.
+    for dataset_animal in dataset.animals:
+        animal_sessions = sessions_by_animal[dataset_animal.animal]
 
         # Picks the most recent session for the animal via natural sort over the timestamped session names.
         latest_session_name = natsort([path.name for path in animal_sessions])[-1]
@@ -385,12 +387,12 @@ def _copy_animal_surgery_files(
         if not source_surgery_path.is_file():
             message = (
                 f"Unable to define dataset '{dataset_name}'. The latest session '{latest_session_name}' for "
-                f"animal '{animal}' does not contain a '{RawDataFiles.SURGERY_METADATA}' file at "
+                f"animal '{dataset_animal.animal}' does not contain a '{RawDataFiles.SURGERY_METADATA}' file at "
                 f"'{source_surgery_path}'. Surgery metadata is required for every animal in a forged dataset."
             )
             console.error(message=message, error=FileNotFoundError)
 
-        shutil.copy2(src=source_surgery_path, dst=destination_paths[animal])
+        shutil.copy2(src=source_surgery_path, dst=dataset_animal.surgery_path)
 
 
 def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _SessionPaths:
@@ -560,7 +562,7 @@ def _assemble_session_dataset(
         # Projects the canonical trial geometry out of the experiment configuration and writes it next to data.feather
         # so downstream analysis can reconstruct per-trial position without re-reading the raw experiment configuration.
         trial_geometry = TrialGeometry.from_experiment_configuration(experiment_configuration=experiment_configuration)
-        trial_geometry.to_yaml(file_path=output_path.parent.joinpath(TRIAL_GEOMETRY_FILENAME))
+        trial_geometry.to_yaml(file_path=output_path.parent.joinpath(DatasetFiles.TRIAL_GEOMETRY))
     finally:
         # Restores the previous progress bar visibility state.
         if prior_progress:

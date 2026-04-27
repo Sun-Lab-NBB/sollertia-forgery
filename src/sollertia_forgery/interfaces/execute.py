@@ -12,8 +12,7 @@ from ..server import (
     get_server_configuration,
     resolve_project_manifest,
 )
-from ..forging import DatasetSession
-from ..shared_assets import ProjectManifest
+from ..shared_assets import DatasetSession, ProjectManifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

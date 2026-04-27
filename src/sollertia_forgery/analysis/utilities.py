@@ -9,12 +9,11 @@ from numba import njit, prange
 import numpy as np
 import polars as pl
 
-from ..forging import (
-    DATA_FILENAME,
-    TRIAL_GEOMETRY_FILENAME,
+from ..forging import FluorescenceColumn
+from ..shared_assets import (
+    DatasetFiles,
     DatasetColumn,
     TrialGeometry,
-    FluorescenceColumn,
     TrialGeometryEntry,
 )
 
@@ -69,11 +68,11 @@ def assemble_run_session_data(
         TrialGeometryEntry.
     """
     geometry_entry = TrialGeometry.from_yaml(
-        file_path=session_path.joinpath(TRIAL_GEOMETRY_FILENAME),
+        file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY),
     ).entries[trial_type]
 
     df = pl.read_ipc(
-        source=session_path.joinpath(DATA_FILENAME),
+        source=session_path.joinpath(DatasetFiles.DATA),
         columns=[
             DatasetColumn.SYSTEM_STATE.value,
             DatasetColumn.TRIAL_TYPE.value,

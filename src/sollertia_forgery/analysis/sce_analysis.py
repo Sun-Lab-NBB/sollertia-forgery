@@ -16,8 +16,9 @@ import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist
 from scipy.cluster.hierarchy import linkage, fcluster
 
-from ..forging import DATA_FILENAME, DatasetColumn, FluorescenceColumn
+from ..forging import FluorescenceColumn
 from .utilities import compute_within_trial_position
+from ..shared_assets import DatasetFiles, DatasetColumn
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -507,7 +508,7 @@ class SCEDetector:
             configuration: SCE detection parameters. Uses defaults if None.
         """
         df = pl.read_ipc(
-            source=session_path.joinpath(DATA_FILENAME),
+            source=session_path.joinpath(DatasetFiles.DATA),
             columns=[
                 DatasetColumn.SYSTEM_STATE.value,
                 DatasetColumn.TIME_US.value,

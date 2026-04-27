@@ -15,17 +15,20 @@ from .analysis_dataset import (
 )
 from .place_cell_analysis import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .bleaching_evaluation import (
+    BleachingColumn,
     BleachingReport,
+    BleachingSummary,
     ExponentialDecayFit,
     BleachingConfiguration,
-    SessionBleachingMetrics,
-    evaluate_bleaching,
+    evaluate_and_save_bleaching,
 )
 from .reward_cell_analysis import RewardCellResults, RewardCellDetector, RewardCellConfiguration
 
 __all__ = [
+    "BleachingColumn",
     "BleachingConfiguration",
     "BleachingReport",
+    "BleachingSummary",
     "ExponentialDecayFit",
     "PlaceFieldDetectionConfiguration",
     "PlaceFieldDetector",
@@ -37,13 +40,12 @@ __all__ = [
     "SCEDetectionConfiguration",
     "SCEDetector",
     "SCEResult",
-    "SessionBleachingMetrics",
     "append_reward_cell_columns",
     "append_sce_columns",
     "assemble_run_session_data",
     "bin_fluorescence_by_position",
     "compute_within_trial_position",
-    "evaluate_bleaching",
+    "evaluate_and_save_bleaching",
     "generate_analysis_dataframe",
     "generate_place_field_dataframe",
 ]

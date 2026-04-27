@@ -1,5 +1,6 @@
 """Provides assets for maintaining the Sollertia platform analysis dataset data hierarchy across all processing
-machines.
+machines. The hierarchy is written by the forging pipeline and read by the analysis pipelines, so the schema lives
+under shared_assets.
 """
 
 from __future__ import annotations
@@ -12,10 +13,7 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import RawDataFiles, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import YamlConfig
 
-from .trial_geometry import TRIAL_GEOMETRY_FILENAME
-
-DATA_FILENAME: str = "data.feather"
-"""The filename of the assembled session data inside each session directory of a forged dataset."""
+from .metadata import DatasetFiles
 
 
 class DatasetColumn(StrEnum):
@@ -106,7 +104,7 @@ class DatasetSession:
     @property
     def data_path(self) -> Path:
         """Returns the path to the session's assembled ``data.feather`` file within the dataset hierarchy."""
-        return self.session_path.joinpath(DATA_FILENAME)
+        return self.session_path.joinpath(DatasetFiles.DATA)
 
     @property
     def descriptor_path(self) -> Path:
@@ -116,7 +114,37 @@ class DatasetSession:
     @property
     def geometry_path(self) -> Path:
         """Returns the path to the session's ``trial_geometry.yaml`` data file within the dataset hierarchy."""
-        return self.session_path.joinpath(TRIAL_GEOMETRY_FILENAME)
+        return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetAnimal:
+    """Defines a single animal included in an analysis dataset.
+
+    Combines the animal identity metadata with the resolved path to the animal's directory within the dataset
+    hierarchy. Per-animal artifacts (surgery metadata, chronic photobleaching evaluation) are co-located in this
+    directory and exposed as derived properties.
+    """
+
+    animal: str
+    """The unique identifier of the animal."""
+    animal_path: Path = Path()
+    """The path to the animal's directory within the dataset hierarchy (dataset/animal)."""
+
+    @property
+    def surgery_path(self) -> Path:
+        """Returns the path to the animal's ``surgery_metadata.yaml`` file within the dataset hierarchy."""
+        return self.animal_path.joinpath(RawDataFiles.SURGERY_METADATA)
+
+    @property
+    def bleaching_path(self) -> Path:
+        """Returns the path to the animal's ``bleaching.yaml`` summary file within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.BLEACHING_SUMMARY)
+
+    @property
+    def bleaching_table_path(self) -> Path:
+        """Returns the path to the animal's ``bleaching.feather`` per-session table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.BLEACHING_TABLE)
 
 
 @dataclass
@@ -293,19 +321,44 @@ class DatasetData(YamlConfig):
         self.to_yaml(file_path=self.dataset_data_path)
 
     @property
-    def animals(self) -> tuple[str, ...]:
-        """Returns a tuple of unique animal identifiers included in the dataset."""
-        return tuple(sorted({session.animal for session in self.sessions}))
+    def animals(self) -> tuple[DatasetAnimal, ...]:
+        """Returns a tuple of DatasetAnimal instances, one per unique animal in the dataset.
 
-    @property
-    def surgery_paths(self) -> dict[str, Path]:
-        """Returns a mapping of each animal identifier to the path of its surgery metadata YAML file.
-
-        The returned paths point to ``surgery_metadata.yaml`` files stored at the root of each animal
-        directory within the forged dataset hierarchy.
+        Each instance carries the animal identifier and the resolved path to the animal's directory under
+        the dataset root, anchored on the ``dataset.yaml`` file's filesystem location so the result remains
+        portable across processing machines.
         """
         dataset_root = self.dataset_data_path.parent
-        return {animal: dataset_root.joinpath(animal, RawDataFiles.SURGERY_METADATA) for animal in self.animals}
+        unique_animals = sorted({session.animal for session in self.sessions})
+        return tuple(
+            DatasetAnimal(animal=animal, animal_path=dataset_root.joinpath(animal)) for animal in unique_animals
+        )
+
+    def get_animal(self, animal: str) -> DatasetAnimal:
+        """Returns the DatasetAnimal instance for the specified animal identifier.
+
+        Args:
+            animal: The unique identifier of the animal to look up.
+
+        Returns:
+            The DatasetAnimal instance carrying the animal identity metadata and the path to the animal's
+            directory within the dataset hierarchy.
+
+        Raises:
+            ValueError: If the specified animal is not found in the dataset.
+        """
+        for candidate in self.animals:
+            if candidate.animal == animal:
+                return candidate
+
+        message = (
+            f"Unable to look up the animal '{animal}'. The animal must exist in the '{self.name}' dataset, "
+            f"but no matching DatasetAnimal was found."
+        )
+        console.error(message=message, error=ValueError)
+        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+        # noinspection PyUnreachableCode
+        raise ValueError(message)  # pragma: no cover
 
     def get_sessions_for_animal(self, animal: str) -> tuple[DatasetSession, ...]:
         """Returns the DatasetSession instances for all sessions performed by the specified animal.

@@ -32,10 +32,11 @@ from .pipeline import (
     run_forging_pipeline,
 )
 from ..interfaces import mcp
-from .dataset_data import DATA_FILENAME, DatasetData
 from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
+    DatasetData,
+    DatasetFiles,
     JobExecutionState,
     prepare_tracker,
     read_tracker_status,
@@ -755,7 +756,7 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
         feather_valid = True
         if not data_path.exists():
             entry["valid"] = False
-            entry["error"] = f"{DATA_FILENAME} not found."
+            entry["error"] = f"{DatasetFiles.DATA} not found."
             all_valid = False
             feather_valid = False
         else:
@@ -797,8 +798,9 @@ def verify_forging_output_tool(dataset_path: str) -> dict[str, Any]:
 
     # Verifies the per-animal surgery file for each unique animal in the dataset.
     animal_results: list[dict[str, Any]] = []
-    for animal, surgery_path in dataset.surgery_paths.items():
-        animal_entry: dict[str, Any] = {"animal": animal, "file": str(surgery_path)}
+    for dataset_animal in dataset.animals:
+        surgery_path = dataset_animal.surgery_path
+        animal_entry: dict[str, Any] = {"animal": dataset_animal.animal, "file": str(surgery_path)}
         if not surgery_path.exists():
             animal_entry["valid"] = False
             animal_entry["error"] = f"{RawDataFiles.SURGERY_METADATA} not found."
