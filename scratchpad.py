@@ -2,11 +2,11 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from sollertia_forgery.analysis import evaluate_and_save_bleaching
+from sollertia_forgery.analysis import evaluate_and_save_bleaching, plot_dataset_baseline_trend
 from sollertia_forgery.shared_assets import DatasetData
 
 dataset_path = Path("/home/data/Data/MaalstroomicFlow/void")
-animal = "11"
+animal = "15"
 
 dataset = DatasetData.load(dataset_path=dataset_path)
 print(f"Loaded dataset {dataset.name!r} from {dataset_path}")
@@ -25,7 +25,13 @@ dataset_root = dataset.dataset_data_path.parent
 file_prefix = f"bleaching_animal_{animal}"
 report.plot_baseline_trend().savefig(dataset_root / f"{file_prefix}_baseline_trend.png", bbox_inches="tight")
 report.plot_within_session().savefig(dataset_root / f"{file_prefix}_within_session.png", bbox_inches="tight")
+report.plot_within_session_average().savefig(
+    dataset_root / f"{file_prefix}_within_session_average.png", bbox_inches="tight"
+)
 report.plot_snr_distributions().savefig(dataset_root / f"{file_prefix}_snr_distributions.png", bbox_inches="tight")
+plot_dataset_baseline_trend(dataset=dataset).savefig(
+    dataset_root / "bleaching_dataset_baseline_trend.png", bbox_inches="tight"
+)
 plt.close("all")
 
 print()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
+import warnings
 from itertools import pairwise
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ import polars as pl
 from scipy.stats import wilcoxon
 from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp, interval_to_rate
 from scipy.optimize import curve_fit
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import YamlConfig
@@ -42,6 +44,25 @@ _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE: int = 2
 """Minimum number of timestamp samples required to estimate the inter-sample sampling rate."""
 _SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
 """``strptime`` format string for the canonical session-directory timestamp."""
+_ACQUISITION_WARMUP_SECONDS: float = 60.0
+"""Number of leading seconds discarded from every loaded session trace before any analysis runs. Sollertia
+experiments include a multi-minute pre-imaging baseline period during which the PMT gain, resonant scanner phase,
+shutter, and laser power have not yet stabilized; the resulting initial fluorescence valley would otherwise
+contaminate the first within-session and per-cell baseline bins and produce artifactually negative bleaching
+fractions for nearly every session. Trimming at load time guarantees every downstream kernel operates on stabilized
+samples without needing to know the artifact exists."""
+_SIGNIFICANCE_LEVELS: tuple[tuple[float, str], ...] = (
+    (0.001, "*\n**"),
+    (0.01, "**"),
+    (0.05, "*"),
+)
+"""Ordered (p-value upper bound, asterisk marker) pairs used to annotate the SNR violins with the standard
+biomedical-publication significance convention. The first level whose threshold the p-value falls below wins;
+p-values that fail every threshold (or are non-finite) fall through to the ``ns`` (not significant) marker. The
+top-level (p < 0.001) marker renders as a tight triangle (``*`` centered over ``**``) so it stays visually distinct
+from the two-asterisk marker. The triangle alignment depends on monospace text rendering — the consumer must pass
+``family='monospace'`` to ``axes.text`` and the legend so the apex sits above the boundary between the two base
+asterisks rather than over one of them."""
 
 
 class BleachingColumn(StrEnum):
@@ -192,9 +213,9 @@ class BleachingReport:
         Notes:
             Operates exclusively on ``DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE``. The protocol's across-session
             per-cell comparisons (paired Wilcoxon SNR test, per-cell baseline trend, decay fit on the population
-            median) require that cell index N denote the same neuron across every session in the evaluation set,
-            which only the multi-recording cindra column carries. Single-recording fluorescence carries no cell
-            correspondence across days and would silently produce mathematically valid but biologically meaningless
+            median) require that cell index N denote the same neuron across every session in the evaluation set.
+            Only the multi-recording cindra column carries that information. Single-recording fluorescence carries no
+            cell correspondence across days and would silently produce mathematically valid but biologically meaningless
             paired statistics, so it is not exposed as an option. Sessions are processed sequentially so the heavy
             per-cell percentile and SNR kernels can saturate every available CPU core via Numba's thread pool; a
             per-session progress line is emitted as each session completes.
@@ -452,6 +473,17 @@ class BleachingReport:
         session_count = len(days)
         cell_count = len(table[BleachingColumn.CELL_BASELINE_FLUORESCENCE.value][0]) if session_count > 0 else 0
 
+        # Resolves the integer display unit and ticks once so the overview header and the per-session detail table
+        # stay in the same unit. Falls back to a "day" placeholder when the table is empty so the header column label
+        # is still well-defined; the per-session loop will not execute in that case.
+        if session_count > 0:
+            unit, ticks = _resolve_display_units(days_since_first=days)
+        else:
+            unit = "day"
+            # noinspection PyTypeChecker
+            ticks = np.zeros(0, dtype=np.int64)
+        unit_plural = f"{unit}s"
+
         # Cross-session aggregates.
         f0_first = float(population_baseline[0]) if session_count > 0 else float("nan")
         f0_last = float(population_baseline[-1]) if session_count > 0 else float("nan")
@@ -485,16 +517,17 @@ class BleachingReport:
         within_status = "pass" if within_violations == 0 else "FAIL"
         snr_status = "pass" if snr_violations == 0 else "FAIL"
 
-        lines: list[str] = []
-        lines.append("Chronic Photobleaching Evaluation")
-        lines.append("=================================")
-        lines.append("")
-        lines.append("Overview")
-        lines.append("--------")
+        lines: list[str] = [
+            "Chronic Photobleaching Evaluation",
+            "=================================",
+            "",
+            "Overview",
+            "--------",
+        ]
         if session_count > 0:
             lines.append(
-                f"Sessions:         {session_count} spanning {float(days[-1] - days[0]):.1f} days "
-                f"(day {float(days[0]):.1f} to {float(days[-1]):.1f})"
+                f"Sessions:         {session_count} spanning {int(ticks[-1] - ticks[0])} {unit_plural} "
+                f"({unit} {int(ticks[0])} to {int(ticks[-1])})"
             )
         else:
             lines.append("Sessions:         0")
@@ -545,33 +578,47 @@ class BleachingReport:
         lines.append("")
         lines.append("Per-session detail")
         lines.append("------------------")
-        lines.append(
-            f"{'day':>6}  {'F0_pop':>8}  {'F0_loss':>8}  {'within_drop':>11}  "
-            f"{'SNR_pop':>7}  {'SNR_p_vs_d0':>11}  {'flag':>4}  session"
+        # Renders the per-session detail as a pipe-separated ASCII table that mirrors the table style used by the
+        # ataraxis-time benchmark report. Header names match the canonical ``BleachingColumn`` enum values where they
+        # fit and shorten to descriptive equivalents (``population_F0`` for ``population_baseline_fluorescence``,
+        # ``within_session_drop`` for ``within_session_fractional_drop``) where the full names would dominate the
+        # table width. The separator row is derived from the header by replacing pipes with plus signs and remaining
+        # characters with dashes so the column boundaries stay aligned regardless of how the widths are tuned.
+        # Session labels are truncated to the ``YY-MM-DD-HH`` prefix because the protocol's >=1h separation
+        # invariant guarantees the hour resolution is sufficient to identify each session uniquely.
+        table_header = (
+            f"{unit:>4} | {'population_F0':>13} | {'F0_loss':>7} | {'within_session_drop':>19} | "
+            f"{'population_SNR':>14} | {'SNR_paired_p_value':>18} | {'flagged':>7} | {'session':<11}"
         )
+        table_separator = "".join("+" if character == "|" else "-" for character in table_header)
+        lines.append(table_header)
+        lines.append(table_separator)
         for index in range(session_count):
             f0_pop_value = float(population_baseline[index])
             f0_loss_session = (f0_first - f0_pop_value) / f0_first if f0_first > 0 else float("nan")
-            f0_loss_str = "       -" if index == 0 else f"{f0_loss_session:>8.1%}"
+            f0_loss_str = "-" if index == 0 else f"{f0_loss_session:.1%}"
             within_value = float(within_drops[index])
-            within_str = f"{within_value:>11.1%}" if np.isfinite(within_value) else f"{'N/A':>11}"
+            within_str = f"{within_value:.1%}" if np.isfinite(within_value) else "N/A"
             snr_p = float(snr_p_values[index])
             if index == 0:
-                snr_p_str = f"{'-':>11}"
+                snr_p_str = "-"
             elif np.isfinite(snr_p):
-                snr_p_str = f"{snr_p:>11.2e}"
+                snr_p_str = f"{snr_p:.2e}"
             else:
-                snr_p_str = f"{'N/A':>11}"
+                snr_p_str = "N/A"
             flag_str = "yes" if bool(flagged_mask[index]) else "-"
+            # Slices the canonical ``YYYY-MM-DD-HH-MM-SS-microseconds`` directory name to ``YY-MM-DD-HH``; the >=1h
+            # separation invariant makes the minute / second / microsecond fields redundant for identification here.
+            short_session = session_names[index][2:13]
             lines.append(
-                f"{float(days[index]):>6.2f}  "
-                f"{f0_pop_value:>8.2f}  "
-                f"{f0_loss_str}  "
-                f"{within_str}  "
-                f"{float(population_snr[index]):>7.2f}  "
-                f"{snr_p_str}  "
-                f"{flag_str:>4}  "
-                f"{session_names[index]}"
+                f"{int(ticks[index]):>4d} | "
+                f"{f0_pop_value:>13.2f} | "
+                f"{f0_loss_str:>7} | "
+                f"{within_str:>19} | "
+                f"{float(population_snr[index]):>14.2f} | "
+                f"{snr_p_str:>18} | "
+                f"{flag_str:>7} | "
+                f"{short_session:<11}"
             )
         lines.append("")
         lines.append(f"Combined flag: {flagged_count} / {session_count} sessions exceeded any threshold criterion.")
@@ -611,16 +658,22 @@ class BleachingReport:
         ]
         cell_count = len(cell_baseline_distributions[0]) if cell_baseline_distributions else 0
 
-        # Computes a non-zero box width that scales with the smallest day step so adjacent boxes do not overlap.
-        minimum_day_step = float(np.diff(days).min()) if len(days) > 1 else 1.0
-        box_width = 0.4 * max(minimum_day_step, 0.1)
+        # Plots in display units (integer day or hour ticks); evaluates the model in days so ``tau_days`` keeps its
+        # native scale regardless of which unit the x-axis uses.
+        unit, ticks = _resolve_display_units(days_since_first=days)
+        days_per_unit = 1.0 if unit == "day" else 1.0 / 24.0
+
+        # Computes a box width that scales with the smallest tick step. Integer ticks guarantee step >= 1, so the
+        # prior float-step floor is no longer needed.
+        minimum_tick_step = float(np.diff(ticks).min()) if len(ticks) > 1 else 1.0
+        box_width = 0.4 * minimum_tick_step
 
         # Draws the per-cell distributions as boxplots so the population spread is visible alongside the median trend.
-        axes.boxplot(cell_baseline_distributions, positions=days, widths=box_width, showfliers=False)
+        axes.boxplot(cell_baseline_distributions, positions=ticks, widths=box_width, showfliers=False)
 
         # Overlays the population-median trend used for the exponential fit.
         axes.plot(
-            days,
+            ticks,
             population_baseline,
             marker="o",
             color="tab:blue",
@@ -628,17 +681,23 @@ class BleachingReport:
             label="Population median",
         )
 
-        # Draws the fitted exponential when the fit converged.
+        # Draws the fitted exponential when the fit converged. The fit lives in day-space; the dense x-coordinates
+        # are converted back to days when evaluating the model so the curve and the boxplots stay aligned on the
+        # display-unit x-axis.
         decay_fit = self.summary.baseline_fluorescence_decay_fit
         if decay_fit.fit_succeeded:
             # noinspection PyTypeChecker
-            dense_days: NDArray[np.float32] = np.linspace(days.min(), days.max(), num=200, dtype=np.float32)
+            dense_ticks: NDArray[np.float32] = np.linspace(
+                float(ticks.min()), float(ticks.max()), num=200, dtype=np.float32
+            )
+            # noinspection PyTypeChecker
+            dense_days: NDArray[np.float32] = dense_ticks * np.float32(days_per_unit)
             # noinspection PyTypeChecker
             fit_curve: NDArray[np.float32] = (
                 decay_fit.amplitude * np.exp(-dense_days / decay_fit.tau_days) + decay_fit.offset
             )
             axes.plot(
-                dense_days,
+                dense_ticks,
                 fit_curve,
                 color="tab:red",
                 linestyle="--",
@@ -646,7 +705,7 @@ class BleachingReport:
                 label=f"Exp fit (tau = {decay_fit.tau_days:.1f} d)",
             )
 
-        axes.set_xlabel("Days since first session")
+        axes.set_xlabel(f"{unit.capitalize()}s since first session")
         axes.set_ylabel("Baseline fluorescence (a.u.)")
         axes.set_title(
             f"Across-session baseline fluorescence trend (n={cell_count} registered cells)",
@@ -662,7 +721,9 @@ class BleachingReport:
         Returns:
             A matplotlib Figure showing within-session bleaching.
         """
-        figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+        # Wider canvas reserves room for the per-session legend that is anchored outside the right of the axes
+        # so it does not occlude the traces; the legend column scales linearly with session count.
+        figure, axes = plt.subplots(1, 1, figsize=(9, 4), facecolor="white", dpi=150)
 
         table = self.table
         # noinspection PyTypeChecker
@@ -683,11 +744,16 @@ class BleachingReport:
         )
         session_count = len(days)
 
+        # Resolves the integer display unit so per-session legend labels match the across-session plots and summary
+        # rather than displaying floats. The x-axis here is within-session minutes, so only the legend changes.
+        unit, ticks = _resolve_display_units(days_since_first=days)
+        unit_capitalized = unit.capitalize()
+
         colormap = plt.get_cmap("viridis")
         for index in range(session_count):
             # Guards against division by zero when the report contains a single session.
             color = colormap(index / max(session_count - 1, 1))
-            label = f"Day {days[index]:.1f} (drop={drops[index]:.1%})"
+            label = f"{unit_capitalized} {int(ticks[index])} (drop={drops[index]:.1%})"
             axes.plot(
                 time_seconds_list[index] / 60.0,
                 baseline_list[index],
@@ -699,17 +765,87 @@ class BleachingReport:
         axes.set_xlabel("Time within session (minutes)")
         axes.set_ylabel("FOV-mean baseline (a.u.)")
         axes.set_title("Within-session bleaching", fontsize=10)
-        axes.legend(loc="best", fontsize=7)
+        # Anchors the legend to the right of the axes so trace inspection is not obstructed when many sessions
+        # accumulate. ``tight_layout`` accounts for the externally placed legend in current matplotlib.
+        axes.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=7, frameon=False)
+        figure.tight_layout()
+        return figure
+
+    def plot_within_session_average(self) -> plt.Figure:
+        """Plots the across-session mean of the within-session FOV-mean baseline trace, with each per-session trace
+        overlaid as a translucent grey curve for context.
+
+        Notes:
+            All sessions share the same bin-center time grid (5 s, 15 s, 25 s, ... by default — the bin spacing
+            equals ``session_baseline_window_seconds`` regardless of per-session sampling rate). Per-session
+            baselines are NaN-padded to the longest session's length and the mean is taken over each bin via
+            ``np.nanmean`` so the bold trace extends to the rightmost grey trace; bins beyond a given session's end
+            simply do not contribute to that point. Sessions whose within-session computation produced an empty
+            bin set (degenerate or fully trimmed by the warmup cutoff) are skipped to avoid biasing the mean
+            toward zero-length contributors.
+
+        Returns:
+            A matplotlib Figure showing the average within-session bleaching trend.
+        """
+        figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+
+        table = self.table
+        time_seconds_list = [
+            np.asarray(values, dtype=np.float32)
+            for values in table[BleachingColumn.WITHIN_SESSION_TIME_SECONDS.value].to_list()
+        ]
+        baseline_list = [
+            np.asarray(values, dtype=np.float32)
+            for values in table[BleachingColumn.WITHIN_SESSION_BASELINE.value].to_list()
+        ]
+
+        # Draws each session as a translucent grey trace first so the bold mean line draws on top of the bundle.
+        for time_seconds, baseline in zip(time_seconds_list, baseline_list, strict=True):
+            axes.plot(time_seconds / 60.0, baseline, color="grey", alpha=0.3, linewidth=0.8)
+
+        # Builds a NaN-padded (n_sessions, max_bins) matrix and takes ``np.nanmean`` along the session axis so the
+        # mean trace extends to the longest session's last bin. Each column drops sessions that ended earlier from
+        # its mean, which is honest about the shrinking sample size at the right edge without truncating the line.
+        usable_baselines = [baseline for baseline in baseline_list if baseline.size > 0]
+        if usable_baselines:
+            max_length = max(baseline.size for baseline in usable_baselines)
+            # noinspection PyTypeChecker
+            baseline_matrix: NDArray[np.float32] = np.full(
+                (len(usable_baselines), max_length), np.nan, dtype=np.float32
+            )
+            for index, baseline in enumerate(usable_baselines):
+                baseline_matrix[index, : baseline.size] = baseline
+            with warnings.catch_warnings():
+                # ``np.nanmean`` emits a RuntimeWarning for any all-NaN column. The matrix is built such that every
+                # column has at least one non-NaN by construction, but the suppression keeps the contract robust.
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                # noinspection PyTypeChecker
+                mean_baseline: NDArray[np.float32] = np.nanmean(baseline_matrix, axis=0).astype(np.float32, copy=False)
+            longest_time = max(time_seconds_list, key=lambda candidate: candidate.size)[:max_length]
+            axes.plot(
+                longest_time / 60.0,
+                mean_baseline,
+                color="black",
+                linewidth=2.5,
+                label="Across-session mean",
+            )
+            axes.legend(loc="upper right", fontsize=8, frameon=False)
+
+        axes.set_xlabel("Time within session (minutes)")
+        axes.set_ylabel("FOV-mean baseline (a.u.)")
+        axes.set_title("Average within-session bleaching", fontsize=10)
         figure.tight_layout()
         return figure
 
     def plot_snr_distributions(self) -> plt.Figure:
-        """Plots per-session per-cell SNR distributions as violins, annotated with the paired Wilcoxon p-values.
+        """Plots per-session per-cell SNR distributions as violins, annotated with significance markers based on the
+        paired Wilcoxon p-values relative to the first session.
 
         Returns:
             A matplotlib Figure showing the SNR-vs-session comparison.
         """
-        figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+        # Wider canvas reserves room for the significance-key legend that is anchored outside the right of the axes.
+        figure, axes = plt.subplots(1, 1, figsize=(9, 4), facecolor="white", dpi=150)
 
         table = self.table
         # noinspection PyTypeChecker
@@ -722,16 +858,66 @@ class BleachingReport:
             table[BleachingColumn.SNR_PAIRED_P_VALUE.value].to_numpy().astype(np.float64, copy=False)
         )
 
-        axes.violinplot(snr_data, positions=days, showmedians=True)
+        # Plots in display units so the SNR violins line up with the baseline-trend boxplots on the same x-axis.
+        unit, ticks = _resolve_display_units(days_since_first=days)
 
-        # Annotates each session past the first with the Wilcoxon p-value relative to session 0.
-        y_position = max(snr.max() for snr in snr_data) * 1.05
-        for index in range(1, len(days)):
-            p_value = p_values[index]
-            label = f"p={p_value:.1e}" if np.isfinite(p_value) else "p=N/A"
-            axes.text(days[index], y_position, label, ha="center", fontsize=7)
+        axes.violinplot(snr_data, positions=ticks, showmedians=True)
 
-        axes.set_xlabel("Days since first session")
+        # Annotates each session past the first with the standard ``*** / ** / * / ns`` significance convention
+        # derived from the paired Wilcoxon p-value relative to session 0. Each marker hovers just above its own
+        # violin tip rather than at a global y so the marker tracks the bar; monospace text is required so the
+        # triangle apex centers above the boundary between the two base asterisks. The y-axis is extended so the
+        # tallest marker (the two-line triangle above the tallest violin) is not clipped against the axis frame.
+        y_data_max = float(max(snr.max() for snr in snr_data))
+        for index in range(1, len(ticks)):
+            p_value = float(p_values[index])
+            marker = "ns"
+            if np.isfinite(p_value):
+                for threshold, level_marker in _SIGNIFICANCE_LEVELS:
+                    if p_value < threshold:
+                        marker = level_marker
+                        break
+            axes.text(
+                int(ticks[index]),
+                float(snr_data[index].max()) * 1.02,
+                marker,
+                ha="center",
+                va="bottom",
+                fontsize=10,
+                multialignment="center",
+                family="monospace",
+                linespacing=0.7,
+            )
+        axes.set_ylim(top=y_data_max * 1.20)
+
+        # Builds a text-only legend on the right side that maps the asterisk markers to their p-value thresholds.
+        # Line2D handles with no visual marker plus zero handle width / pad collapse the legend to plain text rows;
+        # the top-level entry is multi-line so the legend's triangle layout mirrors the in-plot rendering. Monospace
+        # text on the legend ensures the triangle apex aligns with the gap between the base asterisks just like the
+        # in-plot markers.
+        significance_handles = [
+            Line2D([], [], color="none", label=" *\n**   p < 0.001"),
+            Line2D([], [], color="none", label="**   p < 0.01"),
+            Line2D([], [], color="none", label="*    p < 0.05"),
+            Line2D([], [], color="none", label="ns   p >= 0.05"),
+        ]
+        legend = axes.legend(
+            handles=significance_handles,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+            handlelength=0,
+            handletextpad=0,
+            title="Significance",
+            title_fontsize=8,
+            prop={"family": "monospace", "size": 8},
+        )
+        # ``prop`` does not propagate linespacing, so the legend's per-entry text objects need to be tightened
+        # individually to match the in-plot triangle (top star pulled close to the bottom asterisk pair).
+        for legend_text in legend.get_texts():
+            legend_text.set_linespacing(0.7)
+
+        axes.set_xlabel(f"{unit.capitalize()}s since first session")
         axes.set_ylabel("Per-cell SNR")
         axes.set_title("Per-cell SNR across sessions (paired Wilcoxon vs session 0)", fontsize=10)
         figure.tight_layout()
@@ -770,6 +956,106 @@ def evaluate_and_save_bleaching(
     )
     report.save(animal=dataset_animal)
     return report
+
+
+def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
+    """Plots per-animal population-median baseline fluorescence trends overlaid for every animal in the dataset,
+    with the across-animal mean rendered as a thick black line on top.
+
+    Notes:
+        Loads the saved ``BleachingReport`` for each animal via ``BleachingReport.load``; animals without a
+        persisted report are skipped silently so this can be called on partially-evaluated datasets. Per-animal
+        traces are drawn as translucent grey lines using rounded integer days as x-coordinates so the cross-animal
+        x-axis is consistent regardless of any per-animal hour-resolution display unit. The across-animal mean is
+        computed on the integer-day union grid by inserting each animal's per-day F0 at its day index and taking
+        nanmean across animals; days where no animal contributes a value are excluded from the mean line. Y-axis
+        is raw fluorescence (a.u.) so absolute baseline differences across animals stay visible alongside the
+        trend; absolute level differences are themselves diagnostic information.
+
+    Args:
+        dataset: The DatasetData instance whose animals contribute to the aggregate plot.
+
+    Returns:
+        A matplotlib Figure showing the across-animal baseline fluorescence trend.
+    """
+    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+
+    animal_traces: list[tuple[NDArray[np.int64], NDArray[np.float32]]] = []
+    for dataset_animal in dataset.animals:
+        try:
+            report = BleachingReport.load(animal=dataset_animal)
+        except FileNotFoundError:
+            continue
+        # noinspection PyTypeChecker
+        days_float: NDArray[np.float32] = (
+            report.table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
+        )
+        # noinspection PyTypeChecker
+        baselines: NDArray[np.float32] = (
+            report.table[BleachingColumn.POPULATION_BASELINE_FLUORESCENCE.value]
+            .to_numpy()
+            .astype(np.float32, copy=False)
+        )
+        if days_float.size == 0:
+            continue
+        # noinspection PyTypeChecker
+        days_int: NDArray[np.int64] = np.round(days_float).astype(np.int64, copy=False)
+        animal_traces.append((days_int, baselines))
+
+    if not animal_traces:
+        axes.set_xlabel("Days since first session")
+        axes.set_ylabel("Baseline fluorescence (a.u.)")
+        axes.set_title("Across-animal baseline fluorescence trend (no reports found)", fontsize=10)
+        figure.tight_layout()
+        return figure
+
+    for days_int, baselines in animal_traces:
+        axes.plot(days_int, baselines, color="grey", alpha=0.5, linewidth=1.0, marker="o", markersize=3)
+
+    # Builds the (n_animals, n_days) value matrix used by the median / IQR aggregates.
+    max_day = int(max(days_int.max() for days_int, _ in animal_traces))
+    # noinspection PyTypeChecker
+    matrix: NDArray[np.float32] = np.full((len(animal_traces), max_day + 1), np.nan, dtype=np.float32)
+    for index, (days_int, baselines) in enumerate(animal_traces):
+        # Per-animal day collisions (rare under the protocol's >=1h spacing rule) overwrite earlier writes, which
+        # is acceptable because the dataset-level plot only needs one value per (animal, day) cell.
+        matrix[index, days_int] = baselines
+
+    # Per-day median and interquartile range as outlier-robust replacements for mean +/- std. A single high- or
+    # low-baseline animal can pull mean +/- std arbitrarily; median and IQR cap the influence of any single
+    # animal at one rank position. ``np.nanmedian`` and ``np.nanpercentile`` emit a RuntimeWarning for any
+    # all-NaN column, suppressed because the resulting NaNs are filtered out via ``valid_mask`` before plotting.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        # noinspection PyTypeChecker
+        median_trace: NDArray[np.float32] = np.nanmedian(matrix, axis=0).astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        lower_quartile: NDArray[np.float32] = np.nanpercentile(matrix, 25, axis=0).astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        upper_quartile: NDArray[np.float32] = np.nanpercentile(matrix, 75, axis=0).astype(np.float32, copy=False)
+
+    valid_mask = np.isfinite(median_trace)
+    grid = np.arange(max_day + 1, dtype=np.int64)
+    axes.fill_between(
+        grid[valid_mask],
+        lower_quartile[valid_mask],
+        upper_quartile[valid_mask],
+        color="black",
+        alpha=0.15,
+        linewidth=0,
+        label="IQR (25-75%)",
+    )
+    axes.plot(grid[valid_mask], median_trace[valid_mask], color="black", linewidth=2.5, label="Across-animal median")
+
+    axes.set_xlabel("Days since first session")
+    axes.set_ylabel("Baseline fluorescence (a.u.)")
+    axes.set_title(
+        f"Across-animal baseline fluorescence trend (n={len(animal_traces)} animals)",
+        fontsize=10,
+    )
+    axes.legend(loc="upper right", fontsize=8, frameon=False)
+    figure.tight_layout()
+    return figure
 
 
 def _parse_session_microseconds(session_path: Path) -> int:
@@ -815,6 +1101,46 @@ def _validate_chronological_order(
                 f"{session_paths[previous_index].name!r}."
             )
             console.error(message=message, error=ValueError)
+
+
+def _resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, NDArray[np.int64]]:
+    """Resolves the integer display unit and per-session tick array used by summaries and plots.
+
+    Notes:
+        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise
+        falls back to ``("hour", round(days_since_first * 24))``. Raises when even the hour-rounded offsets collide;
+        the chronic photobleaching protocol mandates at least one hour between consecutive sessions, so the
+        hour-rounded values are by construction distinct, and a collision indicates a violated input invariant.
+        Storage and the exponential-decay fit continue to operate on the float ``days_since_first`` column;
+        the integer ticks returned here are display-only.
+
+    Args:
+        days_since_first: Per-session day offsets relative to the first session, as the float column persisted in
+            ``bleaching.feather``.
+
+    Returns:
+        A tuple of unit label (``"day"`` or ``"hour"``) and an int64 tick array aligned with ``days_since_first``.
+    """
+    # noinspection PyTypeChecker
+    rounded_days: NDArray[np.int64] = np.round(days_since_first).astype(np.int64, copy=False)
+    if int(np.unique(rounded_days).size) == int(rounded_days.size):
+        return "day", rounded_days
+
+    # Promotes through float64 first so the *24 multiplication does not lose precision near the float32 boundary.
+    # noinspection PyTypeChecker
+    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(np.int64, copy=False)
+    if int(np.unique(rounded_hours).size) == int(rounded_hours.size):
+        return "hour", rounded_hours
+
+    message = (
+        "Unable to assign unique integer day or hour labels to the supplied sessions. The chronic photobleaching "
+        "protocol requires at least one hour of separation between consecutive sessions, but at least two sessions "
+        "in this evaluation set rounded to the same hour-since-first value, which violates that invariant."
+    )
+    console.error(message=message, error=ValueError)
+    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+    # noinspection PyUnreachableCode
+    raise ValueError(message)  # pragma: no cover
 
 
 def _compute_session_row(
@@ -899,7 +1225,7 @@ def _compute_session_row(
 
 def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
     """Loads the multi-recording raw per-cell fluorescence trace and per-sample timestamps from a forged session
-    feather.
+    feather, with the leading acquisition-warmup window trimmed off both arrays.
 
     Notes:
         Loads ``DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE`` exclusively because the protocol's across-session
@@ -910,12 +1236,18 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
         the list column to a flat fp32 series and reshaping in NumPy stays in compiled code and runs roughly an
         order of magnitude faster while producing the same (cell_count, sample_count) C-contiguous layout.
 
+        After loading, the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples are dropped from both arrays so every
+        downstream kernel — per-cell baseline percentile, SNR, within-session bleaching — operates on stabilized
+        data without needing its own warmup-aware logic. Sessions that contain no samples past the warmup window
+        are returned as empty arrays; existing length guards in the per-session pipeline produce NaN sentinels for
+        such degenerate sessions.
+
     Args:
         session_path: Path to the forged session directory containing the data feather.
 
     Returns:
         A tuple containing the (cell_count, sample_count) fp32 fluorescence array and the per-sample int64
-        microsecond timestamps.
+        microsecond timestamps, both already trimmed of the acquisition-warmup window.
     """
     df = pl.read_ipc(
         source=session_path.joinpath(DatasetFiles.DATA),
@@ -936,6 +1268,19 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
     # ascontiguousarray copy materializes the C-contiguous result that downstream reshapes need.
     # noinspection PyTypeChecker
     fluorescence: NDArray[np.float32] = np.ascontiguousarray(flat.reshape(sample_count, cell_count).T)
+
+    # Trims the leading acquisition-warmup window. ``searchsorted`` finds the first sample at or after
+    # ``time_us[0] + warmup_us``; sessions with no samples past the warmup window collapse to empty arrays so the
+    # per-session pipeline's existing length guards produce NaN sentinels rather than spurious values.
+    if time_us.size > 0:
+        warmup_us = int(_ACQUISITION_WARMUP_SECONDS * 1_000_000)
+        cutoff_us = int(time_us[0]) + warmup_us
+        warmup_index = int(np.searchsorted(time_us, cutoff_us, side="left"))
+        if warmup_index > 0:
+            time_us = time_us[warmup_index:]
+            # noinspection PyTypeChecker
+            fluorescence = np.ascontiguousarray(fluorescence[:, warmup_index:])
+
     return fluorescence, time_us
 
 

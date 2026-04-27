@@ -21,6 +21,7 @@ from .bleaching_evaluation import (
     ExponentialDecayFit,
     BleachingConfiguration,
     evaluate_and_save_bleaching,
+    plot_dataset_baseline_trend,
 )
 from .reward_cell_analysis import RewardCellResults, RewardCellDetector, RewardCellConfiguration
 
@@ -48,4 +49,5 @@ __all__ = [
     "evaluate_and_save_bleaching",
     "generate_analysis_dataframe",
     "generate_place_field_dataframe",
+    "plot_dataset_baseline_trend",
 ]
