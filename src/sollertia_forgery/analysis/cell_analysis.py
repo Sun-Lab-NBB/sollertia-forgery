@@ -48,6 +48,10 @@ if TYPE_CHECKING:
 
 _PLOT_TICK_INTERVAL_CM: float = 25.0
 """Spacing in centimeters between x-axis ticks on track-position plots."""
+_PLACE_STRIP_WIDTH_RATIO: float = 0.04
+"""Per-strip width ratio (relative to the main heatmap) used by the per-cell significance strips."""
+_PLACE_PVALUE_DISPLAY_FLOOR: float = 1e-4
+"""P-value floor used when computing the ``-log10(p)`` color scale; keeps the dynamic range bounded."""
 _PLACE_FIELD_BIN_SIZE_CM: float = 5.0
 """Default spatial bin size in centimeters used by ``PlaceFieldDetector`` and persisted in the per-trial fluorescence
 matrix. Matches the ``PlaceFieldDetector`` constructor default."""
@@ -94,6 +98,33 @@ class CellAnalysisColumn(StrEnum):
     """Skaggs spatial information content in bits per event."""
     SPATIAL_P_VALUE = "spatial_p_value"
     """Shuffle-derived p-value for the spatial information statistic."""
+    STABILITY_EVEN_ODD = "stability_even_odd"
+    """Pearson r between the even-trial and odd-trial mean rate maps. NaN when fewer than two trials are available
+    or either half-map has zero variance."""
+    STABILITY_SPLIT_HALF = "stability_split_half"
+    """Pearson r between the first-half and second-half mean rate maps. NaN when the trial count is below 2 or
+    either half-map has zero variance."""
+    IS_RELIABLE = "is_reliable"
+    """True for cells with at least one place field that passes the lap-coverage criterion. Equivalent to ``IS_PLACE``
+    today because the lap-coverage filter is applied during place-field detection (Climer et al., 2025); persisted as
+    a separate column so downstream analysts can keep the criteria explicit."""
+    IS_STABLE = "is_stable"
+    """True for cells whose split-half stability r exceeds the 95th percentile of a per-cell shuffled null. From the
+    Stability method of Climer & Dombeck (2021)."""
+    STABILITY_P_VALUE = "stability_p_value"
+    """Per-cell p-value for the Stability shuffle: fraction of shuffles whose split-half r is greater than or equal
+    to the observed value. NaN when the observed r is NaN or the shuffle distribution is empty (e.g., fewer than two
+    trials)."""
+    IS_PEAK_SIGNIFICANT = "is_peak_significant"
+    """True for cells whose observed pooled-rate-map peak exceeds the 99th percentile of the shuffled per-cell peak
+    distribution. From the Peak method of Climer & Dombeck (2021)."""
+    PEAK_P_VALUE = "peak_p_value"
+    """Per-cell p-value for the Peak shuffle: fraction of shuffles whose smoothed-rate-map peak is greater than or
+    equal to the observed peak. NaN when the observed peak is NaN."""
+    IS_STRICT_PLACE = "is_strict_place"
+    """True for cells that pass all three of ``IS_PLACE``, ``IS_STABLE``, and ``IS_PEAK_SIGNIFICANT`` simultaneously.
+    Convenience column for downstream consumers; computed by AND-ing the three independent flags during table
+    assembly."""
     SPEED_ACTIVITY_CORRELATION = "speed_activity_correlation"
     """Pearson correlation between binned speed and activity in the pre-reward window."""
     SCE_PARTICIPATION_COUNT_REST = "sce_participation_count_rest"
@@ -196,13 +227,27 @@ class CellAnalysisSummary(YamlConfig):
     cell_count: int
     """Total number of cells in the session."""
     place_cell_count: int
-    """Number of cells with at least one detected place field."""
+    """Number of cells with at least one detected place field (Dombeck-style threshold + lap-coverage filter)."""
     spatially_significant_count: int
     """Number of cells whose Skaggs spatial information passes the shuffle threshold."""
     reward_cell_count: int
     """Number of cells that are both spatially significant and reward-proximal."""
     reward_predictive_count: int
     """Number of cells that are reward-associated and slowing-correlated."""
+    reliable_count: int
+    """Number of cells whose detected fields pass the lap-coverage criterion (Climer 2025). Equivalent to
+    ``place_cell_count`` while lap-coverage is applied during detection; persisted separately so the criterion is
+    explicit in the summary."""
+    stable_count: int
+    """Number of cells whose split-half stability r exceeds the 95th percentile of a per-cell shuffled null
+    (Climer & Dombeck 2021 Stability method)."""
+    peak_significant_count: int
+    """Number of cells whose pooled-rate-map peak exceeds the 99th percentile of a per-cell shuffled null
+    (Climer & Dombeck 2021 Peak method)."""
+    strict_place_cell_count: int
+    """Number of cells that simultaneously pass IS_PLACE, IS_STABLE, and IS_PEAK_SIGNIFICANT. Used as the working
+    place-cell population for plotting; downstream consumers can still recover any single criterion from the
+    per-cell table."""
 
     mixture_weight: float
     """Reward-component weight from the uniform + Gaussian mixture model fit to the spatially significant COMs."""
@@ -245,7 +290,7 @@ class CellAnalysisReport:
         session_path: Path,
         *,
         trial_type: str = "ABC",
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         configuration: CellAnalysisConfiguration | None = None,
     ) -> CellAnalysisReport:
         """Runs the place / reward / SCE pipelines sequentially and assembles an in-memory report.
@@ -276,16 +321,22 @@ class CellAnalysisReport:
             (geometry_entry.stimulus_trigger_zone_start_cm + geometry_entry.stimulus_trigger_zone_end_cm) / 2.0
         )
 
-        # Runs place-field detection.
-        console.echo(message="Running place field detection...", level=LogLevel.INFO)
-        place_detector = PlaceFieldDetector(
+        # Loads the session data once and shares it across both detectors via from_run_session, so the place and
+        # reward flags operate on identical speed-filtered samples and bit-identical rate maps.
+        run_session = assemble_run_session_data(
             session_path=session_path,
             trial_type=trial_type,
             fluorescence_column=fluorescence_column,
+        )
+
+        # Runs place-field detection.
+        console.echo(message="Running place field detection...", level=LogLevel.INFO)
+        place_detector = PlaceFieldDetector(
+            run_session=run_session,
             bin_size=_PLACE_FIELD_BIN_SIZE_CM,
             configuration=resolved_configuration.place,
         )
-        place_fields = place_detector.detect(run_shuffle=False)
+        place_fields = place_detector.detect()
         cell_count = int(place_fields.binned_fluorescence.shape[0])
         place_cell_count = int(place_fields.has_place_field.sum())
         console.echo(
@@ -296,9 +347,7 @@ class CellAnalysisReport:
         # Runs reward-cell detection.
         console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
         reward_detector = RewardCellDetector(
-            session_path=session_path,
-            trial_type=trial_type,
-            fluorescence_column=fluorescence_column,
+            run_session=run_session,
             configuration=resolved_configuration.reward,
         )
         reward_results = reward_detector.detect()
@@ -340,12 +389,36 @@ class CellAnalysisReport:
         sampling_rate_hz = float(sce_detector.sampling_rate_hz)
         rate_map_bin_count = int(reward_results.spatial_results.rate_maps.shape[1])
 
+        # Computes split-half and even/odd stability r per cell from the per-trial binned fluorescence already
+        # produced during place-field detection. The IS_STABLE and IS_PEAK_SIGNIFICANT booleans are computed by
+        # ``_compute_multi_criterion_flags`` from shuffle distributions; see Climer & Dombeck (2021) for the
+        # multi-criterion framework.
+        stability_even_odd, stability_split_half = _compute_stability_metrics(
+            binned_fluorescence_per_trial=place_fields.binned_fluorescence_per_trial,
+            cell_count=cell_count,
+        )
+        is_stable, is_peak_significant, stability_p_values, peak_p_values = _compute_multi_criterion_flags(
+            place_detector=place_detector,
+            place_fields=place_fields,
+            stability_split_half=stability_split_half,
+            configuration=resolved_configuration.place,
+        )
+        # noinspection PyTypeChecker
+        is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
+
         # Assembles the per-cell wide table.
         table = _build_cell_table(
             cell_count=cell_count,
             place_fields=place_fields,
             reward_results=reward_results,
             sce_results=sce_results,
+            stability_even_odd=stability_even_odd,
+            stability_split_half=stability_split_half,
+            is_stable=is_stable,
+            is_peak_significant=is_peak_significant,
+            stability_p_values=stability_p_values,
+            peak_p_values=peak_p_values,
+            is_strict_place=is_strict_place,
         )
 
         # Assembles the per-period SCE table.
@@ -369,6 +442,10 @@ class CellAnalysisReport:
             spatially_significant_count=spatially_significant_count,
             reward_cell_count=reward_cell_count,
             reward_predictive_count=reward_predictive_count,
+            reliable_count=int(place_fields.has_place_field.sum()),
+            stable_count=int(np.sum(is_stable)),
+            peak_significant_count=int(np.sum(is_peak_significant)),
+            strict_place_cell_count=int(np.sum(is_strict_place)),
             mixture_weight=float(reward_results.mixture_weight),
             gaussian_mean_cm=float(reward_results.gaussian_mean),
             gaussian_std_cm=float(reward_results.gaussian_std),
@@ -405,6 +482,45 @@ class CellAnalysisReport:
         self.table.write_ipc(file=session.cell_analysis_table_path)
         self.sce_periods.write_ipc(file=session.sce_periods_table_path)
 
+    def place_mask(
+        self,
+        *,
+        require_place: bool = True,
+        require_stable: bool = True,
+        require_peak_significant: bool = True,
+    ) -> NDArray[np.bool_]:
+        """Returns the per-cell boolean mask for cells passing every requested place-cell criterion simultaneously.
+
+        Notes:
+            Defaults to the strict triple-AND of place / stable / peak-significant recommended by Climer & Dombeck
+            (2021). When every kwarg is False the method returns an all-True mask, treating "no criteria" as "no
+            filter". Skaggs spatial significance is intentionally not exposed here: it is the reward-cell pipeline's
+            broader spatial filter and overlaps heavily with Dombeck place-field morphology.
+
+        Args:
+            require_place: Require ``IS_PLACE`` (Dombeck 2010 morphology + lap coverage).
+            require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability method).
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak method).
+
+        Returns:
+            Per-cell boolean mask with length cell_count.
+        """
+        # noinspection PyTypeChecker
+        mask: NDArray[np.bool_] = np.ones(self.table.height, dtype=np.bool_)
+        if require_place:
+            # noinspection PyTypeChecker
+            place_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_PLACE.value].to_numpy()
+            mask = mask & place_flag
+        if require_stable:
+            # noinspection PyTypeChecker
+            stable_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_STABLE.value].to_numpy()
+            mask = mask & stable_flag
+        if require_peak_significant:
+            # noinspection PyTypeChecker
+            peak_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_PEAK_SIGNIFICANT.value].to_numpy()
+            mask = mask & peak_flag
+        return mask
+
     def summarize(self) -> str:
         """Returns a multi-line human-readable summary of the report's per-cell and per-period statistics."""
         summary = self.summary
@@ -413,13 +529,21 @@ class CellAnalysisReport:
         place_pct = 100.0 * summary.place_cell_count / cell_count if cell_count > 0 else 0.0
         reward_pct = 100.0 * summary.reward_cell_count / cell_count if cell_count > 0 else 0.0
         predictive_pct = 100.0 * summary.reward_predictive_count / cell_count if cell_count > 0 else 0.0
+        reliable_pct = 100.0 * summary.reliable_count / cell_count if cell_count > 0 else 0.0
+        stable_pct = 100.0 * summary.stable_count / cell_count if cell_count > 0 else 0.0
+        peak_pct = 100.0 * summary.peak_significant_count / cell_count if cell_count > 0 else 0.0
+        strict_pct = 100.0 * summary.strict_place_cell_count / cell_count if cell_count > 0 else 0.0
 
         lines = [
             "Cell analysis report",
             "====================",
             f"Cells: {cell_count}",
+            f"  Place cells (Dombeck): {summary.place_cell_count} ({place_pct:.1f}%)",
+            f"  Reliable (lap cov.):   {summary.reliable_count} ({reliable_pct:.1f}%)",
+            f"  Stable (split-half):   {summary.stable_count} ({stable_pct:.1f}%)",
+            f"  Peak-significant:      {summary.peak_significant_count} ({peak_pct:.1f}%)",
+            f"  Strict place cells:    {summary.strict_place_cell_count} ({strict_pct:.1f}%)",
             f"  Spatially significant: {summary.spatially_significant_count} ({spatially_pct:.1f}%)",
-            f"  Place cells:           {summary.place_cell_count} ({place_pct:.1f}%)",
             f"  Reward cells:          {summary.reward_cell_count} ({reward_pct:.1f}%)",
             f"  Reward-predictive:     {summary.reward_predictive_count} ({predictive_pct:.1f}%)",
             "",
@@ -448,6 +572,10 @@ class CellAnalysisReport:
         title: str | None = None,
         sort_by_position: bool = True,
         show_only_place_cells: bool = True,
+        require_place: bool = True,
+        require_stable: bool = True,
+        require_peak_significant: bool = True,
+        show_significance_strip: bool = True,
         figure_dpi: int = 150,
         minimum_percentile: float = 0.5,
         maximum_percentile: float = 0.9,
@@ -459,11 +587,17 @@ class CellAnalysisReport:
         Args:
             title: Optional title displayed at the top of the figure.
             sort_by_position: Order cells by their place-field center along the track before plotting.
-            show_only_place_cells: Display only cells whose ``is_place`` flag is True.
+            show_only_place_cells: Display only cells that pass every requested criterion (the AND of the three
+                ``require_*`` flags below).
+            require_place: Require ``IS_PLACE`` (Dombeck morphology + lap coverage).
+            require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability shuffle).
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak shuffle).
+            show_significance_strip: When True, renders one thin per-cell ``-log10(p)`` strip to the left of the main
+                heatmap for each active p-value-bearing criterion (Stable / Peak).
             figure_dpi: Figure resolution in dots per inch.
             minimum_percentile: Percentile used as the lower bound of the color scale.
             maximum_percentile: Percentile used as the upper bound of the color scale.
-            cmap: Matplotlib colormap name.
+            cmap: Matplotlib colormap name for the rate-map panel.
             show_color_bar: Render a color bar alongside the heatmap.
 
         Returns:
@@ -474,8 +608,11 @@ class CellAnalysisReport:
 
         # Reconstructs the per-cell pooled rate map and per-cell place-field center used for ordering.
         rate_maps = _stack_list_column(table=self.table, column=CellAnalysisColumn.RATE_MAP, target_length=bin_count)
-        # noinspection PyTypeChecker
-        is_place: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_PLACE.value].to_numpy()
+        cell_population: NDArray[np.bool_] = self.place_mask(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
         order = _resolve_place_cell_order(table=self.table)
 
         if not sort_by_position:
@@ -483,7 +620,7 @@ class CellAnalysisReport:
             order = np.arange(rate_maps.shape[0], dtype=np.int64)
 
         if show_only_place_cells:
-            order = order[np.isin(order, np.flatnonzero(is_place))]
+            order = order[np.isin(order, np.flatnonzero(cell_population))]
 
         sorted_data = rate_maps[order, :]
         if sorted_data.size == 0:
@@ -492,9 +629,29 @@ class CellAnalysisReport:
         minimum_value = float(np.nanquantile(sorted_data, minimum_percentile)) if sorted_data.size > 0 else 0.0
         maximum_value = float(np.nanquantile(sorted_data, maximum_percentile)) if sorted_data.size > 0 else 1.0
 
-        figure, axes = plt.subplots(1, 1, figsize=(8, 4), facecolor="white", dpi=figure_dpi)
+        # Builds figure with optional p-value significance strips on the left edge.
+        strip_columns = _active_significance_columns(
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+            table=self.table,
+        )
+        strip_count = len(strip_columns) if show_significance_strip else 0
+        figure = _make_heatmap_figure(strip_count=strip_count, figure_dpi=figure_dpi)
+        strip_axes, axes, colorbar_axes = _layout_heatmap_axes(
+            figure=figure,
+            strip_count=strip_count,
+            include_colorbar=show_color_bar,
+        )
+
+        population_label = _compose_population_label(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
         if title is not None:
-            axes.set_title(title, fontsize=8)
+            axes.set_title(f"{title} — {population_label} (n={order.size})", fontsize=8)
+        elif show_only_place_cells:
+            axes.set_title(f"{population_label} (n={order.size})", fontsize=8)
 
         extent: tuple[float, float, float, float] = (
             0.0,
@@ -514,14 +671,22 @@ class CellAnalysisReport:
         axes.set_aspect("auto")
         axes.set_xlabel("Position (cm)")
         axes.set_ylabel("Cell number")
+        if show_significance_strip and strip_axes:
+            _render_significance_strips(
+                figure=figure,
+                strip_axes=strip_axes,
+                strip_columns=strip_columns,
+                table=self.table,
+                ordered_indices=order,
+            )
 
         track_length_cm = self.summary.track_length_cm
         # noinspection PyTypeChecker
         x_ticks: NDArray[np.float64] = np.arange(0, track_length_cm + 1, _PLOT_TICK_INTERVAL_CM)
         axes.set_xticks(x_ticks)
 
-        if show_color_bar:
-            color_bar = figure.colorbar(image, ax=axes)
+        if show_color_bar and colorbar_axes is not None:
+            color_bar = figure.colorbar(image, cax=colorbar_axes)
             color_bar.set_label("ΔF/F₀")
             cbar_min = np.floor(minimum_value / 0.5) * 0.5
             cbar_max = np.ceil(maximum_value / 0.5) * 0.5
@@ -617,9 +782,24 @@ class CellAnalysisReport:
         self,
         *,
         title: str | None = None,
+        require_place: bool = True,
+        require_stable: bool = True,
+        require_peak_significant: bool = True,
         figure_dpi: int = 150,
     ) -> plt.Figure:
-        """Plots row-normalized rate maps for reward cells and non-reward place cells side by side, sorted by COM."""
+        """Plots row-normalized rate maps for reward cells and place cells side by side, sorted by COM.
+
+        Args:
+            title: Optional figure-level title.
+            require_place: Require ``IS_PLACE`` for the place-cell panel population.
+            require_stable: Require ``IS_STABLE`` for the place-cell panel population.
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place-cell panel population.
+            figure_dpi: Figure resolution in dots per inch.
+
+        Notes:
+            The reward panel always uses ``IS_SPATIALLY_SIGNIFICANT & IS_REWARD_PROXIMAL`` and is unaffected by the
+            ``require_*`` flags; those flags govern only the place-cell panel.
+        """
         summary = self.summary
         rate_maps = _stack_list_column(
             table=self.table, column=CellAnalysisColumn.RATE_MAP, target_length=summary.bin_count
@@ -633,8 +813,13 @@ class CellAnalysisReport:
             self.table[CellAnalysisColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
         )
 
+        place_population: NDArray[np.bool_] = self.place_mask(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
         reward_mask = is_significant & is_reward_proximal
-        place_mask = is_significant & ~is_reward_proximal
+        place_mask = place_population & ~is_reward_proximal
 
         reward_zone_half = summary.reward_configuration.reward_zone_width / 2.0
         reward_left = summary.reward_position_cm - reward_zone_half
@@ -644,9 +829,14 @@ class CellAnalysisReport:
             1, 2, figsize=(12, 6), facecolor="white", dpi=figure_dpi, sharey=False
         )
 
+        place_label = "Place Cells — " + _compose_population_label(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
         for axes, mask, panel_title in [
             (axes_reward, reward_mask, "Reward Cells"),
-            (axes_place, place_mask, "Place Cells"),
+            (axes_place, place_mask, place_label),
         ]:
             maps = rate_maps[mask]
             coms = centers_of_mass[mask]
@@ -836,16 +1026,36 @@ class CellAnalysisReport:
         *,
         session: DatasetSession,
         trial_type: str = "ABC",
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         title: str | None = None,
+        require_place: bool = True,
+        require_stable: bool = True,
+        require_peak_significant: bool = True,
         figure_dpi: int = 150,
         position_bin_size_cm: float = 2.0,
         position_sigma_cm: float = 3.0,
         slowing_threshold_cm_s: float = 10.0,
     ) -> plt.Figure:
-        """Plots per-trial activity heatmaps for an example reward-predictive cell and an example non-reward place
-        cell, with slowing-onset markers overlaid. Reads ``data.feather`` for the raw fluorescence and per-trial
-        speed time series.
+        """Plots per-trial activity heatmaps for an example reward-predictive cell and an example place cell, with
+        slowing-onset markers overlaid. Reads ``data.feather`` for the raw fluorescence and per-trial speed time
+        series.
+
+        Args:
+            session: DatasetSession backing the on-disk data.feather.
+            trial_type: Trial type to load.
+            fluorescence_column: Column to load from data.feather.
+            title: Optional figure-level title.
+            require_place: Require ``IS_PLACE`` for the place-cell pool from which the example place cell is picked.
+            require_stable: Require ``IS_STABLE`` for the place-cell pool.
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place-cell pool.
+            figure_dpi: Figure resolution in dots per inch.
+            position_bin_size_cm: Spatial bin size used to build the per-trial heatmaps.
+            position_sigma_cm: Gaussian smoothing sigma applied along the position axis.
+            slowing_threshold_cm_s: Speed cutoff (cm/s) used to mark per-trial slowing-onset locations.
+
+        Notes:
+            The reward-predictive panel is unaffected by the ``require_*`` flags; those flags govern only the
+            place-cell pool.
         """
         summary = self.summary
         # noinspection PyTypeChecker
@@ -863,10 +1073,15 @@ class CellAnalysisReport:
             self.table[CellAnalysisColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
         )
 
+        place_population: NDArray[np.bool_] = self.place_mask(
+            require_place=require_place,
+            require_stable=require_stable,
+            require_peak_significant=require_peak_significant,
+        )
         predictive_mask = is_significant & is_reward_proximal & is_slowing_correlated
         # noinspection PyTypeChecker
         predictive_indices: NDArray[np.int64] = np.argwhere(predictive_mask).flatten()
-        place_mask = is_significant & ~is_reward_proximal
+        place_mask = place_population & ~is_reward_proximal
         # noinspection PyTypeChecker
         place_indices: NDArray[np.int64] = np.argwhere(place_mask).flatten()
 
@@ -1005,7 +1220,7 @@ class CellAnalysisReport:
         self,
         *,
         session: DatasetSession,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         cell_indices: NDArray[np.int32] | list[int] | None = None,
         cell_count: int = 5,
         trial_index: int = 0,
@@ -1243,7 +1458,7 @@ def evaluate_and_save_cell_analysis(
     session: DatasetSession,
     *,
     trial_type: str = "ABC",
-    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
     configuration: CellAnalysisConfiguration | None = None,
 ) -> CellAnalysisReport:
     """Evaluates the cell analysis pipeline for a single session and persists the report to disk.
@@ -1268,15 +1483,42 @@ def evaluate_and_save_cell_analysis(
     return report
 
 
-def plot_dataset_place_cell_fraction(dataset: DatasetData) -> plt.Figure:
-    """Plots the per-animal place-cell fraction trend overlaid for every animal, with the across-animal median +
-    IQR rendered on top. Animals without saved reports are silently skipped.
+def plot_dataset_place_cell_fraction(
+    dataset: DatasetData,
+    *,
+    require_place: bool = True,
+    require_stable: bool = True,
+    require_peak_significant: bool = True,
+) -> plt.Figure:
+    """Plots the per-animal place-cell fraction trend for the criterion combination chosen by the ``require_*`` flags.
+
+    Notes:
+        Animals without saved reports are silently skipped. The y-axis label and figure title encode the active
+        criterion combination so several invocations with different criteria can be saved alongside one another
+        without ambiguity. Single-criterion combinations and the strict triple-AND read directly from precomputed
+        summary fields; other combinations are not currently cached and raise.
+
+    Args:
+        dataset: DatasetData root used to enumerate per-animal sessions.
+        require_place: Require ``IS_PLACE`` (Dombeck morphology + lap coverage).
+        require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability shuffle).
+        require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak shuffle).
     """
+    label = _compose_population_label(
+        require_place=require_place,
+        require_stable=require_stable,
+        require_peak_significant=require_peak_significant,
+    )
+    extractor = _resolve_dataset_place_metric_extractor(
+        require_place=require_place,
+        require_stable=require_stable,
+        require_peak_significant=require_peak_significant,
+    )
     return _plot_dataset_metric(
         dataset=dataset,
-        metric_extractor=lambda summary: summary.place_cell_count / summary.cell_count if summary.cell_count else 0.0,
-        y_label="Place cell fraction",
-        figure_title="Across-animal place cell fraction",
+        metric_extractor=extractor,
+        y_label=f"{label} fraction",
+        figure_title=f"Across-animal {label.lower()} fraction",
     )
 
 
@@ -1310,6 +1552,38 @@ def plot_dataset_cell_count(dataset: DatasetData) -> plt.Figure:
     )
 
 
+def plot_dataset_stable_cell_fraction(dataset: DatasetData) -> plt.Figure:
+    """Plots the per-animal stable-cell fraction trend (Climer & Dombeck 2021 Stability method)."""
+    return _plot_dataset_metric(
+        dataset=dataset,
+        metric_extractor=lambda summary: summary.stable_count / summary.cell_count if summary.cell_count else 0.0,
+        y_label="Stable cell fraction",
+        figure_title="Across-animal stable cell fraction",
+    )
+
+
+def plot_dataset_peak_significant_cell_fraction(dataset: DatasetData) -> plt.Figure:
+    """Plots the per-animal peak-significant cell fraction trend (Climer & Dombeck 2021 Peak method)."""
+    return _plot_dataset_metric(
+        dataset=dataset,
+        metric_extractor=lambda summary: (
+            summary.peak_significant_count / summary.cell_count if summary.cell_count else 0.0
+        ),
+        y_label="Peak-significant cell fraction",
+        figure_title="Across-animal peak-significant cell fraction",
+    )
+
+
+def plot_dataset_reliable_cell_fraction(dataset: DatasetData) -> plt.Figure:
+    """Plots the per-animal reliable-cell fraction trend (Climer 2025 lap-coverage criterion)."""
+    return _plot_dataset_metric(
+        dataset=dataset,
+        metric_extractor=lambda summary: summary.reliable_count / summary.cell_count if summary.cell_count else 0.0,
+        y_label="Reliable cell fraction",
+        figure_title="Across-animal reliable cell fraction",
+    )
+
+
 # ===== Private helpers ==========================================================================================
 
 
@@ -1325,13 +1599,185 @@ class _ReconstructedPeriod:
     """Savitzky-Golay smoothed cell x sample fluorescence trace."""
 
 
+def _compute_stability_metrics(
+    binned_fluorescence_per_trial: NDArray[np.float32],
+    cell_count: int,
+) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+    """Computes per-cell even/odd and split-half Pearson correlations from a per-trial binned rate-map matrix.
+
+    Notes:
+        Both metrics return NaN for cells with fewer than two trials, fewer than three valid bins in either half,
+        or zero variance in either half. Bins where either half has NaN are excluded pairwise from the correlation.
+
+    References:
+        - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of cells
+          identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Stability method.
+        - Hainmueller & Bartos (2018). Parallel emergence of stable and dynamic memory engrams in the hippocampus.
+          Nature. https://doi.org/10.1038/s41586-018-0191-2 -- split-half stability r as a place-cell criterion.
+
+    Args:
+        binned_fluorescence_per_trial: Per-trial binned fluorescence with dimensions (cell_count, trial_count,
+            bin_count). NaN entries are treated as missing.
+        cell_count: Number of cells in the session; used to size the output arrays when the per-trial matrix is
+            empty.
+
+    Returns:
+        A tuple of (even_odd_r, split_half_r), each with length cell_count.
+    """
+    # noinspection PyTypeChecker
+    even_odd: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    # noinspection PyTypeChecker
+    split_half: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+
+    if binned_fluorescence_per_trial.size == 0:
+        return even_odd, split_half
+    trial_count = binned_fluorescence_per_trial.shape[1]
+    # Need at least one trial in each half to compute even/odd and split-half Pearson r.
+    minimum_trials_for_split = 2
+    if trial_count < minimum_trials_for_split:
+        return even_odd, split_half
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        # noinspection PyTypeChecker
+        even_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 0::2, :], axis=1)
+        # noinspection PyTypeChecker
+        odd_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 1::2, :], axis=1)
+    even_odd = _per_cell_pearson(a=even_map, b=odd_map)
+
+    half_index = trial_count // 2
+    if half_index > 0 and trial_count - half_index > 0:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            # noinspection PyTypeChecker
+            first_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, :half_index, :], axis=1)
+            # noinspection PyTypeChecker
+            second_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, half_index:, :], axis=1)
+        split_half = _per_cell_pearson(a=first_map, b=second_map)
+
+    return even_odd, split_half
+
+
+def _per_cell_pearson(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
+
+    Args:
+        a: First matrix with dimensions (cell_count, bin_count).
+        b: Second matrix with dimensions (cell_count, bin_count).
+
+    Returns:
+        Per-cell Pearson r with length cell_count; NaN when fewer than three pairwise-valid bins or zero variance.
+    """
+    cell_count = a.shape[0]
+    # Pearson r requires at least three pairwise-valid observations to be numerically meaningful; with two points
+    # the correlation is trivially +/-1 regardless of the underlying signal.
+    minimum_valid_bins = 3
+    # noinspection PyTypeChecker
+    out: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    for cell_index in range(cell_count):
+        # noinspection PyTypeChecker
+        mask: NDArray[np.bool_] = ~np.isnan(a[cell_index]) & ~np.isnan(b[cell_index])
+        if int(np.sum(mask)) < minimum_valid_bins:
+            continue
+        ai = a[cell_index, mask]
+        bi = b[cell_index, mask]
+        if float(np.std(ai)) == 0.0 or float(np.std(bi)) == 0.0:
+            continue
+        out[cell_index] = float(np.corrcoef(ai, bi)[0, 1])
+    return out
+
+
+def _compute_multi_criterion_flags(
+    place_detector: PlaceFieldDetector,
+    place_fields: PlaceFields,
+    stability_split_half: NDArray[np.float32],
+    configuration: PlaceFieldDetectionConfiguration,
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
+    """Computes the IS_STABLE / IS_PEAK_SIGNIFICANT per-cell flags and their per-cell shuffle p-values.
+
+    Notes:
+        The Peak-method null distribution is generated by re-running threshold-based detection on the same shuffles
+        already used by the Peak shuffle in ``compute_multi_criterion_significance``. The Stability null is generated
+        by circularly shifting each
+        trial's rate map by a random bin offset and recomputing the split-half correlation. The p-values report the
+        per-cell rank of the observed statistic within its shuffled distribution and are NaN where the observed value
+        is NaN or the shuffle distribution is empty.
+
+    References:
+        - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of cells
+          identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Peak method (99th percentile)
+          and Stability method (95th percentile).
+
+    Args:
+        place_detector: PlaceFieldDetector instance used to access shuffle infrastructure and pooled rate map.
+        place_fields: PlaceFields output containing the pooled and per-trial rate maps.
+        stability_split_half: Observed per-cell split-half Pearson r from ``_compute_stability_metrics``.
+        configuration: Place-field configuration carrying ``shuffle_repeat_count`` and ``peak_percentile``.
+
+    Returns:
+        A tuple of (is_stable, is_peak_significant, stability_p_values, peak_p_values), each with length cell_count.
+    """
+    cell_count = place_fields.binned_fluorescence.shape[0]
+    is_stable, is_peak_significant, stability_p_values, peak_p_values = (
+        place_detector.compute_multi_criterion_significance(
+            observed_pooled_rate_map=place_fields.binned_fluorescence,
+            observed_per_trial_rate_map=place_fields.binned_fluorescence_per_trial,
+            observed_split_half_r=stability_split_half,
+            repeat_count=configuration.shuffle_repeat_count,
+            peak_percentile=configuration.peak_percentile,
+        )
+    )
+    if is_stable.size != cell_count:
+        # noinspection PyTypeChecker
+        is_stable = np.zeros(cell_count, dtype=np.bool_)
+    if is_peak_significant.size != cell_count:
+        # noinspection PyTypeChecker
+        is_peak_significant = np.zeros(cell_count, dtype=np.bool_)
+    if stability_p_values.size != cell_count:
+        # noinspection PyTypeChecker
+        stability_p_values = np.full(cell_count, np.nan, dtype=np.float32)
+    if peak_p_values.size != cell_count:
+        # noinspection PyTypeChecker
+        peak_p_values = np.full(cell_count, np.nan, dtype=np.float32)
+    return is_stable, is_peak_significant, stability_p_values, peak_p_values
+
+
 def _build_cell_table(
     cell_count: int,
     place_fields: PlaceFields,
     reward_results: RewardCellResults,
     sce_results: list,
+    *,
+    stability_even_odd: NDArray[np.float32],
+    stability_split_half: NDArray[np.float32],
+    is_stable: NDArray[np.bool_],
+    is_peak_significant: NDArray[np.bool_],
+    stability_p_values: NDArray[np.float32],
+    peak_p_values: NDArray[np.float32],
+    is_strict_place: NDArray[np.bool_],
 ) -> pl.DataFrame:
-    """Assembles the per-cell wide-format DataFrame from the live detector outputs."""
+    """Assembles the per-cell wide-format DataFrame from the live detector outputs.
+
+    Args:
+        cell_count: Total number of cells in the session.
+        place_fields: PlaceFields output from PlaceFieldDetector.detect.
+        reward_results: RewardCellResults from RewardCellDetector.detect.
+        sce_results: List of SCEResult instances from SCEDetector.
+        stability_even_odd: Per-cell Pearson r between even-trial and odd-trial mean rate maps with length cell_count.
+        stability_split_half: Per-cell Pearson r between first-half and second-half mean rate maps with length
+            cell_count.
+        is_stable: Per-cell boolean from the stability shuffle (Climer & Dombeck 2021 Stability method) with length
+            cell_count.
+        is_peak_significant: Per-cell boolean from the peak-method shuffle (Climer & Dombeck 2021 Peak method) with
+            length cell_count.
+        stability_p_values: Per-cell p-value from the stability shuffle with length cell_count.
+        peak_p_values: Per-cell p-value from the peak shuffle with length cell_count.
+        is_strict_place: Per-cell boolean equal to ``has_place_field & is_stable & is_peak_significant`` with length
+            cell_count.
+
+    Returns:
+        Per-cell wide-format polars DataFrame with one row per cell.
+    """
     spatial = reward_results.spatial_results
 
     place_rows = _build_place_field_rows(cell_count=cell_count, place_fields=place_fields)
@@ -1367,6 +1813,12 @@ def _build_cell_table(
             CellAnalysisColumn.IS_SLOWING_CORRELATED.value: pl.Series(
                 values=reward_results.is_slowing_correlated, dtype=pl.Boolean
             ),
+            CellAnalysisColumn.IS_RELIABLE.value: pl.Series(values=place_fields.has_place_field, dtype=pl.Boolean),
+            CellAnalysisColumn.IS_STABLE.value: pl.Series(values=is_stable, dtype=pl.Boolean),
+            CellAnalysisColumn.STABILITY_P_VALUE.value: pl.Series(values=stability_p_values, dtype=pl.Float32),
+            CellAnalysisColumn.IS_PEAK_SIGNIFICANT.value: pl.Series(values=is_peak_significant, dtype=pl.Boolean),
+            CellAnalysisColumn.PEAK_P_VALUE.value: pl.Series(values=peak_p_values, dtype=pl.Float32),
+            CellAnalysisColumn.IS_STRICT_PLACE.value: pl.Series(values=is_strict_place, dtype=pl.Boolean),
             CellAnalysisColumn.PF_START_CM.value: pl.Series(
                 values=place_rows["pf_start_cm"], dtype=pl.List(pl.Float32)
             ),
@@ -1394,6 +1846,8 @@ def _build_cell_table(
                 values=spatial.spatial_information, dtype=pl.Float32
             ),
             CellAnalysisColumn.SPATIAL_P_VALUE.value: pl.Series(values=spatial.p_values, dtype=pl.Float32),
+            CellAnalysisColumn.STABILITY_EVEN_ODD.value: pl.Series(values=stability_even_odd, dtype=pl.Float32),
+            CellAnalysisColumn.STABILITY_SPLIT_HALF.value: pl.Series(values=stability_split_half, dtype=pl.Float32),
             CellAnalysisColumn.SPEED_ACTIVITY_CORRELATION.value: pl.Series(
                 values=reward_results.speed_activity_correlations, dtype=pl.Float32
             ),
@@ -1891,6 +2345,178 @@ def _detect_assemblies_from_state(
 
     assemblies.sort(key=lambda entry: entry[0], reverse=True)
     return [member_indices for _, member_indices in assemblies]
+
+
+def _active_significance_columns(
+    *,
+    require_stable: bool,
+    require_peak_significant: bool,
+    table: pl.DataFrame,
+) -> list[tuple[str, CellAnalysisColumn]]:
+    """Returns the active p-value-bearing criteria as (display label, p-value column) pairs in canonical order.
+
+    Notes:
+        Skips criteria whose p-value column is missing from the table, so plots remain functional on legacy
+        reports persisted before the multi-criterion p-value columns were added.
+    """
+    candidates: list[tuple[bool, str, CellAnalysisColumn]] = [
+        (require_stable, "Stable", CellAnalysisColumn.STABILITY_P_VALUE),
+        (require_peak_significant, "Peak", CellAnalysisColumn.PEAK_P_VALUE),
+    ]
+    return [(label, column) for active, label, column in candidates if active and column.value in table.columns]
+
+
+def _make_heatmap_figure(strip_count: int, figure_dpi: int) -> plt.Figure:
+    """Allocates a figure sized to leave room for the requested number of significance strips."""
+    base_width = 8.0
+    extra_width = 0.45 * strip_count
+    return plt.figure(figsize=(base_width + extra_width, 4), facecolor="white", dpi=figure_dpi)
+
+
+def _layout_heatmap_axes(
+    figure: plt.Figure,
+    strip_count: int,
+    *,
+    include_colorbar: bool,
+) -> tuple[list[plt.Axes], plt.Axes, plt.Axes | None]:
+    """Builds the gridspec layout for a heatmap with optional left-side significance strips and a right-side colorbar.
+
+    Returns:
+        A tuple of (strip_axes, main_axes, colorbar_axes_or_None).
+    """
+    width_ratios: list[float] = [_PLACE_STRIP_WIDTH_RATIO] * strip_count + [1.0]
+    if include_colorbar:
+        width_ratios.append(0.05)
+    grid = figure.add_gridspec(1, len(width_ratios), width_ratios=width_ratios, wspace=0.08)
+    strip_axes = [figure.add_subplot(grid[0, i]) for i in range(strip_count)]
+    main_axes = figure.add_subplot(grid[0, strip_count])
+    colorbar_axes = figure.add_subplot(grid[0, strip_count + 1]) if include_colorbar else None
+    return strip_axes, main_axes, colorbar_axes
+
+
+def _render_significance_strips(
+    figure: plt.Figure,
+    strip_axes: list[plt.Axes],
+    strip_columns: list[tuple[str, CellAnalysisColumn]],
+    table: pl.DataFrame,
+    ordered_indices: NDArray[np.int64],
+) -> None:
+    """Renders one ``-log10(p)`` strip per (label, column) entry in ``strip_columns`` alongside the main heatmap.
+
+    Notes:
+        Cells with NaN p-values render at the floor (treated as p=1.0). The color scale spans 0 to ``-log10`` of
+        :data:`_PLACE_PVALUE_DISPLAY_FLOOR`, which keeps very-significant outliers from compressing the visible range
+        for the rest of the population. The leftmost strip carries the ``-log₁₀(p)`` y-axis label and a small
+        horizontal colorbar at the bottom encodes the standard significance landmarks (p=1, 0.05, 0.01, 0.001).
+    """
+    if not strip_axes or not strip_columns:
+        return
+    floor = _PLACE_PVALUE_DISPLAY_FLOOR
+    vmax = float(-np.log10(floor))
+    cell_count = int(ordered_indices.size)
+    image = None
+    for axis, (label, column) in zip(strip_axes, strip_columns, strict=True):
+        # noinspection PyTypeChecker
+        p_values: NDArray[np.float32] = table[column.value].to_numpy().astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        ordered_p: NDArray[np.float32] = np.empty(0, dtype=np.float32) if cell_count == 0 else p_values[ordered_indices]
+        # noinspection PyTypeChecker
+        clipped: NDArray[np.float32] = np.clip(ordered_p, floor, 1.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # noinspection PyTypeChecker
+            neg_log_p: NDArray[np.float32] = (-np.log10(clipped)).astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        cleaned: NDArray[np.float32] = np.where(np.isnan(ordered_p), 0.0, neg_log_p).astype(np.float32, copy=False)
+        column_data = cleaned.reshape(-1, 1) if cleaned.size > 0 else np.zeros((1, 1), dtype=np.float32)
+        image = axis.imshow(
+            column_data,
+            cmap="Reds",
+            extent=(0.0, 1.0, float(max(cell_count, 1)), 0.0),
+            vmin=0.0,
+            vmax=vmax,
+            interpolation="none",
+            origin="upper",
+            aspect="auto",
+        )
+        axis.set_xticks([])
+        axis.set_yticks([])
+        axis.set_xlabel(label, fontsize=7, rotation=0, labelpad=2)
+        for spine in axis.spines.values():
+            spine.set_linewidth(0.4)
+            spine.set_color("0.5")
+    strip_axes[0].set_ylabel("-log₁₀(p)", fontsize=7)
+    if image is not None:
+        # Inset a thin horizontal colorbar at the bottom of the leftmost strip with significance landmarks.
+        anchor = strip_axes[0].get_position()
+        bar_height = 0.02
+        bar_axes = figure.add_axes(
+            (anchor.x0, anchor.y0 - bar_height - 0.04, anchor.width * len(strip_axes), bar_height)
+        )
+        color_bar = figure.colorbar(image, cax=bar_axes, orientation="horizontal")
+        landmark_p_values = [1.0, 0.05, 0.01, 0.001]
+        # noinspection PyTypeChecker
+        landmark_ticks: list[float] = [float(-np.log10(max(p, floor))) for p in landmark_p_values if p >= floor]
+        color_bar.set_ticks(landmark_ticks)
+        color_bar.set_ticklabels(
+            [f"{p:g}" for p in landmark_p_values if p >= floor],
+            fontsize=6,
+        )
+        color_bar.ax.tick_params(length=2, pad=1)
+        color_bar.set_label("p", fontsize=6, labelpad=2)
+
+
+def _compose_population_label(
+    *,
+    require_place: bool,
+    require_stable: bool,
+    require_peak_significant: bool,
+) -> str:
+    """Returns ``"Place ∩ Stable ∩ Peak"``-style labels from active criterion bools; ``"All cells"`` when all False."""
+    parts: list[str] = []
+    if require_place:
+        parts.append("Place")
+    if require_stable:
+        parts.append("Stable")
+    if require_peak_significant:
+        parts.append("Peak")
+    return " ∩ ".join(parts) if parts else "All cells"
+
+
+def _resolve_dataset_place_metric_extractor(
+    *,
+    require_place: bool,
+    require_stable: bool,
+    require_peak_significant: bool,
+) -> Callable[[CellAnalysisSummary], float]:
+    """Returns a per-summary fraction extractor for the requested criterion combination, using precomputed summary
+    fields when available.
+
+    Notes:
+        Single-criterion combinations and the default strict triple-AND each have a precomputed count in
+        :class:`CellAnalysisSummary`. Other multi-criterion combinations are not currently cached in the summary
+        and would require loading each session's per-cell feather; this helper raises in that case so callers know
+        to either request a cached combination or extend the summary schema.
+    """
+    bools = (require_place, require_stable, require_peak_significant)
+    if bools == (True, True, True):
+        return lambda summary: summary.strict_place_cell_count / summary.cell_count if summary.cell_count else 0.0
+    if bools == (True, False, False):
+        return lambda summary: summary.place_cell_count / summary.cell_count if summary.cell_count else 0.0
+    if bools == (False, True, False):
+        return lambda summary: summary.stable_count / summary.cell_count if summary.cell_count else 0.0
+    if bools == (False, False, True):
+        return lambda summary: summary.peak_significant_count / summary.cell_count if summary.cell_count else 0.0
+    message = (
+        "Unable to plot a dataset-level place-cell fraction for the requested criterion combination. The summary "
+        f"caches counts for single criteria and for the strict triple-AND only; got "
+        f"(require_place={require_place}, require_stable={require_stable}, "
+        f"require_peak_significant={require_peak_significant}). Either pass one of the cached combinations or "
+        "extend CellAnalysisSummary to cache the requested combination."
+    )
+    console.error(message=message, error=ValueError)
+    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+    # noinspection PyUnreachableCode
+    raise ValueError(message)  # pragma: no cover
 
 
 def _plot_dataset_metric(

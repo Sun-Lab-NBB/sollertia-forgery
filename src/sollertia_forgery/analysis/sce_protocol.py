@@ -468,7 +468,7 @@ class SCEDetector:
         self,
         session_path: Path,
         track_length: float,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         place_fields: PlaceFields | None = None,
         configuration: SCEDetectionConfiguration | None = None,
     ) -> None:

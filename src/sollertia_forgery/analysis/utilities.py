@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from numba import njit, prange
 import numpy as np
 import polars as pl
+from ataraxis_time import TimeUnits, convert_time, interval_to_rate
 from ataraxis_base_utilities import console
 
 from ..forging import FluorescenceColumn
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-ACQUISITION_WARMUP_SECONDS: float = 60.0
+_ACQUISITION_WARMUP_SECONDS: float = 60.0
 """Number of leading seconds discarded from every loaded session trace before any analysis runs. Sollertia
 experiments include a multi-minute pre-imaging baseline period during which the PMT gain, resonant scanner phase,
 shutter, and laser power have not yet stabilized; the resulting initial fluorescence valley would otherwise
@@ -33,8 +34,30 @@ tuning). Trimming at load time guarantees every analyzer operates on stabilized 
 the artifact exists."""
 
 
+@dataclass(frozen=True, slots=True)
+class RunSessionData:
+    """Stores run-state arrays and trial geometry resolved from a forged session for a single trial type."""
+
+    fluorescence: NDArray[np.float32]
+    """Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count)."""
+    position: NDArray[np.float32]
+    """Within-trial position in centimeters at each sample."""
+    speed: NDArray[np.float32]
+    """Animal's speed in cm/s at each sample."""
+    trial_ids: NDArray[np.int32]
+    """Trial identifier at each sample."""
+    trial_type: str
+    """The trial type the loaded samples belong to."""
+    geometry: TrialGeometryEntry
+    """The canonical Virtual Reality environment geometry for the loaded trial type, including track length and
+    stimulus trigger zone."""
+    sampling_rate_hz: float
+    """Acquisition sampling rate in Hz, computed from the median per-sample inter-time interval before any
+    run-state filtering. NaN when the session has fewer than two samples."""
+
+
 def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
-    """Drops the leading ``ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe based on the
+    """Drops the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe based on the
     ``time_us`` column.
 
     Notes:
@@ -54,37 +77,25 @@ def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
         return df
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
-    warmup_us = int(ACQUISITION_WARMUP_SECONDS * 1_000_000)
+    warmup_us = int(
+        convert_time(
+            time=_ACQUISITION_WARMUP_SECONDS,
+            from_units=TimeUnits.SECOND,
+            to_units=TimeUnits.MICROSECOND,
+            as_float=True,
+        )
+    )
     cutoff_us = int(time_us[0]) + warmup_us
-    warmup_index = int(np.searchsorted(time_us, cutoff_us, side="left"))
+    warmup_index = int(np.searchsorted(a=time_us, v=cutoff_us, side="left"))
     if warmup_index <= 0:
         return df
-    return df.slice(warmup_index)
-
-
-@dataclass(frozen=True, slots=True)
-class RunSessionData:
-    """Stores run-state arrays and trial geometry resolved from a forged session for a single trial type."""
-
-    fluorescence: NDArray[np.float32]
-    """Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count)."""
-    position: NDArray[np.float32]
-    """Within-trial position in centimeters at each sample."""
-    speed: NDArray[np.float32]
-    """Animal's speed in cm/s at each sample."""
-    trial_ids: NDArray[np.int32]
-    """Trial identifier at each sample."""
-    trial_type: str
-    """The trial type the loaded samples belong to."""
-    geometry: TrialGeometryEntry
-    """The canonical Virtual Reality environment geometry for the loaded trial type, including track length and 
-    stimulus trigger zone."""
+    return df.slice(offset=warmup_index)
 
 
 def assemble_run_session_data(
     session_path: Path,
     trial_type: str,
-    fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
 ) -> RunSessionData:
     """Assembles run-state arrays and trial geometry from a forged session for the given trial type.
 
@@ -98,7 +109,7 @@ def assemble_run_session_data(
     Args:
         session_path: Path to the session's dataset directory containing the data feather and the trial geometry
             data file.
-        trial_type: Trial type to load (e.g. "ABC", "ABCD"). Must match an entry in the session's trial geometry
+        trial_type: Trial type to load (e.g., "ABC", "ABCD"). Must match an entry in the session's trial geometry
             data file.
         fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to load. Selects between
             single-recording and multi-recording cindra outputs.
@@ -123,7 +134,12 @@ def assemble_run_session_data(
             DatasetColumn.TRIAL.value,
         ],
     )
-    df = trim_acquisition_warmup(df)
+    df = trim_acquisition_warmup(df=df)
+
+    # Resolves the sampling rate from the post-warmup time column before any run-state filtering, so the rate
+    # reflects the canonical acquisition cadence rather than the cadence of the (possibly gappy) run-only subset.
+    sampling_rate_hz = _resolve_sampling_rate_hz(df=df)
+
     df = df.filter(
         (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run") & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type),
     )
@@ -151,6 +167,7 @@ def assemble_run_session_data(
         trial_ids=trial_ids[valid],
         trial_type=trial_type,
         geometry=geometry_entry,
+        sampling_rate_hz=sampling_rate_hz,
     )
 
 
@@ -190,16 +207,15 @@ def compute_within_trial_position(
     per_trial_start = distance[starts]
     per_trial_length = distance[ends - 1] - per_trial_start
     # noinspection PyTypeChecker
-    per_sample_start: NDArray[np.float32] = np.repeat(per_trial_start, counts)
+    per_sample_start: NDArray[np.float32] = np.repeat(a=per_trial_start, repeats=counts)
     # noinspection PyTypeChecker
     position: NDArray[np.float32] = (distance - per_sample_start).astype(np.float32)
 
     # Masks samples in below-threshold trials with NaN so downstream consumers can drop them in one step.
     minimum_length = np.float32(completeness_threshold * track_length)
     # noinspection PyTypeChecker
-    per_sample_incomplete: NDArray[np.bool_] = np.repeat(per_trial_length < minimum_length, counts)
+    per_sample_incomplete: NDArray[np.bool_] = np.repeat(a=per_trial_length < minimum_length, repeats=counts)
     position[per_sample_incomplete] = np.float32("nan")
-    # noinspection PyTypeChecker
     return position
 
 
@@ -207,17 +223,20 @@ def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, N
     """Resolves the integer display unit and per-session tick array used by dataset-level summaries and plots.
 
     Notes:
-        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise
-        falls back to ``("hour", round(days_since_first * 24))``. Raises when even the hour-rounded offsets collide;
-        Sollertia acquisition protocols mandate at least one hour between consecutive sessions, so the hour-rounded
-        values are by construction distinct, and a collision indicates a violated input invariant. Storage and any
-        cross-session fits continue to operate on float days; the integer ticks returned here are display-only.
+        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise,
+        falls back to ``("hour", round(days_since_first * 24))``. Storage and any cross-session fits continue to
+        operate on float days; the integer ticks returned here are display-only.
 
     Args:
         days_since_first: Per-session day offsets relative to the first session.
 
     Returns:
         A tuple of unit label (``"day"`` or ``"hour"``) and an int64 tick array aligned with ``days_since_first``.
+
+    Raises:
+        ValueError: When sessions cannot be assigned unique day or hour ticks. Sollertia acquisition protocols
+            mandate at least one hour between consecutive sessions, so the hour-rounded values are by construction
+            distinct; a collision indicates a violated input invariant.
     """
     # noinspection PyTypeChecker
     rounded_days: NDArray[np.int64] = np.round(days_since_first).astype(np.int64, copy=False)
@@ -263,9 +282,13 @@ def bin_fluorescence_by_position(
     """
     # Assigns each position to a spatial bin and clips to the range [0, bin_count - 1].
     # noinspection PyTypeChecker
-    raw_bin_indices: NDArray[np.int64] = np.searchsorted(position_bin_edges, position, side="right") - 1
+    raw_bin_indices: NDArray[np.int64] = np.searchsorted(a=position_bin_edges, v=position, side="right") - 1
     # noinspection PyTypeChecker
-    bin_indices: NDArray[np.int32] = np.clip(raw_bin_indices, 0, len(position_bin_edges) - 2).astype(np.int32)
+    bin_indices: NDArray[np.int32] = np.clip(
+        a=raw_bin_indices,
+        a_min=0,
+        a_max=len(position_bin_edges) - 2,
+    ).astype(np.int32)
 
     bin_count = len(position_bin_edges) - 1
     cell_count = fluorescence.shape[0]
@@ -273,7 +296,7 @@ def bin_fluorescence_by_position(
     sample_counts: NDArray[np.int32] = np.bincount(bin_indices, minlength=bin_count).astype(np.int32)
 
     # noinspection PyTypeChecker
-    output: NDArray[np.float32] = np.full((cell_count, bin_count), np.nan, dtype=np.float32)
+    output: NDArray[np.float32] = np.full(shape=(cell_count, bin_count), fill_value=np.nan, dtype=np.float32)
 
     # Hands off to vectorized and compiled accumulator.
     _accumulate_binned_fluorescence(
@@ -285,6 +308,142 @@ def bin_fluorescence_by_position(
     )
 
     return output, sample_counts
+
+
+@njit(cache=True, nogil=True)
+def compute_shuffle_source_indices(
+    filtered_sample_indices: NDArray[np.int32],
+    sample_count: int,
+    minimum_shift: int,
+    chunk_count: int,
+    seed: int,
+) -> NDArray[np.int32]:
+    """Maps each speed-filtered destination sample back to the source sample it pulls from under the shuffle.
+
+    Notes:
+        Encodes the circular shift (when ``chunk_count == 1``) and circular-shift + chunk-permute (when
+        ``chunk_count > 1``) as an indirection array rather than materializing a full shuffled fluorescence matrix.
+        Hoisted from the reward-cell pipeline so both protocols share the same shuffle implementation.
+
+    References:
+        - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
+          environments. Nature. https://doi.org/10.1038/s41586-025-09245-y -- circular-shift null with a 15 s
+          minimum shift; the standard time-domain shuffle in 2-photon hippocampal place-cell analysis.
+
+    Args:
+        filtered_sample_indices: Destination-sample indices retained by the speed filter with length
+            filtered_sample_count.
+        sample_count: Total number of samples in the original fluorescence time series.
+        minimum_shift: Minimum number of samples for the circular shift.
+        chunk_count: Number of chunks to split the shifted trace into for permutation. Set to 1 to disable
+            chunk-permute and use a pure circular shift.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        Source-sample indices with length filtered_sample_count.
+    """
+    np.random.seed(seed)  # noqa: NPY002
+    shift_amount = np.random.randint(minimum_shift, sample_count - minimum_shift)  # noqa: NPY002
+    chunk_size = sample_count // chunk_count
+    permutation = np.random.permutation(chunk_count)  # noqa: NPY002
+
+    # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
+    output_chunk_starts = np.empty(chunk_count + 1, dtype=np.int32)
+    output_chunk_starts[0] = 0
+    for output_chunk_position in range(chunk_count):
+        source_chunk_index = permutation[output_chunk_position]
+        if source_chunk_index < chunk_count - 1:
+            chunk_size_local = chunk_size
+        else:
+            chunk_size_local = sample_count - source_chunk_index * chunk_size
+        output_chunk_starts[output_chunk_position + 1] = output_chunk_starts[output_chunk_position] + chunk_size_local
+
+    filtered_count = filtered_sample_indices.shape[0]
+    # noinspection PyTypeChecker
+    source_indices: NDArray[np.int32] = np.empty(filtered_count, dtype=np.int32)
+
+    # Resolves each destination back through the permutation and shift to its source sample.
+    for filtered_index in range(filtered_count):
+        destination = filtered_sample_indices[filtered_index]
+        output_chunk_position = 0
+        while output_chunk_position + 1 < chunk_count and output_chunk_starts[output_chunk_position + 1] <= destination:
+            output_chunk_position += 1
+        offset_within_chunk = destination - output_chunk_starts[output_chunk_position]
+        source_chunk_index = permutation[output_chunk_position]
+        shifted_index = source_chunk_index * chunk_size + offset_within_chunk
+        source_indices[filtered_index] = (shifted_index - shift_amount) % sample_count
+
+    return source_indices
+
+
+@njit(cache=True, parallel=True, nogil=True)
+def accumulate_shuffled_rate_maps(
+    fluorescence: NDArray[np.float32],
+    source_indices: NDArray[np.int32],
+    bin_indices: NDArray[np.int32],
+    sample_counts: NDArray[np.int32],
+    output: NDArray[np.float32],
+) -> None:
+    """Bins fluorescence into a per-cell rate map by gathering source samples through an indirection array.
+
+    Notes:
+        Shared by the place- and reward-cell pipelines. Empty bins are written as 0.0 (not NaN) so callers can apply
+        smoothing without a NaN-aware kernel; smoothing in the calling code uses ``mode="wrap"`` and is robust to
+        zero-occupancy bins.
+
+    Args:
+        fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
+        source_indices: Source-sample indices per filtered destination sample with length filtered_sample_count.
+        bin_indices: Spatial bin indices per filtered destination sample with length filtered_sample_count.
+        sample_counts: Per-bin occupancy counts with length bin_count.
+        output: Pre-allocated output rate maps with dimensions (cell_count, bin_count).
+    """
+    cell_count = fluorescence.shape[0]
+    filtered_count = source_indices.shape[0]
+    bin_count = output.shape[1]
+
+    for cell_index in prange(cell_count):
+        bin_sums = np.zeros(bin_count, dtype=np.float32)
+        for filtered_index in range(filtered_count):
+            bin_sums[bin_indices[filtered_index]] += fluorescence[cell_index, source_indices[filtered_index]]
+
+        for bin_index in range(bin_count):
+            if sample_counts[bin_index] > 0:
+                output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
+            else:
+                output[cell_index, bin_index] = 0.0
+
+
+def _resolve_sampling_rate_hz(df: pl.DataFrame) -> float:
+    """Computes the acquisition sampling rate in Hz from the ``time_us`` column of a session dataframe.
+
+    Notes:
+        Uses the median per-sample inter-time interval to be robust to gaps that arise from system-state transitions
+        within the session. Returns NaN when the dataframe has fewer than two samples.
+
+    Args:
+        df: Session dataframe loaded from ``DatasetFiles.DATA`` (post-warmup, pre-filter). Must include the
+            ``DatasetColumn.TIME_US`` column.
+
+    Returns:
+        The acquisition sampling rate in Hz, or NaN when the dataframe has fewer than two samples.
+    """
+    # np.diff over N samples yields N-1 intervals; computing a median requires at least one interval.
+    minimum_samples_for_interval = 2
+    if df.height < minimum_samples_for_interval:
+        return float("nan")
+    # noinspection PyTypeChecker
+    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
+    median_interval_us = float(np.median(np.diff(time_us)))
+    if median_interval_us <= 0.0:
+        return float("nan")
+    return float(
+        interval_to_rate(
+            interval=median_interval_us,
+            from_units=TimeUnits.MICROSECOND,
+            as_float=True,
+        )
+    )
 
 
 @njit(cache=True, parallel=True)

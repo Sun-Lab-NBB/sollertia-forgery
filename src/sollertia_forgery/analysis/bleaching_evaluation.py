@@ -767,13 +767,13 @@ class BleachingReport:
 
     def plot_within_session_average(self) -> plt.Figure:
         """Plots the across-session mean of the within-session FOV-mean baseline trace, with each per-session trace
-        overlaid as a translucent grey curve for context.
+        overlaid as a translucent gray curve for context.
 
         Notes:
             All sessions share the same bin-center time grid (5 s, 15 s, 25 s, ... by default — the bin spacing
             equals ``session_baseline_window_seconds`` regardless of per-session sampling rate). Per-session
             baselines are NaN-padded to the longest session's length and the mean is taken over each bin via
-            ``np.nanmean`` so the bold trace extends to the rightmost grey trace; bins beyond a given session's end
+            ``np.nanmean`` so the bold trace extends to the rightmost gray trace; bins beyond a given session's end
             simply do not contribute to that point. Sessions whose within-session computation produced an empty
             bin set (degenerate or fully trimmed by the warmup cutoff) are skipped to avoid biasing the mean
             toward zero-length contributors.
@@ -793,7 +793,7 @@ class BleachingReport:
             for values in table[BleachingColumn.WITHIN_SESSION_BASELINE.value].to_list()
         ]
 
-        # Draws each session as a translucent grey trace first so the bold mean line draws on top of the bundle.
+        # Draws each session as a translucent gray trace first so the bold mean line draws on top of the bundle.
         for time_seconds, baseline in zip(time_seconds_list, baseline_list, strict=True):
             axes.plot(time_seconds / 60.0, baseline, color="grey", alpha=0.3, linewidth=0.8)
 
@@ -955,10 +955,10 @@ def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
     Notes:
         Loads the saved ``BleachingReport`` for each animal via ``BleachingReport.load``; animals without a
         persisted report are skipped silently so this can be called on partially-evaluated datasets. Per-animal
-        traces are drawn as translucent grey lines using rounded integer days as x-coordinates so the cross-animal
+        traces are drawn as translucent gray lines using rounded integer days as x-coordinates so the cross-animal
         x-axis is consistent regardless of any per-animal hour-resolution display unit. The across-animal mean is
         computed on the integer-day union grid by inserting each animal's per-day F0 at its day index and taking
-        nanmean across animals; days where no animal contributes a value are excluded from the mean line. Y-axis
+        nanmean across animals; days when no animal contributes a value are excluded from the mean line. Y-axis
         is raw fluorescence (a.u.) so absolute baseline differences across animals stay visible alongside the
         trend; absolute level differences are themselves diagnostic information.
 
@@ -1015,6 +1015,7 @@ def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
     # low-baseline animal can pull mean +/- std arbitrarily; median and IQR cap the influence of any single
     # animal at one rank position. ``np.nanmedian`` and ``np.nanpercentile`` emit a RuntimeWarning for any
     # all-NaN column, suppressed because the resulting NaNs are filtered out via ``valid_mask`` before plotting.
+    # noinspection PyTypeChecker
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         # noinspection PyTypeChecker

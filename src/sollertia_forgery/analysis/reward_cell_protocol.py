@@ -8,13 +8,16 @@ from dataclasses import dataclass
 from tqdm import tqdm
 from numba import njit, prange
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
+from scipy.ndimage import uniform_filter1d
 from scipy.optimize import minimize
 
 from sollertia_forgery.forging import FluorescenceColumn
 from sollertia_forgery.analysis.utilities import (
+    RunSessionData,
     assemble_run_session_data,
     bin_fluorescence_by_position,
+    accumulate_shuffled_rate_maps,
+    compute_shuffle_source_indices,
 )
 
 if TYPE_CHECKING:
@@ -31,22 +34,33 @@ _MINIMUM_VALID_SAMPLE_COUNT: int = 3
 
 @dataclass(slots=True)
 class RewardCellConfiguration:
-    """Defines configuration parameters for reward cell detection."""
+    """Defines configuration parameters for reward cell detection.
 
-    bin_size: float = 10.0
-    """Spatial bin size in centimeters for position binning."""
+    Notes:
+        Bin size and smoothing default to the place-pipeline values (5.0 cm bins, uniform 3-bin smoothing) so that
+        ``IS_PLACE`` and ``IS_SPATIALLY_SIGNIFICANT`` are computed against the same rate map and disagreements between
+        the two flags reflect biology rather than binning artifacts. The standalone
+        :meth:`RewardCellDetector.from_session_path` path re-bins from scratch using these defaults.
+    """
+
+    bin_size: float = 5.0
+    """Spatial bin size in centimeters for position binning. Matches the place-pipeline default so the two flags
+    operate on the same rate map."""
     minimum_speed: float = 5.0
     """Minimum speed threshold in cm/s for including samples in analysis."""
-    gaussian_sigma: float = 20.0
-    """Standard deviation in centimeters for Gaussian spatial smoothing of rate maps."""
-    shuffle_count: int = 100
-    """Number of shuffle iterations for significance testing."""
+    smooth_size: int = 3
+    """Size of the uniform-smoothing kernel in bins applied to the rate map. Matches the place-pipeline smoothing
+    (Dombeck-lineage uniform 3-bin moving average) so the two flags share the same smoothing."""
+    shuffle_count: int = 1000
+    """Number of shuffle iterations for significance testing. Matches the place-pipeline default of 1000 (Climer
+    et al., 2025)."""
     minimum_shift_samples: int = 500
     """Minimum circular shift in samples applied during shuffle."""
     chunk_count: int = 6
     """Number of chunks for chunk-and-permute shuffle method."""
-    significance_threshold: float = 0.05
-    """P-value threshold for determining statistically significant spatial information."""
+    significance_threshold: float = 0.01
+    """P-value threshold for determining statistically significant spatial information. Climer et al. (2025) uses
+    p < 0.01 (99th percentile)."""
     reward_zone_width: float = 30.0
     """Width of the reward zone in centimeters for defining reward-proximal fields."""
     pre_reward_window: float = 50.0
@@ -144,6 +158,19 @@ def _compute_spatial_information(
 ) -> None:
     """Computes spatial information content for each neuron from its spatial rate map.
 
+    Notes:
+        Implements the Skaggs spatial-information formula in bits per event:
+        ``I = sum_x p(x) * (rate[x] / mean_rate) * log2(rate[x] / mean_rate)``, where ``p(x)`` is the per-bin
+        occupancy probability. Bins with zero occupancy or zero rate are skipped (the log term diverges).
+
+    References:
+        - Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal populations
+          and the compression of temporal sequences. Hippocampus.
+          https://doi.org/10.1002/(SICI)1098-1063(1996)6:2<149::AID-HIPO6>3.0.CO;2-K
+        - Skaggs, McNaughton & Gothard (1993). An information-theoretic approach to deciphering the hippocampal
+          code. NIPS. https://proceedings.neurips.cc/paper/1992/hash/4e4d9c44e7c41a8c0fa5e0c9a47a9e44 -- the
+          original Skaggs spatial information measure.
+
     Args:
         rate_maps: Mean fluorescence rate maps with dimensions (cell_count, bin_count).
         occupancy: Per-bin occupancy sample counts with length bin_count.
@@ -174,97 +201,6 @@ def _compute_spatial_information(
                     info += probability * rate_ratio * np.log2(rate_ratio)
 
         information[cell_index] = info
-
-
-@njit(cache=True, nogil=True)
-def _compute_shuffled_source_indices(
-    filtered_sample_indices: NDArray[np.int32],
-    sample_count: int,
-    minimum_shift: int,
-    chunk_count: int,
-    seed: int,
-) -> NDArray[np.int32]:
-    """Maps each speed-filtered destination sample back to the source sample it pulls from under the shuffle.
-
-    Notes:
-        Encodes the circular shift and chunk permutation as an indirection array rather than materializing a full
-        shuffled fluorescence matrix.
-
-    Args:
-        filtered_sample_indices: Destination-sample indices retained by the speed filter with length
-            filtered_sample_count.
-        sample_count: Total number of samples in the original fluorescence time series.
-        minimum_shift: Minimum number of samples for the circular shift.
-        chunk_count: Number of chunks to split the shifted trace into for permutation.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Source-sample indices with length filtered_sample_count.
-    """
-    np.random.seed(seed)  # noqa: NPY002
-    shift_amount = np.random.randint(minimum_shift, sample_count - minimum_shift)  # noqa: NPY002
-    chunk_size = sample_count // chunk_count
-    permutation = np.random.permutation(chunk_count)  # noqa: NPY002
-
-    # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
-    output_chunk_starts = np.empty(chunk_count + 1, dtype=np.int32)
-    output_chunk_starts[0] = 0
-    for output_chunk_position in range(chunk_count):
-        source_chunk_index = permutation[output_chunk_position]
-        if source_chunk_index < chunk_count - 1:
-            chunk_size_local = chunk_size
-        else:
-            chunk_size_local = sample_count - source_chunk_index * chunk_size
-        output_chunk_starts[output_chunk_position + 1] = output_chunk_starts[output_chunk_position] + chunk_size_local
-
-    filtered_count = filtered_sample_indices.shape[0]
-    source_indices = np.empty(filtered_count, dtype=np.int32)
-
-    # Resolves each destination back through the permutation and shift to its source sample.
-    for filtered_index in range(filtered_count):
-        destination = filtered_sample_indices[filtered_index]
-        output_chunk_position = 0
-        while output_chunk_position + 1 < chunk_count and output_chunk_starts[output_chunk_position + 1] <= destination:
-            output_chunk_position += 1
-        offset_within_chunk = destination - output_chunk_starts[output_chunk_position]
-        source_chunk_index = permutation[output_chunk_position]
-        shifted_index = source_chunk_index * chunk_size + offset_within_chunk
-        source_indices[filtered_index] = (shifted_index - shift_amount) % sample_count
-
-    return source_indices
-
-
-@njit(cache=True, parallel=True, nogil=True)
-def _accumulate_shuffled_rate_maps(
-    fluorescence: NDArray[np.float32],
-    source_indices: NDArray[np.int32],
-    bin_indices: NDArray[np.int32],
-    sample_counts: NDArray[np.int32],
-    output: NDArray[np.float32],
-) -> None:
-    """Bins fluorescence into a per-cell rate map by gathering source samples through an indirection array.
-
-    Args:
-        fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
-        source_indices: Source-sample indices per filtered destination sample with length filtered_sample_count.
-        bin_indices: Spatial bin indices per filtered destination sample with length filtered_sample_count.
-        sample_counts: Per-bin occupancy counts with length bin_count.
-        output: Pre-allocated output rate maps with dimensions (cell_count, bin_count).
-    """
-    cell_count = fluorescence.shape[0]
-    filtered_count = source_indices.shape[0]
-    bin_count = output.shape[1]
-
-    for cell_index in prange(cell_count):
-        bin_sums = np.zeros(bin_count, dtype=np.float32)
-        for filtered_index in range(filtered_count):
-            bin_sums[bin_indices[filtered_index]] += fluorescence[cell_index, source_indices[filtered_index]]
-
-        for bin_index in range(bin_count):
-            if sample_counts[bin_index] > 0:
-                output[cell_index, bin_index] = bin_sums[bin_index] / sample_counts[bin_index]
-            else:
-                output[cell_index, bin_index] = 0.0
 
 
 @njit(cache=True, parallel=True)
@@ -315,20 +251,29 @@ def _compute_circular_center_of_mass(
             centers[cell_index] = -1.0
 
 
-def _apply_smooth_rate_maps_wrapped(
+def _apply_uniform_smoothing_wrapped(
     rate_maps: NDArray[np.float32],
-    sigma_bins: float,
+    smooth_size: int,
 ) -> NDArray[np.float32]:
-    """Applies Gaussian smoothing to rate maps with circular wrapping at track edges.
+    """Applies uniform-kernel (boxcar) smoothing to rate maps with circular wrapping at track edges.
+
+    Notes:
+        Uses the same uniform 3-bin moving average as the place-cell pipeline so the spatial-information rate map and
+        the place-field rate map are bit-identical when the bin sizes match.
+
+    References:
+        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- uniform smoothing
+          across spatial bins is the canonical choice in the Dombeck/Tank lineage.
 
     Args:
         rate_maps: Rate maps with dimensions (cell_count, bin_count).
-        sigma_bins: Standard deviation of the Gaussian kernel in bin units.
+        smooth_size: Width of the uniform kernel in bins.
 
     Returns:
         The smoothed rate maps with the same dimensions as input.
     """
-    return gaussian_filter1d(input=rate_maps, sigma=sigma_bins, axis=1, mode="wrap").astype(np.float32)
+    return uniform_filter1d(input=rate_maps, size=smooth_size, axis=1, mode="wrap").astype(np.float32)
 
 
 def _compute_negative_log_likelihood(
@@ -408,18 +353,44 @@ class RewardCellDetector:
 
     def __init__(
         self,
-        session_path: Path,
-        trial_type: str,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        run_session: RunSessionData,
+        *,
         configuration: RewardCellConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, position, speed, and trial data from the session feather and trial geometry data file
-        for reward cell detection.
+        """Constructs the detector from already-loaded session data.
 
         Notes:
-            The reward position is taken as the midpoint of the stimulus trigger zone defined in the session's
-            trial geometry data file, since water is delivered wherever in the lick-active zone the animal happens to
-            lick rather than at a single point.
+            Use :meth:`from_session_path` when starting from a session directory; this constructor takes the canonical
+            data dependency (a :class:`RunSessionData`) so the same loaded session can feed both detectors without
+            re-reading the feather. The reward position is taken as the midpoint of the stimulus trigger zone defined
+            in the session's trial geometry data file, since water is delivered wherever in the lick-active zone the
+            animal happens to lick rather than at a single point.
+
+        Args:
+            run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
+            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if
+                None.
+        """
+        self.fluorescence = run_session.fluorescence
+        self.position = run_session.position
+        self.speed = run_session.speed
+        self.trial_ids = run_session.trial_ids
+        self.track_length = run_session.geometry.trial_length_cm
+        self.reward_position = (
+            run_session.geometry.stimulus_trigger_zone_start_cm + run_session.geometry.stimulus_trigger_zone_end_cm
+        ) / 2.0
+        self.configuration = configuration if configuration is not None else RewardCellConfiguration()
+
+    @classmethod
+    def from_session_path(
+        cls,
+        session_path: Path,
+        trial_type: str,
+        *,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+        configuration: RewardCellConfiguration | None = None,
+    ) -> RewardCellDetector:
+        """Loads fluorescence, position, speed, and trial data from the session feather and constructs the detector.
 
         Args:
             session_path: Path to the session's dataset directory.
@@ -427,22 +398,18 @@ class RewardCellDetector:
                 geometry data file.
             fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
                 analysis input.
-            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if None.
+            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if
+                None.
+
+        Returns:
+            A constructed RewardCellDetector ready to call ``detect()`` on.
         """
-        session = assemble_run_session_data(
+        run_session = assemble_run_session_data(
             session_path=session_path,
             trial_type=trial_type,
             fluorescence_column=fluorescence_column,
         )
-        self.fluorescence = session.fluorescence
-        self.position = session.position
-        self.speed = session.speed
-        self.trial_ids = session.trial_ids
-        self.track_length = session.geometry.trial_length_cm
-        self.reward_position = (
-            session.geometry.stimulus_trigger_zone_start_cm + session.geometry.stimulus_trigger_zone_end_cm
-        ) / 2.0
-        self.configuration = configuration if configuration is not None else RewardCellConfiguration()
+        return cls(run_session=run_session, configuration=configuration)
 
     def detect(self) -> RewardCellResults:
         """Runs the full reward cell detection pipeline.
@@ -452,6 +419,14 @@ class RewardCellDetector:
             model to the significant neurons' center-of-mass distribution to identify excess field density near the
             reward zone. Classifies reward-proximal neurons and tests them for speed-activity correlation in the
             pre-reward window using trial-label permutation.
+
+        References:
+            - Gauthier & Tank (2018). A dedicated population for reward coding in the hippocampus. Neuron.
+              https://doi.org/10.1016/j.neuron.2018.06.008 -- canonical hippocampal reward-cell concept and the
+              uniform + Gaussian mixture-model framework for separating place- vs reward-anchored populations.
+            - Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal populations
+              and the compression of temporal sequences. Hippocampus. -- spatial information measure used for the
+              significance test.
 
         Returns:
             A RewardCellResults instance containing spatial modulation results, reward classification, mixture model
@@ -520,9 +495,9 @@ class RewardCellDetector:
         # Replaces NaN bins (unvisited) with zero for downstream computation.
         rate_maps = np.nan_to_num(rate_maps, nan=0.0)
 
-        # Applies Gaussian smoothing with circular wrapping at track edges.
-        sigma_bins = configuration.gaussian_sigma / configuration.bin_size
-        smoothed_maps = _apply_smooth_rate_maps_wrapped(rate_maps=rate_maps, sigma_bins=sigma_bins)
+        # Applies uniform-kernel smoothing with circular wrapping at track edges, matching the place-pipeline
+        # smoothing so the two flags operate on the same rate map.
+        smoothed_maps = _apply_uniform_smoothing_wrapped(rate_maps=rate_maps, smooth_size=configuration.smooth_size)
 
         # Computes spatial information for the observed data.
         # noinspection PyTypeChecker
@@ -539,7 +514,7 @@ class RewardCellDetector:
             speed_mask=speed_mask,
             bin_edges=bin_edges,
             occupancy=sample_counts,
-            sigma_bins=sigma_bins,
+            smooth_size=configuration.smooth_size,
             observed_information=observed_information,
         )
 
@@ -572,7 +547,7 @@ class RewardCellDetector:
         speed_mask: NDArray[np.bool_],
         bin_edges: NDArray[np.float32],
         occupancy: NDArray[np.int32],
-        sigma_bins: float,
+        smooth_size: int,
         observed_information: NDArray[np.float32],
     ) -> NDArray[np.float32]:
         """Computes p-values by comparing observed spatial information to a null distribution from shuffled data.
@@ -580,14 +555,20 @@ class RewardCellDetector:
         Notes:
             For each shuffle iteration, the fluorescence time series is circularly shifted by at least minimum_shift
             samples and then split into chunks that are randomly permuted. Only the speed-filtered
-            subset of fluorescence is shuffled and rebinned using the shared place_1d binning function.
+            subset of fluorescence is shuffled and rebinned using the shared indirection-array shuffle helpers
+            hoisted into ``analysis.utilities``.
+
+        References:
+            - Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal populations
+              and the compression of temporal sequences. Hippocampus.
+              https://doi.org/10.1002/(SICI)1098-1063(1996)6:2<149::AID-HIPO6>3.0.CO;2-K -- Skaggs spatial information.
 
         Args:
             filtered_position: Speed-filtered position values with length filtered_sample_count.
             speed_mask: Boolean mask indicating speed-filtered samples with length sample_count.
             bin_edges: Spatial bin edges with length bin_count + 1.
             occupancy: Per-bin occupancy sample counts with length bin_count.
-            sigma_bins: Gaussian smoothing kernel width in bin units.
+            smooth_size: Width of the uniform smoothing kernel in bins.
             observed_information: Observed spatial information values with length cell_count.
 
         Returns:
@@ -615,7 +596,7 @@ class RewardCellDetector:
         )
 
         for iteration in tqdm(range(configuration.shuffle_count), desc="Running shuffling", unit="iter"):
-            source_indices = _compute_shuffled_source_indices(
+            source_indices = compute_shuffle_source_indices(
                 filtered_sample_indices=filtered_sample_indices,
                 sample_count=sample_count,
                 minimum_shift=configuration.minimum_shift_samples,
@@ -623,7 +604,7 @@ class RewardCellDetector:
                 seed=iteration,
             )
 
-            _accumulate_shuffled_rate_maps(
+            accumulate_shuffled_rate_maps(
                 fluorescence=self.fluorescence,
                 source_indices=source_indices,
                 bin_indices=filtered_bin_indices,
@@ -631,7 +612,7 @@ class RewardCellDetector:
                 output=rate_maps,
             )
 
-            smoothed_shuffled = _apply_smooth_rate_maps_wrapped(rate_maps=rate_maps, sigma_bins=sigma_bins)
+            smoothed_shuffled = _apply_uniform_smoothing_wrapped(rate_maps=rate_maps, smooth_size=smooth_size)
 
             _compute_spatial_information(
                 rate_maps=smoothed_shuffled,

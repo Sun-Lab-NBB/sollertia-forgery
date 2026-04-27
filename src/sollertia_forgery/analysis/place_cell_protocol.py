@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING
+import warnings
 from dataclasses import field, replace, dataclass
 from concurrent.futures import ThreadPoolExecutor
 
@@ -15,7 +16,13 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 
 from ..forging import FluorescenceColumn
-from .utilities import assemble_run_session_data, bin_fluorescence_by_position
+from .utilities import (
+    RunSessionData,
+    assemble_run_session_data,
+    bin_fluorescence_by_position,
+    accumulate_shuffled_rate_maps,
+    compute_shuffle_source_indices,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -27,11 +34,21 @@ _NO_TRIAL_SENTINEL: int = 255
 """Sentinel trial id used by the acquisition pipeline to mark samples outside of any trial."""
 _WORKER_RESERVE: int = 4
 """Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
+_MINIMUM_TRIALS_FOR_STABILITY: int = 2
+"""Minimum trial count required to compute a per-cell split-half Pearson r for the stability shuffle."""
+_MINIMUM_VALID_BINS_FOR_PEARSON: int = 3
+"""Minimum number of pairwise-non-NaN bins required for a numerically stable per-cell Pearson r."""
 
 
 @dataclass(frozen=True, slots=True)
 class PlaceFieldDetectionConfiguration:
-    """Defines configuration parameters for Tank lab place field detection algorithm."""
+    """Defines configuration parameters for the place field detection algorithm.
+
+    Notes:
+        Defaults inherit from Dombeck et al. (2010) for the thresholding stage and from Climer et al. (2025) for the
+        shuffle and lap-coverage stages. See the per-method ``References:`` sections in :class:`PlaceFieldDetector`
+        for citations.
+    """
 
     minimum_speed: float = 5.0
     """Minimum speed threshold in cm/s for including timepoints in analysis."""
@@ -48,10 +65,23 @@ class PlaceFieldDetectionConfiguration:
     """Factor by which in-field activity must exceed out-of-field activity."""
     maximum_intensity_threshold: float = 0.1
     """Minimum peak intensity required for a valid place field."""
-    chunk_count: int = 100
-    """Number of temporal chunks used for shuffle-based validation."""
-    significance_threshold: float = 0.05
-    """P-value threshold for determining statistically significant place fields."""
+    minimum_lap_coverage: float = 0.33
+    """Minimum fraction of laps on which a candidate field must show in-field activity above its out-of-field
+    baseline. Climer et al. (2025) uses 1/3; the original Dombeck et al. (2010) value was 0.30."""
+    shuffle_minimum_chunk_count: int = 100
+    """Sets the minimum circular shift in the shuffle to ``total_samples / shuffle_minimum_chunk_count`` samples.
+    Used as the chunk-granularity floor when ``minimum_shift_seconds`` would either fall below one sample or exceed
+    the safe upper bound (``total_samples / 4``)."""
+    shuffle_repeat_count: int = 1000
+    """Number of shuffle iterations for significance testing. Climer et al. (2025) uses 1000; the original Dombeck
+    et al. (2010) protocol used the same."""
+    minimum_shift_seconds: float = 10.0
+    """Minimum circular shift expressed in seconds. Set above the GCaMP6 autocorrelation timescale (roughly 1.2-2 s)
+    so the null distribution is not contaminated by indicator decay. Climer et al. (2025) uses 15 s; Climer & Dombeck
+    (2021) uses 5 s."""
+    peak_percentile: float = 0.99
+    """Percentile of the per-cell shuffled peak distribution above which the observed peak rate is classified as
+    peak-significant. From Climer & Dombeck (2021) Peak method."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,48 +186,62 @@ class PlaceFields:
             ),
         )
 
-    def filter_cells(self, indices: NDArray[np.int32]) -> PlaceFields:
-        """Filters to keep only specified cells and returns a new PlaceFields object.
-
-        Args:
-            indices: Indices of cells to keep.
-
-        Returns:
-            A new PlaceFields object containing only the specified cells.
-        """
-        # Zeros out labels for cells that are not in the list of cells to keep on a fresh copy so the source instance
-        # remains immutable.
-        # noinspection PyTypeChecker
-        new_label_image: NDArray[np.int32] = self.label_image.copy()
-        # noinspection PyTypeChecker
-        all_indices: NDArray[np.int64] = np.arange(new_label_image.shape[0])
-        new_label_image[~np.isin(all_indices, indices), :] = 0
-        _renumber_labels(new_label_image)
-
-        return replace(
-            self,
-            label_image=new_label_image,
-            centers=_compute_centers_from_labels(
-                label_image=new_label_image,
-                binned_fluorescence=self.binned_fluorescence,
-                bin_size=self.bin_size,
-            ),
-        )
-
 
 class PlaceFieldDetector:
     """Detects, validates, and visualizes 1D place fields using thresholding and connected component analysis."""
 
     def __init__(
         self,
-        session_path: Path,
-        trial_type: str,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.SINGLE_DAY_SUBTRACTED,
+        run_session: RunSessionData,
+        *,
         bin_size: float = 5.0,
         configuration: PlaceFieldDetectionConfiguration | None = None,
     ) -> None:
-        """Loads fluorescence, position, speed, and trial data from the session feather and trial geometry data file
-        for place field detection.
+        """Constructs the detector from already-loaded session data.
+
+        Notes:
+            Use :meth:`from_session_path` when starting from a session directory; this constructor takes the canonical
+            data dependency (a :class:`RunSessionData`) so the same loaded session can feed multiple detectors without
+            re-reading the feather.
+
+        Args:
+            run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
+            bin_size: Size of spatial bins in centimeters.
+            configuration: Configuration parameters for place field detection. Uses defaults if None.
+        """
+        # noinspection PyTypeChecker
+        self.fluorescence: NDArray[np.float32] = run_session.fluorescence
+        # noinspection PyTypeChecker
+        self.position: NDArray[np.float32] = run_session.position
+        # noinspection PyTypeChecker
+        self.speed: NDArray[np.float32] = run_session.speed
+        # noinspection PyTypeChecker
+        self.trial_ids: NDArray[np.int32] = run_session.trial_ids
+        self.track_length = run_session.geometry.trial_length_cm
+        self.bin_size = bin_size
+        self.sampling_rate_hz = run_session.sampling_rate_hz
+        self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
+
+        # Caches the bin edges shared by `_run_detection` and `_bin_fluorescence_per_trial`.
+        # noinspection PyTypeChecker
+        self._bin_edges: NDArray[np.float32] = np.arange(0, self.track_length + bin_size, bin_size, dtype=np.float32)
+
+        # Caches shuffle-invariant arrays so each shuffle iteration only computes the indirection array and the
+        # rate-map accumulation, not the speed mask or bin assignments. Computed at init time because the
+        # configuration is stable for the lifetime of the detector.
+        self._build_shuffle_invariants()
+
+    @classmethod
+    def from_session_path(
+        cls,
+        session_path: Path,
+        trial_type: str,
+        *,
+        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+        bin_size: float = 5.0,
+        configuration: PlaceFieldDetectionConfiguration | None = None,
+    ) -> PlaceFieldDetector:
+        """Loads fluorescence, position, speed, and trial data from the session feather and constructs the detector.
 
         Args:
             session_path: Path to the session's dataset directory.
@@ -207,38 +251,115 @@ class PlaceFieldDetector:
                 analysis input.
             bin_size: Size of spatial bins in centimeters.
             configuration: Configuration parameters for place field detection. Uses defaults if None.
+
+        Returns:
+            A constructed PlaceFieldDetector ready to call ``detect()`` on.
         """
-        session = assemble_run_session_data(
+        run_session = assemble_run_session_data(
             session_path=session_path,
             trial_type=trial_type,
             fluorescence_column=fluorescence_column,
         )
-        # noinspection PyTypeChecker
-        self.fluorescence: NDArray[np.float32] = session.fluorescence
-        # noinspection PyTypeChecker
-        self.position: NDArray[np.float32] = session.position
-        # noinspection PyTypeChecker
-        self.speed: NDArray[np.float32] = session.speed
-        # noinspection PyTypeChecker
-        self.trial_ids: NDArray[np.int32] = session.trial_ids
-        self.track_length = session.geometry.trial_length_cm
-        self.bin_size = bin_size
-        self.configuration = configuration if configuration is not None else PlaceFieldDetectionConfiguration()
+        return cls(run_session=run_session, bin_size=bin_size, configuration=configuration)
 
-        # Caches the bin edges shared by `_run_detection` and `_bin_fluorescence_per_trial`.
-        # noinspection PyTypeChecker
-        self._bin_edges: NDArray[np.float32] = np.arange(0, self.track_length + bin_size, bin_size, dtype=np.float32)
+    def _build_shuffle_invariants(self) -> None:
+        """Builds the shuffle-invariant arrays (speed-filtered sample indices, bin indices, occupancy, minimum shift)
+        and caches them on self.
 
-    def detect(self, *, run_shuffle: bool = False) -> PlaceFields:
-        """Detects place fields from the original fluorescence and position data.
+        Notes:
+            Called once from ``__init__``. Replaces NaN speed values with 0 so they fall below the minimum-speed gate
+            without raising in comparisons. Resolves the minimum shift the same way ``_shuffle`` does:
+            seconds-based when in range, falling back to chunk-granularity floor on degenerate short sessions.
+        """
+        # noinspection PyTypeChecker
+        speed_safe: NDArray[np.float32] = self.speed.copy()
+        speed_safe[np.isnan(speed_safe)] = 0
+        # noinspection PyTypeChecker
+        speed_mask: NDArray[np.bool_] = speed_safe > self.configuration.minimum_speed
+
+        bin_count = len(self._bin_edges) - 1
+        # noinspection PyTypeChecker
+        self._shuffle_filtered_sample_indices: NDArray[np.int32] = np.nonzero(speed_mask)[0].astype(np.int32)
+        # noinspection PyTypeChecker
+        filtered_position: NDArray[np.float32] = self.position[speed_mask]
+        # noinspection PyTypeChecker
+        self._shuffle_filtered_bin_indices: NDArray[np.int32] = np.clip(
+            np.searchsorted(self._bin_edges, filtered_position, side="right") - 1, 0, bin_count - 1
+        ).astype(np.int32)
+        # noinspection PyTypeChecker
+        self._shuffle_sample_counts: NDArray[np.int32] = np.bincount(
+            self._shuffle_filtered_bin_indices, minlength=bin_count
+        ).astype(np.int32)
+
+        total_samples = int(self.fluorescence.shape[1])
+        seconds_based_shift = int(self.sampling_rate_hz * self.configuration.minimum_shift_seconds)
+        chunk_based_shift = total_samples // self.configuration.shuffle_minimum_chunk_count
+        upper_bound = total_samples // 4
+        self._shuffle_minimum_shift: int = (
+            seconds_based_shift if 0 < seconds_based_shift <= upper_bound else max(chunk_based_shift, 1)
+        )
+        self._shuffle_total_samples: int = total_samples
+        self._shuffle_bin_count: int = bin_count
+
+    def _compute_shuffled_smoothed_rate_map(self, seed: int) -> NDArray[np.float32]:
+        """Returns one smoothed shuffled rate map produced by the indirection-array shuffle.
+
+        Notes:
+            Uses ``compute_shuffle_source_indices`` with ``chunk_count=1`` for a pure circular shift (matches the
+            historical place-pipeline behaviour). The numba kernels are ``nogil=True`` so this method is safe to
+            call concurrently from worker threads.
 
         Args:
-            run_shuffle: Determines whether to run shuffle significance testing and filter results to only include
-                cells with statistically significant place fields.
+            seed: Random seed used by ``compute_shuffle_source_indices``.
+
+        Returns:
+            Smoothed shuffled rate map with dimensions (cell_count, bin_count).
+        """
+        # noinspection PyTypeChecker
+        source_indices: NDArray[np.int32] = compute_shuffle_source_indices(
+            filtered_sample_indices=self._shuffle_filtered_sample_indices,
+            sample_count=self._shuffle_total_samples,
+            minimum_shift=self._shuffle_minimum_shift,
+            chunk_count=1,
+            seed=seed,
+        )
+        # noinspection PyTypeChecker
+        rate_map: NDArray[np.float32] = np.empty(
+            (self.fluorescence.shape[0], self._shuffle_bin_count), dtype=np.float32
+        )
+        accumulate_shuffled_rate_maps(
+            fluorescence=self.fluorescence,
+            source_indices=source_indices,
+            bin_indices=self._shuffle_filtered_bin_indices,
+            sample_counts=self._shuffle_sample_counts,
+            output=rate_map,
+        )
+        # noinspection PyTypeChecker
+        smoothed: NDArray[np.float32] = uniform_filter1d(
+            input=rate_map, size=self.configuration.smooth_size, axis=1, mode="wrap"
+        ).astype(np.float32)
+        return smoothed
+
+    def detect(self) -> PlaceFields:
+        """Detects place fields from the original fluorescence and position data.
+
+        Notes:
+            Pipeline ordering: threshold-based detection -> per-trial binning -> lap-coverage filter. Significance
+            is reported by the multi-criterion shuffles in :meth:`compute_multi_criterion_significance` (Peak and
+            Stability methods, Climer & Dombeck 2021); the legacy combined "did a place field appear under shuffle?"
+            filter is intentionally not applied here so downstream consumers can decide on a population using each
+            criterion's per-cell p-value rather than a single conflated cutoff.
+
+        References:
+            - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
+              environments. Nature. https://doi.org/10.1038/s41586-025-09245-y -- lap-coverage filter.
+            - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+              resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- canonical
+              place-field detection algorithm (thresholding, in-/out-of-field ratio, peak intensity, lap coverage).
 
         Returns:
             A PlaceFields instance containing the labeled regions, pooled and per-lap binned fluorescence, and centers
-            of detected place fields. If run_shuffle is True, only significant cells are included.
+            of detected place fields.
         """
         # Bins fluorescence by spatial position, applies thresholding, and detects connected regions as place fields.
         place_fields = self._run_detection(
@@ -247,69 +368,185 @@ class PlaceFieldDetector:
             speed=self.speed,
         )
 
-        # Filters to only include cells with statistically significant place fields based on shuffle testing.
-        if run_shuffle:
-            significant_cells, _ = self.compute_shuffle_significance(repeat_count=self.configuration.chunk_count)
-            place_fields = place_fields.filter_cells(indices=significant_cells)
-
         # Computes per-lap binned fluorescence using the same speed filter and smoothing as the pooled computation.
-        return replace(
-            place_fields,
-            binned_fluorescence_per_trial=self._bin_fluorescence_per_trial(fluorescence=self.fluorescence),
+        # noinspection PyTypeChecker
+        per_trial_binned: NDArray[np.float32] = self._bin_fluorescence_per_trial(fluorescence=self.fluorescence)
+
+        # Drops fields with insufficient lap coverage on the per-trial binned matrix, which is independent of the
+        # shuffle nulls used by the multi-criterion classifier.
+        place_fields = _lap_coverage_filter(
+            place_fields=place_fields,
+            binned_fluorescence_per_trial=per_trial_binned,
+            minimum_lap_coverage=self.configuration.minimum_lap_coverage,
         )
 
-    def compute_shuffle_significance(
+        return replace(
+            place_fields,
+            binned_fluorescence_per_trial=per_trial_binned,
+        )
+
+    def compute_multi_criterion_significance(
         self,
-        repeat_count: int = 100,
+        observed_pooled_rate_map: NDArray[np.float32],
+        observed_per_trial_rate_map: NDArray[np.float32],
+        observed_split_half_r: NDArray[np.float32],
+        repeat_count: int = 1000,
+        peak_percentile: float = 0.99,
+        stability_percentile: float = 0.95,
         worker_count: int = -1,
-    ) -> tuple[NDArray[np.int32], NDArray[np.float32]]:
-        """Validates place fields by comparing observed fields against shuffled data via per-cell p-values.
+    ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
+        """Computes the per-cell IS_STABLE and IS_PEAK_SIGNIFICANT flags via per-cell shuffle distributions, and
+        returns the corresponding per-cell p-values.
+
+        Notes:
+            The peak null uses the same time-domain circular-shift shuffle as
+            :meth:`_compute_shuffled_smoothed_rate_map`, captures the per-cell peak of each shuffled smoothed rate
+            map, and classifies cells whose observed peak
+            exceeds the per-cell ``peak_percentile`` of the shuffled distribution. The stability null is a per-trial
+            shuffle that circularly shifts each trial's rate map by an independent random bin offset and recomputes
+            the per-cell split-half Pearson r; cells whose observed r exceeds the per-cell ``stability_percentile``
+            of the shuffled distribution are classified as stable. The p-value for each measure is the fraction of
+            shuffles whose statistic is greater than or equal to the observed value (NaN where the observed statistic
+            is NaN or the shuffled distribution is empty).
+
+        References:
+            - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of
+              cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Peak method (99th
+              percentile cutoff against shuffled per-cell peaks) and Stability method (95th percentile cutoff).
 
         Args:
-            repeat_count: Number of shuffles to perform.
+            observed_pooled_rate_map: Observed pooled rate map with dimensions (cell_count, bin_count).
+            observed_per_trial_rate_map: Observed per-trial rate map with dimensions (cell_count, trial_count,
+                bin_count). May be empty for sessions with too few trials; the stability flag falls back to all-False
+                and the stability p-values to all-NaN.
+            observed_split_half_r: Observed per-cell split-half Pearson r with length cell_count. NaN entries are
+                classified as not-stable and receive a NaN p-value.
+            repeat_count: Number of shuffle iterations.
+            peak_percentile: Percentile cutoff (0-1) for the peak-method classifier; default 0.99.
+            stability_percentile: Percentile cutoff (0-1) for the stability classifier; default 0.95.
             worker_count: Number of parallel workers for shuffle iterations. If -1, uses all CPU cores minus a
                 small reserve.
 
         Returns:
-            A tuple containing the significant cell indices and p-values arrays.
+            A tuple of (is_stable, is_peak_significant, stability_p_values, peak_p_values). All four arrays have
+            length cell_count; the booleans share the percentile cutoff, and the p-values report the per-cell rank
+            of the observed value within its shuffled distribution.
         """
-        # Replaces NaN speed values with 0 so they fall below the minimum-speed gate without raising in comparisons.
-        # noinspection PyTypeChecker
-        speed: NDArray[np.float32] = self.speed.copy()
-        speed[np.isnan(speed)] = 0
-
-        # Detects place fields in the original dataset.
-        observed = self._run_detection(
-            fluorescence=self.fluorescence,
-            position=self.position,
-            speed=speed,
-        ).has_place_field
+        cell_count = observed_pooled_rate_map.shape[0]
 
         if worker_count == -1:
             worker_count = max(1, (os.cpu_count() or 1) - _WORKER_RESERVE)
 
-        # Spawns a thread for each shuffle iteration to parallelize detection.
+        # Runs the time-domain shuffles in parallel; each iteration returns the per-cell peak of its shuffled
+        # smoothed rate map via the indirection-array shuffle.
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                executor.submit(self._shuffle_iteration_has_field, self.fluorescence, speed, iteration)
-                for iteration in range(repeat_count)
-            ]
-            shuffled_results = [future.result() for future in tqdm(futures, desc="Shuffle significance", unit="iter")]
+            futures = [executor.submit(self._shuffle_iteration_peak, iteration) for iteration in range(repeat_count)]
+            shuffled_peaks_list = [future.result() for future in tqdm(futures, desc="Peak shuffle", unit="iter")]
+        # noinspection PyTypeChecker
+        shuffled_peaks: NDArray[np.float32] = np.vstack(shuffled_peaks_list).astype(np.float32)
 
         # noinspection PyTypeChecker
-        stacked_results: NDArray[np.bool_] = np.vstack(shuffled_results).T
-
-        # Computes p-values as the proportion of shuffles where a place field was detected by chance.
+        observed_peaks: NDArray[np.float32] = np.nanmax(observed_pooled_rate_map, axis=1)
+        with np.errstate(invalid="ignore"):
+            # noinspection PyTypeChecker
+            peak_thresholds: NDArray[np.float32] = np.nanquantile(shuffled_peaks, peak_percentile, axis=0).astype(
+                np.float32
+            )
         # noinspection PyTypeChecker
-        p_values: NDArray[np.float32] = (np.sum(stacked_results, axis=1) / stacked_results.shape[1]).astype(np.float32)
+        is_peak_significant: NDArray[np.bool_] = observed_peaks > peak_thresholds
+        peak_p_values = _per_cell_p_values(observed=observed_peaks, shuffled=shuffled_peaks)
 
-        # Selects cells with an observed place field and a p-value below the significance threshold.
+        # Runs the per-trial stability shuffle. Generates a null by circularly shifting each trial's rate map by
+        # a random bin offset (independent per trial), then recomputes split-half r per cell.
         # noinspection PyTypeChecker
-        significant_cells: NDArray[np.int32] = np.flatnonzero(
-            observed & (p_values < self.configuration.significance_threshold)
-        ).astype(np.int32)
+        is_stable: NDArray[np.bool_] = np.zeros(cell_count, dtype=np.bool_)
+        # noinspection PyTypeChecker
+        stability_p_values: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+        if (
+            observed_per_trial_rate_map.size > 0
+            and observed_per_trial_rate_map.shape[1] >= _MINIMUM_TRIALS_FOR_STABILITY
+        ):
+            stability_thresholds, stability_p_values = self._stability_shuffle_threshold(
+                per_trial_rate_map=observed_per_trial_rate_map,
+                repeat_count=repeat_count,
+                stability_percentile=stability_percentile,
+                observed_split_half_r=observed_split_half_r,
+            )
+            # noinspection PyTypeChecker
+            valid_observed: NDArray[np.bool_] = ~np.isnan(observed_split_half_r)
+            is_stable = valid_observed & (observed_split_half_r > stability_thresholds)
 
-        return significant_cells, p_values
+        return is_stable, is_peak_significant, stability_p_values, peak_p_values
+
+    def _shuffle_iteration_peak(self, iteration: int) -> NDArray[np.float32]:
+        """Returns the per-cell peak of the smoothed shuffled rate map for one indirection-array shuffle iteration."""
+        smoothed = self._compute_shuffled_smoothed_rate_map(seed=iteration)
+        # noinspection PyTypeChecker
+        return np.nanmax(smoothed, axis=1).astype(np.float32)
+
+    def _stability_shuffle_threshold(
+        self,
+        per_trial_rate_map: NDArray[np.float32],
+        repeat_count: int,
+        stability_percentile: float,
+        observed_split_half_r: NDArray[np.float32],
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """Computes the per-cell stability threshold and per-cell stability p-value from a per-trial circular-shift
+        null distribution.
+
+        Notes:
+            Each shuffle iteration shifts every trial's rate map by an independent random bin offset, then computes
+            the per-cell split-half Pearson r between the even-trial and odd-trial means of the shuffled per-trial
+            matrix. Returns the per-cell ``stability_percentile`` quantile of the shuffle distribution alongside the
+            per-cell p-value (fraction of shuffles whose r is greater than or equal to the observed r).
+
+        Args:
+            per_trial_rate_map: Per-trial rate map with dimensions (cell_count, trial_count, bin_count).
+            repeat_count: Number of shuffle iterations.
+            stability_percentile: Percentile cutoff (0-1).
+            observed_split_half_r: Observed per-cell split-half Pearson r with length cell_count. Used to compute the
+                per-cell p-value against the shuffled distribution.
+
+        Returns:
+            A tuple of (thresholds, p_values), each with length cell_count.
+        """
+        cell_count, trial_count, bin_count = per_trial_rate_map.shape
+        half_index = trial_count // 2
+        # noinspection PyTypeChecker
+        shuffled_split_half: NDArray[np.float32] = np.full((repeat_count, cell_count), np.nan, dtype=np.float32)
+
+        for iteration in range(repeat_count):
+            generator = np.random.default_rng(iteration)
+            # numpy's Generator.integers stubs pick the scalar overload when ``size`` is bound to an int variable,
+            # even though the runtime call returns an ndarray; the cast realigns the static type with reality.
+            # noinspection PyTypeChecker
+            shifts: NDArray[np.int32] = np.asarray(
+                generator.integers(low=0, high=bin_count, size=trial_count, dtype=np.int32),
+                dtype=np.int32,
+            )
+            # noinspection PyTypeChecker
+            shuffled_per_trial: NDArray[np.float32] = np.empty_like(per_trial_rate_map)
+            for trial_index in range(trial_count):
+                shuffled_per_trial[:, trial_index, :] = np.roll(
+                    per_trial_rate_map[:, trial_index, :], shift=int(shifts[trial_index]), axis=1
+                )
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+                with np.errstate(invalid="ignore"):
+                    # noinspection PyTypeChecker
+                    first_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, :half_index, :], axis=1)
+                    # noinspection PyTypeChecker
+                    second_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, half_index:, :], axis=1)
+            shuffled_split_half[iteration] = _per_cell_pearson_safe(a=first_map, b=second_map)
+
+        with np.errstate(invalid="ignore"):
+            # noinspection PyTypeChecker
+            thresholds: NDArray[np.float32] = np.nanquantile(shuffled_split_half, stability_percentile, axis=0).astype(
+                np.float32
+            )
+        p_values = _per_cell_p_values(observed=observed_split_half_r, shuffled=shuffled_split_half)
+        return thresholds, p_values
 
     def _bin_fluorescence_per_trial(self, fluorescence: NDArray[np.float32]) -> NDArray[np.float32]:
         """Bins dF/F0 fluorescence per lap into a (cell_count, trial_count, bin_count) array.
@@ -379,8 +616,8 @@ class PlaceFieldDetector:
         """Runs the place field detection pipeline on dF/F0 normalized fluorescence data.
 
         Notes:
-            Expects fluorescence data that has already been converted to dF/F0. This method is shared by both the
-            public detect() method for original data and compute_shuffle_significance() for shuffled data.
+            Speed-filters, bins by position, smooths, then hands off to :meth:`_detect_from_smoothed_rate_map` for
+            the threshold + label + outside-field + peak filter steps.
 
         Args:
             fluorescence: Pre-normalized dF/F0 fluorescence data with dimensions (cell_count, timepoint_count).
@@ -411,6 +648,27 @@ class PlaceFieldDetector:
             input=raw_binned_fluorescence, size=self.configuration.smooth_size, axis=1, mode="wrap"
         ).astype(np.float32)
 
+        return self._detect_from_smoothed_rate_map(binned_fluorescence=binned_fluorescence)
+
+    def _detect_from_smoothed_rate_map(self, binned_fluorescence: NDArray[np.float32]) -> PlaceFields:
+        """Runs the threshold + label + outside-field + peak filter steps on a precomputed smoothed rate map.
+
+        Notes:
+            Called from :meth:`_run_detection` after the speed-mask + bin-by-position + smooth steps. Does not apply
+            the lap-coverage filter (which requires per-trial binning); :meth:`detect` applies it after this method
+            returns.
+
+        References:
+            - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+              resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- the threshold,
+              connected-component, in-/out-of-field ratio, and peak intensity criteria.
+
+        Args:
+            binned_fluorescence: Smoothed per-cell rate map with dimensions (cell_count, bin_count).
+
+        Returns:
+            A PlaceFields instance containing the labeled regions, the input rate map, and centers.
+        """
         # Creates a binary mask by thresholding bins that exceed the baseline-to-max activity level.
         thresholded_fluorescence = _compute_quantile_max_threshold(
             fluorescence=binned_fluorescence,
@@ -439,42 +697,6 @@ class PlaceFieldDetector:
         ).astype(np.int32)
 
         return place_fields.remove_fields(indices=invalid_indices)
-
-    def _shuffle_iteration_has_field(
-        self,
-        fluorescence: NDArray[np.float32],
-        speed: NDArray[np.float32],
-        iteration: int,
-    ) -> NDArray[np.bool_]:
-        """Runs detection on a single shuffled fluorescence trace and returns the per-cell place field flag."""
-        return self._run_detection(
-            fluorescence=self._shuffle(data=fluorescence, iteration=iteration),
-            position=self.position,
-            speed=speed,
-        ).has_place_field
-
-    def _shuffle(self, data: NDArray[np.float32], iteration: int) -> NDArray[np.float32]:
-        """Shuffles fluorescence traces by circular time-shifting to disrupt spatial tuning for significance testing.
-
-        Args:
-            data: Fluorescence data to be shuffled with dimensions (cell_count, timepoint_count).
-            iteration: Shuffle iteration used as random seed.
-
-        Returns:
-            The shuffled fluorescence data with the same dimensions as input.
-        """
-        random_generator = np.random.default_rng(iteration)
-
-        # Computes the minimum shift as a fraction of total samples based on chunk_count configuration.
-        total_samples = data.shape[1]
-        minimum_shift = total_samples // self.configuration.chunk_count
-
-        # Generates a random shift amount that ensures at least minimum_shift displacement in either direction.
-        shift_amount = random_generator.integers(minimum_shift, total_samples - minimum_shift)
-
-        # Applies circular shift along the time axis to disrupt position-fluorescence correlations.
-        # noinspection PyTypeChecker
-        return np.roll(data, shift=shift_amount, axis=1)
 
 
 @njit(cache=True)
@@ -788,6 +1010,17 @@ def _compute_quantile_max_threshold(
 ) -> NDArray[np.bool_]:
     """Thresholds binned fluorescence using a fractional difference between baseline quantile and peak activity.
 
+    Notes:
+        Implements Dombeck's "25% of (peak - baseline)" criterion exactly: per cell, baseline is the mean of bins at
+        or below the ``base_quantile``-th percentile, and the threshold is ``baseline + threshold_factor *
+        (peak - baseline)``.
+
+    References:
+        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "Potential place
+          fields were first identified as contiguous regions of this plot in which all of the points were greater
+          than 25% of the difference between the peak deltaF/F value and the baseline".
+
     Args:
         fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
         base_quantile: Quantile of the per-cell fluorescence distribution used as the baseline reference.
@@ -916,12 +1149,188 @@ def _compute_circular_connected_place_fields(
     )
 
 
+@njit(cache=True)
+def _per_cell_pearson_safe(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
+
+    Notes:
+        Mirrors :func:`sollertia_forgery.analysis.cell_analysis._per_cell_pearson` but compiled with numba so it runs
+        without GIL contention inside the stability shuffle loop. Returns NaN for cells with fewer than three
+        pairwise-valid bins or zero variance in either half.
+
+    Args:
+        a: First matrix with dimensions (cell_count, bin_count).
+        b: Second matrix with dimensions (cell_count, bin_count).
+
+    Returns:
+        Per-cell Pearson r with length cell_count.
+    """
+    cell_count = a.shape[0]
+    bin_count = a.shape[1]
+    out = np.full(cell_count, np.nan, dtype=np.float32)
+    for cell_index in range(cell_count):
+        valid_count = 0
+        sum_a = 0.0
+        sum_b = 0.0
+        for bin_index in range(bin_count):
+            value_a = a[cell_index, bin_index]
+            value_b = b[cell_index, bin_index]
+            if not np.isnan(value_a) and not np.isnan(value_b):
+                valid_count += 1
+                sum_a += value_a
+                sum_b += value_b
+        if valid_count < _MINIMUM_VALID_BINS_FOR_PEARSON:
+            continue
+        mean_a = sum_a / valid_count
+        mean_b = sum_b / valid_count
+
+        var_a = 0.0
+        var_b = 0.0
+        cov = 0.0
+        for bin_index in range(bin_count):
+            value_a = a[cell_index, bin_index]
+            value_b = b[cell_index, bin_index]
+            if not np.isnan(value_a) and not np.isnan(value_b):
+                diff_a = value_a - mean_a
+                diff_b = value_b - mean_b
+                var_a += diff_a * diff_a
+                var_b += diff_b * diff_b
+                cov += diff_a * diff_b
+        if var_a <= 0.0 or var_b <= 0.0:
+            continue
+        out[cell_index] = np.float32(cov / np.sqrt(var_a * var_b))
+    return out
+
+
+def _per_cell_p_values(observed: NDArray[np.float32], shuffled: NDArray[np.float32]) -> NDArray[np.float32]:
+    """Computes per-cell p-values as the fraction of shuffles whose statistic exceeds or equals the observed value.
+
+    Notes:
+        Returns NaN for cells whose observed value is NaN or whose shuffled column contains no finite entries. NaN
+        entries inside the shuffled distribution are excluded from the denominator so that fragmented per-trial
+        shuffles (e.g., on cells with frequent all-NaN trial halves) do not bias the p-value toward zero.
+
+    Args:
+        observed: Per-cell observed values with length cell_count.
+        shuffled: Per-shuffle, per-cell values with dimensions (repeat_count, cell_count).
+
+    Returns:
+        Per-cell p-values with length cell_count.
+    """
+    cell_count = int(observed.shape[0])
+    # noinspection PyTypeChecker
+    p_values: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    if shuffled.shape[1] != cell_count or shuffled.shape[0] == 0:
+        return p_values
+    for cell_index in range(cell_count):
+        observed_value = float(observed[cell_index])
+        if np.isnan(observed_value):
+            continue
+        cell_shuffled = shuffled[:, cell_index]
+        # noinspection PyTypeChecker
+        valid_mask: NDArray[np.bool_] = ~np.isnan(cell_shuffled)
+        valid_count = int(np.sum(valid_mask))
+        if valid_count == 0:
+            continue
+        hit_count = int(np.sum(cell_shuffled[valid_mask] >= observed_value))
+        p_values[cell_index] = np.float32(hit_count / valid_count)
+    return p_values
+
+
+def _lap_coverage_filter(
+    place_fields: PlaceFields,
+    binned_fluorescence_per_trial: NDArray[np.float32],
+    minimum_lap_coverage: float = 0.33,
+) -> PlaceFields:
+    """Filters place fields by requiring per-lap in-field activity to exceed the cell's out-of-field baseline on at
+    least ``minimum_lap_coverage`` of laps with valid in-field samples.
+
+    Notes:
+        Computes the per-cell out-of-field baseline from the pooled rate map (matching the convention in
+        :func:`_outside_field_threshold`). For each detected field, walks every lap, computes the mean in-field
+        fluorescence for that lap from the per-trial binned matrix, and counts laps where that mean exceeds the
+        baseline. Laps where every in-field bin is NaN (no samples landed in the field that lap) are excluded from
+        both the numerator and the denominator. Fields are dropped when the resulting coverage fraction is below
+        ``minimum_lap_coverage``.
+
+    References:
+        - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory environments.
+          Nature. https://doi.org/10.1038/s41586-025-09245-y -- "at least one significant transient during running on
+          at least 1/3 of the laps".
+        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "Significant calcium
+          transients must be present >30% of the time the mouse spent in the place field".
+
+    Args:
+        place_fields: PlaceFields object with previously detected fields.
+        binned_fluorescence_per_trial: Per-lap binned fluorescence with dimensions (cell_count, trial_count,
+            bin_count). NaN-filled bins/laps with no valid speed-filtered samples are treated as missing.
+        minimum_lap_coverage: Minimum fraction of laps on which in-field activity must exceed the out-of-field
+            baseline.
+
+    Returns:
+        The filtered PlaceFields object.
+    """
+    if binned_fluorescence_per_trial.size == 0:
+        return place_fields
+
+    label_image = place_fields.label_image
+    region_count = int(np.max(label_image)) if label_image.size > 0 else 0
+    if region_count == 0:
+        return place_fields
+
+    # Recomputes the per-cell out-of-field baseline; matches _outside_field_threshold so coverage and ratio filters
+    # share the same reference value. Cells whose every bin is labeled as a place field, and trials whose every
+    # in-field bin is NaN, both produce empty slices for nanmean; the resulting NaNs are handled downstream via the
+    # valid_lap_mask, but nanmean still emits "Mean of empty slice" for those rows. The catch_warnings block below
+    # silences only that specific message so unrelated RuntimeWarnings continue to surface.
+    # noinspection PyTypeChecker
+    outside_image: NDArray[np.float32] = place_fields.binned_fluorescence.copy()
+    outside_image[label_image != 0] = np.nan
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+        # noinspection PyTypeChecker
+        outside_values: NDArray[np.float32] = np.nanmean(outside_image, axis=1)
+
+        invalid_regions: list[int] = []
+        cell_ids = place_fields.cell_id
+        for region_index in range(region_count):
+            label = region_index + 1
+            cell_index = int(cell_ids[region_index])
+            # noinspection PyTypeChecker
+            in_field_bin_mask: NDArray[np.bool_] = label_image[cell_index] == label
+            # noinspection PyTypeChecker
+            per_trial_in_field: NDArray[np.float32] = binned_fluorescence_per_trial[cell_index][:, in_field_bin_mask]
+            # noinspection PyTypeChecker
+            in_field_means: NDArray[np.float32] = np.nanmean(per_trial_in_field, axis=1)
+            # noinspection PyTypeChecker
+            valid_lap_mask: NDArray[np.bool_] = ~np.isnan(in_field_means)
+            valid_lap_count = int(np.sum(valid_lap_mask))
+            if valid_lap_count == 0:
+                invalid_regions.append(region_index)
+                continue
+            active_lap_count = int(np.sum(in_field_means[valid_lap_mask] > outside_values[cell_index]))
+            if active_lap_count / valid_lap_count < minimum_lap_coverage:
+                invalid_regions.append(region_index)
+
+    if not invalid_regions:
+        return place_fields
+    # noinspection PyTypeChecker
+    return place_fields.remove_fields(indices=np.asarray(invalid_regions, dtype=np.int32))
+
+
 def _outside_field_threshold(place_fields: PlaceFields, threshold_factor: float = 3.0) -> PlaceFields:
     """Filters place fields by requiring in-field activity to exceed out-of-field baseline by a threshold factor.
 
-    Removes false positives by requiring that detected place fields have significantly higher activity than the
-    baseline outside the field. In cases where a cell has multiple fields, both fields are excluded from the
-    outside field calculation.
+    Notes:
+        Removes false positives by requiring that detected place fields have significantly higher activity than the
+        baseline outside the field. In cases where a cell has multiple fields, both fields are excluded from the
+        outside field calculation.
+
+    References:
+        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
+          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "The mean in field
+          deltaF/F value must be >3 times the mean out of field deltaF/F value".
 
     Args:
         place_fields: PlaceFields object with previously detected place fields.
