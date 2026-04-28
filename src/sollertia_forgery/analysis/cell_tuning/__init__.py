@@ -1,25 +1,7 @@
-"""Provides cell analysis pipelines for place field, reward cell, SCE detection, and bleaching."""
+"""Provides cell-tuning pipelines for place fields, reward cells, SCEs, and longitudinal shifts."""
 
-from .utilities import (
-    RunSessionData,
-    resolve_display_units,
-    assemble_run_session_data,
-    bin_fluorescence_by_position,
-    compute_within_trial_position,
-)
-from .bleaching import (
-    BleachingColumn,
-    BleachingReport,
-    BleachingSummary,
-    ExponentialDecayFit,
-    BleachingConfiguration,
-    run_bleaching_analysis,
-    plot_dataset_baseline_trend,
-)
-from .cell_tuning import (
-    SCEResult,
-    SCEDetector,
-    SCEDetectionConfiguration,
+from .sce_protocol import SCEResult, SCEDetector, SCEDetectionConfiguration
+from .cell_analysis import (
     SCEPeriodColumn,
     CellAnalysisColumn,
     CellAnalysisReport,
@@ -30,16 +12,16 @@ from .cell_tuning import (
     evaluate_and_save_cell_analysis,
     plot_dataset_place_cell_fraction,
     plot_dataset_reward_cell_fraction,
-    PlaceFields,
-    PlaceFieldDetector,
-    PlaceFieldDetectionConfiguration,
-    RewardCellResults,
-    RewardCellDetector,
-    RewardCellConfiguration,
+)
+from .place_cell_protocol import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
+from .reward_cell_protocol import RewardCellResults, RewardCellDetector, RewardCellConfiguration
+from .reward_relative_analysis import (
     RewardRelativeColumn,
     RewardRelativeReport,
     RewardRelativeSummary,
     RewardRelativeConfiguration,
+)
+from .longitudinal_reward_shift import (
     LongitudinalRewardShiftColumn,
     LongitudinalRewardShiftReport,
     LongitudinalRewardShiftSummary,
@@ -47,15 +29,10 @@ from .cell_tuning import (
 )
 
 __all__ = [
-    "BleachingColumn",
-    "BleachingConfiguration",
-    "BleachingReport",
-    "BleachingSummary",
     "CellAnalysisColumn",
     "CellAnalysisConfiguration",
     "CellAnalysisReport",
     "CellAnalysisSummary",
-    "ExponentialDecayFit",
     "LongitudinalRewardShiftColumn",
     "LongitudinalRewardShiftConfiguration",
     "LongitudinalRewardShiftReport",
@@ -70,20 +47,13 @@ __all__ = [
     "RewardRelativeConfiguration",
     "RewardRelativeReport",
     "RewardRelativeSummary",
-    "RunSessionData",
     "SCEDetectionConfiguration",
     "SCEDetector",
     "SCEPeriodColumn",
     "SCEResult",
-    "assemble_run_session_data",
-    "bin_fluorescence_by_position",
-    "compute_within_trial_position",
     "evaluate_and_save_cell_analysis",
-    "plot_dataset_baseline_trend",
     "plot_dataset_cell_count",
     "plot_dataset_place_cell_fraction",
     "plot_dataset_reward_cell_fraction",
     "plot_dataset_sce_rate",
-    "resolve_display_units",
-    "run_bleaching_analysis",
 ]

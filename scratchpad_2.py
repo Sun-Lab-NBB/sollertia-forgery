@@ -52,8 +52,8 @@ report.plot_speed_and_activity_by_position(session=session).savefig(
 report.plot_per_trial_activity(session=session, trial_type=trial_type).savefig(
     dataset_root / f"{file_prefix}_per_trial_activity.png", bbox_inches="tight"
 )
-report.plot_sce_rest_run_rest_sequence(session=session).savefig(
-    dataset_root / f"{file_prefix}_sce_rest_run_rest_sequence.png", bbox_inches="tight"
+report.plot_sce_cells_across_periods(session=session).savefig(
+    dataset_root / f"{file_prefix}_sce_cells_across_periods.png", bbox_inches="tight"
 )
 plt.close("all")
 

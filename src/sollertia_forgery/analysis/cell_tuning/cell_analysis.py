@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import numpy as np
 import polars as pl
-from scipy.stats import chi2
+from scipy.stats import chi2, fisher_exact
 from scipy.signal import savgol_filter
 from threadpoolctl import threadpool_limits
 from scipy.sparse.linalg import LinearOperator, eigsh, ArpackNoConvergence
@@ -29,15 +29,15 @@ import matplotlib.pyplot as plt
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
-from ..forging import FluorescenceColumn
-from .utilities import (
+from ...forging import FluorescenceColumn
+from ..utilities import (
     resolve_display_units,
     per_cell_pearson_safe,
     trim_acquisition_warmup,
     assemble_run_session_data,
 )
-from .sce_protocol import SCEResult, PeriodType, SCEDetector, SCEDetectionConfiguration
-from ..shared_assets import (
+from .sce_protocol import SCEResult, SCEDetector, SCEDetectionConfiguration
+from ...shared_assets import (
     DatasetData,
     DatasetFiles,
     DatasetColumn,
@@ -65,8 +65,9 @@ _PLACE_FIELD_BIN_SIZE_CM: float = 5.0
 matrix. Matches the ``PlaceFieldDetector`` constructor default."""
 _MINIMUM_SCE_COUNT_FOR_ASSEMBLY: int = 2
 """Minimum number of SCEs required in a period to attempt cell-assembly detection."""
-_MINIMUM_PERIODS_FOR_REST_RUN_REST: int = 1
-"""Minimum number of run periods required to render a rest-run-rest plot."""
+_MAX_DEFAULT_SCE_TRACE_CELLS: int = 5
+"""Default cap on the number of cells drawn by ``plot_sce_cells_across_periods`` when the caller does not
+supply explicit cell indices."""
 _MINIMUM_OBSERVATIONS_FOR_VARIANCE: int = 2
 """Minimum number of samples or cells required for a variance-, PCA-, or rank-correlation-based step to
 produce a defined output. Below this threshold the corresponding helper short-circuits to NaN."""
@@ -187,41 +188,30 @@ class CellAnalysisColumn(StrEnum):
     """True for cells that pass all three of ``IS_PLACE``, ``IS_STABLE``, and ``IS_PEAK_SIGNIFICANT`` simultaneously.
     Convenience column for downstream consumers; computed by AND-ing the three independent flags during table
     assembly."""
-    SCE_PARTICIPATION_COUNT_REST = "sce_participation_count_rest"
+    SCE_PARTICIPATION_COUNT = "sce_participation_count"
     """Total number of rest-period SCEs the cell participated in."""
-    SCE_PARTICIPATION_COUNT_RUN = "sce_participation_count_run"
-    """Total number of run-period SCEs the cell participated in."""
-    SCE_PARTICIPATION_RATE_REST = "sce_participation_rate_rest"
+    SCE_PARTICIPATION_RATE = "sce_participation_rate"
     """Fraction of rest-period SCEs the cell participated in."""
-    SCE_PARTICIPATION_RATE_RUN = "sce_participation_rate_run"
-    """Fraction of run-period SCEs the cell participated in."""
-    SCE_EVENTS_REST = "sce_events_rest"
+    SCE_EVENTS = "sce_events"
     """Per-cell list of (period_index, sce_label) pairs for every rest-period SCE the cell participated in."""
-    SCE_EVENTS_RUN = "sce_events_run"
-    """Per-cell list of (period_index, sce_label) pairs for every run-period SCE the cell participated in."""
-    SCE_PARTICIPATION_P_VALUE_REST = "sce_participation_p_value_rest"
+    SCE_PARTICIPATION_P_VALUE = "sce_participation_p_value"
     """Per-cell aggregated p-value for SCE recruitment across all rest periods. Combined via Fisher's method
     over the per-period jitter-null p-values produced by ``SCEDetector``. NaN when no rest period contributed
     SCEs (Modol et al. 2020 super-rich-cell logic; Fisher 1925 p-value combination)."""
-    SCE_PARTICIPATION_P_VALUE_RUN = "sce_participation_p_value_run"
-    """Per-cell aggregated p-value for SCE recruitment across all run periods. NaN when no run period
-    contributed SCEs."""
-    IS_SCE_CELL_REST = "is_sce_cell_rest"
+    IS_SCE_CELL = "is_sce_cell"
     """True for cells whose participation rate exceeds the per-cell jitter null in at least one rest period at
-    the configured ``participation_significance_percentile``."""
-    IS_SCE_CELL_RUN = "is_sce_cell_run"
-    """True for cells whose participation rate exceeds the per-cell jitter null in at least one run period at
     the configured ``participation_significance_percentile``."""
 
 
 class SCEPeriodColumn(StrEnum):
     """Defines every column written to the per-session ``sce_periods.feather`` per-period table."""
 
-    PERIOD_TYPE = "period_type"
-    """Period kind: ``"rest"`` or ``"run"``."""
     PERIOD_INDEX = "period_index"
-    """Index within the period type, 0-based, matching the ``(period_index, sce_label)`` references in
-    ``CellAnalysisColumn.SCE_EVENTS_*``."""
+    """0-based stationary-period index in temporal session order, matching the ``(period_index, sce_label)``
+    references in ``CellAnalysisColumn.SCE_EVENTS``."""
+    PERIOD_STATE = "period_state"
+    """``DatasetColumn.SYSTEM_STATE`` value of the protocol epoch this stationary chunk was extracted from
+    (e.g. ``"rest"``, ``"run"``, or any custom protocol state)."""
     CELL_COUNT = "cell_count"
     """Cell count active during the period; constant across all rows in a session and equal to the cell-feather
     height."""
@@ -254,16 +244,34 @@ class SCEPeriodColumn(StrEnum):
     SCE_INTER_EVENT_INTERVALS_SAMPLES = "sce_inter_event_intervals_samples"
     """Per-SCE sample gap between consecutive events; length equal to ``max(sce_count - 1, 0)``."""
     SCE_RATE_HZ = "sce_rate_hz"
-    """SCE rate in events per second over the period (post-stability or post-rate-map masking)."""
-    REACTIVATION_STRENGTHS = "reactivation_strengths"
-    """Per-SCE population reactivation strength against the run-derived assembly templates. Computed via the
-    Peyrache 2009 / Lopes-dos-Santos 2013 diagonal-removed projection on z-scored binary onsets. Length equal
-    to the per-period SCE count; empty for run periods (templates are derived from run, evaluated on rest)."""
-    MEAN_REACTIVATION_STRENGTH = "mean_reactivation_strength"
-    """Per-period mean reactivation strength across the period's SCEs; NaN when no SCEs were detected."""
-    REACTIVATING_SCE_FRACTION = "reactivating_sce_fraction"
-    """Per-period fraction of SCEs whose reactivation strength exceeds the per-period 95th-percentile of the
-    null distribution computed by independent circular shifts on the run-template projections."""
+    """SCE rate in events per second over the period (post-stability masking)."""
+
+
+@dataclass(frozen=True, slots=True)
+class SCEPopulationOverlap:
+    """Per-population SCE-participation tabulation returned by ``CellAnalysisReport.sce_population_overlap``.
+
+    Used to test post-hoc whether place / strict-place / reward populations are over- or under-represented
+    among SCE-recruited cells. All counts and fractions are computed from the persisted cell feather, so
+    callers can recompute against alternative population definitions without re-running detection.
+    """
+
+    population_label: str
+    """Display label for the population."""
+    population_size: int
+    """Number of cells in the population."""
+    sce_cell_count_in_population: int
+    """Cells that are simultaneously in the population and flagged ``IS_SCE_CELL``."""
+    fraction_population_sce_cells: float
+    """Fraction of the population that is SCE-recruited; NaN when the population is empty."""
+    fraction_sce_cells_in_population: float
+    """Fraction of all SCE-recruited cells that come from this population; NaN when no SCE cell exists."""
+    mean_sce_participation_rate: float
+    """Mean ``SCE_PARTICIPATION_RATE`` across the population. NaN when the population is empty or when no
+    rest-period SCE produced a defined per-cell rate."""
+    fisher_p_value: float
+    """Two-sided Fisher exact test p-value for independence between population membership and SCE recruitment.
+    NaN when either marginal is empty."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,26 +372,14 @@ class CellAnalysisSummary(YamlConfig):
     track_end_std_cm: float
     """Track-end landmark Gaussian standard deviation in centimeters."""
 
-    rest_period_count: int
-    """Number of rest periods that survived torque-stability filtering and contributed an SCE row."""
-    run_period_count: int
-    """Number of run periods that contributed an SCE row."""
-    total_rest_sces: int
-    """Total SCEs detected across all rest periods."""
-    total_run_sces: int
-    """Total SCEs detected across all run periods."""
-    rest_sce_cell_count: int
-    """Per-session count of cells flagged as SCE-recruited during at least one rest period (Modol 2020
+    period_count: int
+    """Number of stationary periods (across every protocol state) that survived stability filtering and
+    contributed an SCE row."""
+    total_sces: int
+    """Total SCEs detected across every stationary period."""
+    sce_cell_count: int
+    """Per-session count of cells flagged as SCE-recruited during at least one stationary period (Modol 2020
     super-rich)."""
-    run_sce_cell_count: int
-    """Per-session count of cells flagged as SCE-recruited during at least one run period."""
-    mean_rest_reactivation_strength: float
-    """Mean reactivation strength of rest-period SCEs against the run-derived assembly templates (C2a in the
-    Peyrache 2009 / Lopes-dos-Santos 2013 sense). NaN when no rest period contributed SCEs or when too few
-    significant assemblies survived the Marchenko-Pastur cutoff to define a template."""
-    rest_reactivating_sce_fraction: float
-    """Fraction of rest-period SCEs whose reactivation strength exceeds the 95th percentile of a per-SCE
-    independent-shuffle null. NaN under the same conditions as ``mean_rest_reactivation_strength``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,8 +395,8 @@ class CellAnalysisReport:
     table: pl.DataFrame
     """Per-cell wide table; one row per cell. Schema enumerated by :class:`CellAnalysisColumn`."""
     sce_periods: pl.DataFrame
-    """Per-period SCE state table; one row per detected rest or run period. Schema enumerated by
-    :class:`SCEPeriodColumn`."""
+    """Per-period SCE state table; one row per torque-stable rest period that yielded SCEs. Schema enumerated
+    by :class:`SCEPeriodColumn`."""
     summary: CellAnalysisSummary
     """YAML wrapper holding the configurations, mixture-model fit, and session-level scalars."""
 
@@ -416,9 +412,7 @@ class CellAnalysisReport:
         """Runs the place / reward / SCE pipelines sequentially and assembles an in-memory report.
 
         Notes:
-            Passes the live ``PlaceFields`` instance directly to ``SCEDetector`` rather than rehydrating it from
-            disk; place-field reconstruction from the cell feather is no longer needed. Returns the report unsaved
-            so callers can inspect or plot before persisting.
+            Returns the report unsaved so callers can inspect or plot before persisting.
 
         Args:
             session_path: Path to the session's dataset directory.
@@ -487,25 +481,18 @@ class CellAnalysisReport:
         console.echo(message="Running SCE detection...", level=LogLevel.INFO)
         sce_detector = SCEDetector(
             session_path=session_path,
-            track_length=track_length_cm,
             fluorescence_column=fluorescence_column,
-            place_fields=place_fields,
             configuration=resolved_configuration.sce,
         )
         sce_detector.detect_events()
-        rest_period_count = len(sce_detector.rest_results)
-        run_period_count = len(sce_detector.run_results)
-        total_rest_sces = int(sum(int(np.max(r.sce_labels)) for r in sce_detector.rest_results))
-        total_run_sces = int(sum(int(np.max(r.sce_labels)) for r in sce_detector.run_results))
+        sce_results: list[SCEResult] = sce_detector.results
+        period_count = len(sce_results)
+        total_sces = int(sum(int(np.max(r.sce_labels)) for r in sce_results))
         console.echo(
-            message=(
-                f"SCE detection complete: {rest_period_count} rest periods ({total_rest_sces} SCEs), "
-                f"{run_period_count} run periods ({total_run_sces} SCEs)."
-            ),
+            message=f"SCE detection complete: {period_count} stationary periods ({total_sces} SCEs).",
             level=LogLevel.SUCCESS,
         )
 
-        sce_results: list[SCEResult] = sce_detector.results
         sampling_rate_hz = float(sce_detector.sampling_rate_hz)
         rate_map_bin_count = int(reward_results.spatial_results.rate_maps.shape[1])
 
@@ -561,55 +548,15 @@ class CellAnalysisReport:
             is_strict_place=is_strict_place,
         )
 
-        # Computes population reactivation strength (Peyrache 2009 / Lopes-dos-Santos 2013): templates from
-        # concatenated RUN onsets via ICA-CS, projected onto each REST period's SCE windows.
-        console.echo(
-            message=(
-                f"Running population reactivation analysis ({rest_period_count} rest periods, "
-                f"{run_period_count} run periods)..."
-            ),
-            level=LogLevel.INFO,
-        )
-        templates, per_period_reactivation = _compute_population_reactivation(
-            run_results=sce_detector.run_results,
-            rest_results=sce_detector.rest_results,
-            cell_count=cell_count,
-        )
-        rest_indices_in_results = [i for i, r in enumerate(sce_results) if r.period_type == PeriodType.REST]
-        reactivation_columns: dict[int, dict[str, object]] = {
-            rest_indices_in_results[rest_position]: payload
-            for rest_position, payload in per_period_reactivation.items()
-        }
-        if templates.shape[0] > 0 and per_period_reactivation:
-            mean_strength_value = float(
-                np.mean([float(entry["mean_reactivation_strength"]) for entry in per_period_reactivation.values()])
-            )
-            reactivating_fraction_value = float(
-                np.mean([float(entry["reactivating_sce_fraction"]) for entry in per_period_reactivation.values()])
-            )
-        else:
-            mean_strength_value = float("nan")
-            reactivating_fraction_value = float("nan")
-        console.echo(
-            message=(
-                f"Reactivation analysis complete: {templates.shape[0]} run-derived templates, "
-                f"mean strength {mean_strength_value:.3f}, reactivating fraction {reactivating_fraction_value:.3f}."
-            ),
-            level=LogLevel.INFO,
-        )
-
-        # Assembles the per-period SCE table with the reactivation columns folded in.
+        # Assembles the per-period SCE table.
         sce_periods = _build_sce_periods_table(
             sampling_rate_hz=sampling_rate_hz,
             results=sce_results,
             cell_count=cell_count,
-            reactivation_columns=reactivation_columns,
         )
 
         # noinspection PyTypeChecker
-        rest_sce_cell_flag: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL_REST.value].to_numpy()
-        # noinspection PyTypeChecker
-        run_sce_cell_flag: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL_RUN.value].to_numpy()
+        sce_cell_flag: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL.value].to_numpy()
 
         summary = CellAnalysisSummary(
             place_configuration=resolved_configuration.place,
@@ -638,14 +585,9 @@ class CellAnalysisReport:
             track_end_weight=float(reward_results.track_end_weight),
             track_start_std_cm=float(reward_results.track_start_std),
             track_end_std_cm=float(reward_results.track_end_std),
-            rest_period_count=rest_period_count,
-            run_period_count=run_period_count,
-            total_rest_sces=total_rest_sces,
-            total_run_sces=total_run_sces,
-            rest_sce_cell_count=int(np.sum(rest_sce_cell_flag)),
-            run_sce_cell_count=int(np.sum(run_sce_cell_flag)),
-            mean_rest_reactivation_strength=mean_strength_value,
-            rest_reactivating_sce_fraction=reactivating_fraction_value,
+            period_count=period_count,
+            total_sces=total_sces,
+            sce_cell_count=int(np.sum(sce_cell_flag)),
         )
 
         return cls(table=table, sce_periods=sce_periods, summary=summary)
@@ -754,6 +696,53 @@ class CellAnalysisReport:
         place_mask = place_population & ~reward_mask if mutually_exclusive else place_population
         return place_mask, reward_mask
 
+    def sce_population_overlap(self, *, mutually_exclusive: bool = True) -> dict[str, SCEPopulationOverlap]:
+        """Returns per-population SCE-participation overlaps for the place / strict-place / reward populations.
+
+        Notes:
+            Post-hoc tabulation built from the persisted cell-feather columns alone -- does not re-run any
+            detector. Each population's mask is intersected with ``IS_SCE_CELL`` to count overlap, the mean
+            ``SCE_PARTICIPATION_RATE`` is reported across the population, and Fisher's exact test on the 2x2
+            (in_population x is_sce_cell) contingency table gives a single p-value for whether the population
+            is over- or under-represented among SCE-recruited cells. With ``mutually_exclusive=True`` the
+            place population excludes cells that are also reward cells (matches ``resolve_population_masks``).
+
+        Args:
+            mutually_exclusive: Subtract reward-cell members from the place / strict-place populations when
+                True so each cell contributes to at most one population. Default True.
+
+        Returns:
+            Dict keyed by population label, each value carrying counts, fractions, mean participation rate,
+            and the Fisher p-value.
+        """
+        # noinspection PyTypeChecker
+        sce_mask: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_SCE_CELL.value].to_numpy()
+        # noinspection PyTypeChecker
+        place_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_PLACE.value].to_numpy()
+        # noinspection PyTypeChecker
+        strict_place_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_STRICT_PLACE.value].to_numpy()
+        # noinspection PyTypeChecker
+        reward_flag: NDArray[np.bool_] = self.table[CellAnalysisColumn.IS_REWARD_CELL.value].to_numpy()
+        # noinspection PyTypeChecker
+        participation_rate: NDArray[np.float32] = self.table[
+            CellAnalysisColumn.SCE_PARTICIPATION_RATE.value
+        ].to_numpy()
+
+        if mutually_exclusive:
+            place_population = place_flag & ~reward_flag
+            strict_place_population = strict_place_flag & ~reward_flag
+        else:
+            place_population = place_flag
+            strict_place_population = strict_place_flag
+
+        return {
+            "place": _build_sce_population_overlap("Place cells", place_population, sce_mask, participation_rate),
+            "strict_place": _build_sce_population_overlap(
+                "Strict place cells", strict_place_population, sce_mask, participation_rate
+            ),
+            "reward": _build_sce_population_overlap("Reward cells", reward_flag, sce_mask, participation_rate),
+        }
+
     def summarize(self, *, mutually_exclusive: bool = True) -> str:
         """Returns a multi-line human-readable summary of the report's per-cell and per-period statistics.
 
@@ -810,15 +799,9 @@ class CellAnalysisReport:
             f"  Track-end wt:      {summary.track_end_weight:.3f} (SD {summary.track_end_std_cm:.1f} cm)",
             f"  Reward position:   {summary.reward_position_cm:.1f} cm",
             "",
-            "SCE detection:",
-            f"  Rest periods: {summary.rest_period_count} ({summary.total_rest_sces} SCEs)",
-            f"  Run periods:  {summary.run_period_count} ({summary.total_run_sces} SCEs)",
-            f"  SCE-recruited cells (rest): {summary.rest_sce_cell_count}",
-            f"  SCE-recruited cells (run):  {summary.run_sce_cell_count}",
-            "",
-            "Population reactivation (REST SCEs vs. RUN-derived templates):",
-            f"  Mean strength:           {summary.mean_rest_reactivation_strength:.3f}",
-            f"  Reactivating fraction:   {summary.rest_reactivating_sce_fraction:.3f}",
+            "SCE detection (stationary samples across every protocol epoch):",
+            f"  Stationary periods: {summary.period_count} ({summary.total_sces} SCEs)",
+            f"  SCE-recruited cells: {summary.sce_cell_count}",
             "",
             "Geometry / sampling:",
             f"  Track length:      {summary.track_length_cm:.1f} cm",
@@ -1518,68 +1501,64 @@ class CellAnalysisReport:
             figure.tight_layout()
         return figure
 
-    def plot_sce_rest_run_rest_sequence(
+    def plot_sce_cells_across_periods(
         self,
         *,
         session: DatasetSession,
         fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         cell_indices: NDArray[np.int32] | list[int] | None = None,
-        cell_count: int = 5,
-        trial_index: int = 0,
+        cell_count: int = _MAX_DEFAULT_SCE_TRACE_CELLS,
         figure_dpi: int = 150,
     ) -> plt.Figure:
-        """Plots smoothed fluorescence traces, onsets, and co-active counts for selected cells across one
-        rest-run-rest sequence. Reads ``data.feather`` to recompute Savitzky-Golay smoothing on the period slice.
-        """
-        rest_periods = _filter_period_rows(table=self.sce_periods, period_type=PeriodType.REST)
-        run_periods = _filter_period_rows(table=self.sce_periods, period_type=PeriodType.RUN)
+        """Plots smoothed fluorescence for selected cells across every contiguous experiment period in the
+        session, with each period labelled by its ``DatasetColumn.SYSTEM_STATE`` value.
 
-        if len(run_periods) < _MINIMUM_PERIODS_FOR_REST_RUN_REST:
+        Notes:
+            Reads ``data.feather`` and re-applies Savitzky-Golay smoothing once over the entire trimmed trace
+            using the persisted ``sce_configuration``. Period boundaries come directly from the system-state
+            column so the plot adapts to whatever experiment-state palette the session was recorded with
+            (rest, run, and any custom states the run protocol emits). When ``cell_indices`` is omitted, the
+            top SCE-recruited cells by smoothed-trace variance are used; if no cell is flagged
+            ``IS_SCE_CELL``, the top cells by variance across the whole session are used instead.
+
+        Args:
+            session: The DatasetSession whose ``data.feather`` is read.
+            fluorescence_column: Fluorescence column to use as the analysis input.
+            cell_indices: Optional explicit cell indices to plot. Default selects up to ``cell_count`` cells
+                by SCE recruitment (``IS_SCE_CELL``) and smoothed-trace variance.
+            cell_count: Maximum number of cells in the default selection. Ignored when ``cell_indices`` is
+                supplied.
+            figure_dpi: Figure DPI.
+        """
+        timestamps_minutes, smoothed, period_spans = _walk_session_periods(
+            session=session,
+            fluorescence_column=fluorescence_column,
+            sce_configuration=self.summary.sce_configuration,
+        )
+        if not period_spans:
             figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
-            axes.text(0.5, 0.5, "No run periods detected", transform=axes.transAxes, ha="center", va="center")
+            axes.text(0.5, 0.5, "No experiment periods detected", transform=axes.transAxes, ha="center", va="center")
+            axes.axis("off")
             return figure
 
-        if trial_index >= len(run_periods):
-            trial_index = 0
-
-        sequence_rows: list[int] = []
-        if trial_index < len(rest_periods):
-            sequence_rows.append(rest_periods[trial_index])
-        sequence_rows.append(run_periods[trial_index])
-        if trial_index + 1 < len(rest_periods):
-            sequence_rows.append(rest_periods[trial_index + 1])
-
-        # Reloads raw fluorescence and re-applies Savitzky-Golay smoothing for each period slice.
-        sequence_data = [
-            _reconstruct_period_state(
-                session=session,
-                fluorescence_column=fluorescence_column,
-                sce_configuration=self.summary.sce_configuration,
-                period_row=self.sce_periods.row(row_index, named=True),
-            )
-            for row_index in sequence_rows
-        ]
-
         if cell_indices is None:
-            # Picks a mix of rest-active and rest-quiet cells that are also active during run, falling back to
-            # the cells with the most onsets across the sequence when run activity is empty.
-            picked = _select_rest_run_cells(
-                sequence_data=sequence_data,
+            cell_indices = _select_sce_cells_by_variance(
+                table=self.table,
+                smoothed=smoothed,
                 cell_count=cell_count,
-                summary_cell_count=self.summary.cell_count,
             )
-            # noinspection PyTypeChecker
-            cell_indices = picked
         else:
             cell_indices = np.asarray(cell_indices, dtype=np.int32)
 
-        period_boundaries = []
-        time_offset = 0.0
-        for state in sequence_data:
-            period_duration = float(state.timestamps[-1] - state.timestamps[0])
-            period_boundaries.append((time_offset, time_offset + period_duration, state.period_type))
-            time_offset += period_duration
-        total_time = time_offset
+        if cell_indices.size == 0:
+            figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
+            axes.text(0.5, 0.5, "No cells available to plot", transform=axes.transAxes, ha="center", va="center")
+            axes.axis("off")
+            return figure
+
+        unique_states = sorted({state for _, _, state in period_spans})
+        colormap = plt.get_cmap("tab20", max(len(unique_states), 1))
+        state_colors = {state: colormap(state_index) for state_index, state in enumerate(unique_states)}
 
         height_ratios = [0.4] + [1.0] * len(cell_indices)
         figure, all_axes = plt.subplots(
@@ -1593,50 +1572,49 @@ class CellAnalysisReport:
         )
 
         label_axis = all_axes[0]
-        period_colors = {PeriodType.REST: "#A8D8EA", PeriodType.RUN: "#FFE0A0"}
-        rest_label_count = 0
-        for start, end, period_type in period_boundaries:
-            face_color = period_colors[period_type]
-            if period_type == PeriodType.REST:
-                rest_label_count += 1
-                display_label = f"Rest {rest_label_count}"
-            else:
-                display_label = "Run"
-            label_axis.axvspan(xmin=start, xmax=end, color=face_color, alpha=0.8)
+        state_run_index: dict[str, int] = {}
+        for start_sample, end_sample, state in period_spans:
+            start_time = float(timestamps_minutes[start_sample])
+            end_time = float(timestamps_minutes[end_sample - 1])
+            state_run_index[state] = state_run_index.get(state, 0) + 1
+            display_label = f"{state.title()} {state_run_index[state]}"
+            face_color = state_colors[state]
+            label_axis.axvspan(xmin=start_time, xmax=end_time, color=face_color, alpha=0.6)
             label_axis.text(
-                x=(start + end) / 2,
+                x=(start_time + end_time) / 2,
                 y=0.5,
                 s=display_label,
                 ha="center",
                 va="center",
-                fontsize=10,
+                fontsize=8,
                 fontweight="bold",
             )
-        label_axis.set_xlim(0, total_time)
+        label_axis.set_xlim(float(timestamps_minutes[0]), float(timestamps_minutes[-1]))
         label_axis.set_ylim(0, 1)
         label_axis.set_yticks([])
         for spine_name in ("top", "right", "left", "bottom"):
             label_axis.spines[spine_name].set_visible(False)
-        label_axis.set_title(f"Rest-Run-Rest Sequence (Trial {trial_index + 1})", fontsize=11)
+        label_axis.set_title("SCE cell traces across experiment periods", fontsize=11)
 
         trace_axes = all_axes[1:]
         for axis_index, cell_index in enumerate(cell_indices):
             axis = trace_axes[axis_index]
-            current_offset = 0.0
-            for state in sequence_data:
-                period_time = state.timestamps - state.timestamps[0] + current_offset
-                fluorescence_trace = state.smoothed_fluorescence[cell_index]
+            for start_sample, end_sample, state in period_spans:
+                period_time = timestamps_minutes[start_sample:end_sample]
                 axis.axvspan(
-                    xmin=period_time[0], xmax=period_time[-1], alpha=0.15, color=period_colors[state.period_type]
+                    xmin=float(period_time[0]),
+                    xmax=float(period_time[-1]),
+                    alpha=0.15,
+                    color=state_colors[state],
                 )
-                trace_mean = float(np.mean(fluorescence_trace))
-                trace_std = float(np.std(fluorescence_trace))
-                if trace_std > 0:
-                    normalized_trace = (fluorescence_trace - trace_mean) / trace_std
-                else:
-                    normalized_trace = fluorescence_trace - trace_mean
-                axis.plot(period_time, normalized_trace, color="black", linewidth=0.5, alpha=0.8)
-                current_offset = period_time[-1]
+
+            fluorescence_trace = smoothed[cell_index]
+            trace_mean = float(np.mean(fluorescence_trace))
+            trace_std = float(np.std(fluorescence_trace))
+            normalized_trace = (
+                (fluorescence_trace - trace_mean) / trace_std if trace_std > 0 else fluorescence_trace - trace_mean
+            )
+            axis.plot(timestamps_minutes, normalized_trace, color="black", linewidth=0.5, alpha=0.8)
             axis.set_ylabel(f"Cell {int(cell_index)}", fontsize=9)
             axis.spines["top"].set_visible(False)
             axis.spines["right"].set_visible(False)
@@ -1648,7 +1626,6 @@ class CellAnalysisReport:
     def plot_sce_assemblies(
         self,
         *,
-        period_type: PeriodType = PeriodType.REST,
         period_index: int = 0,
         top_n: int = 5,
         shuffle_count: int = 200,
@@ -1662,13 +1639,12 @@ class CellAnalysisReport:
         (Lopes-dos-Santos 2013) on the persisted per-period SCE participation matrix. Recomputes assemblies
         on every call so no live detector is required.
         """
-        period_rows = _filter_period_rows(table=self.sce_periods, period_type=period_type)
-        if period_index >= len(period_rows):
+        if period_index >= self.sce_periods.height:
             figure, axes = plt.subplots(figsize=(6, 4), facecolor="white", dpi=figure_dpi)
             axes.text(
                 0.5,
                 0.5,
-                f"Period {period_index + 1} not found for {period_type.value}",
+                f"Rest period {period_index + 1} not found",
                 ha="center",
                 va="center",
                 fontsize=12,
@@ -1676,8 +1652,7 @@ class CellAnalysisReport:
             axes.axis("off")
             return figure
 
-        row_index = period_rows[period_index]
-        row = self.sce_periods.row(row_index, named=True)
+        row = self.sce_periods.row(period_index, named=True)
         sce_labels = np.asarray(row[SCEPeriodColumn.SCE_LABELS.value], dtype=np.int32)
         onset_matrix = _reconstruct_onset_matrix(
             cell_count=int(row[SCEPeriodColumn.CELL_COUNT.value]),
@@ -1761,7 +1736,7 @@ class CellAnalysisReport:
 
         if title is None:
             title = (
-                f"SCE Assemblies — {period_type.value.title()} Period {period_index + 1}  "
+                f"SCE Assemblies — Rest Period {period_index + 1}  "
                 f"({total_sce_count} total SCEs, showing top {display_count} assemblies)"
             )
         figure.suptitle(title, fontsize=11)
@@ -1859,11 +1834,11 @@ def plot_dataset_reward_cell_fraction(dataset: DatasetData) -> plt.Figure:
 
 
 def plot_dataset_sce_rate(dataset: DatasetData) -> plt.Figure:
-    """Plots the per-animal total SCE count (rest + run) trend; same aggregation pattern."""
+    """Plots the per-animal total rest-period SCE count trend; same aggregation pattern."""
     return _plot_dataset_metric(
         dataset=dataset,
-        metric_extractor=lambda summary: float(summary.total_rest_sces + summary.total_run_sces),
-        y_label="Total SCEs (rest + run)",
+        metric_extractor=lambda summary: float(summary.total_sces),
+        y_label="Total rest-period SCEs",
         figure_title="Across-animal SCE counts",
     )
 
@@ -1911,18 +1886,6 @@ def plot_dataset_reliable_cell_fraction(dataset: DatasetData) -> plt.Figure:
 
 
 # ===== Private helpers ==========================================================================================
-
-
-@dataclass(frozen=True, slots=True)
-class _ReconstructedPeriod:
-    """Plot-time view of a reconstructed SCE period with smoothed fluorescence."""
-
-    period_type: PeriodType
-    """Period kind (REST or RUN)."""
-    timestamps: NDArray[np.float32]
-    """Per-sample elapsed-minutes timestamps."""
-    smoothed_fluorescence: NDArray[np.float32]
-    """Savitzky-Golay smoothed cell x sample fluorescence trace."""
 
 
 def _compute_stability_metrics(
@@ -2168,31 +2131,18 @@ def _build_cell_table(
             CellAnalysisColumn.POSITION_GLM_P_VALUE.value: pl.Series(
                 values=reward_results.position_glm_p_values, dtype=pl.Float32
             ),
-            CellAnalysisColumn.SCE_PARTICIPATION_COUNT_REST.value: sce_columns["participation_count_rest"],
-            CellAnalysisColumn.SCE_PARTICIPATION_COUNT_RUN.value: sce_columns["participation_count_run"],
-            CellAnalysisColumn.SCE_PARTICIPATION_RATE_REST.value: sce_columns["participation_rate_rest"],
-            CellAnalysisColumn.SCE_PARTICIPATION_RATE_RUN.value: sce_columns["participation_rate_run"],
-            CellAnalysisColumn.SCE_EVENTS_REST.value: pl.Series(
-                name=CellAnalysisColumn.SCE_EVENTS_REST.value,
-                values=sce_columns["sce_events_rest"],
+            CellAnalysisColumn.SCE_PARTICIPATION_COUNT.value: sce_columns["participation_count"],
+            CellAnalysisColumn.SCE_PARTICIPATION_RATE.value: sce_columns["participation_rate"],
+            CellAnalysisColumn.SCE_EVENTS.value: pl.Series(
+                name=CellAnalysisColumn.SCE_EVENTS.value,
+                values=sce_columns["sce_events"],
                 dtype=pl.List(pl.List(pl.Int32)),
             ),
-            CellAnalysisColumn.SCE_EVENTS_RUN.value: pl.Series(
-                name=CellAnalysisColumn.SCE_EVENTS_RUN.value,
-                values=sce_columns["sce_events_run"],
-                dtype=pl.List(pl.List(pl.Int32)),
+            CellAnalysisColumn.SCE_PARTICIPATION_P_VALUE.value: pl.Series(
+                values=sce_columns["participation_p_value"], dtype=pl.Float32
             ),
-            CellAnalysisColumn.SCE_PARTICIPATION_P_VALUE_REST.value: pl.Series(
-                values=sce_columns["participation_p_value_rest"], dtype=pl.Float32
-            ),
-            CellAnalysisColumn.SCE_PARTICIPATION_P_VALUE_RUN.value: pl.Series(
-                values=sce_columns["participation_p_value_run"], dtype=pl.Float32
-            ),
-            CellAnalysisColumn.IS_SCE_CELL_REST.value: pl.Series(
-                values=sce_columns["is_sce_cell_rest"], dtype=pl.Boolean
-            ),
-            CellAnalysisColumn.IS_SCE_CELL_RUN.value: pl.Series(
-                values=sce_columns["is_sce_cell_run"], dtype=pl.Boolean
+            CellAnalysisColumn.IS_SCE_CELL.value: pl.Series(
+                values=sce_columns["is_sce_cell"], dtype=pl.Boolean
             ),
         },
     ).sort(CellAnalysisColumn.CELL_ID.value)
@@ -2262,8 +2212,50 @@ def _combine_pvalues_fisher(values: list[float]) -> float:
     return float(chi2.sf(chi2_stat, df=2 * len(values)))
 
 
+def _build_sce_population_overlap(
+    population_label: str,
+    population_mask: NDArray[np.bool_],
+    sce_mask: NDArray[np.bool_],
+    participation_rate: NDArray[np.float32],
+) -> SCEPopulationOverlap:
+    """Computes the per-population SCE overlap counts, fractions, and Fisher exact p-value."""
+    population_size = int(np.sum(population_mask))
+    overlap_count = int(np.sum(population_mask & sce_mask))
+    total_sce_cells = int(np.sum(sce_mask))
+
+    fraction_population_sce_cells = (overlap_count / population_size) if population_size > 0 else float("nan")
+    fraction_sce_cells_in_population = (overlap_count / total_sce_cells) if total_sce_cells > 0 else float("nan")
+
+    if population_size > 0:
+        rates = participation_rate[population_mask]
+        finite_rates = rates[~np.isnan(rates)]
+        mean_rate = float(np.mean(finite_rates)) if finite_rates.size > 0 else float("nan")
+    else:
+        mean_rate = float("nan")
+
+    in_pop_sce = overlap_count
+    in_pop_no_sce = population_size - overlap_count
+    out_pop_sce = total_sce_cells - overlap_count
+    out_pop_no_sce = int(population_mask.size) - population_size - out_pop_sce
+    if population_size == 0 or total_sce_cells == 0 or in_pop_no_sce + out_pop_no_sce == 0 or out_pop_sce + out_pop_no_sce == 0:
+        fisher_p = float("nan")
+    else:
+        _, fisher_p = fisher_exact([[in_pop_sce, in_pop_no_sce], [out_pop_sce, out_pop_no_sce]], alternative="two-sided")
+        fisher_p = float(fisher_p)
+
+    return SCEPopulationOverlap(
+        population_label=population_label,
+        population_size=population_size,
+        sce_cell_count_in_population=overlap_count,
+        fraction_population_sce_cells=fraction_population_sce_cells,
+        fraction_sce_cells_in_population=fraction_sce_cells_in_population,
+        mean_sce_participation_rate=mean_rate,
+        fisher_p_value=fisher_p,
+    )
+
+
 def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
-    """Computes per-cell SCE participation and recruitment-significance metrics across all detected periods.
+    """Computes per-cell SCE participation and recruitment-significance metrics across every rest period.
 
     References:
         - Modol et al. (2020). Hippocampal hub neurons. Nat Commun.
@@ -2271,30 +2263,23 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
           cells); per-period p-values combined here via Fisher's method (Fisher 1925).
     """
     # noinspection PyTypeChecker
-    participation: NDArray[np.int32] = np.zeros((2, cell_count), dtype=np.int32)
+    participation: NDArray[np.int32] = np.zeros(cell_count, dtype=np.int32)
+    total_sces: int = 0
+    sce_events: list[list[list[int]]] = [[] for _ in range(cell_count)]
+    p_value_lists: list[list[float]] = [[] for _ in range(cell_count)]
     # noinspection PyTypeChecker
-    total_sces: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
-    # noinspection PyTypeChecker
-    period_counter: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
-    sce_events: list[list[list[list[int]]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
-    p_value_lists: list[list[list[float]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
-    # noinspection PyTypeChecker
-    is_sce_cell: NDArray[np.bool_] = np.zeros((2, cell_count), dtype=np.bool_)
+    is_sce_cell: NDArray[np.bool_] = np.zeros(cell_count, dtype=np.bool_)
 
-    for result in sce_results:
-        period = 0 if result.period_type == PeriodType.REST else 1
-        period_index = int(period_counter[period])
-        period_counter[period] += 1
+    for period_index, result in enumerate(sce_results):
         sce_count = int(np.max(result.sce_labels))
-        total_sces[period] += sce_count
+        total_sces += sce_count
 
-        # Per-period participation significance flags OR-merge across periods of the same type.
-        is_sce_cell[period] |= result.is_sce_cell
+        is_sce_cell |= result.is_sce_cell
         if not bool(np.all(np.isnan(result.participation_p_values))):
             for cell_index in range(cell_count):
                 p_value = float(result.participation_p_values[cell_index])
                 if not np.isnan(p_value):
-                    p_value_lists[period][cell_index].append(p_value)
+                    p_value_lists[cell_index].append(p_value)
 
         if sce_count == 0:
             continue
@@ -2306,41 +2291,35 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
         sample_to_sce[sce_sample_indices, result.sce_labels[sce_sample_indices] - 1] = 1.0
         # noinspection PyTypeChecker
         cell_sce_participation: NDArray[np.bool_] = (result.onset_matrix.astype(np.float32) @ sample_to_sce) > 0
-        participation[period] += cell_sce_participation.sum(axis=1).astype(np.int32)
+        participation += cell_sce_participation.sum(axis=1).astype(np.int32)
 
         for sce_label in range(1, sce_count + 1):
             # noinspection PyTypeChecker
             participating_indices: NDArray[np.int64] = np.where(cell_sce_participation[:, sce_label - 1])[0]
             for cell in participating_indices:
-                sce_events[period][cell].append([period_index, sce_label])
+                sce_events[cell].append([period_index, sce_label])
 
     # noinspection PyTypeChecker
-    rate: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
+    rate: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    if total_sces > 0:
+        rate = (participation / total_sces).astype(np.float32)
     # noinspection PyTypeChecker
-    combined_p: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
-    for period in range(2):
-        if total_sces[period] > 0:
-            rate[period] = (participation[period] / total_sces[period]).astype(np.float32)
-        for cell_index in range(cell_count):
-            combined_p[period, cell_index] = _combine_pvalues_fisher(values=p_value_lists[period][cell_index])
+    combined_p: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    for cell_index in range(cell_count):
+        combined_p[cell_index] = _combine_pvalues_fisher(values=p_value_lists[cell_index])
 
     return {
-        "participation_count_rest": participation[0],
-        "participation_count_run": participation[1],
-        "participation_rate_rest": rate[0],
-        "participation_rate_run": rate[1],
-        "sce_events_rest": sce_events[0],
-        "sce_events_run": sce_events[1],
-        "participation_p_value_rest": combined_p[0],
-        "participation_p_value_run": combined_p[1],
-        "is_sce_cell_rest": is_sce_cell[0],
-        "is_sce_cell_run": is_sce_cell[1],
+        "participation_count": participation,
+        "participation_rate": rate,
+        "sce_events": sce_events,
+        "participation_p_value": combined_p,
+        "is_sce_cell": is_sce_cell,
     }
 
 
 _SCE_PERIODS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
-    SCEPeriodColumn.PERIOD_TYPE.value: pl.Utf8,
     SCEPeriodColumn.PERIOD_INDEX.value: pl.Int32,
+    SCEPeriodColumn.PERIOD_STATE.value: pl.Utf8,
     SCEPeriodColumn.CELL_COUNT.value: pl.Int32,
     SCEPeriodColumn.SAMPLE_COUNT.value: pl.Int32,
     SCEPeriodColumn.SAMPLING_RATE_HZ.value: pl.Float32,
@@ -2356,9 +2335,6 @@ _SCE_PERIODS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
     SCEPeriodColumn.SCE_PEAK_COACTIVE.value: pl.List(pl.Int32),
     SCEPeriodColumn.SCE_INTER_EVENT_INTERVALS_SAMPLES.value: pl.List(pl.Int32),
     SCEPeriodColumn.SCE_RATE_HZ.value: pl.Float32,
-    SCEPeriodColumn.REACTIVATION_STRENGTHS.value: pl.List(pl.Float32),
-    SCEPeriodColumn.MEAN_REACTIVATION_STRENGTH.value: pl.Float32,
-    SCEPeriodColumn.REACTIVATING_SCE_FRACTION.value: pl.Float32,
 }
 
 
@@ -2366,20 +2342,14 @@ def _build_sce_periods_table(
     sampling_rate_hz: float,
     results: list,
     cell_count: int,
-    reactivation_columns: dict[int, dict[str, object]] | None = None,
 ) -> pl.DataFrame:
     """Assembles the per-period SCE feather, encoding the dense onset matrix as sparse cell/sample index lists
-    and persisting the per-SCE descriptors and the population reactivation strength columns.
+    and persisting the per-SCE descriptors.
 
     Args:
         sampling_rate_hz: Sampling rate in Hz; constant across all rows.
-        results: List of ``SCEResult`` instances in temporal session order.
+        results: List of rest-period ``SCEResult`` instances in temporal session order.
         cell_count: Total number of cells in the session.
-        reactivation_columns: Optional mapping from result index in ``results`` to a dict carrying
-            ``{"reactivation_strengths": list[float], "mean_reactivation_strength": float,
-            "reactivating_sce_fraction": float}``. Rows without an entry receive empty/NaN reactivation
-            columns. Run-period rows always receive empty/NaN values because the templates are derived from
-            run and evaluated on rest.
 
     Returns:
         A polars DataFrame following :class:`SCEPeriodColumn`.
@@ -2387,8 +2357,8 @@ def _build_sce_periods_table(
     if not results:
         return pl.DataFrame(schema=_SCE_PERIODS_EMPTY_SCHEMA)
 
-    period_type_column: list[str] = []
     period_index_column: list[int] = []
+    period_state_column: list[str] = []
     cell_count_column: list[int] = []
     sample_count_column: list[int] = []
     sampling_rate_column: list[float] = []
@@ -2404,24 +2374,11 @@ def _build_sce_periods_table(
     sce_peak_column: list[list[int]] = []
     sce_inter_interval_column: list[list[int]] = []
     sce_rate_column: list[float] = []
-    reactivation_strengths_column: list[list[float]] = []
-    mean_reactivation_column: list[float] = []
-    reactivating_fraction_column: list[float] = []
 
-    rest_counter = 0
-    run_counter = 0
-
-    for result_index, result in enumerate(results):
-        if result.period_type == PeriodType.REST:
-            period_index = rest_counter
-            rest_counter += 1
-        else:
-            period_index = run_counter
-            run_counter += 1
-
+    for period_index, result in enumerate(results):
         onset_cells, onset_samples = np.nonzero(result.onset_matrix)
-        period_type_column.append(result.period_type.value)
         period_index_column.append(period_index)
+        period_state_column.append(result.period_state)
         cell_count_column.append(cell_count)
         sample_count_column.append(int(result.onset_matrix.shape[1]))
         sampling_rate_column.append(sampling_rate_hz)
@@ -2438,21 +2395,10 @@ def _build_sce_periods_table(
         sce_inter_interval_column.append([int(value) for value in result.sce_inter_event_intervals_samples.tolist()])
         sce_rate_column.append(float(result.sce_rate_hz))
 
-        entry = reactivation_columns.get(result_index) if reactivation_columns is not None else None
-        if entry is not None:
-            strengths = list(entry.get("reactivation_strengths", []))  # type: ignore[arg-type]
-            reactivation_strengths_column.append([float(value) for value in strengths])
-            mean_reactivation_column.append(float(entry.get("mean_reactivation_strength", float("nan"))))  # type: ignore[arg-type]
-            reactivating_fraction_column.append(float(entry.get("reactivating_sce_fraction", float("nan"))))  # type: ignore[arg-type]
-        else:
-            reactivation_strengths_column.append([])
-            mean_reactivation_column.append(float("nan"))
-            reactivating_fraction_column.append(float("nan"))
-
     return pl.DataFrame(
         {
-            SCEPeriodColumn.PERIOD_TYPE.value: pl.Series(values=period_type_column, dtype=pl.Utf8),
             SCEPeriodColumn.PERIOD_INDEX.value: pl.Series(values=period_index_column, dtype=pl.Int32),
+            SCEPeriodColumn.PERIOD_STATE.value: pl.Series(values=period_state_column, dtype=pl.Utf8),
             SCEPeriodColumn.CELL_COUNT.value: pl.Series(values=cell_count_column, dtype=pl.Int32),
             SCEPeriodColumn.SAMPLE_COUNT.value: pl.Series(values=sample_count_column, dtype=pl.Int32),
             SCEPeriodColumn.SAMPLING_RATE_HZ.value: pl.Series(values=sampling_rate_column, dtype=pl.Float32),
@@ -2474,15 +2420,6 @@ def _build_sce_periods_table(
                 values=sce_inter_interval_column, dtype=pl.List(pl.Int32)
             ),
             SCEPeriodColumn.SCE_RATE_HZ.value: pl.Series(values=sce_rate_column, dtype=pl.Float32),
-            SCEPeriodColumn.REACTIVATION_STRENGTHS.value: pl.Series(
-                values=reactivation_strengths_column, dtype=pl.List(pl.Float32)
-            ),
-            SCEPeriodColumn.MEAN_REACTIVATION_STRENGTH.value: pl.Series(
-                values=mean_reactivation_column, dtype=pl.Float32
-            ),
-            SCEPeriodColumn.REACTIVATING_SCE_FRACTION.value: pl.Series(
-                values=reactivating_fraction_column, dtype=pl.Float32
-            ),
         }
     )
 
@@ -2526,21 +2463,6 @@ def _resolve_place_cell_order(table: pl.DataFrame) -> NDArray[np.int64]:
     return np.argsort(sort_keys, kind="stable").astype(np.int64)
 
 
-def _filter_period_rows(table: pl.DataFrame, period_type: PeriodType) -> list[int]:
-    """Returns the row indices in ``sce_periods`` that belong to the given period type, ordered by period_index."""
-    if table.height == 0:
-        return []
-    period_types = table[SCEPeriodColumn.PERIOD_TYPE.value].to_list()
-    period_indices = table[SCEPeriodColumn.PERIOD_INDEX.value].to_list()
-    matched = [
-        (period_indices[row_index], row_index)
-        for row_index in range(table.height)
-        if period_types[row_index] == period_type.value
-    ]
-    matched.sort()
-    return [row_index for _, row_index in matched]
-
-
 def _bin_speed_by_position(
     session: DatasetSession,
     track_length_cm: float,
@@ -2582,38 +2504,39 @@ def _bin_speed_by_position(
     return mean_speed
 
 
-def _reconstruct_period_state(
+def _walk_session_periods(
+    *,
     session: DatasetSession,
     fluorescence_column: FluorescenceColumn,
     sce_configuration: SCEDetectionConfiguration,
-    period_row: dict,
-) -> _ReconstructedPeriod:
-    """Rebuilds a smoothed-fluorescence view for one persisted SCE period by reloading ``data.feather`` and
-    re-applying Savitzky-Golay smoothing matching the persisted sce_configuration parameters.
-    """
-    timestamps = np.asarray(period_row[SCEPeriodColumn.TIMESTAMPS_MINUTES.value], dtype=np.float32)
-    sampling_rate_hz = float(period_row[SCEPeriodColumn.SAMPLING_RATE_HZ.value])
+) -> tuple[NDArray[np.float32], NDArray[np.float32], list[tuple[int, int, str]]]:
+    """Reads the session's ``data.feather`` and returns the elapsed-minutes timestamps, smoothed fluorescence,
+    and contiguous-state period spans suitable for the across-period trace plot.
 
+    Each entry in the returned ``period_spans`` list is ``(start_sample, end_sample_exclusive, state_name)``;
+    ``state_name`` is taken verbatim from ``DatasetColumn.SYSTEM_STATE`` so the caller can label periods with
+    whatever state palette the session was recorded with.
+    """
     df = pl.read_ipc(
         source=session.data_path,
-        columns=[DatasetColumn.TIME_US.value, fluorescence_column.value],
+        columns=[DatasetColumn.TIME_US.value, DatasetColumn.SYSTEM_STATE.value, fluorescence_column.value],
         memory_map=True,
     )
     df = trim_acquisition_warmup(df)
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
+    if time_us.size < _MINIMUM_OBSERVATIONS_FOR_VARIANCE:
+        # noinspection PyTypeChecker
+        empty_timestamps: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
+        # noinspection PyTypeChecker
+        empty_smoothed: NDArray[np.float32] = np.zeros((0, 0), dtype=np.float32)
+        return empty_timestamps, empty_smoothed, []
+
     elapsed_minutes = (time_us - time_us[0]).astype(np.float32) / np.float32(60_000_000.0)
-
-    # Locates the trimmed-row index for each persisted timestamp via searchsorted; ties to the closest match per
-    # sample so unstable rest samples that were dropped during detection are excluded from the reload too.
-    # noinspection PyTypeChecker
-    sample_indices: NDArray[np.int64] = np.searchsorted(elapsed_minutes, timestamps, side="left")
-    sample_indices = np.clip(sample_indices, 0, elapsed_minutes.size - 1)
+    sampling_rate_hz = 1_000_000.0 / float(np.median(np.diff(time_us)))
 
     # noinspection PyTypeChecker
-    fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T[
-        :, sample_indices
-    ]
+    fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
 
     smoothing_window_samples = int(sce_configuration.smoothing_window_seconds * sampling_rate_hz)
     if smoothing_window_samples % 2 == 0:
@@ -2632,11 +2555,56 @@ def _reconstruct_period_state(
             axis=1,
         ).astype(np.float32, copy=False)
 
-    return _ReconstructedPeriod(
-        period_type=PeriodType(period_row[SCEPeriodColumn.PERIOD_TYPE.value]),
-        timestamps=timestamps,
-        smoothed_fluorescence=smoothed,
-    )
+    states = df[DatasetColumn.SYSTEM_STATE.value].to_list()
+    period_spans: list[tuple[int, int, str]] = []
+    if states:
+        run_start = 0
+        current_state = states[0]
+        for sample_index in range(1, len(states)):
+            if states[sample_index] != current_state:
+                period_spans.append((run_start, sample_index, str(current_state)))
+                current_state = states[sample_index]
+                run_start = sample_index
+        period_spans.append((run_start, len(states), str(current_state)))
+
+    return elapsed_minutes, smoothed, period_spans
+
+
+def _select_sce_cells_by_variance(
+    *,
+    table: pl.DataFrame,
+    smoothed: NDArray[np.float32],
+    cell_count: int,
+) -> NDArray[np.int32]:
+    """Returns up to ``cell_count`` cell indices to plot, preferring SCE-recruited cells ranked by smoothed-trace
+    variance. Falls back to top-variance cells across the full session when no cell is flagged ``IS_SCE_CELL``.
+    """
+    if smoothed.size == 0:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.int32)
+
+    per_cell_variance = np.std(smoothed, axis=1)
+    if CellAnalysisColumn.IS_SCE_CELL.value in table.columns:
+        # noinspection PyTypeChecker
+        sce_cell_mask: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL.value].to_numpy()
+    else:
+        # noinspection PyTypeChecker
+        sce_cell_mask = np.zeros(per_cell_variance.size, dtype=np.bool_)
+
+    # noinspection PyTypeChecker
+    candidate_mask: NDArray[np.bool_] = sce_cell_mask if sce_cell_mask.any() else np.ones_like(sce_cell_mask)
+    # noinspection PyTypeChecker
+    candidate_indices: NDArray[np.int64] = np.where(candidate_mask)[0]
+    if candidate_indices.size == 0:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.int32)
+
+    candidate_variance = per_cell_variance[candidate_indices]
+    # noinspection PyTypeChecker
+    sorted_descending: NDArray[np.int64] = np.argsort(-candidate_variance, kind="stable")
+    selected = candidate_indices[sorted_descending[:cell_count]]
+    # noinspection PyTypeChecker
+    return np.sort(selected).astype(np.int32)
 
 
 def _reconstruct_onset_matrix(
@@ -2656,45 +2624,6 @@ def _reconstruct_onset_matrix(
         return matrix
     matrix[cells, samples] = True
     return matrix
-
-
-def _select_rest_run_cells(
-    sequence_data: list,
-    cell_count: int,
-    summary_cell_count: int,
-) -> NDArray[np.int32]:
-    """Picks a mix of rest-active and rest-quiet cells that are also active during run for the trace plot."""
-    # noinspection PyTypeChecker
-    rest_onsets: NDArray[np.int32] = np.zeros(summary_cell_count, dtype=np.int32)
-    # noinspection PyTypeChecker
-    run_onsets: NDArray[np.int32] = np.zeros(summary_cell_count, dtype=np.int32)
-    # The sequence_data list does not currently carry the dense onset matrix; using non-zero smoothed-fluorescence
-    # variance per cell as a proxy for activity within each period.
-    for state in sequence_data:
-        per_cell_variance = np.std(state.smoothed_fluorescence, axis=1)
-        # noinspection PyTypeChecker
-        active_cells: NDArray[np.bool_] = per_cell_variance > 0
-        if state.period_type == PeriodType.REST:
-            rest_onsets[active_cells] += 1
-        else:
-            run_onsets[active_cells] += 1
-
-    # noinspection PyTypeChecker
-    run_active_indices: NDArray[np.int64] = np.where(run_onsets > 0)[0]
-    if run_active_indices.size == 0:
-        # noinspection PyTypeChecker
-        run_active_indices = np.arange(summary_cell_count, dtype=np.int64)
-
-    rest_spikers = cell_count // 2
-    rest_calm = cell_count - rest_spikers
-    rest_subset = rest_onsets[run_active_indices]
-    # noinspection PyTypeChecker
-    sorted_by_rest: NDArray[np.int64] = np.argsort(rest_subset)
-    calm_indices = run_active_indices[sorted_by_rest[:rest_calm]]
-    spiker_indices = run_active_indices[sorted_by_rest[-rest_spikers:]]
-    # noinspection PyTypeChecker
-    selected: NDArray[np.int32] = np.unique(np.concatenate([calm_indices, spiker_indices])).astype(np.int32)
-    return selected[:cell_count]
 
 
 def _z_score_along_samples(activity: NDArray[np.float32]) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
@@ -3074,296 +3003,6 @@ def _detect_assemblies_ica_cs(
     # noinspection PyTypeChecker
     surviving_templates: NDArray[np.float32] = np.stack(surviving, axis=0).astype(np.float32, copy=False)
     return surviving_templates, member_lists
-
-
-def _per_sce_reactivation_strength(
-    z: NDArray[np.float32],
-    templates: NDArray[np.float32],
-    sce_labels: NDArray[np.int32],
-    sce_count: int,
-    *,
-    templates_squared: NDArray[np.float32] | None = None,
-    z_squared: NDArray[np.float32] | None = None,
-) -> NDArray[np.float32]:
-    """Returns the per-SCE mean diagonal-removed reactivation strength under the Peyrache 2009 / Lopes-dos-
-    Santos 2013 quadratic projection ``R(t) = sum_k ((P_k @ z(:,t))^2 - sum_i P_k[i]^2 * z(i,t)^2)``.
-
-    Notes:
-        Reformulates the Peyrache / Lopes-dos-Santos quadratic projection as two BLAS GEMMs so the per-sample
-        strength becomes a vectorised reduction. Lets ``A = templates @ z`` and ``B = (templates ** 2) @ (z ** 2)``;
-        the per-sample strength is ``(A ** 2 - B).sum(axis=0)``. Aggregating across SCEs is one ``np.bincount``
-        with weights. Replaces the previous numba-kernel implementation that walked
-        ``sample_count * n_assemblies * cell_count`` strided loads on a column-major access pattern (z is
-        C-contiguous (cell, sample)) and accumulated per-SCE sums via a non-atomic
-        ``sums[label - 1] += per_sample_strength`` scatter under ``prange`` -- the new path is roughly an
-        order of magnitude faster and is race-free.
-
-        ``templates_squared`` and ``z_squared`` are optional pre-computed elementwise squares. Inside the
-        shuffle loop the templates are shuffle-invariant so ``templates_squared`` is hoisted once per period;
-        ``z_squared`` is also reused per shuffle because the circular-shift gather commutes with elementwise
-        squaring (``shuffled_z ** 2 == shuffled(z ** 2)`` when both use identical per-cell shifts), so the
-        caller pre-computes ``z * z`` once per period and gathers it with the same indices used for ``z``.
-
-    Args:
-        z: Z-scored activity with dimensions (cell_count, sample_count).
-        templates: Assembly templates with dimensions (n_assemblies, cell_count).
-        sce_labels: Per-sample SCE labels (1-indexed; 0 outside any SCE) with length sample_count.
-        sce_count: Number of detected SCEs (the maximum value in ``sce_labels``).
-        templates_squared: Optional pre-computed ``templates * templates`` array; when provided the per-call
-            elementwise squaring is skipped. Useful inside shuffle loops where templates are invariant.
-        z_squared: Optional pre-computed ``z * z`` array (same shape and dtype as ``z``). When provided the
-            per-call ``z ** 2`` materialisation -- the dominant elementwise allocation at the typical
-            ``cell_count * sample_count`` of a rest period -- is skipped.
-
-    Returns:
-        Per-SCE mean reactivation strength with length sce_count; entries for SCEs whose sample slice is empty
-        remain at zero.
-    """
-    sample_count = z.shape[1]
-    n_assemblies = templates.shape[0]
-    # noinspection PyTypeChecker
-    means: NDArray[np.float32] = np.zeros(sce_count, dtype=np.float32)
-    if sce_count == 0 or n_assemblies == 0 or sample_count == 0:
-        return means
-
-    # noinspection PyTypeChecker
-    projection: NDArray[np.float32] = (templates @ z).astype(np.float32, copy=False)
-    if templates_squared is None:
-        # noinspection PyTypeChecker
-        templates_squared = (templates * templates).astype(np.float32, copy=False)
-    if z_squared is None:
-        # noinspection PyTypeChecker
-        z_squared = (z * z).astype(np.float32, copy=False)
-    # noinspection PyTypeChecker
-    diagonal: NDArray[np.float32] = (templates_squared @ z_squared).astype(np.float32, copy=False)
-    # noinspection PyTypeChecker
-    per_sample: NDArray[np.float32] = (projection * projection - diagonal).sum(axis=0).astype(
-        np.float32, copy=False
-    )
-
-    # ``np.bincount(sce_labels, weights=per_sample, minlength=sce_count + 1)`` puts samples whose label is 0
-    # into bin 0 (which we discard) and accumulates per_sample[t] into bin label[t] for valid SCEs. Counts use
-    # the same minlength so the per-SCE divisor is computed without a separate pass over the labels.
-    minlength = sce_count + 1
-    # noinspection PyTypeChecker
-    sums: NDArray[np.float64] = np.bincount(sce_labels, weights=per_sample, minlength=minlength)[1:]
-    # noinspection PyTypeChecker
-    counts: NDArray[np.int64] = np.bincount(sce_labels, minlength=minlength)[1:]
-    nonempty = counts > 0
-    if np.any(nonempty):
-        # noinspection PyTypeChecker
-        means[nonempty] = (sums[nonempty] / counts[nonempty]).astype(np.float32, copy=False)
-    return means
-
-
-def _build_run_template_matrix(
-    *,
-    run_results: list,
-    cell_count: int,
-    shuffle_count: int,
-    eigenvalue_significance_percentile: float,
-    minimum_shift_samples: int,
-    rng_seed: int,
-) -> NDArray[np.float32]:
-    """Concatenates RUN-period onset matrices column-wise and runs ICA-CS to derive the population-assembly
-    templates used for rest-period reactivation projection.
-    """
-    if not run_results:
-        # noinspection PyTypeChecker
-        return np.empty((0, cell_count), dtype=np.float32)
-
-    # noinspection PyTypeChecker
-    run_concat: NDArray[np.float32] = np.concatenate(
-        [result.onset_matrix.astype(np.float32, copy=False) for result in run_results], axis=1
-    )
-    if run_concat.shape[1] < max(2, minimum_shift_samples * 2):
-        # noinspection PyTypeChecker
-        return np.empty((0, cell_count), dtype=np.float32)
-
-    templates, _ = _detect_assemblies_ica_cs(
-        activity_matrix=run_concat,
-        shuffle_count=shuffle_count,
-        eigenvalue_significance_percentile=eigenvalue_significance_percentile,
-        minimum_shift_samples=minimum_shift_samples,
-        rng_seed=rng_seed,
-    )
-    return templates
-
-
-def _compute_population_reactivation(
-    *,
-    run_results: list,
-    rest_results: list,
-    cell_count: int,
-    shuffle_count: int = 200,
-    template_eigenvalue_significance_percentile: float = 99.0,
-    sce_significance_percentile: float = 95.0,
-    minimum_shift_samples: int = 5,
-    rng_seed: int = 0,
-) -> tuple[NDArray[np.float32], dict[int, dict[str, object]]]:
-    """Computes per-SCE population reactivation strength of REST SCEs against templates derived from the
-    concatenated RUN onset matrix (Peyrache 2009 / Lopes-dos-Santos 2013).
-
-    Notes:
-        Templates are derived once from RUN onsets via ICA-CS; each REST period's onsets are then
-        z-scored along the sample axis and projected onto the templates via the diagonal-removed quadratic
-        form so within-cell autocorrelation does not inflate the strength. A per-SCE significance flag is
-        derived from a per-period circular-shuffle null on the same projection.
-
-    Args:
-        run_results: List of RUN-period ``SCEResult`` instances supplying the onset matrix used for template
-            estimation.
-        rest_results: List of REST-period ``SCEResult`` instances onto which the templates are projected.
-        cell_count: Total number of cells in the session.
-        shuffle_count: Number of shuffle iterations both for template selection and for the per-SCE null.
-        template_eigenvalue_significance_percentile: Percentile cutoff for selecting significant principal
-            components during template estimation.
-        sce_significance_percentile: Percentile of the per-SCE shuffle null at which an SCE is flagged as
-            reactivating.
-        minimum_shift_samples: Lower bound on the absolute circular shift per cell per shuffle (template
-            estimation and per-SCE null).
-        rng_seed: Master seed for both the template-estimation rng and the per-period shuffle rngs.
-
-    Returns:
-        Tuple of (templates, per_period_dict). ``templates`` has shape ``(n_assemblies, cell_count)``;
-        ``per_period_dict`` maps result index in ``rest_results`` (also indexable as the position of the rest
-        result inside the combined results list when consumed by ``_build_sce_periods_table``) to a dict
-        carrying ``reactivation_strengths`` (per-SCE), ``mean_reactivation_strength`` (period mean), and
-        ``reactivating_sce_fraction`` (per-period significance fraction).
-    """
-    templates = _build_run_template_matrix(
-        run_results=run_results,
-        cell_count=cell_count,
-        shuffle_count=shuffle_count,
-        eigenvalue_significance_percentile=template_eigenvalue_significance_percentile,
-        minimum_shift_samples=minimum_shift_samples,
-        rng_seed=rng_seed,
-    )
-    if templates.shape[0] == 0 or not rest_results:
-        return templates, {}
-
-    master_rng = np.random.default_rng(seed=rng_seed + 1)
-    period_seeds = master_rng.integers(low=0, high=np.iinfo(np.int64).max, size=len(rest_results))
-
-    # Pre-computes ``templates ** 2`` once across every per-period reactivation call. Templates are
-    # shuffle-invariant (and period-invariant) so the elementwise square is hoisted out of the hot path.
-    # noinspection PyTypeChecker
-    templates_squared: NDArray[np.float32] = (templates * templates).astype(np.float32, copy=False)
-
-    total_budget = resolve_worker_count(requested_workers=0)
-    blas_threads_per_shuffle, parallel_shuffles = _resolve_ica_shuffle_allocation(
-        budget=total_budget,
-        shuffle_count=shuffle_count,
-    )
-
-    def _init_reactivation_worker() -> None:
-        # Same per-worker BLAS-thread pin used by ``_shuffle_max_eigenvalue``: each ICA-CS reactivation
-        # shuffle does two GEMMs (templates @ z and templates_squared @ z_squared), so capping BLAS to its
-        # share of the CPU budget prevents 4x oversubscription while still saturating each worker's matvec.
-        threadpool_limits(limits=blas_threads_per_shuffle)
-
-    per_period: dict[int, dict[str, object]] = {}
-    rest_iterator = tqdm(
-        list(enumerate(rest_results)),
-        desc="Reactivation per rest period",
-        unit="period",
-        leave=False,
-    )
-    for period_position, result in rest_iterator:
-        sce_count = int(np.max(result.sce_labels)) if result.sce_labels.size > 0 else 0
-        if sce_count == 0:
-            continue
-        # noinspection PyTypeChecker
-        rest_activity: NDArray[np.float32] = result.onset_matrix.astype(np.float32, copy=False)
-        z, _ = _z_score_along_samples(activity=rest_activity)
-        # Pre-computes ``z * z`` once per period. Circular shifts commute with elementwise squaring, so
-        # gathering ``z_squared`` with the same per-cell shifts used for ``z`` yields ``shuffled_z ** 2``
-        # without paying the per-shuffle elementwise allocation (the dominant non-GEMM allocation at
-        # ``cell_count * sample_count`` of a rest period).
-        # noinspection PyTypeChecker
-        z_squared_period: NDArray[np.float32] = (z * z).astype(np.float32, copy=False)
-        sce_labels_int32 = result.sce_labels.astype(np.int32, copy=False)
-
-        observed = _per_sce_reactivation_strength(
-            z=z,
-            templates=templates,
-            sce_labels=sce_labels_int32,
-            sce_count=sce_count,
-            templates_squared=templates_squared,
-            z_squared=z_squared_period,
-        )
-
-        # Per-SCE null: independent circular shifts of each cell, recompute reactivation strength.
-        period_rng = np.random.default_rng(seed=int(period_seeds[period_position]))
-        sample_count = rest_activity.shape[1]
-        floor = max(1, int(minimum_shift_samples))
-        ceil = max(floor + 1, sample_count - floor)
-        # noinspection PyTypeChecker
-        sample_index_arange: NDArray[np.int64] = np.arange(sample_count, dtype=np.int64)
-        # noinspection PyTypeChecker
-        cell_arange: NDArray[np.int64] = np.arange(cell_count, dtype=np.int64)[:, np.newaxis]
-        # noinspection PyTypeChecker
-        null_strengths: NDArray[np.float32] = np.zeros((shuffle_count, sce_count), dtype=np.float32)
-
-        # Pre-draws every shuffle's shift vector from the period rng in serial order so the rng state advances
-        # exactly as the previous sequential implementation -- preserves bit-for-bit reproducibility against
-        # legacy reports.
-        # noinspection PyTypeChecker
-        all_shifts: NDArray[np.int64] = period_rng.integers(
-            low=floor, high=ceil, size=(shuffle_count, cell_count)
-        ).astype(np.int64)
-
-        def _one_reactivation_shuffle(shuffle_index: int) -> tuple[int, NDArray[np.float32]]:
-            # noinspection PyTypeChecker
-            gather: NDArray[np.int64] = (
-                sample_index_arange[np.newaxis, :] - all_shifts[shuffle_index][:, np.newaxis]
-            ) % sample_count
-            shuffled_z = z[cell_arange, gather]
-            shuffled_z_squared = z_squared_period[cell_arange, gather]
-            strengths = _per_sce_reactivation_strength(
-                z=shuffled_z,
-                templates=templates,
-                sce_labels=sce_labels_int32,
-                sce_count=sce_count,
-                templates_squared=templates_squared,
-                z_squared=shuffled_z_squared,
-            )
-            return shuffle_index, strengths
-
-        # No inner per-shuffle progress bar -- the outer ``Reactivation per rest period`` bar already advances
-        # at period granularity, and at typical shuffle throughputs the inner bar emits hundreds of updates per
-        # period that flood non-TTY consoles (PyCharm Run windows, log files) without adding actionable
-        # information.
-        if parallel_shuffles <= 1:
-            with threadpool_limits(limits=blas_threads_per_shuffle):
-                for shuffle_index in range(shuffle_count):
-                    _, strengths = _one_reactivation_shuffle(shuffle_index)
-                    null_strengths[shuffle_index] = strengths
-        else:
-            with ThreadPoolExecutor(
-                max_workers=parallel_shuffles,
-                initializer=_init_reactivation_worker,
-            ) as executor:
-                futures = [
-                    executor.submit(_one_reactivation_shuffle, index) for index in range(shuffle_count)
-                ]
-                for future in as_completed(futures):
-                    shuffle_index, strengths = future.result()
-                    null_strengths[shuffle_index] = strengths
-
-        # noinspection PyTypeChecker
-        sce_threshold: NDArray[np.float32] = np.percentile(null_strengths, sce_significance_percentile, axis=0).astype(
-            np.float32, copy=False
-        )
-        # noinspection PyTypeChecker
-        is_significant: NDArray[np.bool_] = observed > sce_threshold
-        per_period[period_position] = {
-            "reactivation_strengths": observed.tolist(),
-            "mean_reactivation_strength": float(np.mean(observed)),
-            "reactivating_sce_fraction": float(np.mean(is_significant)),
-        }
-
-    return templates, per_period
 
 
 def _active_significance_columns(

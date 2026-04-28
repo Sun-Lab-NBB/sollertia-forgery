@@ -13,8 +13,8 @@ from numba import njit, prange
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from ..forging import FluorescenceColumn
-from .utilities import (
+from ...forging import FluorescenceColumn
+from ..utilities import (
     RunSessionData,
     MINIMUM_VALID_BINS_FOR_PEARSON,
     per_cell_pearson_safe,

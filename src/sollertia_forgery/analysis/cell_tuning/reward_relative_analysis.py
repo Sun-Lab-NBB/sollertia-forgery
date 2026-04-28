@@ -23,7 +23,7 @@ import numpy as np
 import polars as pl
 from ataraxis_data_structures import YamlConfig
 
-from ..forging import FluorescenceColumn
+from ...forging import FluorescenceColumn
 from .cell_analysis import (
     CellAnalysisColumn,
     CellAnalysisReport,

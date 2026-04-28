@@ -12,8 +12,8 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.optimize import minimize
 
-from sollertia_forgery.forging import FluorescenceColumn
-from sollertia_forgery.analysis.utilities import (
+from ...forging import FluorescenceColumn
+from ..utilities import (
     RunSessionData,
     per_cell_pearson_safe,
     assemble_run_session_data,

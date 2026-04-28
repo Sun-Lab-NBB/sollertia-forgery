@@ -9,7 +9,7 @@ References:
     - Villette, Malvache, Tressard, Dupuy & Cossart (2015). Internally Recurring Hippocampal Sequences as a
       Population Template of Spatiotemporal Information. Neuron. https://doi.org/10.1016/j.neuron.2015.09.052
       -- per-cell onset-rank-within-SCE motivation; consumed downstream by the rank-correlation analysis in
-      :mod:`sollertia_forgery.analysis.cell_analysis`.
+      :mod:`sollertia_forgery.analysis.cell_tuning.cell_analysis`.
     - Modol, Sousa, Malvache, Tressard et al. (2020). Hippocampal hub neurons maintain distinct connectivity
       throughout their lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6 -- per-cell
       SCE-recruitment significance test ("super-rich" cells) implemented here as the per-cell participation
@@ -21,7 +21,6 @@ References:
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
@@ -32,16 +31,14 @@ import polars as pl
 from scipy.signal import savgol_filter
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
 
-from ..forging import FluorescenceColumn
-from .utilities import trim_acquisition_warmup, compute_within_trial_position
-from ..shared_assets import DatasetFiles, DatasetColumn
+from ...forging import FluorescenceColumn
+from ..utilities import trim_acquisition_warmup
+from ...shared_assets import DatasetFiles, DatasetColumn
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
-
-    from sollertia_forgery.analysis.place_cell_protocol import PlaceFields
 
 
 _MINIMUM_STABLE_FRACTION: float = 0.5
@@ -50,15 +47,6 @@ _MINIMUM_STABLE_SAMPLE_COUNT: int = 10
 """Minimum number of stable torque samples required for a rest period to be included in SCE analysis."""
 _DEFAULT_RNG_SEED: int = 42
 """Seed for the per-period numpy generator used for circular-shift shuffles. Fixed for reproducibility."""
-
-
-class PeriodType(StrEnum):
-    """Defines the analysis period types for SCE detection."""
-
-    REST = "rest"
-    """Indicates a rest period where the animal is stationary."""
-    RUN = "run"
-    """Indicates a run period where the animal is actively locomoting."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,18 +91,30 @@ class SCEDetectionConfiguration:
     ("super-rich" sense of Modol et al. 2020). A cell whose observed participation rate exceeds this percentile
     of its own jitter null is recorded in the per-period ``is_sce_cell`` mask."""
     torque_stability_window_seconds: float = 5.0
-    """Window length in seconds for computing the rolling standard deviation of torque during rest periods."""
+    """Window length in seconds for computing the rolling standard deviation of torque during rest-state
+    periods. Torque is the canonical stationarity indicator when the animal is in a designated rest state on
+    the wheel: zero net force exerted means the animal is not preparing to run."""
     torque_stability_threshold: float = 0.1
-    """Maximum allowable rolling standard deviation of torque (in N*cm) for a rest sample to be considered
-    stable."""
+    """Maximum allowable rolling standard deviation of torque (in N*cm) for a rest-state sample to be
+    considered stationary."""
+    encoder_stability_window_seconds: float = 2.0
+    """Window length in seconds for computing the rolling standard deviation of wheel speed during non-rest
+    states. Set to 2 seconds to match the canonical quiet-wakefulness floor used in awake-replay / immobility
+    studies (Foster & Wilson 2006; Diba & Buzsaki 2007; Davidson, Kloosterman & Wilson 2009): >=2 s of
+    sustained immobility distinguishes genuine pauses from deceleration phases of ongoing locomotion."""
+    encoder_stability_threshold: float = 0.1
+    """Maximum allowable rolling standard deviation of wheel speed (in cm/s) for a non-rest sample to be
+    considered stationary. Strict ~0 cm/s cutoff -- the animal must be completely still on the wheel for the
+    sample to qualify, in line with the SCE / replay literature's "complete immobility" requirement."""
 
 
 @dataclass(slots=True)
 class SCEResult:
-    """Stores the results of SCE detection for a single analysis period.
+    """Stores the results of SCE detection for a single stationary period.
 
     Attributes:
-        period_type: Identifies this result as belonging to a rest or run period.
+        period_state: ``DatasetColumn.SYSTEM_STATE`` value identifying the experiment-protocol state this
+            stationary block sat inside (e.g. ``"rest"``, ``"run"``, or any custom protocol state).
         onset_matrix: Binary matrix of calcium transient onsets with dimensions (cell_count, sample_count).
         smoothed_fluorescence: Smoothed fluorescence traces with dimensions (cell_count, sample_count).
         coactive_counts: Number of co-active cells at each sample with length sample_count.
@@ -139,8 +139,8 @@ class SCEResult:
             participation-significance percentile of its jitter null with length cell_count.
     """
 
-    period_type: PeriodType
-    """Identifies this result as belonging to a rest or run period."""
+    period_state: str
+    """``DatasetColumn.SYSTEM_STATE`` value of the protocol epoch this period was extracted from."""
     onset_matrix: NDArray[np.bool_]
     """Binary matrix of transient onsets with dimensions (cell_count, sample_count)."""
     smoothed_fluorescence: NDArray[np.float32]
@@ -691,10 +691,10 @@ def _detect_sces(
     timestamps: NDArray[np.float32],
     trial_ids: NDArray[np.int32],
     configuration: SCEDetectionConfiguration,
-    period_type: PeriodType,
+    period_state: str,
     rng: np.random.Generator,
 ) -> SCEResult:
-    """Runs the full SCE detection pipeline on fluorescence data for a single analysis period.
+    """Runs the full SCE detection pipeline on fluorescence data for a single stationary period.
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
@@ -702,7 +702,7 @@ def _detect_sces(
         timestamps: Timestamps in minutes for each sample with length sample_count.
         trial_ids: Per-sample trial id with length sample_count (-1 outside any complete trial).
         configuration: SCE detection parameters.
-        period_type: Identifies this period as rest or run.
+        period_state: System-state label (e.g. ``"rest"``, ``"run"``) preserved on the result.
         rng: Per-period numpy random generator (shared between threshold and per-cell significance shuffles).
 
     Returns:
@@ -765,7 +765,7 @@ def _detect_sces(
     )
 
     return SCEResult(
-        period_type=period_type,
+        period_state=period_state,
         onset_matrix=onsets,
         smoothed_fluorescence=smoothed,
         coactive_counts=coactive_counts,
@@ -817,74 +817,53 @@ def _identify_stable_rest_samples(
     return rolling_std <= stability_threshold
 
 
-def _subtract_place_field_predictions(
-    *,
-    fluorescence: NDArray[np.float32],
-    position: NDArray[np.float32],
-    place_fields: PlaceFields,
-    track_length: float,
-) -> NDArray[np.float32]:
-    """Returns a residual fluorescence trace with the place-field rate-map prediction subtracted at each
-    sample's current position bin.
+_REST_STATE: str = "rest"
+"""``DatasetColumn.SYSTEM_STATE`` value that uses the torque-based stationarity filter. Every other state value
+falls through to the speed/encoder-based filter. Both filters are stationarity gates: SCEs are restricted to
+moments when the animal is motionless, regardless of which protocol epoch the moment is in (Malvache 2016
+canonical rest replay + Buzsaki two-stage immobility framing)."""
+
+
+def _identify_stable_run_samples(
+    speed: NDArray[np.float32],
+    sampling_rate: float,
+    stability_window_seconds: float,
+    stability_threshold: float,
+) -> NDArray[np.bool_]:
+    """Identifies non-rest samples where the wheel encoder is stable, marking pauses-within-run.
 
     Notes:
-        Replaces the legacy hard-zeroing approach (which created spurious derivatives at mask boundaries) with
-        the residual approach used by Geiller / Grosmark in awake CA1 SCE work: at every sample, subtract the
-        cell's expected fluorescence given the animal's current position so genuine off-field synchrony
-        survives but stereotyped place-field firing is removed. Cells without a place field at the current
-        position experience zero subtraction. Samples with NaN positions (incomplete trials) carry no
-        subtraction. Operates on a copy.
+        Mirrors :func:`_identify_stable_rest_samples` but uses wheel speed as the stationarity indicator. During
+        designated run epochs the animal is mostly locomoting, but brief pauses (encoder coasts to zero) are
+        windows where SCE-class population synchrony can occur; this mask admits those samples.
 
     Args:
-        fluorescence: Fluorescence trace with dimensions (cell_count, sample_count).
-        position: Per-sample within-trial position with length sample_count.
-        place_fields: Detected place fields exposing ``binned_fluorescence`` rate maps and ``label_image``.
-        track_length: Track length in centimeters used to derive the bin edges.
+        speed: Wheel speed in cm/s with length sample_count.
+        sampling_rate: Sampling rate in Hz.
+        stability_window_seconds: Window length in seconds for the rolling speed standard deviation.
+        stability_threshold: Maximum allowable rolling standard deviation of speed for a sample to be considered
+            stationary.
 
     Returns:
-        Residual fluorescence trace with the same dimensions as ``fluorescence``.
+        Boolean mask with length sample_count, True for samples where the wheel is stationary.
     """
-    # noinspection PyTypeChecker
-    residual: NDArray[np.float32] = fluorescence.astype(np.float32, copy=True)
-    bin_size = place_fields.bin_size
-    bin_count = place_fields.label_image.shape[1]
-    if bin_count == 0:
-        return residual
-
-    # noinspection PyTypeChecker
-    valid_position: NDArray[np.bool_] = ~np.isnan(position)
-    if not valid_position.any():
-        return residual
-
-    # noinspection PyTypeChecker
-    bin_edges: NDArray[np.float32] = np.arange(0.0, track_length + bin_size, bin_size, dtype=np.float32)
-    # noinspection PyTypeChecker
-    safe_position: NDArray[np.float32] = np.where(valid_position, position, np.float32(0.0))
-    position_bins = np.clip(np.searchsorted(bin_edges, safe_position, side="right") - 1, 0, bin_count - 1).astype(
-        np.int32
-    )
-
-    # Per-sample rate-map prediction has dimensions (cell_count, sample_count); zeroed where the cell has no
-    # place field overlapping the current bin and where the animal's position is undefined.
-    # noinspection PyTypeChecker
-    rate_map: NDArray[np.float32] = place_fields.binned_fluorescence.astype(np.float32, copy=False)
-    # noinspection PyTypeChecker
-    has_place_at_bin: NDArray[np.bool_] = place_fields.label_image[:, position_bins] > 0
-    # noinspection PyTypeChecker
-    predictions: NDArray[np.float32] = rate_map[:, position_bins].astype(np.float32, copy=False)
-    predictions = np.where(has_place_at_bin, predictions, np.float32(0.0)).astype(np.float32, copy=False)
-    predictions[:, ~valid_position] = np.float32(0.0)
-
-    residual -= predictions
-    return residual
+    window_samples = max(1, int(stability_window_seconds * sampling_rate))
+    rolling_mean = uniform_filter1d(input=speed, size=window_samples, mode="nearest")
+    rolling_mean_sq = uniform_filter1d(input=speed**2, size=window_samples, mode="nearest")
+    rolling_variance = rolling_mean_sq - rolling_mean**2
+    rolling_std = np.sqrt(np.maximum(rolling_variance, 0.0))
+    return rolling_std <= stability_threshold
 
 
 class SCEDetector:
-    """Detects Synchronous Calcium Events (SCEs) separately in rest and run periods.
+    """Detects Synchronous Calcium Events (SCEs) during stationary samples across every protocol epoch.
 
-    Separates the session into rest and run epochs, applies torque-based stability filtering for rest periods,
-    and subtracts the place-field rate-map prediction from run-period fluorescence so genuine off-field
-    synchrony survives without place-field firing dominating the onset detector.
+    Walks every contiguous ``DatasetColumn.SYSTEM_STATE`` block, applies a state-appropriate stationarity gate
+    (torque-stability for ``"rest"``-state samples, encoder/speed-stability for every other state), and runs the
+    SCE detection pipeline on each surviving stationary chunk. SCEs are by definition a quiet-wakefulness
+    phenomenon (Malvache 2016 lineage; Buzsaki two-stage model) so the gate is animal stationarity, not which
+    protocol epoch the sample sits in. Pauses-within-run survive and contribute their own SCE periods, tagged
+    with the originating ``period_state`` so post-hoc analyses can split events by epoch.
 
     References:
         - Malvache, Reichinnek, Villette, Haimerl & Cossart (2016). Awake hippocampal reactivations project
@@ -893,19 +872,11 @@ class SCEDetector:
         - Modol et al. (2020). Hippocampal hub neurons maintain distinct connectivity throughout their
           lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6 -- per-cell SCE-recruitment
           significance test against a per-cell jitter null.
-        - Geiller, Vancura, Terada et al. (2020). Large-Scale 3D Two-Photon Imaging of CA1 Interneuron
-          Dynamics. Neuron. https://doi.org/10.1016/j.neuron.2020.09.013 -- run-period rate-map subtraction
-          rather than hard masking, preserving variance for off-field synchrony detection.
 
     Args:
         session_path: Path to the session's dataset directory containing the data feather.
-        track_length: Length of the track in centimeters, used to convert distance to position for the
-            place-field rate-map subtraction during run.
         fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to read from the
             data feather.
-        place_fields: Detected place fields. When provided, the rate-map prediction at each sample's current
-            position bin is subtracted from run-period fluorescence; when None, run-period fluorescence is
-            passed through untouched.
         configuration: SCE detection parameters. Uses defaults if None.
         rng_seed: Seed for the per-period numpy random generator. Fixed for reproducibility.
     """
@@ -913,21 +884,15 @@ class SCEDetector:
     def __init__(
         self,
         session_path: Path,
-        track_length: float,
         fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
-        place_fields: PlaceFields | None = None,
         configuration: SCEDetectionConfiguration | None = None,
         rng_seed: int = _DEFAULT_RNG_SEED,
     ) -> None:
-        """Loads fluorescence, torque, distance, trial-id, and system-state data from the session's data
-        feather.
+        """Loads fluorescence, torque, speed, trial-id, and system-state data from the session's data feather.
 
         Args:
             session_path: Path to the session's dataset directory.
-            track_length: Length of the track in centimeters.
             fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use.
-            place_fields: Detected place fields for run-period rate-map subtraction. If None, no subtraction
-                is applied.
             configuration: SCE detection parameters. Uses defaults if None.
             rng_seed: Seed for the per-period numpy random generator.
         """
@@ -938,7 +903,7 @@ class SCEDetector:
                 DatasetColumn.TIME_US.value,
                 fluorescence_column.value,
                 DatasetColumn.TORQUE_N_CM.value,
-                DatasetColumn.DISTANCE_CM.value,
+                DatasetColumn.SPEED_CM_S.value,
                 DatasetColumn.TRIAL.value,
             ],
             memory_map=True,
@@ -954,17 +919,13 @@ class SCEDetector:
 
         # noinspection PyTypeChecker
         self._fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
-        self._torque = df[DatasetColumn.TORQUE_N_CM.value].to_numpy()
+        # noinspection PyTypeChecker
+        self._torque: NDArray[np.float32] = df[DatasetColumn.TORQUE_N_CM.value].to_numpy().astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        self._speed: NDArray[np.float32] = df[DatasetColumn.SPEED_CM_S.value].to_numpy().astype(np.float32, copy=False)
         # noinspection PyTypeChecker
         self._trial_ids: NDArray[np.int32] = df[DatasetColumn.TRIAL.value].to_numpy().astype(np.int32, copy=False)
 
-        distance = df[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float32)
-        self._position = compute_within_trial_position(
-            distance=distance, trial_ids=self._trial_ids, track_length=track_length
-        )
-
-        self._track_length: float = track_length
-        self._place_fields: PlaceFields | None = place_fields
         self._configuration: SCEDetectionConfiguration = (
             configuration if configuration is not None else SCEDetectionConfiguration()
         )
@@ -972,18 +933,10 @@ class SCEDetector:
         self._results: list[SCEResult] = []
 
     @property
-    def rest_results(self) -> list[SCEResult]:
-        """Returns the subset of results belonging to rest periods in temporal order."""
-        return [r for r in self._results if r.period_type == PeriodType.REST]
-
-    @property
-    def run_results(self) -> list[SCEResult]:
-        """Returns the subset of results belonging to run periods in temporal order."""
-        return [r for r in self._results if r.period_type == PeriodType.RUN]
-
-    @property
     def results(self) -> list[SCEResult]:
-        """Returns every detected SCE result in temporal order, with rest and run periods interleaved."""
+        """Returns every detected SCE result in temporal session order. Each result carries the originating
+        ``period_state`` so callers can split events by protocol epoch downstream.
+        """
         return list(self._results)
 
     @property
@@ -992,68 +945,57 @@ class SCEDetector:
         return self._sampling_rate
 
     def detect_events(self, *, progress: bool = True) -> list[SCEResult]:
-        """Detects SCEs separately in rest and run periods across the session.
+        """Detects SCEs in every stationary chunk across every protocol epoch in the session.
 
         Notes:
-            Segments the session into alternating rest and run periods, applies torque stability filtering for
-            rest and place-field rate-map subtraction for run, then runs the SCE detection pipeline on each
-            period independently.
+            Walks every contiguous ``SYSTEM_STATE`` block. Inside ``"rest"``-state blocks the torque-stability
+            mask is applied to drop fidgeting samples; inside every other state block the speed-stability mask
+            is applied to retain only pauses-within-run. Each surviving stationary chunk feeds a separate
+            ``SCEResult`` whose ``period_state`` carries the originating block's state name.
 
         Args:
             progress: Displays a tqdm progress bar tracking period completion when True.
 
         Returns:
-            A list of SCEResult objects in temporal session order, each tagged with its PeriodType.
+            A list of SCEResult objects in temporal session order.
         """
-        pending: list[tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int32], PeriodType]] = []
-        current_state = None
+        pending: list[tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int32], str]] = []
+        current_state: str | None = None
         period_start = 0
 
         for sample_index in range(len(self._system_state) + 1):
             state = self._system_state[sample_index] if sample_index < len(self._system_state) else None
 
             if state != current_state:
-                if current_state in (PeriodType.REST, PeriodType.RUN) and (sample_index - period_start) > 0:
-                    period_fluorescence = self._fluorescence[:, period_start:sample_index]
-                    period_timestamps = self._elapsed_minutes[period_start:sample_index]
-                    period_trials = self._trial_ids[period_start:sample_index]
-
-                    if current_state == PeriodType.REST:
-                        period_torque = self._torque[period_start:sample_index]
+                if current_state is not None and (sample_index - period_start) > 0:
+                    period_state_str = str(current_state)
+                    if period_state_str == _REST_STATE:
                         stable_mask = _identify_stable_rest_samples(
-                            torque=period_torque,
+                            torque=self._torque[period_start:sample_index],
                             sampling_rate=self._sampling_rate,
                             stability_window_seconds=self._configuration.torque_stability_window_seconds,
                             stability_threshold=self._configuration.torque_stability_threshold,
                         )
+                    else:
+                        stable_mask = _identify_stable_run_samples(
+                            speed=self._speed[period_start:sample_index],
+                            sampling_rate=self._sampling_rate,
+                            stability_window_seconds=self._configuration.encoder_stability_window_seconds,
+                            stability_threshold=self._configuration.encoder_stability_threshold,
+                        )
 
-                        stable_count = int(np.sum(stable_mask))
-                        stable_fraction = stable_count / len(stable_mask)
+                    stable_count = int(np.sum(stable_mask))
+                    stable_fraction = stable_count / len(stable_mask)
 
-                        if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_SAMPLE_COUNT:
-                            pending.append(
-                                (
-                                    period_fluorescence[:, stable_mask],
-                                    period_timestamps[stable_mask],
-                                    period_trials[stable_mask],
-                                    PeriodType.REST,
-                                )
+                    if stable_fraction > _MINIMUM_STABLE_FRACTION and stable_count > _MINIMUM_STABLE_SAMPLE_COUNT:
+                        pending.append(
+                            (
+                                self._fluorescence[:, period_start:sample_index][:, stable_mask],
+                                self._elapsed_minutes[period_start:sample_index][stable_mask],
+                                self._trial_ids[period_start:sample_index][stable_mask],
+                                period_state_str,
                             )
-
-                    elif current_state == PeriodType.RUN:
-                        # noinspection PyTypeChecker
-                        run_fluorescence: NDArray[np.float32] = period_fluorescence.astype(np.float32, copy=True)
-
-                        if self._place_fields is not None:
-                            period_position = self._position[period_start:sample_index]
-                            run_fluorescence = _subtract_place_field_predictions(
-                                fluorescence=run_fluorescence,
-                                position=period_position,
-                                place_fields=self._place_fields,
-                                track_length=self._track_length,
-                            )
-
-                        pending.append((run_fluorescence, period_timestamps, period_trials, PeriodType.RUN))
+                        )
 
                 current_state = state
                 period_start = sample_index
@@ -1070,10 +1012,10 @@ class SCEDetector:
                 timestamps=timestamps,
                 trial_ids=trial_ids,
                 configuration=self._configuration,
-                period_type=period_type,
+                period_state=period_state,
                 rng=np.random.default_rng(seed=int(period_seeds[index])),
             )
-            for index, (fluorescence, timestamps, trial_ids, period_type) in enumerate(periods)
+            for index, (fluorescence, timestamps, trial_ids, period_state) in enumerate(periods)
         ]
 
         return self._results

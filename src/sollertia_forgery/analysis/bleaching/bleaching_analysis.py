@@ -28,8 +28,8 @@ import matplotlib.pyplot as plt
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
-from .utilities import resolve_display_units, trim_acquisition_warmup
-from ..shared_assets import DatasetData, DatasetFiles, DatasetAnimal, DatasetColumn
+from ..utilities import resolve_display_units, trim_acquisition_warmup
+from ...shared_assets import DatasetData, DatasetFiles, DatasetAnimal, DatasetColumn
 
 if TYPE_CHECKING:
     from pathlib import Path
