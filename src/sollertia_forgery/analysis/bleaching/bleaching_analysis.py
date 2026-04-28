@@ -158,247 +158,6 @@ class BleachingReport:
     fractional loss, and audit metadata."""
 
     @classmethod
-    def evaluate(
-        cls,
-        session_paths: tuple[Path, ...],
-        *,
-        configuration: BleachingConfiguration | None = None,
-        display_progress: bool = True,
-    ) -> BleachingReport:
-        """Quantifies photobleaching across the supplied chronologically ordered sessions for a single animal.
-
-        Notes:
-            Operates exclusively on ``DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE`` via
-            :func:`.bleaching_protocol.compute_session_metrics`. The protocol's across-session per-cell
-            comparisons (paired Wilcoxon SNR test, per-cell baseline trend, decay fit on the population median)
-            require that cell index N denote the same neuron across every session in the evaluation set. Only the
-            multi-recording cindra column carries that information; single-recording fluorescence carries no cell
-            correspondence across days and would silently produce mathematically valid but biologically
-            meaningless paired statistics, so it is not exposed as an option. Sessions are computed sequentially
-            in this entry point so the per-cell numba kernels saturate the active Numba thread pool one session
-            at a time; ``run_bleaching_analysis`` parallelizes session compute across a process pool by
-            dispatching session results directly and feeding them to ``_build_from_session_results``.
-
-            The pipeline collapses every methodological step routed through this entry point. The multi-day
-            registered cell intersection that anchors all longitudinal per-cell comparisons follows Ziv et al.
-            (2013) and Rubin et al. (2015). The combined-flagging strategy that unifies the three orthogonal
-            criteria into one flag column follows the standardized longitudinal-imaging quality-control framework
-            of de Vries et al. (2020). Per-session methodological references (Suite2p baseline, MAD noise,
-            GCaMP SNR characterization, within-session bleaching) are attached to
-            :func:`.bleaching_protocol.compute_session_metrics`.
-
-        References:
-            Multi-day registered cell intersection for longitudinal comparisons:
-                Ziv et al. (2013). Long-term dynamics of CA1 hippocampal place codes. Nature Neuroscience.
-                https://doi.org/10.1038/nn.3329
-                Rubin et al. (2015). Hippocampal ensemble dynamics timestamp events in long-term memory. eLife.
-                https://doi.org/10.7554/eLife.12247
-            Standardized longitudinal-imaging quality-control framework that motivates the combined-flagging strategy:
-                de Vries et al. (2020). A large-scale standardized physiological survey reveals functional
-                organization of the mouse visual cortex. Nature Neuroscience.
-                https://doi.org/10.1038/s41593-019-0550-9
-
-        Args:
-            session_paths: Chronologically ordered tuple of session directory paths. Sessions are validated to be
-                in non-decreasing date order via the canonical session-name timestamp.
-            configuration: Bleaching evaluation parameters. Uses defaults if None.
-            display_progress: Determines whether to display a per-session progress bar as each session completes.
-                Suppress when this method is invoked from a subprocess that already reports progress at a coarser
-                level so that the bars do not interleave on the parent terminal.
-
-        Returns:
-            A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
-            cross-session aggregates and configuration.
-        """
-        resolved_configuration: BleachingConfiguration = (
-            configuration if configuration is not None else BleachingConfiguration()
-        )
-
-        progress_context = (
-            console.progress(total=len(session_paths), description="Evaluating bleaching", unit="session")
-            if display_progress
-            else nullcontext()
-        )
-        session_results: list[BleachingSessionResult] = []
-        with progress_context as progress_bar:
-            for session_path in session_paths:
-                session_results.append(
-                    compute_session_metrics(session_path=session_path, configuration=resolved_configuration)
-                )
-                if progress_bar is not None:
-                    progress_bar.update()
-
-        return cls._build_from_session_results(
-            session_paths=session_paths,
-            session_results=tuple(session_results),
-            configuration=resolved_configuration,
-        )
-
-    @classmethod
-    def _build_from_session_results(
-        cls,
-        session_paths: tuple[Path, ...],
-        session_results: tuple[BleachingSessionResult, ...],
-        configuration: BleachingConfiguration,
-    ) -> BleachingReport:
-        """Assembles the report from pre-computed per-session results.
-
-        Notes:
-            Pure aggregation step — no I/O, no per-cell compute. Used by ``BleachingReport.evaluate`` after its
-            sequential loop and by ``run_bleaching_analysis`` after its parallel session dispatch. Validates
-            chronological order of ``session_paths`` and registered cell-count consistency across results before
-            running the cross-session decay fit, paired Wilcoxon comparison, and combined-flag computation.
-
-        Args:
-            session_paths: Chronologically ordered tuple of session directory paths, parallel to
-                ``session_results``.
-            session_results: Per-session results produced by :func:`.bleaching_protocol.compute_session_metrics`,
-                in the same order as ``session_paths``.
-            configuration: Bleaching evaluation parameters that produced the results.
-
-        Returns:
-            A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
-            cross-session aggregates and the configuration.
-        """
-        if len(session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
-            message = (
-                f"Unable to evaluate bleaching across the supplied sessions. The protocol requires at least two "
-                f"sessions, but got {len(session_paths)}."
-            )
-            console.error(message=message, error=ValueError)
-
-        session_microseconds = tuple(_parse_session_microseconds(session_path=path) for path in session_paths)
-        _validate_chronological_order(session_paths=session_paths, session_microseconds=session_microseconds)
-
-        first_microseconds = session_microseconds[0]
-        days_since_first_values = [
-            float(
-                convert_time(
-                    time=session_us - first_microseconds,
-                    from_units=TimeUnits.MICROSECOND,
-                    to_units=TimeUnits.DAY,
-                    as_float=True,
-                )
-            )
-            for session_us in session_microseconds
-        ]
-
-        # Validates that every session sees the same registered cell count before any cross-session reduction
-        # touches the per-cell arrays. Mismatched cell counts would silently produce broadcasting errors in the
-        # paired Wilcoxon test or the population-median trend.
-        cell_count_reference: int | None = None
-        for session_path, result in zip(session_paths, session_results, strict=True):
-            result_cell_count = int(result.cell_baseline_fluorescence.shape[0])
-            if cell_count_reference is None:
-                cell_count_reference = result_cell_count
-            elif result_cell_count != cell_count_reference:
-                message = (
-                    f"Unable to evaluate bleaching across the supplied sessions. The cell count must match "
-                    f"across all sessions for the multi-recording registered comparison, but session "
-                    f"{session_path.name!r} has {result_cell_count} cells while the first session has "
-                    f"{cell_count_reference}."
-                )
-                console.error(message=message, error=ValueError)
-
-        session_names = [session_path.name for session_path in session_paths]
-        sampling_rates = [result.sampling_rate_hz for result in session_results]
-        cell_baseline_arrays = [result.cell_baseline_fluorescence for result in session_results]
-        cell_snr_arrays = [result.cell_snr for result in session_results]
-        within_session_time_arrays = [result.within_session_time_seconds for result in session_results]
-        within_session_baseline_arrays = [result.within_session_baseline for result in session_results]
-        within_session_drops = [result.within_session_fractional_drop for result in session_results]
-
-        # Cross-session aggregates derived from the per-session arrays.
-        population_baseline_values = [float(np.median(array)) for array in cell_baseline_arrays]
-        population_snr_values = [float(np.median(array)) for array in cell_snr_arrays]
-
-        # noinspection PyTypeChecker
-        population_baseline_array: NDArray[np.float32] = np.array(population_baseline_values, dtype=np.float32)
-        # noinspection PyTypeChecker
-        population_snr_array: NDArray[np.float32] = np.array(population_snr_values, dtype=np.float32)
-        # noinspection PyTypeChecker
-        within_session_drop_array: NDArray[np.float32] = np.array(within_session_drops, dtype=np.float32)
-        # noinspection PyTypeChecker
-        days_array: NDArray[np.float32] = np.array(days_since_first_values, dtype=np.float32)
-
-        decay_fit = _fit_exponential_decay(days=days_array, baseline=population_baseline_array)
-
-        snr_paired_p_values = _compute_paired_snr_p_values(cell_snr_arrays=cell_snr_arrays)
-        flag_masks = _compute_flag_masks(
-            population_baseline=population_baseline_array,
-            population_snr=population_snr_array,
-            snr_paired_p_values=snr_paired_p_values,
-            within_session_drops=within_session_drop_array,
-            configuration=configuration,
-        )
-        flagged_mask = flag_masks.combined
-
-        # Assembles the per-session feather. Equal-length cell columns are promoted by polars to
-        # Array(Float32, cell_count); ragged within-session columns stay List(Float32). Each Series is constructed
-        # with an explicit dtype so the schema is stable rather than inferred from data.
-        table = pl.DataFrame(
-            [
-                pl.Series(name=BleachingColumn.SESSION.value, values=session_names, dtype=pl.Utf8),
-                pl.Series(
-                    name=BleachingColumn.DAYS_SINCE_FIRST.value, values=days_since_first_values, dtype=pl.Float32
-                ),
-                pl.Series(name=BleachingColumn.SAMPLING_RATE_HZ.value, values=sampling_rates, dtype=pl.Float64),
-                pl.Series(
-                    name=BleachingColumn.CELL_BASELINE_FLUORESCENCE.value,
-                    values=cell_baseline_arrays,
-                    dtype=pl.List(pl.Float32),
-                ),
-                pl.Series(
-                    name=BleachingColumn.CELL_SNR.value,
-                    values=cell_snr_arrays,
-                    dtype=pl.List(pl.Float32),
-                ),
-                pl.Series(
-                    name=BleachingColumn.WITHIN_SESSION_TIME_SECONDS.value,
-                    values=within_session_time_arrays,
-                    dtype=pl.List(pl.Float32),
-                ),
-                pl.Series(
-                    name=BleachingColumn.WITHIN_SESSION_BASELINE.value,
-                    values=within_session_baseline_arrays,
-                    dtype=pl.List(pl.Float32),
-                ),
-                pl.Series(
-                    name=BleachingColumn.WITHIN_SESSION_FRACTIONAL_DROP.value,
-                    values=within_session_drops,
-                    dtype=pl.Float32,
-                ),
-                pl.Series(
-                    name=BleachingColumn.POPULATION_BASELINE_FLUORESCENCE.value,
-                    values=population_baseline_values,
-                    dtype=pl.Float32,
-                ),
-                pl.Series(
-                    name=BleachingColumn.POPULATION_SNR.value,
-                    values=population_snr_values,
-                    dtype=pl.Float32,
-                ),
-                pl.Series(
-                    name=BleachingColumn.SNR_PAIRED_P_VALUE.value,
-                    values=snr_paired_p_values,
-                    dtype=pl.Float64,
-                ),
-                pl.Series(
-                    name=BleachingColumn.FLAGGED.value,
-                    values=flagged_mask,
-                    dtype=pl.Boolean,
-                ),
-            ]
-        )
-
-        summary = BleachingSummary(
-            configuration=configuration,
-            baseline_fluorescence_decay_fit=decay_fit,
-        )
-
-        return cls(table=table, summary=summary)
-
-    @classmethod
     def load(cls, animal: DatasetAnimal) -> BleachingReport:
         """Loads a previously saved bleaching report from the animal directory.
 
@@ -406,7 +165,7 @@ class BleachingReport:
             animal: The DatasetAnimal whose directory holds ``bleaching.yaml`` and ``bleaching.feather``.
 
         Returns:
-            A BleachingReport equivalent to the one produced by ``evaluate``.
+            A BleachingReport persisted by :func:`run_bleaching_analysis`.
         """
         summary: BleachingSummary = BleachingSummary.from_yaml(file_path=animal.bleaching_path)
         table = pl.read_ipc(source=animal.bleaching_table_path, memory_map=True)
@@ -629,6 +388,170 @@ class BleachingReport:
         console.echo(message=self.summarize(), raw=True)
 
 
+def _assemble_bleaching_report(
+    session_paths: tuple[Path, ...],
+    session_results: tuple[BleachingSessionResult, ...],
+    configuration: BleachingConfiguration,
+) -> BleachingReport:
+    """Assembles a :class:`BleachingReport` from pre-computed per-session results.
+
+    Notes:
+        Pure aggregation step — no I/O, no per-cell compute. Validates chronological order of ``session_paths``
+        and registered cell-count consistency across results before running the cross-session decay fit, paired
+        Wilcoxon comparison, and combined-flag computation. Methodological references for the protocol live on
+        the public orchestrator :func:`run_bleaching_analysis`; this helper exists so the orchestrator can hand
+        off its parallel session-results dispatch to a single deterministic aggregation pass.
+
+    Args:
+        session_paths: Chronologically ordered tuple of session directory paths, parallel to
+            ``session_results``.
+        session_results: Per-session results produced by :func:`.bleaching_protocol.compute_session_metrics`,
+            in the same order as ``session_paths``.
+        configuration: Bleaching evaluation parameters that produced the results.
+
+    Returns:
+        A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
+        cross-session aggregates and the configuration.
+    """
+    if len(session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
+        message = (
+            f"Unable to evaluate bleaching across the supplied sessions. The protocol requires at least two "
+            f"sessions, but got {len(session_paths)}."
+        )
+        console.error(message=message, error=ValueError)
+
+    session_microseconds = tuple(_parse_session_microseconds(session_path=path) for path in session_paths)
+    _validate_chronological_order(session_paths=session_paths, session_microseconds=session_microseconds)
+
+    first_microseconds = session_microseconds[0]
+    days_since_first_values = [
+        float(
+            convert_time(
+                time=session_us - first_microseconds,
+                from_units=TimeUnits.MICROSECOND,
+                to_units=TimeUnits.DAY,
+                as_float=True,
+            )
+        )
+        for session_us in session_microseconds
+    ]
+
+    # Validates that every session sees the same registered cell count before any cross-session reduction
+    # touches the per-cell arrays. Mismatched cell counts would silently produce broadcasting errors in the
+    # paired Wilcoxon test or the population-median trend.
+    cell_count_reference: int | None = None
+    for session_path, result in zip(session_paths, session_results, strict=True):
+        result_cell_count = int(result.cell_baseline_fluorescence.shape[0])
+        if cell_count_reference is None:
+            cell_count_reference = result_cell_count
+        elif result_cell_count != cell_count_reference:
+            message = (
+                f"Unable to evaluate bleaching across the supplied sessions. The cell count must match "
+                f"across all sessions for the multi-recording registered comparison, but session "
+                f"{session_path.name!r} has {result_cell_count} cells while the first session has "
+                f"{cell_count_reference}."
+            )
+            console.error(message=message, error=ValueError)
+
+    session_names = [session_path.name for session_path in session_paths]
+    sampling_rates = [result.sampling_rate_hz for result in session_results]
+    cell_baseline_arrays = [result.cell_baseline_fluorescence for result in session_results]
+    cell_snr_arrays = [result.cell_snr for result in session_results]
+    within_session_time_arrays = [result.within_session_time_seconds for result in session_results]
+    within_session_baseline_arrays = [result.within_session_baseline for result in session_results]
+    within_session_drops = [result.within_session_fractional_drop for result in session_results]
+
+    # Cross-session aggregates derived from the per-session arrays.
+    population_baseline_values = [float(np.median(array)) for array in cell_baseline_arrays]
+    population_snr_values = [float(np.median(array)) for array in cell_snr_arrays]
+
+    # noinspection PyTypeChecker
+    population_baseline_array: NDArray[np.float32] = np.array(population_baseline_values, dtype=np.float32)
+    # noinspection PyTypeChecker
+    population_snr_array: NDArray[np.float32] = np.array(population_snr_values, dtype=np.float32)
+    # noinspection PyTypeChecker
+    within_session_drop_array: NDArray[np.float32] = np.array(within_session_drops, dtype=np.float32)
+    # noinspection PyTypeChecker
+    days_array: NDArray[np.float32] = np.array(days_since_first_values, dtype=np.float32)
+
+    decay_fit = _fit_exponential_decay(days=days_array, baseline=population_baseline_array)
+
+    snr_paired_p_values = _compute_paired_snr_p_values(cell_snr_arrays=cell_snr_arrays)
+    flag_masks = _compute_flag_masks(
+        population_baseline=population_baseline_array,
+        population_snr=population_snr_array,
+        snr_paired_p_values=snr_paired_p_values,
+        within_session_drops=within_session_drop_array,
+        configuration=configuration,
+    )
+    flagged_mask = flag_masks.combined
+
+    # Assembles the per-session feather. Equal-length cell columns are promoted by polars to
+    # Array(Float32, cell_count); ragged within-session columns stay List(Float32). Each Series is constructed
+    # with an explicit dtype so the schema is stable rather than inferred from data.
+    table = pl.DataFrame(
+        [
+            pl.Series(name=BleachingColumn.SESSION.value, values=session_names, dtype=pl.Utf8),
+            pl.Series(
+                name=BleachingColumn.DAYS_SINCE_FIRST.value, values=days_since_first_values, dtype=pl.Float32
+            ),
+            pl.Series(name=BleachingColumn.SAMPLING_RATE_HZ.value, values=sampling_rates, dtype=pl.Float64),
+            pl.Series(
+                name=BleachingColumn.CELL_BASELINE_FLUORESCENCE.value,
+                values=cell_baseline_arrays,
+                dtype=pl.List(pl.Float32),
+            ),
+            pl.Series(
+                name=BleachingColumn.CELL_SNR.value,
+                values=cell_snr_arrays,
+                dtype=pl.List(pl.Float32),
+            ),
+            pl.Series(
+                name=BleachingColumn.WITHIN_SESSION_TIME_SECONDS.value,
+                values=within_session_time_arrays,
+                dtype=pl.List(pl.Float32),
+            ),
+            pl.Series(
+                name=BleachingColumn.WITHIN_SESSION_BASELINE.value,
+                values=within_session_baseline_arrays,
+                dtype=pl.List(pl.Float32),
+            ),
+            pl.Series(
+                name=BleachingColumn.WITHIN_SESSION_FRACTIONAL_DROP.value,
+                values=within_session_drops,
+                dtype=pl.Float32,
+            ),
+            pl.Series(
+                name=BleachingColumn.POPULATION_BASELINE_FLUORESCENCE.value,
+                values=population_baseline_values,
+                dtype=pl.Float32,
+            ),
+            pl.Series(
+                name=BleachingColumn.POPULATION_SNR.value,
+                values=population_snr_values,
+                dtype=pl.Float32,
+            ),
+            pl.Series(
+                name=BleachingColumn.SNR_PAIRED_P_VALUE.value,
+                values=snr_paired_p_values,
+                dtype=pl.Float64,
+            ),
+            pl.Series(
+                name=BleachingColumn.FLAGGED.value,
+                values=flagged_mask,
+                dtype=pl.Boolean,
+            ),
+        ]
+    )
+
+    summary = BleachingSummary(
+        configuration=configuration,
+        baseline_fluorescence_decay_fit=decay_fit,
+    )
+
+    return BleachingReport(table=table, summary=summary)
+
+
 def run_bleaching_analysis(
     dataset: DatasetData,
     *,
@@ -640,41 +563,30 @@ def run_bleaching_analysis(
     """Evaluates bleaching for every animal in the dataset (or a single specified animal) and persists each report.
 
     Notes:
-        When ``animal`` is omitted, every animal returned by ``DatasetData.animals`` is processed; when ``animal``
-        is provided, evaluation is scoped to that single animal. For each animal, sessions are sorted
-        chronologically (lexicographic order on the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session name is
-        equivalent to chronological order). Each report is written to ``<dataset>/<animal>/bleaching.yaml`` and
+        Sole orchestrator for assembling :class:`BleachingReport` artifacts. Per-session metrics are produced
+        by :func:`.bleaching_protocol.compute_session_metrics` and cross-session aggregation is delegated to
+        :func:`_assemble_bleaching_report`; methodological references and protocol context live on those
+        algorithmic entry-points. Each report is written to ``<dataset>/<animal>/bleaching.yaml`` and
         ``<dataset>/<animal>/bleaching.feather`` and returned to the caller for in-process figure rendering.
 
-        ``workers`` controls the total CPU budget used by the pipeline and is split between two layers of
-        parallelism modeled on cindra: the inner Numba thread pool that drives the per-cell percentile, MAD, and
-        SNR kernels within a session, and the outer process pool that dispatches independent sessions concurrently
-        across the union of all in-scope animals. Sessions are the natural unit of parallelism because they are
-        typically far more numerous than animals and :func:`.bleaching_protocol.compute_session_metrics` is
-        independent per session — the cross-session aggregation (decay fit, paired Wilcoxon, flag mask) collects
-        results back in the parent process and runs sequentially per animal. The split uses cindra's saturating
-        allocator (``_resolve_saturating_allocation``): the resolved budget first saturates a single subprocess up
-        to ``_PREFERRED_WORKERS_PER_SESSION`` (10) Numba threads before any second session is dispatched, the
-        per-subprocess thread count is rounded down to a multiple of ``_WORKER_MULTIPLE`` (5) for clean
-        allocation, and the across-session parallelism is reduced one step at a time whenever the per-subprocess
-        share would fall below ``_MINIMUM_WORKERS_PER_SESSION`` (5) so underresourced subprocesses are never
-        spawned. A budget of one (or a single session in scope) collapses to an in-process run with every thread
-        handed to Numba.
+        ``workers`` controls the total CPU budget. Sessions are the natural unit of parallelism: the budget is
+        split between across-session subprocesses and within-session Numba threads through cindra's saturating
+        allocator (:func:`_resolve_saturating_allocation`). A budget of one (or a single session in scope)
+        collapses to an in-process run with every thread handed to Numba.
 
     Args:
         dataset: The DatasetData instance whose animals are evaluated.
         animal: The unique identifier of a single animal to evaluate. When None, every animal in the dataset
             is evaluated and the returned tuple preserves the order of ``DatasetData.animals``.
         workers: The total number of CPU cores to use. A non-positive value requests every available core minus
-            the system reserve. The budget is split between across-session processes and within-session Numba
-            threads as described in Notes; ``workers=1`` forces a fully sequential, single-threaded run.
+            the system reserve. ``workers=1`` forces a fully sequential, single-threaded run.
         display_progress: Determines whether to display a progress bar tracking total sessions across every
             in-scope animal as each session row is computed.
         configuration: Bleaching evaluation parameters shared across animals. Uses defaults if None.
 
     Returns:
-        A tuple of BleachingReports in the same order as the resolved animal set, with each report's two artifacts
-        persisted under the corresponding animal directory.
+        A tuple of BleachingReports in the same order as the resolved animal set, with each report's two
+        artifacts persisted under the corresponding animal directory.
     """
     resolved_configuration: BleachingConfiguration = (
         configuration if configuration is not None else BleachingConfiguration()
@@ -805,7 +717,7 @@ def run_bleaching_analysis(
     for animal_name in animal_names:
         ordered_paths = sessions_by_animal[animal_name]
         ordered_results = tuple(results_by_animal[animal_name][session_path] for session_path in ordered_paths)
-        report = BleachingReport._build_from_session_results(
+        report = _assemble_bleaching_report(
             session_paths=ordered_paths,
             session_results=ordered_results,
             configuration=resolved_configuration,

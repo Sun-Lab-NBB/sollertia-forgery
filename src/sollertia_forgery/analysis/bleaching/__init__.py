@@ -10,7 +10,6 @@ from .plotting import (
 from .bleaching_protocol import (
     BleachingConfiguration,
     BleachingSessionResult,
-    compute_session_metrics,
 )
 from .bleaching_analysis import (
     BleachingColumn,
@@ -27,7 +26,6 @@ __all__ = [
     "BleachingSessionResult",
     "BleachingSummary",
     "ExponentialDecayFit",
-    "compute_session_metrics",
     "plot_baseline_trend",
     "plot_dataset_baseline_trend",
     "plot_snr_distributions",

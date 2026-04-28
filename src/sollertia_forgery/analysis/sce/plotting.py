@@ -1,17 +1,9 @@
 """Per-session plotting helpers for the SCE pipeline.
 
 Module-level functions consume an :class:`SCEReport` plus, where noted, the session's ``data.feather`` opened
-memory-mapped at plot time. Persistence and summarization stay on the report; assembly detection runs locally so
-the report itself does not need to carry a live detector.
-
-References:
-    - Lopes-dos-Santos, Ribeiro & Tort (2013). Detecting cell assemblies in large neuronal populations.
-      J Neurosci Methods. https://doi.org/10.1016/j.jneumeth.2013.04.010 -- the ICA-CS algorithm.
-    - Mölter, Avitan & Goodhill (2018). Detecting neural assemblies in calcium imaging data. BMC Biol.
-      https://doi.org/10.1186/s12915-018-0606-4 -- comparative benchmark recommending ICA-CS over hierarchical
-      clustering.
-    - Hyvärinen (1999). Fast and robust fixed-point algorithms for ICA. IEEE Trans Neural Netw.
-      https://doi.org/10.1109/72.761722 -- deflation FastICA fixed-point iteration used here.
+memory-mapped at plot time. Persistence and summarization stay on the report; assembly detection runs locally
+so the report itself does not need to carry a live detector. Methodological references for the SCE pipeline
+live on :func:`..sce_report.compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -197,8 +189,8 @@ def plot_sce_assemblies(
     title: str | None = None,
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Detects and plots the most prominent SCE cell assemblies as raster panels using ICA-CS
-    (Lopes-dos-Santos 2013) on the persisted per-period SCE participation matrix. Recomputes assemblies on
+    """Detects and plots the most prominent SCE cell assemblies as raster panels using ICA-CS on the
+    persisted per-period SCE participation matrix. Recomputes assemblies on
     every call so no live detector is required.
     """
     if period_index >= report.periods.height:
@@ -489,9 +481,8 @@ def _shuffle_max_eigenvalue(
     progress_description: str = "Assembly null shuffle",
     requested_workers: int = 0,
 ) -> NDArray[np.float32]:
-    """Returns the shuffled-distribution maximum eigenvalue per shuffle for the cell-by-cell correlation matrix
-    obtained after independent circular shifts of each cell's z-scored activity (Lopes-dos-Santos 2013 ICA-CS
-    null).
+    """Returns the shuffled-distribution maximum eigenvalue per shuffle for the cell-by-cell correlation
+    matrix obtained after independent circular shifts of each cell's z-scored activity (ICA-CS null).
 
     Notes:
         Each iteration draws independent per-cell shifts and gathers the shifted z-matrix. The largest
@@ -640,7 +631,7 @@ def _detect_assemblies_ica_cs(
     minimum_shift_samples: int = 5,
     rng_seed: int = 0,
 ) -> tuple[NDArray[np.float32], list[NDArray[np.int32]]]:
-    """Detects neural assemblies via the Lopes-dos-Santos 2013 ICA-CS pipeline.
+    """Detects neural assemblies via the ICA-CS pipeline.
 
     Notes:
         Z-scores activity along the sample axis, computes the cell-by-cell correlation matrix, retains

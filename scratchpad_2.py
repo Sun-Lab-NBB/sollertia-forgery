@@ -40,7 +40,7 @@ dataset_root = dataset.dataset_data_path.parent
 file_prefix = f"cell_analysis_animal_{animal}_{session.session}"
 
 print(f"--- Running tuning evaluation on {session.session} ---")
-tuning_report: TuningReport = evaluate_and_save_tuning_report(session=session, trial_type=trial_type)
+tuning_report: TuningReport = evaluate_and_save_tuning_report(session=session)
 print(tuning_report.summarize())
 print()
 
@@ -50,25 +50,25 @@ print(sce_report.summarize())
 print()
 
 # Plots that work entirely off the persisted feathers + YAML.
-plot_place_cell_heatmap(tuning_report).savefig(
+plot_place_cell_heatmap(tuning_report, trial_type=trial_type).savefig(
     dataset_root / f"{file_prefix}_place_cell_heatmap.png", bbox_inches="tight"
 )
-plot_reward_com_histogram(tuning_report).savefig(
+plot_reward_com_histogram(tuning_report, trial_type=trial_type).savefig(
     dataset_root / f"{file_prefix}_reward_com_histogram.png", bbox_inches="tight"
 )
-plot_rate_map_heatmap(tuning_report).savefig(
+plot_rate_map_heatmap(tuning_report, trial_type=trial_type).savefig(
     dataset_root / f"{file_prefix}_rate_map_heatmap.png", bbox_inches="tight"
 )
-plot_population_activity_by_position(tuning_report).savefig(
+plot_population_activity_by_position(tuning_report, trial_type=trial_type).savefig(
     dataset_root / f"{file_prefix}_population_activity_by_position.png", bbox_inches="tight"
 )
 plot_sce_assemblies(sce_report).savefig(dataset_root / f"{file_prefix}_sce_assemblies.png", bbox_inches="tight")
 
 # Plots that also reload data.feather to recover speed and per-trial fluorescence.
-plot_speed_and_activity_by_position(tuning_report, session=session).savefig(
+plot_speed_and_activity_by_position(tuning_report, trial_type=trial_type, session=session).savefig(
     dataset_root / f"{file_prefix}_speed_and_activity_by_position.png", bbox_inches="tight"
 )
-plot_per_trial_activity(tuning_report, session=session, trial_type=trial_type).savefig(
+plot_per_trial_activity(tuning_report, trial_type=trial_type, session=session).savefig(
     dataset_root / f"{file_prefix}_per_trial_activity.png", bbox_inches="tight"
 )
 plot_sce_cells_across_periods(sce_report, session=session).savefig(

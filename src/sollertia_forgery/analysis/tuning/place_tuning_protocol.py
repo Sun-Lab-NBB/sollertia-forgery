@@ -1,5 +1,6 @@
-"""Provides functionality for detecting and analyzing spatial tuning and place fields in neural recordings on a linear
-track.
+"""Provides functionality for detecting and analyzing spatial tuning and place fields in neural recordings on
+a linear track. Methodological references for the tuning pipeline live on
+:func:`..tuning_report.compute_tuning_report`.
 """
 
 from __future__ import annotations
@@ -37,13 +38,7 @@ negligible against the heavier per-iteration work."""
 
 @dataclass(frozen=True, slots=True)
 class PlaceFieldDetectionConfiguration:
-    """Defines configuration parameters for the place field detection algorithm.
-
-    Notes:
-        Defaults inherit from Dombeck et al. (2010) for the thresholding stage and from Climer et al. (2025) for the
-        shuffle and lap-coverage stages. See the per-method ``References:`` sections in :class:`PlaceFieldDetector`
-        for citations.
-    """
+    """Defines configuration parameters for the place field detection algorithm."""
 
     minimum_speed: float = 5.0
     """Minimum speed threshold in cm/s for including timepoints in analysis."""
@@ -62,21 +57,19 @@ class PlaceFieldDetectionConfiguration:
     """Minimum peak intensity required for a valid place field."""
     minimum_lap_coverage: float = 0.33
     """Minimum fraction of laps on which a candidate field must show in-field activity above its out-of-field
-    baseline. Climer et al. (2025) uses 1/3; the original Dombeck et al. (2010) value was 0.30."""
+    baseline."""
     shuffle_minimum_chunk_count: int = 100
-    """Sets the minimum circular shift in the shuffle to ``total_samples / shuffle_minimum_chunk_count`` samples.
-    Used as the chunk-granularity floor when ``minimum_shift_seconds`` would either fall below one sample or exceed
-    the safe upper bound (``total_samples / 4``)."""
+    """Sets the minimum circular shift in the shuffle to ``total_samples / shuffle_minimum_chunk_count``
+    samples. Used as the chunk-granularity floor when ``minimum_shift_seconds`` would either fall below one
+    sample or exceed the safe upper bound (``total_samples / 4``)."""
     shuffle_repeat_count: int = 1000
-    """Number of shuffle iterations for significance testing. Climer et al. (2025) uses 1000; the original Dombeck
-    et al. (2010) protocol used the same."""
+    """Number of shuffle iterations for significance testing."""
     minimum_shift_seconds: float = 10.0
-    """Minimum circular shift expressed in seconds. Set above the GCaMP6 autocorrelation timescale (roughly 1.2-2 s)
-    so the null distribution is not contaminated by indicator decay. Climer et al. (2025) uses 15 s; Climer & Dombeck
-    (2021) uses 5 s."""
+    """Minimum circular shift expressed in seconds. Set above the GCaMP6 autocorrelation timescale (roughly
+    1.2-2 s) so the null distribution is not contaminated by indicator decay."""
     peak_percentile: float = 0.99
-    """Percentile of the per-cell shuffled peak distribution above which the observed peak rate is classified as
-    peak-significant. From Climer & Dombeck (2021) Peak method."""
+    """Percentile of the per-cell shuffled peak distribution above which the observed peak rate is classified
+    as peak-significant."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,18 +225,11 @@ class PlaceFieldDetector:
         """Detects place fields from the original fluorescence and position data.
 
         Notes:
-            Pipeline ordering: threshold-based detection -> per-trial binning -> lap-coverage filter. Significance
-            is reported by the multi-criterion shuffles in :meth:`compute_multi_criterion_significance` (Peak and
-            Stability methods, Climer & Dombeck 2021); the legacy combined "did a place field appear under shuffle?"
-            filter is intentionally not applied here so downstream consumers can decide on a population using each
-            criterion's per-cell p-value rather than a single conflated cutoff.
-
-        References:
-            - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
-              environments. Nature. https://doi.org/10.1038/s41586-025-09245-y -- lap-coverage filter.
-            - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-              resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- canonical
-              place-field detection algorithm (thresholding, in-/out-of-field ratio, peak intensity, lap coverage).
+            Pipeline ordering: threshold-based detection -> per-trial binning -> lap-coverage filter.
+            Significance is reported by the multi-criterion shuffles in
+            :meth:`compute_multi_criterion_significance`; the legacy combined "did a place field appear under
+            shuffle?" filter is intentionally not applied here so downstream consumers can decide on a
+            population using each criterion's per-cell p-value rather than a single conflated cutoff.
 
         Returns:
             A PlaceFields instance containing the labeled regions, pooled and per-lap binned fluorescence, and centers
@@ -303,14 +289,9 @@ class PlaceFieldDetector:
             than or equal to the observed value (NaN where the observed statistic is NaN or the shuffled distribution
             is empty).
 
-            Both nulls are produced by single ``@njit(parallel=True)`` kernels dispatched in chunks so the tqdm
-            progress bar advances smoothly while every CPU core stays saturated. The kernels parallelize over
-            ``(iteration * cell_count)`` so the per-iteration cell loop never serializes the heavy work.
-
-        References:
-            - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of
-              cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Peak method (99th
-              percentile cutoff against shuffled per-cell peaks) and Stability method (95th percentile cutoff).
+            Both nulls are produced by single ``@njit(parallel=True)`` kernels dispatched in chunks so the
+            tqdm progress bar advances smoothly while every CPU core stays saturated. The kernels parallelize
+            over ``(iteration * cell_count)`` so the per-iteration cell loop never serializes the heavy work.
 
         Args:
             observed_pooled_rate_map: Observed pooled rate map with dimensions (cell_count, bin_count).
@@ -505,14 +486,9 @@ class PlaceFieldDetector:
         """Runs the threshold + label + outside-field + peak filter steps on a precomputed smoothed rate map.
 
         Notes:
-            Called from :meth:`_run_detection` after the speed-mask + bin-by-position + smooth steps. Does not apply
-            the lap-coverage filter (which requires per-trial binning); :meth:`detect` applies it after this method
-            returns.
-
-        References:
-            - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-              resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- the threshold,
-              connected-component, in-/out-of-field ratio, and peak intensity criteria.
+            Called from :meth:`_run_detection` after the speed-mask + bin-by-position + smooth steps. Does not
+            apply the lap-coverage filter (which requires per-trial binning); :meth:`detect` applies it after
+            this method returns.
 
         Args:
             binned_fluorescence: Smoothed per-cell rate map with dimensions (cell_count, bin_count).
@@ -862,15 +838,9 @@ def _compute_quantile_max_threshold(
     """Thresholds binned fluorescence using a fractional difference between baseline quantile and peak activity.
 
     Notes:
-        Implements Dombeck's "25% of (peak - baseline)" criterion exactly: per cell, baseline is the mean of bins at
-        or below the ``base_quantile``-th percentile, and the threshold is ``baseline + threshold_factor *
-        (peak - baseline)``.
-
-    References:
-        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "Potential place
-          fields were first identified as contiguous regions of this plot in which all of the points were greater
-          than 25% of the difference between the peak deltaF/F value and the baseline".
+        Per cell, baseline is the mean of bins at or below the ``base_quantile``-th percentile, and the
+        threshold is ``baseline + threshold_factor * (peak - baseline)`` -- the canonical "25% of
+        (peak - baseline)" place-field criterion.
 
     Args:
         fluorescence: Binned fluorescence data with dimensions (cell_count, bin_count).
@@ -1260,18 +1230,10 @@ def _lap_coverage_filter(
     Notes:
         Computes the per-cell out-of-field baseline from the pooled rate map (matching the convention in
         :func:`_outside_field_threshold`). For each detected field, walks every lap, computes the mean in-field
-        fluorescence for that lap from the per-trial binned matrix, and counts laps where that mean exceeds the
-        baseline. Laps where every in-field bin is NaN (no samples landed in the field that lap) are excluded from
-        both the numerator and the denominator. Fields are dropped when the resulting coverage fraction is below
-        ``minimum_lap_coverage``.
-
-    References:
-        - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory environments.
-          Nature. https://doi.org/10.1038/s41586-025-09245-y -- "at least one significant transient during running on
-          at least 1/3 of the laps".
-        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "Significant calcium
-          transients must be present >30% of the time the mouse spent in the place field".
+        fluorescence for that lap from the per-trial binned matrix, and counts laps where that mean exceeds
+        the baseline. Laps where every in-field bin is NaN (no samples landed in the field that lap) are
+        excluded from both the numerator and the denominator. Fields are dropped when the resulting coverage
+        fraction is below ``minimum_lap_coverage``.
 
     Args:
         place_fields: PlaceFields object with previously detected fields.
@@ -1335,14 +1297,9 @@ def _outside_field_threshold(place_fields: PlaceFields, threshold_factor: float 
     """Filters place fields by requiring in-field activity to exceed out-of-field baseline by a threshold factor.
 
     Notes:
-        Removes false positives by requiring that detected place fields have significantly higher activity than the
-        baseline outside the field. In cases where a cell has multiple fields, both fields are excluded from the
-        outside field calculation.
-
-    References:
-        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- "The mean in field
-          deltaF/F value must be >3 times the mean out of field deltaF/F value".
+        Removes false positives by requiring that detected place fields have significantly higher activity
+        than the baseline outside the field. In cases where a cell has multiple fields, both fields are
+        excluded from the outside field calculation.
 
     Args:
         place_fields: PlaceFields object with previously detected place fields.

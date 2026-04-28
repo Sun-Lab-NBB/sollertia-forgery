@@ -1,17 +1,16 @@
 """Per-session tuning-report container that consolidates place-field and reward-cell detection.
 
-The :class:`TuningReport` pair (per-cell feather + summary YAML) is the analysis counterpart to
-:class:`BleachingReport`; the report owns persistence and population-mask resolution so loading a saved report
-is sufficient to reproduce every figure without rerunning detection. Plot regeneration lives in
-:mod:`.plotting`. SCE-related analyses live alongside in :mod:`..sce` and produce their own per-session report.
+The :class:`TuningReport` pair (per-cell long-format feather + summary YAML) is the analysis counterpart to
+:class:`BleachingReport`; the report owns persistence and per-trial-type population-mask resolution so loading
+a saved report is sufficient to reproduce every figure without rerunning detection. Plot regeneration lives in
+:mod:`.plotting`. SCE-related analyses live alongside in :mod:`..sce` and produce their own per-session
+report. Methodological references for the assembly pipeline are attached to :func:`compute_tuning_report`.
 
-References:
-    - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of cells
-      identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Stability and Peak methods
-      that gate ``IS_STABLE`` and ``IS_PEAK_SIGNIFICANT``.
-    - Sosa, Plitt & Giocomo (2025). A flexible hippocampal population code for experience relative to reward.
-      Nat Neurosci. https://doi.org/10.1038/s41593-025-01985-4 -- the position-vs-speed GLM ΔR² that gates
-      ``IS_POSITION_GLM_SIGNIFICANT``.
+The persisted ``tuning_cells.feather`` is **long-format**: one row per ``(cell_id, trial_type)`` pair with a
+``trial_type: Utf8`` column. Cell IDs are stable across trial types because the upstream multi-day cindra
+pipeline registers cells once per session, so cross-trial-type queries collapse to ``polars`` filters or
+joins on ``cell_id``. The summary YAML carries one :class:`TuningTrialSummary` entry per trial type alongside
+session-level fields shared across trial types (sub-pipeline configurations, sampling rate, cell count).
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING
 import warnings
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 import numpy as np
 import polars as pl
@@ -46,31 +45,33 @@ fluorescence matrix. Matches the ``PlaceFieldDetector`` constructor default."""
 
 
 class TuningColumn(StrEnum):
-    """Defines every column written to the per-session ``tuning_cells.feather`` per-cell table."""
+    """Defines every column written to the per-session ``tuning_cells.feather`` long-format per-cell table."""
 
     CELL_ID = "cell_id"
-    """Contiguous integer cell identifier."""
+    """Contiguous integer cell identifier; stable across trial types within a session."""
+    TRIAL_TYPE = "trial_type"
+    """Trial type the row's per-cell flags and rate maps were computed against; matches an entry in the
+    session's ``trial_geometry.yaml``."""
     IS_PLACE = "is_place"
     """True for cells with at least one detected place field."""
     IS_SPATIALLY_SIGNIFICANT = "is_spatially_significant"
     """True for cells whose Skaggs spatial information is significant under shuffle testing."""
     IS_REWARD_PROXIMAL = "is_reward_proximal"
-    """True for cells whose circular center of mass falls within the reward zone. Alias of ``IS_ZONE`` preserved
-    for backwards compatibility; bit-identical to it."""
+    """True for cells whose circular center of mass falls within the reward zone. Alias of ``IS_ZONE``
+    preserved for backwards compatibility; bit-identical to it."""
     IS_APPROACH = "is_approach"
-    """True for cells whose center of mass falls in the approach band immediately upstream of the reward zone
-    (Issa, Radvansky, Xuan & Dombeck 2024 anticipatory band; default 40 cm)."""
+    """True for cells whose center of mass falls in the approach (anticipatory) band immediately upstream of
+    the reward zone (default 40 cm)."""
     IS_ZONE = "is_zone"
-    """True for cells whose center of mass falls inside the reward zone (Issa et al. 2024 zone band; configured
-    by ``reward_zone_width``)."""
+    """True for cells whose center of mass falls inside the reward zone (configured by ``reward_zone_width``)."""
     IS_DEPARTURE = "is_departure"
-    """True for cells whose center of mass falls in the departure band immediately downstream of the reward zone
-    (Issa et al. 2024 post-reward band; default 40 cm)."""
+    """True for cells whose center of mass falls in the post-reward (departure) band immediately downstream
+    of the reward zone (default 40 cm)."""
     IS_REWARD_CELL = "is_reward_cell"
     """True for cells that are both spatially significant and reward-proximal (zone-band)."""
     IS_POSITION_GLM_SIGNIFICANT = "is_position_glm_significant"
-    """True for cells whose 5-fold CV ΔR² of position over speed+acceleration exceeds the trial-label permutation
-    null at the configured ``glm_significance_threshold`` (Sosa, Plitt & Giocomo 2025; Hardcastle et al. 2017)."""
+    """True for cells whose 5-fold CV ΔR² of position over speed+acceleration exceeds the trial-label
+    permutation null at the configured ``glm_significance_threshold``."""
     PF_START_CM = "pf_start_cm"
     """Per-field place-field start position in centimeters."""
     PF_END_CM = "pf_end_cm"
@@ -92,8 +93,8 @@ class TuningColumn(StrEnum):
     SPATIAL_INFORMATION_BITS = "spatial_information_bits"
     """Skaggs spatial information content in bits per event."""
     SPATIAL_INFORMATION_Z = "spatial_information_z"
-    """Z-scored Skaggs spatial information against the same circular-shift null used for ``SPATIAL_P_VALUE``
-    (Souza & Tort 2018; Sheintuch et al. 2022)."""
+    """Z-scored Skaggs spatial information against the same circular-shift null used for
+    ``SPATIAL_P_VALUE``."""
     SPATIAL_P_VALUE = "spatial_p_value"
     """Shuffle-derived p-value for the spatial information statistic."""
     SPATIAL_FDR_SURVIVED = "spatial_fdr_survived"
@@ -113,15 +114,14 @@ class TuningColumn(StrEnum):
     STABILITY_SPLIT_HALF = "stability_split_half"
     """Pearson r between the first-half and second-half mean rate maps."""
     IS_RELIABLE = "is_reliable"
-    """True for cells with at least one place field that passes the lap-coverage criterion (Climer 2025)."""
+    """True for cells with at least one place field that passes the lap-coverage criterion."""
     IS_STABLE = "is_stable"
-    """True for cells whose split-half stability r exceeds the 95th percentile of a per-cell shuffled null
-    (Climer & Dombeck 2021 Stability method)."""
+    """True for cells whose split-half stability r exceeds the 95th percentile of a per-cell shuffled null."""
     STABILITY_P_VALUE = "stability_p_value"
     """Per-cell p-value for the Stability shuffle."""
     IS_PEAK_SIGNIFICANT = "is_peak_significant"
-    """True for cells whose observed pooled-rate-map peak exceeds the 99th percentile of the shuffled per-cell
-    peak distribution (Climer & Dombeck 2021 Peak method)."""
+    """True for cells whose observed pooled-rate-map peak exceeds the 99th percentile of the shuffled
+    per-cell peak distribution."""
     PEAK_P_VALUE = "peak_p_value"
     """Per-cell p-value for the Peak shuffle."""
     IS_STRICT_PLACE = "is_strict_place"
@@ -148,43 +148,33 @@ class TuningConfiguration:
 
 
 @dataclass
-class TuningSummary(YamlConfig):
-    """Per-session YAML companion to ``tuning_cells.feather``.
+class TuningTrialSummary(YamlConfig):
+    """Per-trial-type entry inside the session-level :class:`TuningSummary`.
 
-    Carries only fields that are not derivable from the cells feather: the two sub-configurations (load-bearing
-    because the per-cell flag columns were computed against their thresholds), the mixture-model fit (cannot be
-    rederived without rerunning the EM step), session-level geometry and sampling metadata, and precomputed
-    cell-population counts that ``summarize()`` reports.
+    Carries fields that vary per trial type: track / reward geometry resolved from the trial geometry data
+    file, the rate-map bin axis, the four-component mixture-model fit, and pre-aggregated per-cell counts
+    that ``summarize()`` reports without rehydrating the cells feather.
     """
-
-    place_configuration: PlaceFieldDetectionConfiguration
-    """Place-field detection configuration that produced the place-field columns."""
-    reward_configuration: RewardCellConfiguration
-    """Reward-cell detection configuration that produced the reward and slowing columns."""
 
     track_length_cm: float
     """Track length in centimeters resolved from ``trial_geometry.yaml``."""
     reward_position_cm: float
     """Reward position in centimeters (midpoint of the stimulus trigger zone)."""
-    sampling_rate_hz: float
-    """Acquisition sampling rate in Hz."""
     bin_size_cm: float
     """Spatial bin size in centimeters used for rate maps and per-cell place-field detection."""
     bin_count: int
     """Number of spatial bins along the track."""
 
-    cell_count: int
-    """Total number of cells in the session."""
     place_cell_count: int
-    """Number of cells with at least one detected place field (Dombeck-style threshold + lap-coverage filter)."""
+    """Number of cells with at least one detected place field."""
     spatially_significant_count: int
     """Number of cells whose Skaggs spatial information passes the shuffle threshold."""
     reward_cell_count: int
     """Number of cells that are both spatially significant and reward-proximal."""
     reward_predictive_count: int
-    """Number of cells that are reward-associated and slowing-correlated."""
+    """Number of cells that are reward-associated and pass the position-vs-speed GLM."""
     reliable_count: int
-    """Number of cells whose detected fields pass the lap-coverage criterion (Climer 2025)."""
+    """Number of cells whose detected fields pass the lap-coverage criterion."""
     stable_count: int
     """Number of cells whose split-half stability r exceeds the 95th percentile of a per-cell shuffled null."""
     peak_significant_count: int
@@ -197,8 +187,7 @@ class TuningSummary(YamlConfig):
     """Number of cells passing ``IS_PLACE & IS_STABLE & IS_PEAK_SIGNIFICANT`` but not ``IS_REWARD_CELL``."""
 
     mixture_weight: float
-    """Reward-component weight from the four-component (uniform + reward + track-start + track-end) mixture
-    model fit to the spatially significant COMs."""
+    """Reward-component weight from the four-component mixture model fit to the spatially significant COMs."""
     gaussian_mean_cm: float
     """Reward-component Gaussian mean in centimeters."""
     gaussian_std_cm: float
@@ -213,174 +202,47 @@ class TuningSummary(YamlConfig):
     """Track-end landmark Gaussian standard deviation in centimeters."""
 
 
+@dataclass
+class TuningSummary(YamlConfig):
+    """Per-session YAML companion to ``tuning_cells.feather``.
+
+    Carries session-level fields shared across trial types (sub-pipeline configurations, sampling rate, total
+    cell count) plus a :class:`TuningTrialSummary` entry for every trial type the session was evaluated
+    against. Cell IDs are stable across the entries because the upstream multi-day pipeline registers cells
+    once per session, so any cross-trial-type tabulation collapses to a join on ``cell_id`` against the
+    long-format cells feather.
+    """
+
+    place_configuration: PlaceFieldDetectionConfiguration
+    """Place-field detection configuration that produced the place-field columns."""
+    reward_configuration: RewardCellConfiguration
+    """Reward-cell detection configuration that produced the reward and slowing columns."""
+
+    sampling_rate_hz: float
+    """Acquisition sampling rate in Hz."""
+    cell_count: int
+    """Total number of cells in the session; constant across every trial-type entry."""
+
+    trial_types: list[str] = field(default_factory=list)
+    """Trial-type names in chronological / configuration order; keys into ``trial_type_summaries``."""
+    trial_type_summaries: dict[str, TuningTrialSummary] = field(default_factory=dict)
+    """Per-trial-type summary entries keyed by trial-type name."""
+
+
 @dataclass(frozen=True, slots=True)
 class TuningReport:
     """Top-level per-session container for the place-field + reward-cell tuning analysis.
 
-    Holds the per-cell tuning table (``cells``) and the YAML summary (``summary``). Persistence and
-    population-mask resolution stay on the report; plot regeneration lives in :mod:`.plotting`.
+    Holds the long-format per-cell tuning table (``cells``) and the YAML summary (``summary``). Persistence
+    and per-trial-type population-mask resolution stay on the report; plot regeneration lives in
+    :mod:`.plotting`.
     """
 
     cells: pl.DataFrame
-    """Per-cell wide table; one row per cell. Schema enumerated by :class:`TuningColumn`."""
+    """Long-format per-cell wide table; one row per ``(cell_id, trial_type)`` pair. Schema enumerated by
+    :class:`TuningColumn`."""
     summary: TuningSummary
-    """YAML wrapper holding the configurations, mixture-model fit, and session-level scalars."""
-
-    @classmethod
-    def evaluate(
-        cls,
-        session_path: Path,
-        *,
-        trial_type: str = "ABC",
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
-        configuration: TuningConfiguration | None = None,
-    ) -> TuningReport:
-        """Runs the place-field and reward-cell pipelines sequentially and assembles an in-memory report.
-
-        Notes:
-            Returns the report unsaved so callers can inspect or plot before persisting.
-
-        Args:
-            session_path: Path to the session's dataset directory.
-            trial_type: Trial type to analyze. Must match an entry in ``trial_geometry.yaml``.
-            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
-                analysis input.
-            configuration: Wrapper holding the two sub-pipeline configurations. Uses defaults if None.
-
-        Returns:
-            An in-memory TuningReport ready to be saved or plotted.
-        """
-        resolved_configuration = configuration if configuration is not None else TuningConfiguration.default()
-
-        # Resolves canonical track length and reward position from the session's trial geometry data file.
-        geometry_entry = TrialGeometry.from_yaml(file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)).entries[
-            trial_type
-        ]
-        track_length_cm = float(geometry_entry.trial_length_cm)
-        reward_position_cm = float(
-            (geometry_entry.stimulus_trigger_zone_start_cm + geometry_entry.stimulus_trigger_zone_end_cm) / 2.0
-        )
-
-        # Loads the session data once and shares it across both detectors via from_run_session, so the place
-        # and reward flags operate on identical speed-filtered samples and bit-identical rate maps.
-        run_session = assemble_run_session_data(
-            session_path=session_path,
-            trial_type=trial_type,
-            fluorescence_column=fluorescence_column,
-        )
-        sampling_rate_hz = float(run_session.sampling_rate_hz)
-
-        console.echo(message="Running place field detection...", level=LogLevel.INFO)
-        place_detector = PlaceFieldDetector(
-            run_session=run_session,
-            bin_size=_PLACE_FIELD_BIN_SIZE_CM,
-            configuration=resolved_configuration.place,
-        )
-        place_fields = place_detector.detect()
-        cell_count = int(place_fields.binned_fluorescence.shape[0])
-        place_cell_count = int(place_fields.has_place_field.sum())
-        console.echo(
-            message=f"Place field detection complete: {place_cell_count}/{cell_count} place cells.",
-            level=LogLevel.SUCCESS,
-        )
-
-        console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
-        reward_detector = RewardCellDetector(
-            run_session=run_session,
-            configuration=resolved_configuration.reward,
-        )
-        reward_results = reward_detector.detect()
-        spatially_significant_count = int(np.sum(reward_results.spatial_results.is_significant))
-        reward_cell_count = int(reward_results.reward_cell_count)
-        reward_predictive_count = len(reward_results.reward_predictive_indices)
-        console.echo(
-            message=(
-                f"Reward cell detection complete: {reward_cell_count} reward cells, "
-                f"{reward_predictive_count} reward-predictive."
-            ),
-            level=LogLevel.SUCCESS,
-        )
-
-        rate_map_bin_count = int(reward_results.spatial_results.rate_maps.shape[1])
-
-        # Computes split-half and even/odd stability r per cell from the per-trial binned fluorescence already
-        # produced during place-field detection.
-        stability_even_odd, stability_split_half = _compute_stability_metrics(
-            binned_fluorescence_per_trial=place_fields.binned_fluorescence_per_trial,
-            cell_count=cell_count,
-        )
-        console.echo(
-            message=(
-                f"Running multi-criterion shuffles "
-                f"({resolved_configuration.place.shuffle_repeat_count} iterations each for Peak and Stability)..."
-            ),
-            level=LogLevel.INFO,
-        )
-        is_stable, is_peak_significant, stability_p_values, peak_p_values = _compute_multi_criterion_flags(
-            place_detector=place_detector,
-            place_fields=place_fields,
-            stability_split_half=stability_split_half,
-            configuration=resolved_configuration.place,
-        )
-        console.echo(
-            message=(
-                f"Multi-criterion shuffles complete: {int(np.sum(is_stable))} stable, "
-                f"{int(np.sum(is_peak_significant))} peak-significant."
-            ),
-            level=LogLevel.SUCCESS,
-        )
-        # noinspection PyTypeChecker
-        is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
-        # noinspection PyTypeChecker
-        is_reward_cell_array: NDArray[np.bool_] = (
-            reward_results.spatial_results.is_significant & reward_results.is_zone
-        )
-        # noinspection PyTypeChecker
-        is_place_only: NDArray[np.bool_] = place_fields.has_place_field & ~is_reward_cell_array
-        # noinspection PyTypeChecker
-        is_strict_place_only: NDArray[np.bool_] = is_strict_place & ~is_reward_cell_array
-
-        cells = _build_cell_table(
-            cell_count=cell_count,
-            place_fields=place_fields,
-            reward_results=reward_results,
-            stability_even_odd=stability_even_odd,
-            stability_split_half=stability_split_half,
-            is_stable=is_stable,
-            is_peak_significant=is_peak_significant,
-            stability_p_values=stability_p_values,
-            peak_p_values=peak_p_values,
-            is_strict_place=is_strict_place,
-        )
-
-        summary = TuningSummary(
-            place_configuration=resolved_configuration.place,
-            reward_configuration=resolved_configuration.reward,
-            track_length_cm=track_length_cm,
-            reward_position_cm=reward_position_cm,
-            sampling_rate_hz=sampling_rate_hz,
-            bin_size_cm=float(resolved_configuration.reward.bin_size),
-            bin_count=rate_map_bin_count,
-            cell_count=cell_count,
-            place_cell_count=place_cell_count,
-            spatially_significant_count=spatially_significant_count,
-            reward_cell_count=reward_cell_count,
-            reward_predictive_count=reward_predictive_count,
-            reliable_count=int(place_fields.has_place_field.sum()),
-            stable_count=int(np.sum(is_stable)),
-            peak_significant_count=int(np.sum(is_peak_significant)),
-            strict_place_cell_count=int(np.sum(is_strict_place)),
-            place_only_count=int(np.sum(is_place_only)),
-            strict_place_only_count=int(np.sum(is_strict_place_only)),
-            mixture_weight=float(reward_results.mixture_weight),
-            gaussian_mean_cm=float(reward_results.gaussian_mean),
-            gaussian_std_cm=float(reward_results.gaussian_std),
-            track_start_weight=float(reward_results.track_start_weight),
-            track_end_weight=float(reward_results.track_end_weight),
-            track_start_std_cm=float(reward_results.track_start_std),
-            track_end_std_cm=float(reward_results.track_end_std),
-        )
-        return cls(cells=cells, summary=summary)
+    """YAML wrapper holding the configurations, mixture-model fit, and per-trial-type session-level scalars."""
 
     @classmethod
     def load(cls, session: DatasetSession) -> TuningReport:
@@ -394,56 +256,81 @@ class TuningReport:
         self.summary.to_yaml(file_path=session.tuning_summary_path)
         self.cells.write_ipc(file=session.tuning_cells_path)
 
+    def trial_summary(self, trial_type: str) -> TuningTrialSummary:
+        """Returns the :class:`TuningTrialSummary` entry for ``trial_type``.
+
+        Raises:
+            KeyError: When ``trial_type`` is not present in ``summary.trial_type_summaries``.
+        """
+        return self.summary.trial_type_summaries[trial_type]
+
+    def trial_cells(self, trial_type: str) -> pl.DataFrame:
+        """Returns the per-cell rows for ``trial_type`` with the ``trial_type`` column dropped.
+
+        Notes:
+            The returned slice is a view of the long-format feather restricted to the requested trial type
+            and ordered by ``cell_id``. Downstream consumers can treat it as the wide single-trial-type table
+            the previous report layout exposed.
+        """
+        return (
+            self.cells.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == trial_type)
+            .drop(TuningColumn.TRIAL_TYPE.value)
+            .sort(TuningColumn.CELL_ID.value)
+        )
+
     def place_mask(
         self,
         *,
+        trial_type: str,
         require_place: bool = True,
         require_stable: bool = True,
         require_peak_significant: bool = True,
     ) -> NDArray[np.bool_]:
-        """Returns the per-cell boolean mask for cells passing every requested place-cell criterion simultaneously.
+        """Returns the per-cell boolean mask for cells in ``trial_type`` passing every requested place-cell
+        criterion simultaneously.
 
         Notes:
-            Defaults to the strict triple-AND of place / stable / peak-significant recommended by Climer &
-            Dombeck (2021). When every kwarg is False the method returns an all-True mask, treating "no
-            criteria" as "no filter". Skaggs spatial significance is intentionally not exposed here: it is the
-            reward-cell pipeline's broader spatial filter and overlaps heavily with Dombeck place-field
-            morphology. Use :meth:`resolve_population_masks` instead when you need place / reward populations
-            that respect mutual exclusion.
+            Defaults to the strict triple-AND of place / stable / peak-significant. When every kwarg is False
+            the method returns an all-True mask, treating "no criteria" as "no filter". Skaggs spatial
+            significance is intentionally not exposed here; use :meth:`resolve_population_masks` instead when
+            you need place / reward populations that respect mutual exclusion.
 
         Args:
-            require_place: Require ``IS_PLACE`` (Dombeck 2010 morphology + lap coverage).
-            require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability method).
-            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak method).
+            trial_type: Trial type to extract; must match an entry in ``summary.trial_type_summaries``.
+            require_place: Require ``IS_PLACE`` (place-field morphology + lap coverage).
+            require_stable: Require ``IS_STABLE`` (split-half stability shuffle).
+            require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (per-cell peak shuffle).
 
         Returns:
-            Per-cell boolean mask with length cell_count.
+            Per-cell boolean mask with length ``cell_count`` aligned with the persisted cell-id ordering.
         """
+        cells = self.trial_cells(trial_type=trial_type)
         # noinspection PyTypeChecker
-        mask: NDArray[np.bool_] = np.ones(self.cells.height, dtype=np.bool_)
+        mask: NDArray[np.bool_] = np.ones(cells.height, dtype=np.bool_)
         if require_place:
             # noinspection PyTypeChecker
-            place_flag: NDArray[np.bool_] = self.cells[TuningColumn.IS_PLACE.value].to_numpy()
+            place_flag: NDArray[np.bool_] = cells[TuningColumn.IS_PLACE.value].to_numpy()
             mask = mask & place_flag
         if require_stable:
             # noinspection PyTypeChecker
-            stable_flag: NDArray[np.bool_] = self.cells[TuningColumn.IS_STABLE.value].to_numpy()
+            stable_flag: NDArray[np.bool_] = cells[TuningColumn.IS_STABLE.value].to_numpy()
             mask = mask & stable_flag
         if require_peak_significant:
             # noinspection PyTypeChecker
-            peak_flag: NDArray[np.bool_] = self.cells[TuningColumn.IS_PEAK_SIGNIFICANT.value].to_numpy()
+            peak_flag: NDArray[np.bool_] = cells[TuningColumn.IS_PEAK_SIGNIFICANT.value].to_numpy()
             mask = mask & peak_flag
         return mask
 
     def resolve_population_masks(
         self,
         *,
+        trial_type: str,
         require_place: bool = True,
         require_stable: bool = True,
         require_peak_significant: bool = True,
         mutually_exclusive: bool = True,
     ) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
-        """Returns ``(place_mask, reward_mask)`` honoring the mutual-exclusion option.
+        """Returns ``(place_mask, reward_mask)`` for ``trial_type`` honoring the mutual-exclusion option.
 
         Notes:
             The reward mask is always ``IS_REWARD_CELL`` (i.e., spatially significant cells whose COM lies in
@@ -454,109 +341,135 @@ class TuningReport:
             presentation-layer convention so the distinction is reversible without re-running detection.
 
         Args:
+            trial_type: Trial type to extract.
             require_place: Require ``IS_PLACE`` for the place population.
             require_stable: Require ``IS_STABLE`` for the place population.
             require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` for the place population.
             mutually_exclusive: When True, subtract ``IS_REWARD_CELL`` cells from the place mask. Default True
-                for visualization clarity; set False to keep both populations as recorded in the table.
+                for visualization clarity.
 
         Returns:
-            A tuple of (place_mask, reward_mask) per-cell boolean arrays each with length cell_count.
+            A tuple of (place_mask, reward_mask) per-cell boolean arrays each with length ``cell_count``.
         """
         place_population = self.place_mask(
+            trial_type=trial_type,
             require_place=require_place,
             require_stable=require_stable,
             require_peak_significant=require_peak_significant,
         )
+        cells = self.trial_cells(trial_type=trial_type)
         # noinspection PyTypeChecker
-        reward_mask: NDArray[np.bool_] = self.cells[TuningColumn.IS_REWARD_CELL.value].to_numpy()
+        reward_mask: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_CELL.value].to_numpy()
         place_mask = place_population & ~reward_mask if mutually_exclusive else place_population
         return place_mask, reward_mask
 
     def summarize(self, *, mutually_exclusive: bool = True) -> str:
-        """Returns a multi-line human-readable summary of the report's per-cell statistics.
+        """Returns a multi-line human-readable summary of the per-cell statistics for every trial type.
 
         Notes:
             With ``mutually_exclusive=True`` (default), the place-cell count subtracts cells also flagged as
             ``IS_REWARD_CELL`` and is reported as "place-only"; the reward count is unchanged. With
-            ``mutually_exclusive=False``, the raw counts persisted in the summary YAML are reported instead and
-            a cell may contribute to both totals.
+            ``mutually_exclusive=False``, the raw counts persisted in the summary YAML are reported instead
+            and a cell may contribute to both totals. Each trial type is summarized in its own block.
 
         Args:
-            mutually_exclusive: When True (default), report ``IS_PLACE & ~IS_REWARD_CELL`` for the place count.
+            mutually_exclusive: When True (default), report ``IS_PLACE & ~IS_REWARD_CELL`` for the place
+                count.
         """
         summary = self.summary
         cell_count = summary.cell_count
-
-        if mutually_exclusive and cell_count > 0:
-            # noinspection PyTypeChecker
-            place_flag: NDArray[np.bool_] = self.cells[TuningColumn.IS_PLACE.value].to_numpy()
-            # noinspection PyTypeChecker
-            reward_flag: NDArray[np.bool_] = self.cells[TuningColumn.IS_REWARD_CELL.value].to_numpy()
-            place_count = int(np.sum(place_flag & ~reward_flag))
-            place_label = "Place-only (Dombeck):"
-        else:
-            place_count = summary.place_cell_count
-            place_label = "Place cells (Dombeck):"
-
-        spatially_pct = 100.0 * summary.spatially_significant_count / cell_count if cell_count > 0 else 0.0
-        place_pct = 100.0 * place_count / cell_count if cell_count > 0 else 0.0
-        reward_pct = 100.0 * summary.reward_cell_count / cell_count if cell_count > 0 else 0.0
-        predictive_pct = 100.0 * summary.reward_predictive_count / cell_count if cell_count > 0 else 0.0
-        reliable_pct = 100.0 * summary.reliable_count / cell_count if cell_count > 0 else 0.0
-        stable_pct = 100.0 * summary.stable_count / cell_count if cell_count > 0 else 0.0
-        peak_pct = 100.0 * summary.peak_significant_count / cell_count if cell_count > 0 else 0.0
-        strict_pct = 100.0 * summary.strict_place_cell_count / cell_count if cell_count > 0 else 0.0
-
-        lines = [
+        lines: list[str] = [
             "Tuning report",
             "=============",
             f"Cells: {cell_count}",
-            f"  {place_label:<22} {place_count} ({place_pct:.1f}%)",
-            f"  Reliable (lap cov.):   {summary.reliable_count} ({reliable_pct:.1f}%)",
-            f"  Stable (split-half):   {summary.stable_count} ({stable_pct:.1f}%)",
-            f"  Peak-significant:      {summary.peak_significant_count} ({peak_pct:.1f}%)",
-            f"  Strict place cells:    {summary.strict_place_cell_count} ({strict_pct:.1f}%)",
-            f"  Spatially significant: {summary.spatially_significant_count} ({spatially_pct:.1f}%)",
-            f"  Reward cells:          {summary.reward_cell_count} ({reward_pct:.1f}%)",
-            f"  Reward-predictive:     {summary.reward_predictive_count} ({predictive_pct:.1f}%)",
-            "",
-            "Reward mixture model (uniform + reward + track-start + track-end):",
-            f"  Reward weight:     {summary.mixture_weight:.3f}",
-            f"  Reward Gaussian:   {summary.gaussian_mean_cm:.1f} cm (SD {summary.gaussian_std_cm:.1f} cm)",
-            f"  Track-start wt:    {summary.track_start_weight:.3f} (SD {summary.track_start_std_cm:.1f} cm)",
-            f"  Track-end wt:      {summary.track_end_weight:.3f} (SD {summary.track_end_std_cm:.1f} cm)",
-            f"  Reward position:   {summary.reward_position_cm:.1f} cm",
-            "",
-            "Geometry / sampling:",
-            f"  Track length:      {summary.track_length_cm:.1f} cm",
-            f"  Bin size:          {summary.bin_size_cm:.1f} cm ({summary.bin_count} bins)",
-            f"  Sampling rate:     {summary.sampling_rate_hz:.2f} Hz",
+            f"Trial types: {', '.join(summary.trial_types) if summary.trial_types else '<none>'}",
+            f"Sampling rate: {summary.sampling_rate_hz:.2f} Hz",
         ]
+        for trial_type in summary.trial_types:
+            entry = summary.trial_type_summaries[trial_type]
+            lines.extend(self._format_trial_type_block(trial_type=trial_type, entry=entry, mutually_exclusive=mutually_exclusive))
         return "\n".join(lines)
+
+    def _format_trial_type_block(
+        self,
+        *,
+        trial_type: str,
+        entry: TuningTrialSummary,
+        mutually_exclusive: bool,
+    ) -> list[str]:
+        """Formats a per-trial-type detail block for ``summarize``."""
+        cell_count = self.summary.cell_count
+        if mutually_exclusive and cell_count > 0:
+            cells = self.trial_cells(trial_type=trial_type)
+            # noinspection PyTypeChecker
+            place_flag: NDArray[np.bool_] = cells[TuningColumn.IS_PLACE.value].to_numpy()
+            # noinspection PyTypeChecker
+            reward_flag: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_CELL.value].to_numpy()
+            place_count = int(np.sum(place_flag & ~reward_flag))
+            place_label = "Place-only:"
+        else:
+            place_count = entry.place_cell_count
+            place_label = "Place cells:"
+
+        spatially_pct = 100.0 * entry.spatially_significant_count / cell_count if cell_count > 0 else 0.0
+        place_pct = 100.0 * place_count / cell_count if cell_count > 0 else 0.0
+        reward_pct = 100.0 * entry.reward_cell_count / cell_count if cell_count > 0 else 0.0
+        predictive_pct = 100.0 * entry.reward_predictive_count / cell_count if cell_count > 0 else 0.0
+        reliable_pct = 100.0 * entry.reliable_count / cell_count if cell_count > 0 else 0.0
+        stable_pct = 100.0 * entry.stable_count / cell_count if cell_count > 0 else 0.0
+        peak_pct = 100.0 * entry.peak_significant_count / cell_count if cell_count > 0 else 0.0
+        strict_pct = 100.0 * entry.strict_place_cell_count / cell_count if cell_count > 0 else 0.0
+
+        return [
+            "",
+            f"Trial type: {trial_type}",
+            "-" * (len(trial_type) + len("Trial type: ")),
+            f"  Track length:      {entry.track_length_cm:.1f} cm",
+            f"  Reward position:   {entry.reward_position_cm:.1f} cm",
+            f"  Bin size:          {entry.bin_size_cm:.1f} cm ({entry.bin_count} bins)",
+            f"  {place_label:<22} {place_count} ({place_pct:.1f}%)",
+            f"  Reliable (lap cov.):   {entry.reliable_count} ({reliable_pct:.1f}%)",
+            f"  Stable (split-half):   {entry.stable_count} ({stable_pct:.1f}%)",
+            f"  Peak-significant:      {entry.peak_significant_count} ({peak_pct:.1f}%)",
+            f"  Strict place cells:    {entry.strict_place_cell_count} ({strict_pct:.1f}%)",
+            f"  Spatially significant: {entry.spatially_significant_count} ({spatially_pct:.1f}%)",
+            f"  Reward cells:          {entry.reward_cell_count} ({reward_pct:.1f}%)",
+            f"  Reward-predictive:     {entry.reward_predictive_count} ({predictive_pct:.1f}%)",
+            f"  Reward mixture: weight {entry.mixture_weight:.3f}, "
+            f"center {entry.gaussian_mean_cm:.1f} cm (SD {entry.gaussian_std_cm:.1f} cm)",
+            f"  Track-start wt: {entry.track_start_weight:.3f} (SD {entry.track_start_std_cm:.1f} cm)",
+            f"  Track-end wt:   {entry.track_end_weight:.3f} (SD {entry.track_end_std_cm:.1f} cm)",
+        ]
 
 
 def evaluate_and_save_tuning_report(
     session: DatasetSession,
     *,
-    trial_type: str = "ABC",
+    trial_types: tuple[str, ...] | None = None,
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
     configuration: TuningConfiguration | None = None,
 ) -> TuningReport:
-    """Evaluates the tuning pipeline for a single session and persists the report to disk.
+    """Evaluates the tuning pipeline for every requested trial type in a session and persists the report.
+
+    Notes:
+        Sole orchestrator for assembling :class:`TuningReport` artifacts. Per-session compute and
+        methodological references live on :func:`compute_tuning_report`; this function calls it once and
+        persists the returned long-format report through :meth:`TuningReport.save`. By default every trial
+        type listed in the session's ``trial_geometry.yaml`` is evaluated.
 
     Args:
         session: The DatasetSession to analyze.
-        trial_type: Trial type to analyze.
+        trial_types: Optional explicit tuple of trial types to evaluate; default evaluates every entry in
+            ``trial_geometry.yaml``.
         fluorescence_column: Fluorescence column to use as the analysis input.
         configuration: Wrapper holding the two sub-pipeline configurations. Uses defaults if None.
 
     Returns:
         The TuningReport produced for the session, with both artifacts persisted under the session directory.
     """
-    report = TuningReport.evaluate(
+    report = compute_tuning_report(
         session_path=session.session_path,
-        trial_type=trial_type,
+        trial_types=trial_types,
         fluorescence_column=fluorescence_column,
         configuration=configuration,
     )
@@ -564,7 +477,281 @@ def evaluate_and_save_tuning_report(
     return report
 
 
+def compute_tuning_report(
+    session_path: Path,
+    *,
+    trial_types: tuple[str, ...] | None = None,
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+    configuration: TuningConfiguration | None = None,
+) -> TuningReport:
+    """Computes the per-session tuning report by running the place-field and reward-cell detectors per trial
+    type.
+
+    Notes:
+        Per-session algorithmic entry-point for the tuning pipeline; consolidates every place- and reward-
+        cell methodology that gates a column in the persisted feather. For each requested trial type, loads
+        a single :class:`RunSessionData` and shares it across :class:`PlaceFieldDetector` and
+        :class:`RewardCellDetector` so the two flag sets operate on identical speed-filtered samples and
+        bit-identical rate maps. Place-field detection uses the thresholding-plus-connected-component
+        pipeline of Dombeck et al. (2010) followed by the lap-coverage gate of Climer et al. (2025). The
+        ``IS_STABLE`` and ``IS_PEAK_SIGNIFICANT`` flags follow the multi-criterion framework of Climer &
+        Dombeck (2021): per-cell circular-shift nulls computed inside :class:`PlaceFieldDetector` yield the
+        Stability (95th percentile of split-half r) and Peak (99th percentile of pooled-rate-map peak)
+        classifiers. The reward-cell pipeline contributes ``IS_SPATIALLY_SIGNIFICANT`` via Skaggs spatial
+        information (Skaggs et al. 1996) z-scored against the circular-shift null in the variant of Souza &
+        Tort (2018), gated by Benjamini-Hochberg FDR correction and an even/odd-lap split-half r reliability
+        check (Krishnan & Sheffield 2024). Reward-relative classification follows the Gauthier & Tank (2018)
+        mixture-model framework with the Issa, Radvansky, Xuan & Dombeck (2024) approach / zone / departure
+        decomposition; the per-cell ``IS_POSITION_GLM_SIGNIFICANT`` flag implements the Sosa, Plitt &
+        Giocomo (2025) and Hardcastle et al. (2017) cross-validated partial-variance test of position over
+        speed and acceleration with a trial-label permutation null. All numba kernels and helpers in
+        :mod:`.place_tuning_protocol` and :mod:`.reward_tuning_protocol` inherit these references through
+        this accessor.
+
+        The cells produced for each trial type are concatenated into a single long-format
+        :class:`polars.DataFrame` keyed by ``(cell_id, trial_type)``. Cell IDs are stable across trial types
+        (and across sessions) because the upstream multi-day cindra pipeline registers cells once per
+        session, so cross-trial-type and cross-session aggregations downstream collapse to ``polars`` filters
+        / joins on ``cell_id``. For paired-frame statistical tests (e.g. peak-shift comparisons across trial
+        types or sessions), :func:`.utilities.random_remapping_peak_shift_p_values` provides a reusable
+        cell-ID-shuffle helper.
+
+    References:
+        Place-field morphology, in-/out-of-field ratio, peak intensity, and lap-coverage criterion:
+            Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at
+            cellular resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648
+            Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
+            environments. Nature. https://doi.org/10.1038/s41586-025-09245-y
+        Multi-criterion place-cell classification (Stability and Peak shuffles):
+            Climer & Dombeck (2021). Choice of method of place cell classification determines the population
+            of cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835
+        Skaggs spatial information and the z-scored sensitivity variant against the circular-shift null:
+            Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal
+            populations and the compression of temporal sequences. Hippocampus.
+            https://doi.org/10.1002/(SICI)1098-1063(1996)6:2<149::AID-HIPO6>3.0.CO;2-K
+            Souza, Pavão, Belchior & Tort (2018). On information metrics for spatial coding. Neuroscience.
+            https://doi.org/10.1016/j.neuroscience.2018.01.066
+        Lap-reliability split-half r as the within-session reliability gate:
+            Krishnan & Sheffield (2024). Mechanisms underlying the development and maintenance of stable
+            spatial representations in the mouse hippocampus. https://doi.org/10.1038/s41467-024-50596-3
+            Hainmueller & Bartos (2018). Parallel emergence of stable and dynamic memory engrams in the
+            hippocampus. Nature. https://doi.org/10.1038/s41586-018-0191-2
+        Reward-cell mixture-model framework and approach / zone / departure decomposition:
+            Gauthier & Tank (2018). A dedicated population for reward coding in the hippocampus. Neuron.
+            https://doi.org/10.1016/j.neuron.2018.06.008
+            Issa, Radvansky, Xuan & Dombeck (2024). Lateral entorhinal cortex subpopulations represent
+            experiential epochs surrounding reward. Nat Neurosci.
+            https://doi.org/10.1038/s41593-023-01557-4
+        Position-vs-speed partial-variance GLM with trial-label permutation null:
+            Sosa, Plitt & Giocomo (2025). A flexible hippocampal population code for experience relative to
+            reward. Nat Neurosci. https://doi.org/10.1038/s41593-025-01985-4
+            Hardcastle, Maheswaranathan, Ganguli & Giocomo (2017). A multiplexed, heterogeneous, and adaptive
+            code for navigation in MEC. Neuron. https://doi.org/10.1016/j.neuron.2017.03.025
+
+    Args:
+        session_path: Path to the session's dataset directory.
+        trial_types: Optional explicit tuple of trial types to evaluate. Default evaluates every entry in
+            ``trial_geometry.yaml``.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
+            analysis input.
+        configuration: Wrapper holding the two sub-pipeline configurations. Uses defaults if None.
+
+    Returns:
+        An in-memory :class:`TuningReport` with one long-format row per ``(cell_id, trial_type)`` pair.
+    """
+    resolved_configuration = configuration if configuration is not None else TuningConfiguration.default()
+
+    geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY))
+    if trial_types is None:
+        resolved_trial_types = tuple(geometry.entries.keys())
+    else:
+        resolved_trial_types = tuple(trial_types)
+    if not resolved_trial_types:
+        message = (
+            f"Unable to compute tuning report: no trial types resolved from {session_path}. The "
+            f"trial_geometry.yaml lists {list(geometry.entries.keys())}; trial_types argument was "
+            f"{trial_types!r}."
+        )
+        console.error(message=message, error=ValueError)
+
+    per_trial_cells: list[pl.DataFrame] = []
+    trial_type_summaries: dict[str, TuningTrialSummary] = {}
+    cell_count_reference: int | None = None
+    sampling_rate_hz: float = float("nan")
+
+    for trial_type in resolved_trial_types:
+        console.echo(message=f"Evaluating tuning for trial type {trial_type!r}...", level=LogLevel.INFO)
+        cells_frame, trial_summary, cell_count, trial_sampling_rate_hz = _compute_trial_type(
+            session_path=session_path,
+            trial_type=trial_type,
+            geometry=geometry,
+            fluorescence_column=fluorescence_column,
+            configuration=resolved_configuration,
+        )
+        per_trial_cells.append(cells_frame)
+        trial_type_summaries[trial_type] = trial_summary
+        if cell_count_reference is None:
+            cell_count_reference = cell_count
+            sampling_rate_hz = trial_sampling_rate_hz
+        elif cell_count != cell_count_reference:
+            message = (
+                f"Cell count mismatch across trial types in session {session_path}: trial type "
+                f"{trial_type!r} has {cell_count} cells but the first evaluated trial type had "
+                f"{cell_count_reference}. Multi-day registered cell IDs must align across trial types; "
+                f"check that ``MULTI_DAY_*`` fluorescence columns are loaded."
+            )
+            console.error(message=message, error=ValueError)
+
+    cells = pl.concat(per_trial_cells, how="vertical_relaxed")
+
+    summary = TuningSummary(
+        place_configuration=resolved_configuration.place,
+        reward_configuration=resolved_configuration.reward,
+        sampling_rate_hz=sampling_rate_hz,
+        cell_count=int(cell_count_reference if cell_count_reference is not None else 0),
+        trial_types=list(resolved_trial_types),
+        trial_type_summaries=trial_type_summaries,
+    )
+    return TuningReport(cells=cells, summary=summary)
+
+
 # ===== Private helpers ==========================================================================================
+
+
+def _compute_trial_type(
+    session_path: Path,
+    trial_type: str,
+    *,
+    geometry: TrialGeometry,
+    fluorescence_column: FluorescenceColumn,
+    configuration: TuningConfiguration,
+) -> tuple[pl.DataFrame, TuningTrialSummary, int, float]:
+    """Runs the place-field and reward-cell detectors on a single trial type and returns the long-format rows.
+
+    Returns:
+        A tuple of ``(cells_frame, trial_summary, cell_count, sampling_rate_hz)``. ``cells_frame`` already
+        carries a :attr:`TuningColumn.TRIAL_TYPE` column populated with ``trial_type`` for every row.
+    """
+    geometry_entry = geometry.entries[trial_type]
+    track_length_cm = float(geometry_entry.trial_length_cm)
+    reward_position_cm = float(
+        (geometry_entry.stimulus_trigger_zone_start_cm + geometry_entry.stimulus_trigger_zone_end_cm) / 2.0
+    )
+
+    run_session = assemble_run_session_data(
+        session_path=session_path,
+        trial_type=trial_type,
+        fluorescence_column=fluorescence_column,
+    )
+    sampling_rate_hz = float(run_session.sampling_rate_hz)
+
+    console.echo(message="Running place field detection...", level=LogLevel.INFO)
+    place_detector = PlaceFieldDetector(
+        run_session=run_session,
+        bin_size=_PLACE_FIELD_BIN_SIZE_CM,
+        configuration=configuration.place,
+    )
+    place_fields = place_detector.detect()
+    cell_count = int(place_fields.binned_fluorescence.shape[0])
+    place_cell_count = int(place_fields.has_place_field.sum())
+    console.echo(
+        message=f"Place field detection complete: {place_cell_count}/{cell_count} place cells.",
+        level=LogLevel.SUCCESS,
+    )
+
+    console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
+    reward_detector = RewardCellDetector(
+        run_session=run_session,
+        configuration=configuration.reward,
+    )
+    reward_results = reward_detector.detect()
+    spatially_significant_count = int(np.sum(reward_results.spatial_results.is_significant))
+    reward_cell_count = int(reward_results.reward_cell_count)
+    reward_predictive_count = len(reward_results.reward_predictive_indices)
+    console.echo(
+        message=(
+            f"Reward cell detection complete: {reward_cell_count} reward cells, "
+            f"{reward_predictive_count} reward-predictive."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+
+    rate_map_bin_count = int(reward_results.spatial_results.rate_maps.shape[1])
+
+    stability_even_odd, stability_split_half = _compute_stability_metrics(
+        binned_fluorescence_per_trial=place_fields.binned_fluorescence_per_trial,
+        cell_count=cell_count,
+    )
+    console.echo(
+        message=(
+            f"Running multi-criterion shuffles "
+            f"({configuration.place.shuffle_repeat_count} iterations each for Peak and Stability)..."
+        ),
+        level=LogLevel.INFO,
+    )
+    is_stable, is_peak_significant, stability_p_values, peak_p_values = _compute_multi_criterion_flags(
+        place_detector=place_detector,
+        place_fields=place_fields,
+        stability_split_half=stability_split_half,
+        configuration=configuration.place,
+    )
+    console.echo(
+        message=(
+            f"Multi-criterion shuffles complete: {int(np.sum(is_stable))} stable, "
+            f"{int(np.sum(is_peak_significant))} peak-significant."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+    # noinspection PyTypeChecker
+    is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
+    # noinspection PyTypeChecker
+    is_reward_cell_array: NDArray[np.bool_] = (
+        reward_results.spatial_results.is_significant & reward_results.is_zone
+    )
+    # noinspection PyTypeChecker
+    is_place_only: NDArray[np.bool_] = place_fields.has_place_field & ~is_reward_cell_array
+    # noinspection PyTypeChecker
+    is_strict_place_only: NDArray[np.bool_] = is_strict_place & ~is_reward_cell_array
+
+    cells_frame = _build_cell_table(
+        cell_count=cell_count,
+        trial_type=trial_type,
+        place_fields=place_fields,
+        reward_results=reward_results,
+        stability_even_odd=stability_even_odd,
+        stability_split_half=stability_split_half,
+        is_stable=is_stable,
+        is_peak_significant=is_peak_significant,
+        stability_p_values=stability_p_values,
+        peak_p_values=peak_p_values,
+        is_strict_place=is_strict_place,
+    )
+
+    trial_summary = TuningTrialSummary(
+        track_length_cm=track_length_cm,
+        reward_position_cm=reward_position_cm,
+        bin_size_cm=float(configuration.reward.bin_size),
+        bin_count=rate_map_bin_count,
+        place_cell_count=place_cell_count,
+        spatially_significant_count=spatially_significant_count,
+        reward_cell_count=reward_cell_count,
+        reward_predictive_count=reward_predictive_count,
+        reliable_count=int(place_fields.has_place_field.sum()),
+        stable_count=int(np.sum(is_stable)),
+        peak_significant_count=int(np.sum(is_peak_significant)),
+        strict_place_cell_count=int(np.sum(is_strict_place)),
+        place_only_count=int(np.sum(is_place_only)),
+        strict_place_only_count=int(np.sum(is_strict_place_only)),
+        mixture_weight=float(reward_results.mixture_weight),
+        gaussian_mean_cm=float(reward_results.gaussian_mean),
+        gaussian_std_cm=float(reward_results.gaussian_std),
+        track_start_weight=float(reward_results.track_start_weight),
+        track_end_weight=float(reward_results.track_end_weight),
+        track_start_std_cm=float(reward_results.track_start_std),
+        track_end_std_cm=float(reward_results.track_end_std),
+    )
+
+    return cells_frame, trial_summary, cell_count, sampling_rate_hz
 
 
 def _compute_stability_metrics(
@@ -577,13 +764,6 @@ def _compute_stability_metrics(
         Both metrics return NaN for cells with fewer than two trials, fewer than three valid bins in either
         half, or zero variance in either half. Bins where either half has NaN are excluded pairwise from the
         correlation.
-
-    References:
-        - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of
-          cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Stability method.
-        - Hainmueller & Bartos (2018). Parallel emergence of stable and dynamic memory engrams in the
-          hippocampus. Nature. https://doi.org/10.1038/s41586-018-0191-2 -- split-half stability r as a
-          place-cell criterion.
 
     Args:
         binned_fluorescence_per_trial: Per-trial binned fluorescence with dimensions (cell_count, trial_count,
@@ -643,11 +823,6 @@ def _compute_multi_criterion_flags(
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
     """Computes the IS_STABLE / IS_PEAK_SIGNIFICANT per-cell flags and their per-cell shuffle p-values.
 
-    References:
-        - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of
-          cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- Peak method (99th
-          percentile) and Stability method (95th percentile).
-
     Args:
         place_detector: PlaceFieldDetector instance used to access shuffle infrastructure and pooled rate map.
         place_fields: PlaceFields output containing the pooled and per-trial rate maps.
@@ -685,6 +860,7 @@ def _compute_multi_criterion_flags(
 
 def _build_cell_table(
     cell_count: int,
+    trial_type: str,
     place_fields: PlaceFields,
     reward_results: RewardCellResults,
     *,
@@ -696,7 +872,12 @@ def _build_cell_table(
     peak_p_values: NDArray[np.float32],
     is_strict_place: NDArray[np.bool_],
 ) -> pl.DataFrame:
-    """Assembles the per-cell wide-format DataFrame from the live detector outputs."""
+    """Assembles the per-trial-type slice of the long-format DataFrame from the live detector outputs.
+
+    The returned DataFrame already carries a :attr:`TuningColumn.TRIAL_TYPE` column populated with
+    ``trial_type`` for every row. The caller concatenates per-trial-type slices into the session-level
+    long-format ``cells`` feather.
+    """
     spatial = reward_results.spatial_results
     place_rows = _build_place_field_rows(cell_count=cell_count, place_fields=place_fields)
 
@@ -704,8 +885,6 @@ def _build_cell_table(
     cell_ids: NDArray[np.int32] = np.arange(cell_count, dtype=np.int32)
     is_reward_cell = spatial.is_significant & reward_results.is_reward_proximal
 
-    # Persists the per-trial binned fluorescence for any cell that is either a place cell or spatially
-    # significant so reward-cell plotting paths can use the same column without an extra rebinning pass.
     keep_per_trial_mask = place_fields.has_place_field | spatial.is_significant
     binned_fluorescence_per_trial: list[list[list[float]] | None] = []
     for cell_index in range(cell_count):
@@ -719,6 +898,7 @@ def _build_cell_table(
     return pl.DataFrame(
         {
             TuningColumn.CELL_ID.value: cell_ids,
+            TuningColumn.TRIAL_TYPE.value: pl.Series(values=[trial_type] * cell_count, dtype=pl.Utf8),
             TuningColumn.IS_PLACE.value: pl.Series(values=place_fields.has_place_field, dtype=pl.Boolean),
             TuningColumn.IS_SPATIALLY_SIGNIFICANT.value: pl.Series(values=spatial.is_significant, dtype=pl.Boolean),
             TuningColumn.IS_REWARD_PROXIMAL.value: pl.Series(values=reward_results.is_zone, dtype=pl.Boolean),

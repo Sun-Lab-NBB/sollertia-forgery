@@ -36,76 +36,70 @@ class RewardCellConfiguration:
     """Defines configuration parameters for reward cell detection.
 
     Notes:
-        Bin size and smoothing default to the place-pipeline values (5.0 cm bins, uniform 3-bin smoothing) so that
-        ``IS_PLACE`` and ``IS_SPATIALLY_SIGNIFICANT`` are computed against the same rate map and disagreements between
-        the two flags reflect biology rather than binning artifacts. The standalone
-        :meth:`RewardCellDetector.from_session_path` path re-bins from scratch using these defaults.
+        Bin size and smoothing default to the place-pipeline values (5.0 cm bins, uniform 3-bin smoothing) so
+        that ``IS_PLACE`` and ``IS_SPATIALLY_SIGNIFICANT`` are computed against the same rate map and
+        disagreements between the two flags reflect biology rather than binning artifacts.
     """
 
     bin_size: float = 5.0
-    """Spatial bin size in centimeters for position binning. Matches the place-pipeline default so the two flags
-    operate on the same rate map."""
+    """Spatial bin size in centimeters for position binning. Matches the place-pipeline default so the two
+    flags operate on the same rate map."""
     minimum_speed: float = 5.0
     """Minimum speed threshold in cm/s for including samples in analysis."""
     smooth_size: int = 3
-    """Size of the uniform-smoothing kernel in bins applied to the rate map. Matches the place-pipeline smoothing
-    (Dombeck-lineage uniform 3-bin moving average) so the two flags share the same smoothing."""
+    """Size of the uniform-smoothing kernel in bins applied to the rate map. Matches the place-pipeline
+    smoothing so the two flags share the same smoothing."""
     shuffle_count: int = 1000
-    """Number of shuffle iterations for significance testing. Matches the place-pipeline default of 1000 (Climer
-    et al., 2025)."""
+    """Number of shuffle iterations for significance testing. Matches the place-pipeline default of 1000."""
     minimum_shift_seconds: float = 10.0
-    """Minimum circular shift expressed in seconds. Set above the GCaMP6 autocorrelation timescale (roughly 1.2-2 s)
-    so the null distribution is not contaminated by indicator decay; matches the place-pipeline default. Climer et
-    al. (2025) uses 15 s; Climer & Dombeck (2021) uses 5 s. Resolved to a sample count at runtime via the session's
-    ``sampling_rate_hz``."""
+    """Minimum circular shift expressed in seconds. Set above the GCaMP6 autocorrelation timescale (roughly
+    1.2-2 s) so the null distribution is not contaminated by indicator decay; matches the place-pipeline
+    default. Resolved to a sample count at runtime via the session's ``sampling_rate_hz``."""
     shuffle_minimum_chunk_count: int = 100
     """Sets the minimum circular shift to ``total_samples / shuffle_minimum_chunk_count`` samples when
     ``minimum_shift_seconds`` would either fall below one sample or exceed the safe upper bound
-    (``total_samples / 4``). Mirrors the place-pipeline fallback so degenerate short sessions still produce a usable
-    null."""
+    (``total_samples / 4``). Mirrors the place-pipeline fallback so degenerate short sessions still produce a
+    usable null."""
     chunk_count: int = 6
     """Number of chunks for chunk-and-permute shuffle method."""
     significance_threshold: float = 0.01
-    """P-value threshold for determining statistically significant spatial information. Climer et al. (2025) uses
-    p < 0.01 (99th percentile)."""
+    """P-value threshold for determining statistically significant spatial information."""
     minimum_split_half_r: float = 0.3
-    """Minimum even/odd-lap Pearson r required for a cell to count as spatially significant. Gates the shuffle-only
-    significance with a within-session reliability check; cells that pass the shuffle but are unreliable across laps
-    are excluded so the reward-mixture fit operates on biologically reproducible activity. Krishnan & Sheffield
-    (2024) and Mau, Sun, Buzsáki et al. (2020) motivate lap-reliability gating; the specific 0.3 cut is a widely-used
-    default in the field."""
+    """Minimum even/odd-lap Pearson r required for a cell to count as spatially significant. Gates the
+    shuffle-only significance with a within-session reliability check; cells that pass the shuffle but are
+    unreliable across laps are excluded so the reward-mixture fit operates on biologically reproducible
+    activity."""
     fdr_q: float = 0.05
     """Benjamini-Hochberg FDR target rate applied to the population of shuffle p-values before the
-    significance gate. Controls the expected false-discovery proportion across cells; raw per-cell p < 0.01 without
-    FDR yields ~1% × N false positives, which materially distorts the mixture-model fit on small reward populations.
-    Set to 1.0 to disable FDR (recovers per-cell uncorrected behavior)."""
+    significance gate. Controls the expected false-discovery proportion across cells; raw per-cell
+    p < 0.01 without FDR yields ~1% × N false positives, which materially distorts the mixture-model fit on
+    small reward populations. Set to 1.0 to disable FDR (recovers per-cell uncorrected behavior)."""
     reward_zone_width: float = 30.0
     """Width of the reward zone in centimeters for defining the zone band. Centered on the geometry midpoint
-    ``(stimulus_trigger_zone_start_cm + stimulus_trigger_zone_end_cm) / 2``. The Issa zone band is bit-identical to
-    the legacy ``is_reward_proximal`` definition with this parameter."""
+    ``(stimulus_trigger_zone_start_cm + stimulus_trigger_zone_end_cm) / 2``."""
     approach_distance: float = 40.0
-    """Length in centimeters of the approach band immediately upstream of the zone. Issa, Radvansky, Xuan & Dombeck
-    (2024) Nat Neurosci use 40 cm for the spatial pre-reward window. The approach band is signed-circular
-    ``[reward - half_zone - approach_distance, reward - half_zone)``."""
+    """Length in centimeters of the approach band immediately upstream of the zone. The approach band is
+    signed-circular ``[reward - half_zone - approach_distance, reward - half_zone)``."""
     departure_distance: float = 40.0
-    """Length in centimeters of the departure band immediately downstream of the zone. Symmetric counterpart of
-    ``approach_distance``; Issa et al. (2024) use 40 cm."""
+    """Length in centimeters of the departure band immediately downstream of the zone. Symmetric counterpart
+    of ``approach_distance``."""
     pre_reward_window: float = 50.0
-    """Distance in centimeters before reward to use as the pre-reward spatial window for the position-vs-speed GLM.
-    Defines the window within which (trial, bin) samples are extracted; should cover the deceleration-and-anticipation
-    phase. Independent of ``approach_distance`` (band classification) so the two can be tuned separately."""
+    """Distance in centimeters before reward to use as the pre-reward spatial window for the position-vs-speed
+    GLM. Defines the window within which (trial, bin) samples are extracted; should cover the
+    deceleration-and-anticipation phase. Independent of ``approach_distance`` (band classification) so the two
+    can be tuned separately."""
     minimum_active_trials: int = 10
-    """Minimum number of trials a neuron must be active in the pre-reward window to qualify for the position GLM."""
+    """Minimum number of trials a neuron must be active in the pre-reward window to qualify for the position
+    GLM."""
     glm_cv_fold_count: int = 5
-    """Number of cross-validation folds (split by trial) for the position-vs-speed partial-variance GLM. Five matches
-    the Sosa, Plitt & Giocomo (2025) and Hardcastle et al. (2017) defaults."""
+    """Number of cross-validation folds (split by trial) for the position-vs-speed partial-variance GLM."""
     glm_permutation_count: int = 200
-    """Number of trial-label permutations for the GLM partial-variance null. Sosa et al. (2025) report stable
-    partial-deviance significance from a few hundred permutations; the permutation cost dominates the GLM runtime."""
+    """Number of trial-label permutations for the GLM partial-variance null. A few hundred permutations are
+    enough for stable partial-deviance significance; the permutation cost dominates the GLM runtime."""
     glm_significance_threshold: float = 0.05
     """P-value threshold for the position-vs-speed GLM partial-variance test. Cells whose CV ΔR² (position vs.
-    speed+accel) exceeds the upper ``1 - threshold`` percentile of the trial-label permutation null are flagged
-    ``IS_POSITION_GLM_SIGNIFICANT``."""
+    speed+accel) exceeds the upper ``1 - threshold`` percentile of the trial-label permutation null are
+    flagged ``IS_POSITION_GLM_SIGNIFICANT``."""
 
 
 @dataclass(slots=True)
@@ -117,9 +111,9 @@ class SpatiallyModulatedNeurons:
     spatial_information: NDArray[np.float32]
     """Spatial information content in bits/event with length cell_count."""
     spatial_information_z: NDArray[np.float32]
-    """Z-scored Skaggs spatial information ``(I_obs - mean(I_shuf)) / std(I_shuf)`` with length cell_count. Uses the
-    same shuffle distribution as ``p_values`` and provides a decoding-equivalent sensitivity metric (Souza & Tort
-    2018) calibrated to the shuffled null rather than to raw bits/event."""
+    """Z-scored Skaggs spatial information ``(I_obs - mean(I_shuf)) / std(I_shuf)`` with length cell_count.
+    Uses the same shuffle distribution as ``p_values`` and provides a decoding-equivalent sensitivity metric
+    calibrated to the shuffled null rather than to raw bits/event."""
     is_significant: NDArray[np.bool_]
     """Boolean mask indicating neurons with statistically significant spatial information with length cell_count.
     Combines the shuffle p-value gate (``p_values < significance_threshold``) with the lap-reliability gate
@@ -156,25 +150,26 @@ class RewardCellResults:
     gaussian_std: float
     """Fitted reward-Gaussian standard deviation in centimeters from the mixture model."""
     track_start_weight: float
-    """Fraction of spatially modulated neurons attributed to the track-start Gaussian component (centered at 0 cm).
-    Captures landmark / start-cell over-representation that would otherwise contaminate ``mixture_weight``
-    (Hainmueller & Bartos 2018; Sato et al. 2020)."""
+    """Fraction of spatially modulated neurons attributed to the track-start Gaussian component (centered at
+    0 cm). Captures landmark / start-cell over-representation that would otherwise contaminate
+    ``mixture_weight``."""
     track_end_weight: float
     """Fraction of spatially modulated neurons attributed to the track-end Gaussian component (centered at
-    ``track_length``). Captures trajectory-endpoint over-representation (Frank, Brown & Wilson 2000)."""
+    ``track_length``). Captures trajectory-endpoint over-representation."""
     track_start_std: float
     """Fitted track-start Gaussian standard deviation in centimeters."""
     track_end_std: float
     """Fitted track-end Gaussian standard deviation in centimeters."""
     is_approach: NDArray[np.bool_]
-    """Boolean mask: COM in the approach band (signed-circular ``[reward - half_zone - approach_distance,
-    reward - half_zone)``) with length cell_count. Issa, Radvansky, Xuan & Dombeck (2024) anticipatory band."""
+    """Boolean mask: COM in the approach (anticipatory) band, signed-circular
+    ``[reward - half_zone - approach_distance, reward - half_zone)`` with length cell_count."""
     is_zone: NDArray[np.bool_]
-    """Boolean mask: COM in the reward zone band (signed-circular ``[reward - half_zone, reward + half_zone]``) with
-    length cell_count. Bit-identical to the legacy ``is_reward_proximal`` definition."""
+    """Boolean mask: COM in the reward zone band, signed-circular
+    ``[reward - half_zone, reward + half_zone]`` with length cell_count. Bit-identical to the legacy
+    ``is_reward_proximal`` definition."""
     is_departure: NDArray[np.bool_]
-    """Boolean mask: COM in the departure band (signed-circular ``(reward + half_zone, reward + half_zone +
-    departure_distance]``) with length cell_count. Issa et al. (2024) post-reward band."""
+    """Boolean mask: COM in the post-reward (departure) band, signed-circular
+    ``(reward + half_zone, reward + half_zone + departure_distance]`` with length cell_count."""
     cv_position_partial_r2: NDArray[np.float32]
     """Per-cell 5-fold CV ΔR² of position over speed+acceleration in the pre-reward window (length cell_count). NaN
     where the cell did not enter the GLM (insufficient active trials, untested band, etc.). The principal A1 statistic
@@ -215,14 +210,6 @@ def _compute_spatial_information(
         Implements the Skaggs spatial-information formula in bits per event:
         ``I = sum_x p(x) * (rate[x] / mean_rate) * log2(rate[x] / mean_rate)``, where ``p(x)`` is the per-bin
         occupancy probability. Bins with zero occupancy or zero rate are skipped (the log term diverges).
-
-    References:
-        - Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal populations
-          and the compression of temporal sequences. Hippocampus.
-          https://doi.org/10.1002/(SICI)1098-1063(1996)6:2<149::AID-HIPO6>3.0.CO;2-K
-        - Skaggs, McNaughton & Gothard (1993). An information-theoretic approach to deciphering the hippocampal
-          code. NIPS. https://proceedings.neurips.cc/paper/1992/hash/4e4d9c44e7c41a8c0fa5e0c9a47a9e44 -- the
-          original Skaggs spatial information measure.
 
     Args:
         rate_maps: Mean fluorescence rate maps with dimensions (cell_count, bin_count).
@@ -527,12 +514,11 @@ def _compute_even_odd_split_half_r(
     """Computes per-cell even/odd-lap split-half Pearson r from a per-trial rate map.
 
     Notes:
-        Splits the per-trial axis into even-indexed and odd-indexed laps, averages each half across the trial axis
-        with NaN-aware mean, and computes the per-cell Pearson r between the two half-maps. Returns NaN for cells
-        when fewer than two trials are available, when either half-map collapses to all-NaN, or when either half has
-        zero variance. Even/odd partitioning rather than first/second-half preserves trial-level structure across
-        within-session drift, which is the lap-reliability statistic used by Krishnan & Sheffield (2024) and the
-        Mau/Sun/Buzsáki (2020) event-cell analysis.
+        Splits the per-trial axis into even-indexed and odd-indexed laps, averages each half across the trial
+        axis with NaN-aware mean, and computes the per-cell Pearson r between the two half-maps. Returns NaN
+        for cells when fewer than two trials are available, when either half-map collapses to all-NaN, or when
+        either half has zero variance. Even/odd partitioning rather than first/second-half preserves trial-
+        level structure across within-session drift.
 
     Args:
         per_trial_rate_map: Per-trial smoothed rate map with dimensions (cell_count, trial_count, bin_count).
@@ -567,13 +553,8 @@ def _apply_uniform_smoothing_wrapped(
     """Applies uniform-kernel (boxcar) smoothing to rate maps with circular wrapping at track edges.
 
     Notes:
-        Uses the same uniform 3-bin moving average as the place-cell pipeline so the spatial-information rate map and
-        the place-field rate map are bit-identical when the bin sizes match.
-
-    References:
-        - Dombeck, Harvey, Tian, Looger & Tank (2010). Functional imaging of hippocampal place cells at cellular
-          resolution during virtual navigation. Nat Neurosci. https://doi.org/10.1038/nn.2648 -- uniform smoothing
-          across spatial bins is the canonical choice in the Dombeck/Tank lineage.
+        Uses the same uniform 3-bin moving average as the place-cell pipeline so the spatial-information rate
+        map and the place-field rate map are bit-identical when the bin sizes match.
 
     Args:
         rate_maps: Rate maps with dimensions (cell_count, bin_count).
@@ -595,10 +576,9 @@ def _extended_mixture_negative_log_likelihood(
     Notes:
         Density model:
             ``p(x) = w_u * U(x) + w_r * N(x; mu_r, sigma_r) + w_s * N(x; 0, sigma_s) + w_e * N(x; L, sigma_e)``,
-        where ``U`` is the uniform density on ``[0, L]`` and ``w_u = 1 - w_r - w_s - w_e``. Generalizing the original
-        Gauthier & Tank (2018) uniform + Gaussian fit with explicit landmark Gaussians at the track ends prevents the
-        reward weight from absorbing trajectory-endpoint over-representation (Hainmueller & Bartos 2018; Sato et al.
-        2020 distinguish reward and landmark over-representations as biologically separable).
+        where ``U`` is the uniform density on ``[0, L]`` and ``w_u = 1 - w_r - w_s - w_e``. The explicit
+        landmark Gaussians at the track ends prevent the reward weight from absorbing trajectory-endpoint
+        over-representation, which would otherwise bias the reward-anchored fraction upward.
 
     Args:
         parameters: Optimization parameters as [w_reward, w_start, w_end, mean_reward, std_reward, std_start, std_end].
@@ -638,19 +618,9 @@ def _compute_extended_mixture(
 
     Notes:
         Optimizes via L-BFGS-B with bounded parameters. The track-start and track-end weights are bounded in
-        ``[0, 0.5]`` so they cannot dominate the fit; their Gaussian centers are fixed at 0 and ``track_length``
-        respectively (track endpoints are physical landmarks, not free parameters). Returns zero weights and the
-        reward seed position when no spatially significant centers are available.
-
-    References:
-        - Gauthier & Tank (2018). A dedicated population for reward coding in the hippocampus. Neuron.
-          https://doi.org/10.1016/j.neuron.2018.06.008 -- canonical uniform + Gaussian formulation.
-        - Hainmueller & Bartos (2018). Parallel emergence of stable and dynamic memory engrams in the hippocampus.
-          Nature. https://doi.org/10.1038/s41586-018-0191-2 -- non-uniform place-cell distribution motivates
-          explicit landmark components.
-        - Sato et al. (2020). Distinct mechanisms of over-representation of landmarks and rewards in the hippocampus.
-          Cell Reports. https://doi.org/10.1016/j.celrep.2020.107987 -- landmark vs. reward over-representations
-          arise from molecularly separable mechanisms.
+        ``[0, 0.5]`` so they cannot dominate the fit; their Gaussian centers are fixed at 0 and
+        ``track_length`` respectively (track endpoints are physical landmarks, not free parameters). Returns
+        zero weights and the reward seed position when no spatially significant centers are available.
 
     Args:
         centers: Array of center-of-mass positions in centimeters for all spatially modulated neurons.
@@ -742,22 +712,12 @@ class RewardCellDetector:
         """Runs the full reward cell detection pipeline.
 
         Notes:
-            Computes spatial rate maps with shuffle-based significance testing (gated by BH-FDR on the population
-            shuffle p-values and by an even/odd-lap split-half reliability check), classifies each cell into the
-            Issa approach / zone / departure bands, fits the four-component (uniform + reward + track-start +
-            track-end) mixture to the significant centers of mass, and runs the per-cell Gaussian GLM
-            partial-variance test (position vs. speed + acceleration, 5-fold CV with trial-label permutation null)
-            for cells in the approach or zone bands.
-
-        References:
-            - Gauthier & Tank (2018). A dedicated population for reward coding in the hippocampus. Neuron.
-              https://doi.org/10.1016/j.neuron.2018.06.008 -- canonical reward-cell mixture-model framework.
-            - Issa, Radvansky, Xuan & Dombeck (2024). Lateral entorhinal cortex subpopulations represent
-              experiential epochs surrounding reward. Nat Neurosci. https://doi.org/10.1038/s41593-023-01557-4 --
-              approach / zone / departure decomposition.
-            - Sosa, Plitt & Giocomo (2025). A flexible hippocampal population code for experience relative to
-              reward. Nat Neurosci. https://doi.org/10.1038/s41593-025-01985-4 -- partial-variance GLM with speed
-              and acceleration covariates that controls for stop-and-lick aliasing.
+            Computes spatial rate maps with shuffle-based significance testing (gated by BH-FDR on the
+            population shuffle p-values and by an even/odd-lap split-half reliability check), classifies each
+            cell into approach / zone / departure bands, fits the four-component (uniform + reward +
+            track-start + track-end) mixture to the significant centers of mass, and runs the per-cell
+            Gaussian GLM partial-variance test (position vs. speed + acceleration, 5-fold CV with trial-label
+            permutation null) for cells in the approach or zone bands.
 
         Returns:
             A RewardCellResults instance containing spatial modulation results, three-band classification, the
@@ -812,14 +772,9 @@ class RewardCellDetector:
         """Computes spatial rate maps, spatial information, and shuffle-based significance for all neurons.
 
         Notes:
-            Significance gates the shuffle p-value with an even/odd-lap split-half Pearson r (Krishnan & Sheffield
-            2024 lap-reliability practice) so the downstream mixture-model fit operates on cells whose tuning is
-            reproducible across laps, not just statistically distinguishable from a circular-shift null.
-
-        References:
-            - Souza, Pavão, Belchior & Tort (2018). On information metrics for spatial coding. Neuroscience.
-              https://doi.org/10.1016/j.neuroscience.2018.01.066 -- z-scored spatial information correlates better
-              with decoder accuracy than raw bits/event.
+            Significance gates the shuffle p-value with an even/odd-lap split-half Pearson r so the downstream
+            mixture-model fit operates on cells whose tuning is reproducible across laps, not just
+            statistically distinguishable from a circular-shift null.
 
         Returns:
             A SpatiallyModulatedNeurons instance with rate maps, spatial information (raw and z-scored), significance
@@ -944,24 +899,14 @@ class RewardCellDetector:
         """Computes shuffle-derived p-values and z-scored spatial information against a circular-shift null.
 
         Notes:
-            For each shuffle iteration, the fluorescence time series is circularly shifted by at least minimum_shift
-            samples and then split into chunks that are randomly permuted. Only the speed-filtered subset of
-            fluorescence is shuffled and rebinned using the shared indirection-array shuffle helpers hoisted into
-            ``analysis.utilities``. The minimum-shift floor is resolved seconds-first against the session's sampling
-            rate (matches the place-pipeline pattern); on degenerate short sessions where the seconds-based shift
-            would fall outside the safe range the chunk-granularity fallback is used. Z-scored information uses the
-            same shuffle distribution as the p-value and reports a decoding-equivalent sensitivity metric (Souza &
-            Tort 2018).
-
-        References:
-            - Skaggs, McNaughton, Wilson & Barnes (1996). Theta phase precession in hippocampal neuronal populations
-              and the compression of temporal sequences. Hippocampus.
-              https://doi.org/10.1002/(SICI)1098-1063(1996)6:2<149::AID-HIPO6>3.0.CO;2-K -- Skaggs spatial information.
-            - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
-              environments. Nature. https://doi.org/10.1038/s41586-025-09245-y -- circular-shift null with a 15 s
-              minimum shift.
-            - Souza, Pavão, Belchior & Tort (2018). On information metrics for spatial coding. Neuroscience.
-              https://doi.org/10.1016/j.neuroscience.2018.01.066 -- z-scored information vs. raw bits/event.
+            For each shuffle iteration, the fluorescence time series is circularly shifted by at least
+            ``minimum_shift`` samples and then split into chunks that are randomly permuted. Only the
+            speed-filtered subset of fluorescence is shuffled and rebinned using the shared indirection-array
+            shuffle helpers hoisted into ``analysis.utilities``. The minimum-shift floor is resolved
+            seconds-first against the session's sampling rate (matches the place-pipeline pattern); on
+            degenerate short sessions where the seconds-based shift would fall outside the safe range the
+            chunk-granularity fallback is used. Z-scored information uses the same shuffle distribution as the
+            p-value and reports a decoding-equivalent sensitivity metric.
 
         Args:
             filtered_position: Speed-filtered position values with length filtered_sample_count.
@@ -1056,17 +1001,11 @@ class RewardCellDetector:
         """Classifies neurons into approach, zone, and departure bands by signed circular offset from reward position.
 
         Notes:
-            Uses signed circular offset (in ``[-track_length/2, track_length/2)``) so the bands wrap correctly when
-            the zone or its outer bands cross a track boundary. The zone band is bit-identical to the legacy
-            ``is_reward_proximal`` definition (``circular_distance <= half_zone``); the approach and departure bands
-            extend Issa, Radvansky, Xuan & Dombeck (2024) anticipatory and post-reward decomposition outward by
+            Uses signed circular offset (in ``[-track_length/2, track_length/2)``) so the bands wrap correctly
+            when the zone or its outer bands cross a track boundary. The zone band is bit-identical to the
+            legacy ``is_reward_proximal`` definition (``circular_distance <= half_zone``); the approach and
+            departure bands extend the anticipatory and post-reward decomposition outward by
             ``approach_distance`` and ``departure_distance`` respectively.
-
-        References:
-            - Issa, Radvansky, Xuan & Dombeck (2024). Lateral entorhinal cortex subpopulations represent experiential
-              epochs surrounding reward. Nat Neurosci. https://doi.org/10.1038/s41593-023-01557-4 -- four-window
-              decomposition (approach / zone / consumption / departure); the zone is time-locked to consumption in
-              their work, here represented spatially by the task-defined reward zone width.
 
         Args:
             centers_of_mass: Center-of-mass positions in centimeters with length cell_count.
@@ -1173,17 +1112,8 @@ class RewardCellDetector:
                 5. Permute trial labels of the activity matrix and recompute ΔR² to build the null distribution.
                 6. p-value = (1 + count of perms with ΔR² >= observed) / (1 + permutation_count) — additive smoothing
                    keeps the p-value strictly positive on small permutation counts.
-            Cells with insufficient active trials, degenerate covariate variance, or fewer valid (trial, bin) tuples
-            than the design-matrix rank receive NaN ΔR², NaN p-value, and ``False`` significance.
-
-        References:
-            - Sosa, Plitt & Giocomo (2025). A flexible hippocampal population code for experience relative to reward.
-              Nat Neurosci. https://doi.org/10.1038/s41593-025-01985-4 -- partial-deviance / partial-R² framework
-              with position, reward-relative position, speed, acceleration, and licking covariates; the GLM
-              architecture this method follows.
-            - Hardcastle, Maheswaranathan, Ganguli & Giocomo (2017). A multiplexed, heterogeneous, and adaptive code
-              for navigation in MEC. Neuron. https://doi.org/10.1016/j.neuron.2017.03.025 -- canonical 2P-GLM with
-              forward selection across position / speed / head-direction predictors.
+            Cells with insufficient active trials, degenerate covariate variance, or fewer valid (trial, bin)
+            tuples than the design-matrix rank receive NaN ΔR², NaN p-value, and ``False`` significance.
 
         Args:
             candidate_mask: Boolean mask of cells to test (typically ``is_significant & (is_approach | is_zone)``)

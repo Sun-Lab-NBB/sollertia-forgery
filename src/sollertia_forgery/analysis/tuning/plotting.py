@@ -1,7 +1,9 @@
 """Per-session plotting helpers for the tuning pipeline.
 
-Module-level functions consume a :class:`TuningReport` plus, where noted, the session's ``data.feather`` opened
-memory-mapped at plot time. Persistence and summarization stay on the report.
+Module-level functions consume a :class:`TuningReport` plus the trial type the figure should depict, plus —
+where noted — the session's ``data.feather`` opened memory-mapped at plot time. Persistence and summarization
+stay on the report. Every function takes a ``trial_type`` argument that selects the long-format slice of the
+report's cells feather and the matching :class:`TuningTrialSummary` entry.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ _PLACE_PVALUE_DISPLAY_FLOOR: float = 1e-4
 def plot_place_cell_heatmap(
     report: TuningReport,
     *,
+    trial_type: str,
     title: str | None = None,
     sort_by_position: bool = True,
     show_only_place_cells: bool = True,
@@ -50,20 +53,20 @@ def plot_place_cell_heatmap(
     cmap: str = "gray_r",
     show_color_bar: bool = True,
 ) -> plt.Figure:
-    """Plots the position-ordered binned-fluorescence heatmap from the persisted per-cell rate maps.
+    """Plots the position-ordered binned-fluorescence heatmap for ``trial_type`` from the persisted rate maps.
 
     Args:
-        report: TuningReport whose persisted rate-map column drives the heatmap.
+        report: TuningReport whose persisted long-format rate-map column drives the heatmap.
+        trial_type: Trial type to extract; must match an entry in ``report.summary.trial_type_summaries``.
         title: Optional title displayed at the top of the figure.
         sort_by_position: Order cells by their place-field center along the track before plotting.
         show_only_place_cells: Display only cells that pass every requested criterion (the AND of the three
             ``require_*`` flags below).
-        require_place: Require ``IS_PLACE`` (Dombeck morphology + lap coverage).
-        require_stable: Require ``IS_STABLE`` (Climer & Dombeck 2021 Stability shuffle).
-        require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (Climer & Dombeck 2021 Peak shuffle).
+        require_place: Require ``IS_PLACE`` (place-field morphology + lap coverage).
+        require_stable: Require ``IS_STABLE`` (split-half stability shuffle).
+        require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (per-cell peak shuffle).
         mutually_exclusive: When True (default), cells also flagged as ``IS_REWARD_CELL`` are removed from the
-            place population so the panel shows only place cells that are not reward cells. Set False to display
-            the unfiltered place population.
+            place population so the panel shows only place cells that are not reward cells.
         show_significance_strip: When True, renders one thin per-cell ``-log10(p)`` strip to the left of the
             main heatmap for each active p-value-bearing criterion (Stable / Peak).
         figure_dpi: Figure resolution in dots per inch.
@@ -75,17 +78,20 @@ def plot_place_cell_heatmap(
     Returns:
         The matplotlib Figure containing the heatmap.
     """
-    bin_size_cm = report.summary.bin_size_cm
-    bin_count = report.summary.bin_count
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
+    bin_size_cm = trial_summary.bin_size_cm
+    bin_count = trial_summary.bin_count
 
-    rate_maps = _stack_list_column(table=report.cells, column=TuningColumn.RATE_MAP, target_length=bin_count)
+    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=bin_count)
     cell_population, _ = report.resolve_population_masks(
+        trial_type=trial_type,
         require_place=require_place,
         require_stable=require_stable,
         require_peak_significant=require_peak_significant,
         mutually_exclusive=mutually_exclusive,
     )
-    order = _resolve_place_cell_order(table=report.cells)
+    order = _resolve_place_cell_order(table=cells)
 
     if not sort_by_position:
         # noinspection PyTypeChecker
@@ -104,7 +110,7 @@ def plot_place_cell_heatmap(
     strip_columns = _active_significance_columns(
         require_stable=require_stable,
         require_peak_significant=require_peak_significant,
-        table=report.cells,
+        table=cells,
     )
     strip_count = len(strip_columns) if show_significance_strip else 0
     figure = _make_heatmap_figure(strip_count=strip_count, figure_dpi=figure_dpi)
@@ -147,11 +153,11 @@ def plot_place_cell_heatmap(
             figure=figure,
             strip_axes=strip_axes,
             strip_columns=strip_columns,
-            table=report.cells,
+            table=cells,
             ordered_indices=order,
         )
 
-    track_length_cm = report.summary.track_length_cm
+    track_length_cm = trial_summary.track_length_cm
     # noinspection PyTypeChecker
     x_ticks: NDArray[np.float64] = np.arange(0, track_length_cm + 1, _PLOT_TICK_INTERVAL_CM)
     axes.set_xticks(x_ticks)
@@ -171,78 +177,65 @@ def plot_place_cell_heatmap(
 def plot_reward_com_histogram(
     report: TuningReport,
     *,
+    trial_type: str,
     bin_count: int = 20,
     title: str | None = None,
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Plots the spatially significant COM histogram with the fitted uniform + Gaussian mixture overlay."""
-    summary = report.summary
+    """Plots the spatially significant COM histogram with the fitted uniform + Gaussian mixture overlay for
+    ``trial_type``.
+    """
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
     # noinspection PyTypeChecker
-    is_significant: NDArray[np.bool_] = report.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
     centers_of_mass: NDArray[np.float32] = (
-        report.cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
+        cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
     )
     valid_centers = centers_of_mass[is_significant & (centers_of_mass >= 0.0)]
 
     figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
     # noinspection PyTypeChecker
-    hist_bins: NDArray[np.float64] = np.linspace(0, summary.track_length_cm, bin_count + 1)
+    hist_bins: NDArray[np.float64] = np.linspace(0, trial_summary.track_length_cm, bin_count + 1)
     axes.hist(
         valid_centers, bins=hist_bins.tolist(), color="0.7", edgecolor="0.5", density=True, label="Observed COMs"
     )
 
     # noinspection PyTypeChecker
-    positions: NDArray[np.float64] = np.linspace(0, summary.track_length_cm, 200)
+    positions: NDArray[np.float64] = np.linspace(0, trial_summary.track_length_cm, 200)
     # noinspection PyTypeChecker
-    uniform_density: NDArray[np.float64] = np.full_like(positions, 1.0 / summary.track_length_cm)
-    gaussian_std = max(summary.gaussian_std_cm, 1.0)
-    gaussian_density_reward = np.exp(-0.5 * ((positions - summary.gaussian_mean_cm) / gaussian_std) ** 2) / (
+    uniform_density: NDArray[np.float64] = np.full_like(positions, 1.0 / trial_summary.track_length_cm)
+    gaussian_std = max(trial_summary.gaussian_std_cm, 1.0)
+    gaussian_density_reward = np.exp(-0.5 * ((positions - trial_summary.gaussian_mean_cm) / gaussian_std) ** 2) / (
         gaussian_std * np.sqrt(2.0 * np.pi)
     )
-    track_start_std = max(summary.track_start_std_cm, 1.0)
+    track_start_std = max(trial_summary.track_start_std_cm, 1.0)
     gaussian_density_start = np.exp(-0.5 * ((positions - 0.0) / track_start_std) ** 2) / (
         track_start_std * np.sqrt(2.0 * np.pi)
     )
-    track_end_std = max(summary.track_end_std_cm, 1.0)
-    gaussian_density_end = np.exp(-0.5 * ((positions - summary.track_length_cm) / track_end_std) ** 2) / (
+    track_end_std = max(trial_summary.track_end_std_cm, 1.0)
+    gaussian_density_end = np.exp(-0.5 * ((positions - trial_summary.track_length_cm) / track_end_std) ** 2) / (
         track_end_std * np.sqrt(2.0 * np.pi)
     )
-    uniform_weight = max(1.0 - summary.mixture_weight - summary.track_start_weight - summary.track_end_weight, 0.0)
+    uniform_weight = max(
+        1.0 - trial_summary.mixture_weight - trial_summary.track_start_weight - trial_summary.track_end_weight,
+        0.0,
+    )
 
     uniform_band = uniform_weight * uniform_density
     landmark_band = uniform_band + (
-        summary.track_start_weight * gaussian_density_start + summary.track_end_weight * gaussian_density_end
+        trial_summary.track_start_weight * gaussian_density_start
+        + trial_summary.track_end_weight * gaussian_density_end
     )
-    mixture_density = landmark_band + summary.mixture_weight * gaussian_density_reward
+    mixture_density = landmark_band + trial_summary.mixture_weight * gaussian_density_reward
 
-    axes.fill_between(
-        positions,
-        0,
-        uniform_band,
-        alpha=0.3,
-        color="lightblue",
-        label="Uniform (place cells)",
-    )
-    axes.fill_between(
-        positions,
-        uniform_band,
-        landmark_band,
-        alpha=0.3,
-        color="khaki",
-        label="Track-end Gaussians",
-    )
-    axes.fill_between(
-        positions,
-        landmark_band,
-        mixture_density,
-        alpha=0.4,
-        color="mediumpurple",
-        label="Reward Gaussian",
-    )
+    axes.fill_between(positions, 0, uniform_band, alpha=0.3, color="lightblue", label="Uniform (place cells)")
+    axes.fill_between(positions, uniform_band, landmark_band, alpha=0.3, color="khaki", label="Track-end Gaussians")
+    axes.fill_between(positions, landmark_band, mixture_density, alpha=0.4, color="mediumpurple", label="Reward Gaussian")
     axes.plot(positions, mixture_density, color="black", linewidth=1.5, label="Mixture fit")
     axes.axvline(
-        x=summary.reward_position_cm,
+        x=trial_summary.reward_position_cm,
         color="red",
         linestyle="--",
         linewidth=1.5,
@@ -253,9 +246,10 @@ def plot_reward_com_histogram(
     axes.set_ylabel("Density")
     axes.legend(fontsize=7, loc="upper left")
     annotation_text = (
-        f"Significant: {summary.spatially_significant_count}/{summary.cell_count} cells\n"
-        f"Mixture weight: {summary.mixture_weight:.1%} reward\n"
-        f"Gaussian center: {summary.gaussian_mean_cm:.0f} cm (SD {summary.gaussian_std_cm:.0f} cm)"
+        f"Significant: {trial_summary.spatially_significant_count}/{report.summary.cell_count} cells\n"
+        f"Mixture weight: {trial_summary.mixture_weight:.1%} reward\n"
+        f"Gaussian center: {trial_summary.gaussian_mean_cm:.0f} cm "
+        f"(SD {trial_summary.gaussian_std_cm:.0f} cm)"
     )
     axes.text(
         0.98,
@@ -276,6 +270,7 @@ def plot_reward_com_histogram(
 def plot_rate_map_heatmap(
     report: TuningReport,
     *,
+    trial_type: str,
     title: str | None = None,
     require_place: bool = True,
     require_stable: bool = True,
@@ -283,26 +278,30 @@ def plot_rate_map_heatmap(
     mutually_exclusive: bool = True,
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Plots row-normalized rate maps for reward cells and place cells side by side, sorted by COM."""
-    summary = report.summary
+    """Plots row-normalized rate maps for reward cells and place cells side by side, sorted by COM, restricted
+    to ``trial_type``.
+    """
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
     rate_maps = _stack_list_column(
-        table=report.cells, column=TuningColumn.RATE_MAP, target_length=summary.bin_count
+        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
     )
     # noinspection PyTypeChecker
     centers_of_mass: NDArray[np.float32] = (
-        report.cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
+        cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
     )
 
     place_mask, reward_mask = report.resolve_population_masks(
+        trial_type=trial_type,
         require_place=require_place,
         require_stable=require_stable,
         require_peak_significant=require_peak_significant,
         mutually_exclusive=mutually_exclusive,
     )
 
-    reward_zone_half = summary.reward_configuration.reward_zone_width / 2.0
-    reward_left = summary.reward_position_cm - reward_zone_half
-    reward_right = summary.reward_position_cm + reward_zone_half
+    reward_zone_half = report.summary.reward_configuration.reward_zone_width / 2.0
+    reward_left = trial_summary.reward_position_cm - reward_zone_half
+    reward_right = trial_summary.reward_position_cm + reward_zone_half
 
     figure, (axes_reward, axes_place) = plt.subplots(
         1, 2, figsize=(12, 6), facecolor="white", dpi=figure_dpi, sharey=False
@@ -327,7 +326,7 @@ def plot_rate_map_heatmap(
         row_maxima[row_maxima == 0] = 1.0
         normalized_maps = sorted_maps / row_maxima
 
-        extent = [0, summary.bin_size_cm * sorted_maps.shape[1], normalized_maps.shape[0], 0]
+        extent = [0, trial_summary.bin_size_cm * sorted_maps.shape[1], normalized_maps.shape[0], 0]
         axes.imshow(
             normalized_maps,
             cmap="gray_r",
@@ -341,7 +340,7 @@ def plot_rate_map_heatmap(
         axes.axvline(x=reward_left, color="red", linestyle="--", linewidth=1, alpha=0.7)
         axes.axvline(x=reward_right, color="red", linestyle="--", linewidth=1, alpha=0.7)
         axes.set_xlabel("Track Position (cm)")
-        axes.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
+        axes.set_xticks(np.arange(0, trial_summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
         axes.set_title(f"{panel_title} (n={int(np.sum(mask))})", fontsize=9)
 
     axes_reward.set_ylabel("Neuron (sorted by COM)")
@@ -356,26 +355,28 @@ def plot_rate_map_heatmap(
 def plot_population_activity_by_position(
     report: TuningReport,
     *,
+    trial_type: str,
     title: str | None = None,
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Plots mean population fluorescence vs track position, contrasting reward-predictive against all
-    spatially modulated cells.
+    """Plots mean population fluorescence vs track position for ``trial_type``, contrasting reward-predictive
+    against all spatially modulated cells.
     """
-    summary = report.summary
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
     rate_maps = _stack_list_column(
-        table=report.cells, column=TuningColumn.RATE_MAP, target_length=summary.bin_count
+        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
     )
     # noinspection PyTypeChecker
-    is_significant: NDArray[np.bool_] = report.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
-    is_reward_proximal: NDArray[np.bool_] = report.cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
+    is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = report.cells[
+    is_position_glm_significant: NDArray[np.bool_] = cells[
         TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
     ].to_numpy()
 
-    bin_centers = (np.arange(summary.bin_count) + 0.5) * summary.bin_size_cm
+    bin_centers = (np.arange(trial_summary.bin_count) + 0.5) * trial_summary.bin_size_cm
     all_significant = is_significant
     reward_predictive_mask = all_significant & is_reward_proximal & is_position_glm_significant
 
@@ -403,7 +404,7 @@ def plot_population_activity_by_position(
         )
 
     axes.axvline(
-        x=summary.reward_position_cm,
+        x=trial_summary.reward_position_cm,
         color="red",
         linestyle="-",
         linewidth=2.0,
@@ -413,7 +414,7 @@ def plot_population_activity_by_position(
     axes.set_xlabel("Track Position (cm)")
     axes.set_ylabel("Average Fluorescence (dF/F)")
     axes.legend(fontsize=7, loc="upper left")
-    axes.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
+    axes.set_xticks(np.arange(0, trial_summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
     if title:
         axes.set_title(title, fontsize=9)
     figure.tight_layout()
@@ -423,24 +424,26 @@ def plot_population_activity_by_position(
 def plot_speed_and_activity_by_position(
     report: TuningReport,
     *,
+    trial_type: str,
     session: DatasetSession,
     title: str | None = None,
     figure_dpi: int = 150,
     position_sigma_cm: float = 5.0,
 ) -> plt.Figure:
-    """Plots binned-speed alongside reward-predictive cell activity. Reads ``data.feather`` to bin speed by
-    position; reward-predictive activity comes from the persisted rate maps.
+    """Plots binned-speed alongside reward-predictive cell activity for ``trial_type``. Reads ``data.feather``
+    to bin speed by position; reward-predictive activity comes from the persisted rate maps.
     """
-    summary = report.summary
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
     rate_maps = _stack_list_column(
-        table=report.cells, column=TuningColumn.RATE_MAP, target_length=summary.bin_count
+        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
     )
     # noinspection PyTypeChecker
-    is_significant: NDArray[np.bool_] = report.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
-    is_reward_proximal: NDArray[np.bool_] = report.cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
+    is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = report.cells[
+    is_position_glm_significant: NDArray[np.bool_] = cells[
         TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
     ].to_numpy()
     reward_predictive_mask = is_significant & is_reward_proximal & is_position_glm_significant
@@ -460,15 +463,15 @@ def plot_speed_and_activity_by_position(
 
     binned_speed = _bin_speed_by_position(
         session=session,
-        track_length_cm=summary.track_length_cm,
-        bin_size_cm=summary.bin_size_cm,
-        bin_count=summary.bin_count,
+        track_length_cm=trial_summary.track_length_cm,
+        bin_size_cm=trial_summary.bin_size_cm,
+        bin_count=trial_summary.bin_count,
     )
-    sigma_bins = position_sigma_cm / summary.bin_size_cm
+    sigma_bins = position_sigma_cm / trial_summary.bin_size_cm
     # noinspection PyTypeChecker
     smoothed_speed: NDArray[np.float32] = gaussian_filter1d(input=binned_speed, sigma=sigma_bins, mode="wrap")
 
-    bin_centers = (np.arange(summary.bin_count) + 0.5) * summary.bin_size_cm
+    bin_centers = (np.arange(trial_summary.bin_count) + 0.5) * trial_summary.bin_size_cm
     mean_activity = np.mean(rate_maps[reward_predictive_mask], axis=0)
 
     figure, axes_speed = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
@@ -489,15 +492,15 @@ def plot_speed_and_activity_by_position(
     axes_activity.set_ylabel("Mean Fluorescence (dF/F)", color="darkviolet")
     axes_activity.tick_params(axis="y", labelcolor="darkviolet")
 
-    reward_zone_half = summary.reward_configuration.reward_zone_width / 2.0
+    reward_zone_half = report.summary.reward_configuration.reward_zone_width / 2.0
     axes_speed.axvspan(
-        summary.reward_position_cm - reward_zone_half,
-        summary.reward_position_cm + reward_zone_half,
+        trial_summary.reward_position_cm - reward_zone_half,
+        trial_summary.reward_position_cm + reward_zone_half,
         alpha=0.1,
         color="red",
         label="Reward zone",
     )
-    axes_speed.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
+    axes_speed.set_xticks(np.arange(0, trial_summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
     lines_speed, labels_speed = axes_speed.get_legend_handles_labels()
     lines_activity, labels_activity = axes_activity.get_legend_handles_labels()
     axes_speed.legend(lines_speed + lines_activity, labels_speed + labels_activity, fontsize=7, loc="upper left")
@@ -510,8 +513,8 @@ def plot_speed_and_activity_by_position(
 def plot_per_trial_activity(
     report: TuningReport,
     *,
+    trial_type: str,
     session: DatasetSession,
-    trial_type: str = "ABC",
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
     title: str | None = None,
     require_place: bool = True,
@@ -523,29 +526,31 @@ def plot_per_trial_activity(
     position_sigma_cm: float = 3.0,
     slowing_threshold_cm_s: float = 10.0,
 ) -> plt.Figure:
-    """Plots per-trial activity heatmaps for an example reward-predictive cell and an example place cell, with
-    slowing-onset markers overlaid. Reads ``data.feather`` for the raw fluorescence and per-trial speed time
-    series.
+    """Plots per-trial activity heatmaps for an example reward-predictive cell and an example place cell
+    drawn from ``trial_type``, with slowing-onset markers overlaid. Reads ``data.feather`` for the raw
+    fluorescence and per-trial speed time series.
     """
-    summary = report.summary
+    trial_summary = report.trial_summary(trial_type=trial_type)
+    cells = report.trial_cells(trial_type=trial_type)
     # noinspection PyTypeChecker
-    is_significant: NDArray[np.bool_] = report.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
-    is_reward_proximal: NDArray[np.bool_] = report.cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
+    is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = report.cells[
+    is_position_glm_significant: NDArray[np.bool_] = cells[
         TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
     ].to_numpy()
     # noinspection PyTypeChecker
     cv_partial_r2: NDArray[np.float32] = (
-        report.cells[TuningColumn.CV_POSITION_PARTIAL_R2.value].to_numpy().astype(np.float32, copy=False)
+        cells[TuningColumn.CV_POSITION_PARTIAL_R2.value].to_numpy().astype(np.float32, copy=False)
     )
     # noinspection PyTypeChecker
     centers_of_mass: NDArray[np.float32] = (
-        report.cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
+        cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
     )
 
     place_mask, _ = report.resolve_population_masks(
+        trial_type=trial_type,
         require_place=require_place,
         require_stable=require_stable,
         require_peak_significant=require_peak_significant,
@@ -571,7 +576,7 @@ def plot_per_trial_activity(
         return figure
 
     best_predictive = int(predictive_indices[np.argmax(cv_partial_r2[predictive_indices])])
-    track_midpoint = summary.track_length_cm / 2.0
+    track_midpoint = trial_summary.track_length_cm / 2.0
     place_distances = np.abs(centers_of_mass[place_indices] - track_midpoint)
     best_place = int(place_indices[np.argmin(place_distances)])
 
@@ -586,23 +591,23 @@ def plot_per_trial_activity(
     trial_count = int(unique_trials.size)
     # noinspection PyTypeChecker
     bin_edges: NDArray[np.float32] = np.arange(
-        0, summary.track_length_cm + position_bin_size_cm, position_bin_size_cm, dtype=np.float32
+        0, trial_summary.track_length_cm + position_bin_size_cm, position_bin_size_cm, dtype=np.float32
     )
     bin_count = len(bin_edges) - 1
     sigma_bins = position_sigma_cm / position_bin_size_cm
 
-    reward_zone_half = summary.reward_configuration.reward_zone_width / 2.0
-    reward_left = summary.reward_position_cm - reward_zone_half
-    reward_right = summary.reward_position_cm + reward_zone_half
-    pre_reward_start = summary.reward_position_cm - summary.reward_configuration.pre_reward_window
+    reward_zone_half = report.summary.reward_configuration.reward_zone_width / 2.0
+    reward_left = trial_summary.reward_position_cm - reward_zone_half
+    reward_right = trial_summary.reward_position_cm + reward_zone_half
+    pre_reward_start = trial_summary.reward_position_cm - report.summary.reward_configuration.pre_reward_window
 
     figure, (axes_predictive, axes_place) = plt.subplots(1, 2, figsize=(14, 8), facecolor="white", dpi=figure_dpi)
 
-    cells = [
+    cell_panels = [
         (axes_predictive, best_predictive, "Reward-predictive", "Purples"),
         (axes_place, best_place, "Place cell", "Blues"),
     ]
-    for axes, cell_index, label, colormap in cells:
+    for axes, cell_index, label, colormap in cell_panels:
         # noinspection PyTypeChecker
         activity_image: NDArray[np.float32] = np.zeros((trial_count, bin_count), dtype=np.float32)
         # noinspection PyTypeChecker
@@ -631,7 +636,7 @@ def plot_per_trial_activity(
 
             # noinspection PyTypeChecker
             pre_reward: NDArray[np.bool_] = (trial_positions >= pre_reward_start) & (
-                trial_positions < summary.reward_position_cm
+                trial_positions < trial_summary.reward_position_cm
             )
             # noinspection PyTypeChecker
             below_threshold: NDArray[np.bool_] = pre_reward & (trial_speeds < slowing_threshold_cm_s)
@@ -646,7 +651,7 @@ def plot_per_trial_activity(
         axes.imshow(
             normalized_activity,
             cmap=colormap,
-            extent=[0, summary.track_length_cm, trial_count, 0],
+            extent=[0, trial_summary.track_length_cm, trial_count, 0],
             interpolation="none",
             vmin=0.0,
             vmax=1.0,
@@ -673,7 +678,7 @@ def plot_per_trial_activity(
         axes.axvline(x=reward_right, color="red", linestyle="--", linewidth=1, alpha=0.7)
         axes.legend(fontsize=6, loc="upper left")
         axes.set_xlabel("Track Position (cm)")
-        axes.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
+        axes.set_xticks(np.arange(0, trial_summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
         cell_com = centers_of_mass[cell_index]
         cell_partial_r2 = float(cv_partial_r2[cell_index]) if not np.isnan(cv_partial_r2[cell_index]) else 0.0
         axes.set_title(f"{label} (cell {cell_index}, COM={cell_com:.0f} cm, ΔR²={cell_partial_r2:.2f})", fontsize=9)
@@ -775,7 +780,9 @@ def _active_significance_columns(
     require_peak_significant: bool,
     table: pl.DataFrame,
 ) -> list[tuple[str, TuningColumn]]:
-    """Returns the active p-value-bearing criteria as (display label, p-value column) pairs in canonical order."""
+    """Returns the active p-value-bearing criteria as (display label, p-value column) pairs in canonical
+    order.
+    """
     candidates: list[tuple[bool, str, TuningColumn]] = [
         (require_stable, "Stable", TuningColumn.STABILITY_P_VALUE),
         (require_peak_significant, "Peak", TuningColumn.PEAK_P_VALUE),

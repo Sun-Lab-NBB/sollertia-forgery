@@ -1,22 +1,6 @@
 """Provides functionality for detecting Synchronous Calcium Events (SCEs) in neural recordings.
 
-References:
-    - Malvache, Reichinnek, Villette, Haimerl & Cossart (2016). Awake hippocampal reactivations project onto
-      orthogonal neuronal assemblies. Science. https://doi.org/10.1126/science.aaf3319 -- the canonical SCE
-      detection pipeline (~250 ms co-activation window, >=5 cells, shuffle-derived peak-coactive threshold) that
-      this module mirrors. The percentile-based threshold default tracks the original report rather than the
-      ``mean + k*sigma`` parametric variant.
-    - Villette, Malvache, Tressard, Dupuy & Cossart (2015). Internally Recurring Hippocampal Sequences as a
-      Population Template of Spatiotemporal Information. Neuron. https://doi.org/10.1016/j.neuron.2015.09.052
-      -- per-cell onset-rank-within-SCE motivation; consumed downstream by the rank-correlation analysis in
-      :mod:`sollertia_forgery.analysis.tuning.cell_analysis`.
-    - Modol, Sousa, Malvache, Tressard et al. (2020). Hippocampal hub neurons maintain distinct connectivity
-      throughout their lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6 -- per-cell
-      SCE-recruitment significance test ("super-rich" cells) implemented here as the per-cell participation
-      jitter null at fixed SCE event times.
-    - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of cells
-      identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835 -- percentile-against-shuffle
-      idiom adopted across the analysis package, reused here for the SCE peak-coactive threshold.
+Methodological references for the SCE pipeline live on :func:`..sce_report.compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -63,7 +47,7 @@ class SCEDetectionConfiguration:
     derivative_amplitude_floor: float = 2.0
     """Per-cell amplitude floor for accepted onsets, expressed in MAD units of the smoothed dF/F0 baseline.
     Decouples a true rising transient from any noise excursion that happens to have positive slope. Set to 0.0
-    to disable the amplitude gate and recover the legacy derivative-only behavior (Malvache 2016)."""
+    to disable the amplitude gate and recover the legacy derivative-only behavior."""
     minimum_inter_event_seconds: float = 0.5
     """Minimum interval in seconds between consecutive calcium transients for the same cell. Default is matched
     to GCaMP6f decay (~0.3-0.5 s); raise for slower indicators such as GCaMP6s."""
@@ -75,7 +59,7 @@ class SCEDetectionConfiguration:
     """Percentile of the shuffled peak-coactive distribution used as the SCE-detection threshold. The
     distribution of the population peak under independent circular shifts is bounded, integer-valued, and
     right-skewed; a percentile cutoff is calibrated and distribution-agnostic, unlike the legacy
-    ``mean + k*sigma`` rule (Malvache 2016; Climer & Dombeck 2021)."""
+    ``mean + k*sigma`` rule."""
     minimum_shift_seconds: float = 1.0
     """Lower bound in seconds on the absolute circular shift drawn per cell per shuffle. Prevents trivial
     near-identity shifts from contaminating the null. Should exceed the dominant calcium-trace autocorrelation
@@ -87,9 +71,9 @@ class SCEDetectionConfiguration:
     than ``shuffle_count`` because the per-cell test is run cell-by-cell at fixed observed SCE times rather
     than at the population level."""
     participation_significance_percentile: float = 95.0
-    """Percentile of the per-cell participation jitter null at which a cell is flagged as an SCE-recruited cell
-    ("super-rich" sense of Modol et al. 2020). A cell whose observed participation rate exceeds this percentile
-    of its own jitter null is recorded in the per-period ``is_sce_cell`` mask."""
+    """Percentile of the per-cell participation jitter null at which a cell is flagged as an SCE-recruited
+    cell. A cell whose observed participation rate exceeds this percentile of its own jitter null is recorded
+    in the per-period ``is_sce_cell`` mask."""
     torque_stability_window_seconds: float = 5.0
     """Window length in seconds for computing the rolling standard deviation of torque during rest-state
     periods. Torque is the canonical stationarity indicator when the animal is in a designated rest state on
@@ -99,9 +83,8 @@ class SCEDetectionConfiguration:
     considered stationary."""
     encoder_stability_window_seconds: float = 2.0
     """Window length in seconds for computing the rolling standard deviation of wheel speed during non-rest
-    states. Set to 2 seconds to match the canonical quiet-wakefulness floor used in awake-replay / immobility
-    studies (Foster & Wilson 2006; Diba & Buzsaki 2007; Davidson, Kloosterman & Wilson 2009): >=2 s of
-    sustained immobility distinguishes genuine pauses from deceleration phases of ongoing locomotion."""
+    states. Set to 2 seconds to match the canonical quiet-wakefulness floor: >=2 s of sustained immobility
+    distinguishes genuine pauses from deceleration phases of ongoing locomotion."""
     encoder_stability_threshold: float = 0.1
     """Maximum allowable rolling standard deviation of wheel speed (in cm/s) for a non-rest sample to be
     considered stationary. Strict ~0 cm/s cutoff -- the animal must be completely still on the wheel for the
@@ -487,7 +470,7 @@ def _compute_shuffled_threshold(
 ) -> float:
     """Computes the SCE significance threshold by circularly shifting each cell's onset trace by a random
     amount per shuffle iteration and reporting the configured percentile of the shuffled peak-coactive
-    distribution (Malvache 2016 / Climer & Dombeck 2021 idiom).
+    distribution.
 
     Args:
         onsets: Binary onset matrix with dimensions (cell_count, sample_count).
@@ -593,9 +576,9 @@ def _compute_per_cell_participation_significance(
     Notes:
         Each cell's onsets are circularly shifted independently while the observed SCE event windows are held
         fixed; the cell's shuffled participation count is the number of SCE windows containing at least one
-        shifted onset. The p-value is the fraction of shuffles whose count is >= the observed count
-        (Modol et al. 2020 super-rich cell logic). Cells with zero observed participation always receive
-        ``p == 1.0``. With zero SCEs in the period, the routine returns NaN p-values and an all-False mask.
+        shifted onset. The p-value is the fraction of shuffles whose count is >= the observed count. Cells
+        with zero observed participation always receive ``p == 1.0``. With zero SCEs in the period, the
+        routine returns NaN p-values and an all-False mask.
 
     Args:
         onsets: Binary onset matrix with dimensions (cell_count, sample_count).
@@ -818,10 +801,9 @@ def _identify_stable_rest_samples(
 
 
 _REST_STATE: str = "rest"
-"""``DatasetColumn.SYSTEM_STATE`` value that uses the torque-based stationarity filter. Every other state value
-falls through to the speed/encoder-based filter. Both filters are stationarity gates: SCEs are restricted to
-moments when the animal is motionless, regardless of which protocol epoch the moment is in (Malvache 2016
-canonical rest replay + Buzsaki two-stage immobility framing)."""
+"""``DatasetColumn.SYSTEM_STATE`` value that uses the torque-based stationarity filter. Every other state
+value falls through to the speed/encoder-based filter. Both filters are stationarity gates: SCEs are
+restricted to moments when the animal is motionless, regardless of which protocol epoch the moment is in."""
 
 
 def _identify_stable_run_samples(
@@ -859,19 +841,12 @@ class SCEDetector:
     """Detects Synchronous Calcium Events (SCEs) during stationary samples across every protocol epoch.
 
     Walks every contiguous ``DatasetColumn.SYSTEM_STATE`` block, applies a state-appropriate stationarity gate
-    (torque-stability for ``"rest"``-state samples, encoder/speed-stability for every other state), and runs the
-    SCE detection pipeline on each surviving stationary chunk. SCEs are by definition a quiet-wakefulness
-    phenomenon (Malvache 2016 lineage; Buzsaki two-stage model) so the gate is animal stationarity, not which
-    protocol epoch the sample sits in. Pauses-within-run survive and contribute their own SCE periods, tagged
-    with the originating ``period_state`` so post-hoc analyses can split events by epoch.
-
-    References:
-        - Malvache, Reichinnek, Villette, Haimerl & Cossart (2016). Awake hippocampal reactivations project
-          onto orthogonal neuronal assemblies. Science. https://doi.org/10.1126/science.aaf3319 -- canonical
-          rest-state SCE detection pipeline (~250 ms window, >=5 cells, percentile-against-shuffle threshold).
-        - Modol et al. (2020). Hippocampal hub neurons maintain distinct connectivity throughout their
-          lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6 -- per-cell SCE-recruitment
-          significance test against a per-cell jitter null.
+    (torque-stability for ``"rest"``-state samples, encoder/speed-stability for every other state), and runs
+    the SCE detection pipeline on each surviving stationary chunk. SCEs are a quiet-wakefulness phenomenon so
+    the gate is animal stationarity, not which protocol epoch the sample sits in. Pauses-within-run survive
+    and contribute their own SCE periods, tagged with the originating ``period_state`` so post-hoc analyses
+    can split events by epoch. Methodological references live on
+    :func:`..sce_report.compute_sce_report`.
 
     Args:
         session_path: Path to the session's dataset directory containing the data feather.

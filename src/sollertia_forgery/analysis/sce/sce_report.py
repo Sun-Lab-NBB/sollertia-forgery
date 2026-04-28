@@ -3,6 +3,7 @@
 Wraps the :class:`SCEDetector` output as a triplet of persisted artifacts: a per-cell participation feather, a
 per-period SCE-state feather, and a summary YAML. The report owns persistence (``save`` / ``load``) and the
 human-readable summary; per-session and cross-session plots live in :mod:`.plotting` and consume the report.
+Methodological references for the assembly pipeline are attached to :func:`compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -130,62 +131,6 @@ class SCEReport:
     """YAML wrapper holding the configuration and session-level scalars."""
 
     @classmethod
-    def evaluate(
-        cls,
-        session_path: Path,
-        *,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
-        configuration: SCEDetectionConfiguration | None = None,
-    ) -> SCEReport:
-        """Runs the SCE detection pipeline and assembles an in-memory report.
-
-        Args:
-            session_path: Path to the session's dataset directory.
-            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
-                analysis input.
-            configuration: SCE detection parameters. Uses defaults if None.
-
-        Returns:
-            An in-memory SCEReport ready to be saved or plotted.
-        """
-        resolved_configuration = configuration if configuration is not None else SCEDetectionConfiguration()
-
-        console.echo(message="Running SCE detection...", level=LogLevel.INFO)
-        sce_detector = SCEDetector(
-            session_path=session_path,
-            fluorescence_column=fluorescence_column,
-            configuration=resolved_configuration,
-        )
-        sce_detector.detect_events()
-        sce_results: list[SCEResult] = sce_detector.results
-        cell_count = int(sce_detector.cell_count)
-        sampling_rate_hz = float(sce_detector.sampling_rate_hz)
-        period_count = len(sce_results)
-        total_sces = int(sum(int(np.max(result.sce_labels)) for result in sce_results))
-        console.echo(
-            message=f"SCE detection complete: {period_count} stationary periods ({total_sces} SCEs).",
-            level=LogLevel.SUCCESS,
-        )
-
-        cells = _build_sce_cells_table(cell_count=cell_count, sce_results=sce_results)
-        periods = _build_sce_periods_table(
-            sampling_rate_hz=sampling_rate_hz, results=sce_results, cell_count=cell_count
-        )
-
-        # noinspection PyTypeChecker
-        sce_cell_flag: NDArray[np.bool_] = cells[SCECellColumn.IS_SCE_CELL.value].to_numpy()
-
-        summary = SCESummary(
-            sce_configuration=resolved_configuration,
-            sampling_rate_hz=sampling_rate_hz,
-            cell_count=cell_count,
-            period_count=period_count,
-            total_sces=total_sces,
-            sce_cell_count=int(np.sum(sce_cell_flag)),
-        )
-        return cls(cells=cells, periods=periods, summary=summary)
-
-    @classmethod
     def load(cls, session: DatasetSession) -> SCEReport:
         """Loads a previously saved report from the session directory.
 
@@ -239,6 +184,11 @@ def evaluate_and_save_sce_report(
 ) -> SCEReport:
     """Evaluates the SCE pipeline for a single session and persists the report to disk.
 
+    Notes:
+        Sole orchestrator for assembling :class:`SCEReport` artifacts. Per-session compute and methodological
+        references live on :func:`compute_sce_report`; this function calls it once and persists the returned
+        report through :meth:`SCEReport.save`.
+
     Args:
         session: The DatasetSession to analyze.
         fluorescence_column: Fluorescence column to use as the analysis input.
@@ -247,13 +197,105 @@ def evaluate_and_save_sce_report(
     Returns:
         The SCEReport produced for the session, with all three artifacts persisted under the session directory.
     """
-    report = SCEReport.evaluate(
+    report = compute_sce_report(
         session_path=session.session_path,
         fluorescence_column=fluorescence_column,
         configuration=configuration,
     )
     report.save(session=session)
     return report
+
+
+def compute_sce_report(
+    session_path: Path,
+    *,
+    fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+    configuration: SCEDetectionConfiguration | None = None,
+) -> SCEReport:
+    """Computes the per-session SCE report by running the SCE detection pipeline on the session.
+
+    Notes:
+        Per-session algorithmic entry-point for the SCE pipeline; consolidates every methodology that gates a
+        column in the persisted feathers. Walks every contiguous protocol-state block in the session via
+        :class:`SCEDetector`, applies the state-appropriate stationarity gate (torque-stability for ``"rest"``
+        and encoder-stability elsewhere), runs SCE detection on each surviving stationary chunk, and aggregates
+        per-cell participation, per-cell recruitment significance, and per-period SCE descriptors into the
+        persisted artifacts.
+
+        SCE detection inside :class:`SCEDetector` mirrors the Malvache et al. (2016) pipeline (~250 ms
+        co-activation window, >=5 cells, percentile-against-shuffle threshold). The per-cell jitter-null
+        p-values produced by :class:`SCEDetector` are combined across stationary periods via Fisher's method
+        (Fisher 1925) into the per-cell ``SCE_PARTICIPATION_P_VALUE`` column, following the Modol et al. (2020)
+        SCE-recruitment significance ("super-rich" cells) framework. The percentile-against-shuffle idiom for
+        the peak-coactive threshold follows Climer & Dombeck (2021) and matches the convention used elsewhere
+        in the analysis package. Per-cell onset-rank-within-SCE descriptors persisted in the per-period feather
+        derive from the Villette et al. (2015) recurring-sequences framework. All numba kernels and helpers in
+        :mod:`.sce_protocol` inherit these references through this accessor.
+
+    References:
+        Canonical SCE detection pipeline (~250 ms co-activation window, >=5 cells, percentile-against-shuffle
+        threshold) that the per-period detector mirrors:
+            Malvache, Reichinnek, Villette, Haimerl & Cossart (2016). Awake hippocampal reactivations project
+            onto orthogonal neuronal assemblies. Science. https://doi.org/10.1126/science.aaf3319
+        Per-cell SCE-recruitment significance test ("super-rich" cells); per-period p-values combined via
+        Fisher's method into the cross-period combined p-value:
+            Modol, Sousa, Malvache, Tressard et al. (2020). Hippocampal hub neurons maintain distinct
+            connectivity throughout their lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6
+            Fisher (1925). Statistical Methods for Research Workers. Edinburgh: Oliver and Boyd.
+        Per-cell onset-rank-within-SCE motivation; consumed downstream by reactivation analyses:
+            Villette, Malvache, Tressard, Dupuy & Cossart (2015). Internally Recurring Hippocampal Sequences as
+            a Population Template of Spatiotemporal Information. Neuron.
+            https://doi.org/10.1016/j.neuron.2015.09.052
+        Percentile-against-shuffle idiom adopted across the analysis package, reused here for the SCE
+        peak-coactive threshold:
+            Climer & Dombeck (2021). Choice of method of place cell classification determines the population
+            of cells identified. PLoS Comput Biol. https://doi.org/10.1371/journal.pcbi.1008835
+
+    Args:
+        session_path: Path to the session's dataset directory.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
+            analysis input.
+        configuration: SCE detection parameters. Uses defaults if None.
+
+    Returns:
+        An in-memory SCEReport ready to be saved or plotted.
+    """
+    resolved_configuration = configuration if configuration is not None else SCEDetectionConfiguration()
+
+    console.echo(message="Running SCE detection...", level=LogLevel.INFO)
+    sce_detector = SCEDetector(
+        session_path=session_path,
+        fluorescence_column=fluorescence_column,
+        configuration=resolved_configuration,
+    )
+    sce_detector.detect_events()
+    sce_results: list[SCEResult] = sce_detector.results
+    cell_count = int(sce_detector.cell_count)
+    sampling_rate_hz = float(sce_detector.sampling_rate_hz)
+    period_count = len(sce_results)
+    total_sces = int(sum(int(np.max(result.sce_labels)) for result in sce_results))
+    console.echo(
+        message=f"SCE detection complete: {period_count} stationary periods ({total_sces} SCEs).",
+        level=LogLevel.SUCCESS,
+    )
+
+    cells = _build_sce_cells_table(cell_count=cell_count, sce_results=sce_results)
+    periods = _build_sce_periods_table(
+        sampling_rate_hz=sampling_rate_hz, results=sce_results, cell_count=cell_count
+    )
+
+    # noinspection PyTypeChecker
+    sce_cell_flag: NDArray[np.bool_] = cells[SCECellColumn.IS_SCE_CELL.value].to_numpy()
+
+    summary = SCESummary(
+        sce_configuration=resolved_configuration,
+        sampling_rate_hz=sampling_rate_hz,
+        cell_count=cell_count,
+        period_count=period_count,
+        total_sces=total_sces,
+        sce_cell_count=int(np.sum(sce_cell_flag)),
+    )
+    return SCEReport(cells=cells, periods=periods, summary=summary)
 
 
 # ===== Private helpers ==========================================================================================
@@ -307,10 +349,10 @@ def _combine_pvalues_fisher(values: list[float]) -> float:
 def _aggregate_sce_cell_columns(cell_count: int, sce_results: list[SCEResult]) -> dict:
     """Computes per-cell SCE participation and recruitment-significance metrics across every stationary period.
 
-    References:
-        - Modol et al. (2020). Hippocampal hub neurons. Nat Commun.
-          https://doi.org/10.1038/s41467-020-18432-6 -- per-cell SCE recruitment significance ("super-rich"
-          cells); per-period p-values combined here via Fisher's method (Fisher 1925).
+    Notes:
+        Per-period jitter-null p-values produced by :class:`SCEDetector` are combined via Fisher's method into
+        the per-cell ``SCE_PARTICIPATION_P_VALUE`` column. Methodological references live on the orchestrator
+        :func:`evaluate_and_save_sce_report`.
     """
     # noinspection PyTypeChecker
     participation: NDArray[np.int32] = np.zeros(cell_count, dtype=np.int32)

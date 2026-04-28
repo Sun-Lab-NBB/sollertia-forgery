@@ -251,11 +251,6 @@ def compute_shuffle_source_indices(
         ``chunk_count > 1``) as an indirection array rather than materializing a full shuffled fluorescence
         matrix. Hoisted from the reward-cell pipeline so both protocols share the same shuffle implementation.
 
-    References:
-        - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
-          environments. Nature. https://doi.org/10.1038/s41586-025-09245-y -- circular-shift null with a 15 s
-          minimum shift; the standard time-domain shuffle in 2-photon hippocampal place-cell analysis.
-
     Args:
         filtered_sample_indices: Destination-sample indices retained by the speed filter with length
             filtered_sample_count.
@@ -650,3 +645,67 @@ def _accumulate_binned_fluorescence(
                     output[cell_index, bin_index] = bin_sums[bin_index] / count
                 else:
                     output[cell_index, bin_index] = bin_sums[bin_index]
+
+
+def random_remapping_peak_shift_p_values(
+    peaks_a: NDArray[np.float32],
+    peaks_b: NDArray[np.float32],
+    *,
+    shuffle_count: int = 1000,
+    seed: int = 0,
+) -> NDArray[np.float32]:
+    """Per-cell p-values from a random-remapping cell-ID shuffle of paired peak positions.
+
+    Notes:
+        Reusable building block for cross-frame peak-shift analyses (cross-trial-type reward-relative,
+        cross-session reward-shift, or any other paired-peak comparison). For each shuffle iteration the
+        ``peaks_b`` vector is permuted across cells; the per-cell p-value is the fraction of shuffles whose
+        shuffled ``|peaks_a - peaks_b|`` is at or below the observed ``|peaks_a - peaks_b|``. Cells whose
+        observed paired shift is unusually small relative to random pairings receive small p-values. NaN
+        entries in either input propagate to NaN p-values.
+
+        Both inputs must already be in the desired coordinate system (e.g. track-aligned cm or signed-circular
+        reward-aligned cm). Compute peak positions with :func:`numpy.argmax` on per-cell rate maps and convert
+        to centimeters at the bin center; for reward-aligned coordinates apply a signed circular wrap to the
+        per-cell reward midpoint before passing in.
+
+    Args:
+        peaks_a: First-frame per-cell peak positions, length ``cell_count``. Same units as ``peaks_b``.
+        peaks_b: Second-frame per-cell peak positions, length ``cell_count``.
+        shuffle_count: Number of cell-ID permutations.
+        seed: Base RNG seed; iteration ``i`` uses ``seed + i``. Fixed-seed iteration order makes the result
+            reproducible across runs.
+
+    Returns:
+        Per-cell p-values with length ``cell_count``. Cells whose observed shift is NaN (either input is NaN)
+        receive NaN p-values; all other cells receive a value in ``[0, 1]``.
+    """
+    cell_count = peaks_a.shape[0]
+    # noinspection PyTypeChecker
+    p_values: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
+    if cell_count == 0 or shuffle_count <= 0:
+        return p_values
+
+    # noinspection PyTypeChecker
+    valid_mask: NDArray[np.bool_] = ~np.isnan(peaks_a) & ~np.isnan(peaks_b)
+    if not bool(np.any(valid_mask)):
+        return p_values
+
+    valid_a = peaks_a[valid_mask]
+    valid_b = peaks_b[valid_mask]
+    valid_count = int(valid_a.shape[0])
+    observed = np.abs(valid_a - valid_b)
+    # noinspection PyTypeChecker
+    le_count: NDArray[np.int64] = np.zeros(valid_count, dtype=np.int64)
+
+    for iteration in range(shuffle_count):
+        generator = np.random.default_rng(seed=seed + iteration)
+        permutation = generator.permutation(valid_count)
+        # noinspection PyTypeChecker
+        shuffled: NDArray[np.float32] = np.abs(valid_a - valid_b[permutation])
+        le_count += (shuffled <= observed).astype(np.int64)
+
+    # noinspection PyTypeChecker
+    valid_p: NDArray[np.float32] = (le_count.astype(np.float32) / float(shuffle_count)).astype(np.float32)
+    p_values[valid_mask] = valid_p
+    return p_values

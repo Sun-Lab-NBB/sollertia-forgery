@@ -71,12 +71,7 @@ class BleachingConfiguration:
 
 @dataclass(frozen=True, slots=True)
 class BleachingSessionResult:
-    """Per-session computed values consumed by the cross-session bleaching report.
-
-    The public per-session output of :func:`compute_session_metrics`. Cross-session aggregation in
-    :mod:`.bleaching_analysis` collects one of these per session in chronological order and reduces them to the
-    bleaching feather columns (population median trends, paired Wilcoxon p-values, combined flag mask).
-    """
+    """Stores the per-session analysis values consumed by the cross-session bleaching report constructor."""
 
     sampling_rate_hz: float
     """Effective fluorescence sampling rate in Hz, derived from the median inter-sample period."""
