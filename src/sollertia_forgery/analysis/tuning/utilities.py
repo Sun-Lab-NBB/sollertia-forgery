@@ -2,7 +2,7 @@
 
 These helpers are package-private to the tuning analysis. The place- and reward-cell detectors share them so
 both pipelines operate on bit-identical speed-filtered samples and rate-map binning. Helpers that any analysis
-package may need (e.g. acquisition-warmup trimming) live in :mod:`..shared_utilities`.
+package may need (e.g. acquisition-warmup trimming) live in `..shared_utilities`.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ import polars as pl
 from ataraxis_time import TimeUnits, interval_to_rate
 
 from ...forging import FluorescenceColumn
-from ..shared_utilities import trim_acquisition_warmup
 from ...shared_assets import (
     DatasetFiles,
     DatasetColumn,
     TrialGeometry,
     TrialGeometryEntry,
 )
+from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,7 +34,7 @@ MINIMUM_VALID_BINS_FOR_PEARSON: int = 3
 """Minimum number of pairwise-non-NaN bins required for a numerically stable per-cell Pearson r."""
 _NO_TRIAL_SENTINEL: int = 255
 """Sentinel trial id the acquisition pipeline writes for samples outside any trial. Used by
-:func:`bin_fluorescence_per_trial` to drop the sentinel slot before the per-trial binning fans out."""
+`bin_fluorescence_per_trial` to drop the sentinel slot before the per-trial binning fans out."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +101,7 @@ def assemble_run_session_data(
             DatasetColumn.TRIAL.value,
         ],
     )
-    df = trim_acquisition_warmup(df=df)
+    df = trim_acquisition_warmup(dataframe=df)
 
     # Resolves the sampling rate from the post-warmup time column before any run-state filtering, so the rate
     # reflects the canonical acquisition cadence rather than the cadence of the (possibly gappy) run-only subset.
@@ -337,7 +337,10 @@ def accumulate_shuffled_rate_maps(
 
 
 @njit(cache=True)
-def per_cell_pearson_safe(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
+def per_cell_pearson_safe(
+    first_matrix: NDArray[np.float32],
+    second_matrix: NDArray[np.float32],
+) -> NDArray[np.float32]:
     """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
 
     Notes:
@@ -346,47 +349,47 @@ def per_cell_pearson_safe(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDA
         pipeline so the place- and reward-cell detectors compute split-half stability against the same kernel.
 
     Args:
-        a: First matrix with dimensions (cell_count, bin_count).
-        b: Second matrix with dimensions (cell_count, bin_count).
+        first_matrix: First matrix with dimensions (cell_count, bin_count).
+        second_matrix: Second matrix with dimensions (cell_count, bin_count).
 
     Returns:
         Per-cell Pearson r with length cell_count.
     """
-    cell_count = a.shape[0]
-    bin_count = a.shape[1]
-    out = np.full(cell_count, np.nan, dtype=np.float32)
+    cell_count = first_matrix.shape[0]
+    bin_count = first_matrix.shape[1]
+    output = np.full(cell_count, np.nan, dtype=np.float32)
     for cell_index in range(cell_count):
         valid_count = 0
-        sum_a = 0.0
-        sum_b = 0.0
+        first_sum = 0.0
+        second_sum = 0.0
         for bin_index in range(bin_count):
-            value_a = a[cell_index, bin_index]
-            value_b = b[cell_index, bin_index]
-            if not np.isnan(value_a) and not np.isnan(value_b):
+            first_value = first_matrix[cell_index, bin_index]
+            second_value = second_matrix[cell_index, bin_index]
+            if not np.isnan(first_value) and not np.isnan(second_value):
                 valid_count += 1
-                sum_a += value_a
-                sum_b += value_b
+                first_sum += first_value
+                second_sum += second_value
         if valid_count < MINIMUM_VALID_BINS_FOR_PEARSON:
             continue
-        mean_a = sum_a / valid_count
-        mean_b = sum_b / valid_count
+        first_mean = first_sum / valid_count
+        second_mean = second_sum / valid_count
 
-        var_a = 0.0
-        var_b = 0.0
-        cov = 0.0
+        first_variance = 0.0
+        second_variance = 0.0
+        covariance = 0.0
         for bin_index in range(bin_count):
-            value_a = a[cell_index, bin_index]
-            value_b = b[cell_index, bin_index]
-            if not np.isnan(value_a) and not np.isnan(value_b):
-                diff_a = value_a - mean_a
-                diff_b = value_b - mean_b
-                var_a += diff_a * diff_a
-                var_b += diff_b * diff_b
-                cov += diff_a * diff_b
-        if var_a <= 0.0 or var_b <= 0.0:
+            first_value = first_matrix[cell_index, bin_index]
+            second_value = second_matrix[cell_index, bin_index]
+            if not np.isnan(first_value) and not np.isnan(second_value):
+                first_diff = first_value - first_mean
+                second_diff = second_value - second_mean
+                first_variance += first_diff * first_diff
+                second_variance += second_diff * second_diff
+                covariance += first_diff * second_diff
+        if first_variance <= 0.0 or second_variance <= 0.0:
             continue
-        out[cell_index] = np.float32(cov / np.sqrt(var_a * var_b))
-    return out
+        output[cell_index] = np.float32(covariance / np.sqrt(first_variance * second_variance))
+    return output
 
 
 def bin_fluorescence_per_trial(
@@ -410,7 +413,7 @@ def bin_fluorescence_per_trial(
         guards.
 
         The hot loop is hoisted into ``_bin_fluorescence_per_trial_kernel`` (``@njit(parallel=True)``) which
-        fans out across ``(cell × trial)`` pairs. The previous version walked trials sequentially in Python,
+        fans out across ``(cell, trial)`` pairs. The previous version walked trials sequentially in Python,
         calling a ``bin_fluorescence_by_position`` + ``uniform_filter1d`` pair per trial; the kernel replaces
         both with a single fused pass that accumulates per-bin sums, computes per-bin means, and applies
         wrap-around uniform smoothing in place.
@@ -665,7 +668,7 @@ def random_remapping_peak_shift_p_values(
         entries in either input propagate to NaN p-values.
 
         Both inputs must already be in the desired coordinate system (e.g. track-aligned cm or signed-circular
-        reward-aligned cm). Compute peak positions with :func:`numpy.argmax` on per-cell rate maps and convert
+        reward-aligned cm). Compute peak positions with `numpy.argmax` on per-cell rate maps and convert
         to centimeters at the bin center; for reward-aligned coordinates apply a signed circular wrap to the
         per-cell reward midpoint before passing in.
 

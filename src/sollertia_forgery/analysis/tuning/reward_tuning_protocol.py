@@ -29,6 +29,8 @@ _MINIMUM_PRE_REWARD_BIN_COUNT: int = 2
 """Minimum number of pre-reward spatial bins required to construct a usable GLM design matrix."""
 _MINIMUM_TRIALS_FOR_SPLIT_HALF: int = 2
 """Minimum number of trials required to compute an even/odd-lap split-half Pearson r."""
+_MINIMUM_SAMPLES_FOR_GRADIENT: int = 2
+"""Minimum number of samples per trial required to compute a per-trial speed gradient."""
 
 
 @dataclass(slots=True)
@@ -72,7 +74,7 @@ class RewardCellConfiguration:
     fdr_q: float = 0.05
     """Benjamini-Hochberg FDR target rate applied to the population of shuffle p-values before the
     significance gate. Controls the expected false-discovery proportion across cells; raw per-cell
-    p < 0.01 without FDR yields ~1% × N false positives, which materially distorts the mixture-model fit on
+    p < 0.01 without FDR yields ~1% * N false positives, which materially distorts the mixture-model fit on
     small reward populations. Set to 1.0 to disable FDR (recovers per-cell uncorrected behavior)."""
     reward_zone_width: float = 30.0
     """Width of the reward zone in centimeters for defining the zone band. Centered on the geometry midpoint
@@ -388,7 +390,7 @@ class _CvFoldBlock:
     Notes:
         Stores the held-out test mask, the design submatrices, and the Moore-Penrose pseudoinverses of the training
         full and reduced models. Each permutation re-uses these blocks and only pays for ``pinv @ Y_train`` and
-        ``X_test @ beta`` matrix products, which are O(n_features × n_samples × n_cells).
+        ``X_test @ beta`` matrix products, which are O(feature_count * sample_count * cell_count).
     """
 
     test_mask: NDArray[np.bool_]
@@ -543,7 +545,7 @@ def _compute_even_odd_split_half_r(
             # noinspection PyTypeChecker
             odd_map: NDArray[np.float32] = np.nanmean(per_trial_rate_map[:, 1::2, :], axis=1).astype(np.float32)
 
-    return per_cell_pearson_safe(a=even_map, b=odd_map)
+    return per_cell_pearson_safe(first_matrix=even_map, second_matrix=odd_map)
 
 
 def _apply_uniform_smoothing_wrapped(
@@ -679,14 +681,14 @@ class RewardCellDetector:
         """Constructs the detector from already-loaded session data.
 
         Notes:
-            Takes the canonical data dependency (a :class:`RunSessionData` from
-            :func:`assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
+            Takes the canonical data dependency (a `RunSessionData` from
+            `assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
             detectors without re-reading the feather. The reward position is taken as the midpoint of the
             stimulus trigger zone defined in the session's trial geometry data file, since water is delivered
             wherever in the lick-active zone the animal happens to lick rather than at a single point.
 
         Args:
-            run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
+            run_session: Pre-loaded session data from `assemble_run_session_data`.
             configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults
                 if None.
         """
@@ -708,7 +710,7 @@ class RewardCellDetector:
             0, self.track_length + self.configuration.bin_size, self.configuration.bin_size, dtype=np.float32
         )
 
-    def detect(self) -> RewardCellResults:
+    def detect(self, *, display_progress: bool = True) -> RewardCellResults:
         """Runs the full reward cell detection pipeline.
 
         Notes:
@@ -719,11 +721,16 @@ class RewardCellDetector:
             Gaussian GLM partial-variance test (position vs. speed + acceleration, 5-fold CV with trial-label
             permutation null) for cells in the approach or zone bands.
 
+        Args:
+            display_progress: When True, render the inner shuffle and GLM-permutation tqdm bars. Set to False
+                by `..tuning_report.run_tuning_analysis` when its session-level progress bar is the active
+                visual signal so the bars stay quiet.
+
         Returns:
             A RewardCellResults instance containing spatial modulation results, three-band classification, the
             four-component mixture parameters, and the position-GLM partial-variance test results.
         """
-        spatial_results = self._compute_spatial_modulation()
+        spatial_results = self._compute_spatial_modulation(display_progress=display_progress)
 
         # Fits the extended (uniform + reward + track-start + track-end) mixture to the significant neurons' COMs.
         (
@@ -749,6 +756,7 @@ class RewardCellDetector:
         candidate_mask = spatial_results.is_significant & (is_approach | is_zone)
         cv_partial_r2, glm_p_values, is_glm_significant = self._compute_partial_variance(
             candidate_mask=candidate_mask,
+            display_progress=display_progress,
         )
 
         return RewardCellResults(
@@ -768,7 +776,7 @@ class RewardCellDetector:
             is_position_glm_significant=is_glm_significant,
         )
 
-    def _compute_spatial_modulation(self) -> SpatiallyModulatedNeurons:
+    def _compute_spatial_modulation(self, *, display_progress: bool = True) -> SpatiallyModulatedNeurons:
         """Computes spatial rate maps, spatial information, and shuffle-based significance for all neurons.
 
         Notes:
@@ -820,6 +828,7 @@ class RewardCellDetector:
             occupancy=sample_counts,
             smooth_size=configuration.smooth_size,
             observed_information=observed_information,
+            display_progress=display_progress,
         )
 
         # Computes per-trial binning + even/odd-lap split-half Pearson r as the lap-reliability statistic that gates
@@ -840,7 +849,7 @@ class RewardCellDetector:
         )
 
         # Applies Benjamini-Hochberg FDR correction on the population shuffle p-values before gating; with thousands
-        # of cells per session, raw p < threshold yields ~threshold × N false positives, which materially distorts
+        # of cells per session, raw p < threshold yields ~threshold * N false positives, which materially distorts
         # the mixture-model fit on small reward populations.
         # noinspection PyTypeChecker
         fdr_survived: NDArray[np.bool_] = _benjamini_hochberg_fdr(p_values=p_values, q=configuration.fdr_q)
@@ -895,6 +904,8 @@ class RewardCellDetector:
         occupancy: NDArray[np.int32],
         smooth_size: int,
         observed_information: NDArray[np.float32],
+        *,
+        display_progress: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
         """Computes shuffle-derived p-values and z-scored spatial information against a circular-shift null.
 
@@ -914,6 +925,8 @@ class RewardCellDetector:
             occupancy: Per-bin occupancy sample counts with length bin_count.
             smooth_size: Width of the uniform smoothing kernel in bins.
             observed_information: Observed spatial information values with length cell_count.
+            display_progress: When True, render the Reward spatial shuffle tqdm bar; set to False when the
+                session-level progress bar of ``..tuning_report.run_tuning_analysis`` is active.
 
         Returns:
             A tuple of (p_values, spatial_information_z), both with length cell_count.
@@ -950,7 +963,12 @@ class RewardCellDetector:
             (configuration.shuffle_count, cell_count), dtype=np.float32
         )
 
-        for iteration in tqdm(range(configuration.shuffle_count), desc="Reward spatial shuffle", unit="iter"):
+        for iteration in tqdm(
+            range(configuration.shuffle_count),
+            desc="Reward spatial shuffle",
+            unit="iter",
+            disable=not display_progress,
+        ):
             source_indices = compute_shuffle_source_indices(
                 filtered_sample_indices=filtered_sample_indices,
                 sample_count=sample_count,
@@ -1099,6 +1117,8 @@ class RewardCellDetector:
     def _compute_partial_variance(
         self,
         candidate_mask: NDArray[np.bool_],
+        *,
+        display_progress: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.bool_]]:
         """Per-cell 5-fold CV partial-variance test for position over speed+acceleration in the pre-reward window.
 
@@ -1118,6 +1138,8 @@ class RewardCellDetector:
         Args:
             candidate_mask: Boolean mask of cells to test (typically ``is_significant & (is_approach | is_zone)``)
                 with length cell_count.
+            display_progress: When True, render the Reward GLM permutation null tqdm bar; set to False when the
+                session-level progress bar of ``..tuning_report.run_tuning_analysis`` is active.
 
         Returns:
             A tuple of (cv_position_partial_r2, p_values, is_glm_significant) per cell, each with length cell_count.
@@ -1163,7 +1185,7 @@ class RewardCellDetector:
         for trial_id in unique_trials:
             # noinspection PyTypeChecker
             trial_mask: NDArray[np.bool_] = self.trial_ids == trial_id
-            if int(np.sum(trial_mask)) < 2:
+            if int(np.sum(trial_mask)) < _MINIMUM_SAMPLES_FOR_GRADIENT:
                 continue
             acceleration[trial_mask] = (np.gradient(self.speed[trial_mask]) * sampling_rate_hz).astype(np.float32)
 
@@ -1271,6 +1293,7 @@ class RewardCellDetector:
             desc="Reward GLM permutation null",
             unit="iter",
             leave=False,
+            disable=not display_progress,
         ):
             generator = np.random.default_rng(seed=permutation_index)
             # noinspection PyTypeChecker

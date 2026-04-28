@@ -4,8 +4,8 @@ Computes the per-session inputs that the cross-session bleaching analysis aggreg
 baseline fluorescence (estimated as a low percentile of the raw trace within a baseline window), per-cell
 signal-to-noise contrast (transient amplitude over MAD noise floor), and the within-session FOV-mean baseline
 trace used to quantify acute single-session bleaching. The cross-session aggregates (decay fit, paired Wilcoxon
-SNR test, combined flag mask) live alongside in :mod:`.bleaching_analysis`; per-session and cross-session plots
-live in :mod:`.plotting`.
+SNR test, combined flag mask) live alongside in `.bleaching_analysis`; per-session and cross-session plots
+live in `.plotting`.
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ import numpy as np
 import polars as pl
 from ataraxis_time import TimeUnits, interval_to_rate
 
-from ..shared_utilities import trim_acquisition_warmup
 from ...shared_assets import DatasetFiles, DatasetColumn
+from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -135,7 +135,7 @@ def compute_session_metrics(
         configuration: Bleaching evaluation parameters that drive window sizes and percentile choices.
 
     Returns:
-        A :class:`BleachingSessionResult` holding the per-cell baseline, per-cell SNR, and within-session baseline
+        A `BleachingSessionResult` holding the per-cell baseline, per-cell SNR, and within-session baseline
         trace plus the sampling rate and within-session fractional drop scalar.
     """
     # Routes through an annotated local so PyCharm narrows the unpacked elements to the declared fp32/int64 pair.
@@ -233,7 +233,7 @@ def _load_session_raw(session_path: Path) -> tuple[NDArray[np.float32], NDArray[
         source=session_path.joinpath(DatasetFiles.DATA),
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE.value],
     )
-    df = trim_acquisition_warmup(df=df)
+    df = trim_acquisition_warmup(dataframe=df)
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy().astype(np.int64, copy=False)
 

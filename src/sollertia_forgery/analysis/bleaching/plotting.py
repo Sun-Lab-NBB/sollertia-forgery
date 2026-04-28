@@ -1,8 +1,8 @@
 """Per-animal and dataset-level bleaching plots.
 
-Module-level functions consume the cross-session :class:`BleachingReport` produced by :mod:`.bleaching_analysis`
-or, for the dataset-wide trace, a :class:`DatasetData` whose animals each carry a saved bleaching report. Mirrors
-the plotting layout of :mod:`..sce.plotting` and :mod:`..tuning.plotting` so each analysis package keeps a single
+Module-level functions consume the cross-session `BleachingReport` produced by `.bleaching_analysis`
+or, for the dataset-wide trace, a `DatasetData` whose animals each carry a saved bleaching report. Mirrors
+the plotting layout of `..sce.plotting` and `..tuning.plotting` so each analysis package keeps a single
 file responsible for matplotlib output.
 """
 
@@ -52,9 +52,7 @@ def plot_baseline_trend(report: BleachingReport) -> plt.Figure:
 
     table = report.table
     # noinspection PyTypeChecker
-    days: NDArray[np.float32] = (
-        table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
-    )
+    days: NDArray[np.float32] = table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
     # noinspection PyTypeChecker
     population_baseline: NDArray[np.float32] = (
         table[BleachingColumn.POPULATION_BASELINE_FLUORESCENCE.value].to_numpy().astype(np.float32, copy=False)
@@ -135,9 +133,7 @@ def plot_within_session(report: BleachingReport) -> plt.Figure:
 
     table = report.table
     # noinspection PyTypeChecker
-    days: NDArray[np.float32] = (
-        table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
-    )
+    days: NDArray[np.float32] = table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
     time_seconds_list = [
         np.asarray(values, dtype=np.float32)
         for values in table[BleachingColumn.WITHIN_SESSION_TIME_SECONDS.value].to_list()
@@ -222,9 +218,7 @@ def plot_within_session_average(report: BleachingReport) -> plt.Figure:
     if usable_baselines:
         max_length = max(baseline.size for baseline in usable_baselines)
         # noinspection PyTypeChecker
-        baseline_matrix: NDArray[np.float32] = np.full(
-            (len(usable_baselines), max_length), np.nan, dtype=np.float32
-        )
+        baseline_matrix: NDArray[np.float32] = np.full((len(usable_baselines), max_length), np.nan, dtype=np.float32)
         for index, baseline in enumerate(usable_baselines):
             baseline_matrix[index, : baseline.size] = baseline
         # noinspection PyTypeChecker
@@ -261,9 +255,7 @@ def plot_snr_distributions(report: BleachingReport) -> plt.Figure:
 
     table = report.table
     # noinspection PyTypeChecker
-    days: NDArray[np.float32] = (
-        table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
-    )
+    days: NDArray[np.float32] = table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
     snr_data = [np.asarray(values, dtype=np.float32) for values in table[BleachingColumn.CELL_SNR.value].to_list()]
     # noinspection PyTypeChecker
     p_values: NDArray[np.float64] = (

@@ -2,7 +2,14 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from sollertia_forgery.analysis import run_bleaching_analysis, plot_dataset_baseline_trend
+from sollertia_forgery.analysis import (
+    plot_baseline_trend,
+    plot_within_session,
+    plot_snr_distributions,
+    run_bleaching_analysis,
+    plot_within_session_average,
+    plot_dataset_baseline_trend,
+)
 from sollertia_forgery.shared_assets import DatasetData
 
 
@@ -15,24 +22,18 @@ if __name__ == "__main__":
 
     dataset = DatasetData.load(dataset_path=dataset_path)
     reports = run_bleaching_analysis(dataset=dataset, animal=animal)
-    target_animals = (
-        (dataset.get_animal(animal=animal),) if animal is not None else dataset.animals
-    )
+    target_animals = (dataset.get_animal(animal=animal),) if animal is not None else dataset.animals
 
     dataset_root = dataset.dataset_data_path.parent
     for dataset_animal, report in zip(target_animals, reports, strict=True):
         report.print_summary()
         file_prefix = f"bleaching_animal_{dataset_animal.animal}"
-        report.plot_baseline_trend().savefig(
-            dataset_root / f"{file_prefix}_baseline_trend.png", bbox_inches="tight"
-        )
-        report.plot_within_session().savefig(
-            dataset_root / f"{file_prefix}_within_session.png", bbox_inches="tight"
-        )
-        report.plot_within_session_average().savefig(
+        plot_baseline_trend(report).savefig(dataset_root / f"{file_prefix}_baseline_trend.png", bbox_inches="tight")
+        plot_within_session(report).savefig(dataset_root / f"{file_prefix}_within_session.png", bbox_inches="tight")
+        plot_within_session_average(report).savefig(
             dataset_root / f"{file_prefix}_within_session_average.png", bbox_inches="tight"
         )
-        report.plot_snr_distributions().savefig(
+        plot_snr_distributions(report).savefig(
             dataset_root / f"{file_prefix}_snr_distributions.png", bbox_inches="tight"
         )
 

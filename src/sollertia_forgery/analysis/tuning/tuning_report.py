@@ -1,15 +1,15 @@
 """Per-session tuning-report container that consolidates place-field and reward-cell detection.
 
-The :class:`TuningReport` pair (per-cell long-format feather + summary YAML) is the analysis counterpart to
-:class:`BleachingReport`; the report owns persistence and per-trial-type population-mask resolution so loading
+The `TuningReport` pair (per-cell long-format feather + summary YAML) is the analysis counterpart to
+`BleachingReport`; the report owns persistence and per-trial-type population-mask resolution so loading
 a saved report is sufficient to reproduce every figure without rerunning detection. Plot regeneration lives in
-:mod:`.plotting`. SCE-related analyses live alongside in :mod:`..sce` and produce their own per-session
-report. Methodological references for the assembly pipeline are attached to :func:`compute_tuning_report`.
+`.plotting`. SCE-related analyses live alongside in `..sce` and produce their own per-session
+report. Methodological references for the assembly pipeline are attached to `compute_tuning_report`.
 
 The persisted ``tuning_cells.feather`` is **long-format**: one row per ``(cell_id, trial_type)`` pair with a
 ``trial_type: Utf8`` column. Cell IDs are stable across trial types because the upstream multi-day cindra
 pipeline registers cells once per session, so cross-trial-type queries collapse to ``polars`` filters or
-joins on ``cell_id``. The summary YAML carries one :class:`TuningTrialSummary` entry per trial type alongside
+joins on ``cell_id``. The summary YAML carries one `TuningTrialSummary` entry per trial type alongside
 session-level fields shared across trial types (sub-pipeline configurations, sampling rate, cell count).
 """
 
@@ -20,14 +20,16 @@ from typing import TYPE_CHECKING
 import warnings
 from dataclasses import field, dataclass
 
+from numba import set_num_threads
 import numpy as np
 import polars as pl
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
 from ...forging import FluorescenceColumn
 from .utilities import per_cell_pearson_safe, assemble_run_session_data
-from ...shared_assets import DatasetFiles, TrialGeometry
+from ...shared_assets import DatasetFiles, TrialGeometry, delay_terminal
+from ..shared_utilities import resolve_session_selection
 from .place_tuning_protocol import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_tuning_protocol import RewardCellResults, RewardCellDetector, RewardCellConfiguration
 
@@ -36,7 +38,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-    from ...shared_assets import DatasetSession
+    from ...shared_assets import DatasetData, DatasetSession
 
 
 _PLACE_FIELD_BIN_SIZE_CM: float = 5.0
@@ -149,7 +151,7 @@ class TuningConfiguration:
 
 @dataclass
 class TuningTrialSummary(YamlConfig):
-    """Per-trial-type entry inside the session-level :class:`TuningSummary`.
+    """Per-trial-type entry inside the session-level `TuningSummary`.
 
     Carries fields that vary per trial type: track / reward geometry resolved from the trial geometry data
     file, the rate-map bin axis, the four-component mixture-model fit, and pre-aggregated per-cell counts
@@ -207,7 +209,7 @@ class TuningSummary(YamlConfig):
     """Per-session YAML companion to ``tuning_cells.feather``.
 
     Carries session-level fields shared across trial types (sub-pipeline configurations, sampling rate, total
-    cell count) plus a :class:`TuningTrialSummary` entry for every trial type the session was evaluated
+    cell count) plus a `TuningTrialSummary` entry for every trial type the session was evaluated
     against. Cell IDs are stable across the entries because the upstream multi-day pipeline registers cells
     once per session, so any cross-trial-type tabulation collapses to a join on ``cell_id`` against the
     long-format cells feather.
@@ -235,12 +237,12 @@ class TuningReport:
 
     Holds the long-format per-cell tuning table (``cells``) and the YAML summary (``summary``). Persistence
     and per-trial-type population-mask resolution stay on the report; plot regeneration lives in
-    :mod:`.plotting`.
+    `.plotting`.
     """
 
     cells: pl.DataFrame
     """Long-format per-cell wide table; one row per ``(cell_id, trial_type)`` pair. Schema enumerated by
-    :class:`TuningColumn`."""
+    `TuningColumn`."""
     summary: TuningSummary
     """YAML wrapper holding the configurations, mixture-model fit, and per-trial-type session-level scalars."""
 
@@ -257,7 +259,7 @@ class TuningReport:
         self.cells.write_ipc(file=session.tuning_cells_path)
 
     def trial_summary(self, trial_type: str) -> TuningTrialSummary:
-        """Returns the :class:`TuningTrialSummary` entry for ``trial_type``.
+        """Returns the `TuningTrialSummary` entry for ``trial_type``.
 
         Raises:
             KeyError: When ``trial_type`` is not present in ``summary.trial_type_summaries``.
@@ -292,7 +294,7 @@ class TuningReport:
         Notes:
             Defaults to the strict triple-AND of place / stable / peak-significant. When every kwarg is False
             the method returns an all-True mask, treating "no criteria" as "no filter". Skaggs spatial
-            significance is intentionally not exposed here; use :meth:`resolve_population_masks` instead when
+            significance is intentionally not exposed here; use `resolve_population_masks` instead when
             you need place / reward populations that respect mutual exclusion.
 
         Args:
@@ -387,7 +389,13 @@ class TuningReport:
         ]
         for trial_type in summary.trial_types:
             entry = summary.trial_type_summaries[trial_type]
-            lines.extend(self._format_trial_type_block(trial_type=trial_type, entry=entry, mutually_exclusive=mutually_exclusive))
+            lines.extend(
+                self._format_trial_type_block(
+                    trial_type=trial_type,
+                    entry=entry,
+                    mutually_exclusive=mutually_exclusive,
+                )
+            )
         return "\n".join(lines)
 
     def _format_trial_type_block(
@@ -442,39 +450,109 @@ class TuningReport:
         ]
 
 
-def evaluate_and_save_tuning_report(
-    session: DatasetSession,
+def run_tuning_analysis(
+    dataset: DatasetData,
     *,
+    animal: str | tuple[str, ...] | None = None,
+    session: str | tuple[str, ...] | None = None,
     trial_types: tuple[str, ...] | None = None,
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+    workers: int = -1,
+    aggregate_progress: bool = True,
     configuration: TuningConfiguration | None = None,
-) -> TuningReport:
-    """Evaluates the tuning pipeline for every requested trial type in a session and persists the report.
+) -> tuple[TuningReport, ...]:
+    """Evaluates the tuning pipeline for every session matching the (animal, session) filter and persists each
+    report.
 
     Notes:
-        Sole orchestrator for assembling :class:`TuningReport` artifacts. Per-session compute and
-        methodological references live on :func:`compute_tuning_report`; this function calls it once and
-        persists the returned long-format report through :meth:`TuningReport.save`. By default every trial
-        type listed in the session's ``trial_geometry.yaml`` is evaluated.
+        Sole orchestrator for assembling `TuningReport` artifacts. Per-session compute and methodological
+        references live on `compute_tuning_report`; this function resolves the in-scope DatasetSession set,
+        configures the per-cell Numba thread pool to the resolved CPU budget, and walks the sessions
+        sequentially because the per-cell kernels already saturate the available threads on a single session.
+        Each report is written to ``<session>/tuning_summary.yaml`` and ``<session>/tuning_cells.feather`` and
+        returned to the caller for downstream plotting.
+
+        ``animal`` and ``session`` accept None (no filter), a single identifier, or a tuple of identifiers and
+        compose as a logical AND through `..shared_utilities.resolve_session_selection`. Feedback is
+        non-optional: ``aggregate_progress`` only chooses the form of feedback (a single session-level
+        progress bar versus the per-session per-stage echoes emitted by `compute_tuning_report`).
 
     Args:
-        session: The DatasetSession to analyze.
-        trial_types: Optional explicit tuple of trial types to evaluate; default evaluates every entry in
-            ``trial_geometry.yaml``.
-        fluorescence_column: Fluorescence column to use as the analysis input.
-        configuration: Wrapper holding the two sub-pipeline configurations. Uses defaults if None.
+        dataset: The DatasetData whose sessions are evaluated.
+        animal: Animal-identifier filter; None evaluates every animal in the dataset.
+        session: Session-identifier filter; None evaluates every session within the resolved animal scope.
+        trial_types: Optional explicit tuple of trial types to evaluate per session; default evaluates every
+            entry in each session's ``trial_geometry.yaml``.
+        fluorescence_column: Fluorescence column to use as the analysis input across every session.
+        workers: The total number of CPU cores to use. A non-positive value requests every available core
+            minus the system reserve. The full budget is handed to the per-cell Numba thread pool because
+            sessions are processed sequentially.
+        aggregate_progress: When True, render a single session-level progress bar and silence per-stage
+            compute echoes so the bar is the only visual signal. When False, skip the bar and let
+            `compute_tuning_report` emit per-trial-type and per-detector echoes for each session as it is
+            processed.
+        configuration: Wrapper holding the two sub-pipeline configurations shared across every session. Uses
+            defaults if None.
 
     Returns:
-        The TuningReport produced for the session, with both artifacts persisted under the session directory.
+        A tuple of TuningReports in the same order as the resolved DatasetSession set, with each report's two
+        artifacts persisted under the corresponding session directory.
     """
-    report = compute_tuning_report(
-        session_path=session.session_path,
-        trial_types=trial_types,
-        fluorescence_column=fluorescence_column,
-        configuration=configuration,
+    sessions = resolve_session_selection(dataset=dataset, animal=animal, session=session)
+
+    total_workers = resolve_worker_count(requested_workers=workers)
+    set_num_threads(total_workers)
+
+    animal_count = len({dataset_session.animal for dataset_session in sessions})
+    console.echo(
+        message=(
+            f"Running tuning analysis on dataset {dataset.name!r} for "
+            f"{animal_count} animal{'s' if animal_count != 1 else ''} "
+            f"({len(sessions)} session{'s' if len(sessions) != 1 else ''} total): "
+            f"sequential session loop x {total_workers} Numba "
+            f"thread{'s' if total_workers != 1 else ''} per session."
+        ),
+        level=LogLevel.INFO,
     )
-    report.save(session=session)
-    return report
+    delay_terminal()
+
+    reports: list[TuningReport] = []
+    if aggregate_progress:
+        with console.progress(
+            total=len(sessions), description="Running tuning analysis", unit="session"
+        ) as progress_bar:
+            for dataset_session in sessions:
+                report = compute_tuning_report(
+                    session_path=dataset_session.session_path,
+                    trial_types=trial_types,
+                    fluorescence_column=fluorescence_column,
+                    configuration=configuration,
+                    verbose=False,
+                )
+                report.save(session=dataset_session)
+                reports.append(report)
+                progress_bar.update()
+    else:
+        for dataset_session in sessions:
+            report = compute_tuning_report(
+                session_path=dataset_session.session_path,
+                trial_types=trial_types,
+                fluorescence_column=fluorescence_column,
+                configuration=configuration,
+                verbose=True,
+            )
+            report.save(session=dataset_session)
+            reports.append(report)
+
+    console.echo(
+        message=(
+            f"Tuning analysis complete. Persisted {len(reports)} "
+            f"report{'s' if len(reports) != 1 else ''} under {dataset.dataset_data_path.parent}."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+    delay_terminal()
+    return tuple(reports)
 
 
 def compute_tuning_report(
@@ -483,6 +561,7 @@ def compute_tuning_report(
     trial_types: tuple[str, ...] | None = None,
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
     configuration: TuningConfiguration | None = None,
+    verbose: bool = True,
 ) -> TuningReport:
     """Computes the per-session tuning report by running the place-field and reward-cell detectors per trial
     type.
@@ -490,12 +569,12 @@ def compute_tuning_report(
     Notes:
         Per-session algorithmic entry-point for the tuning pipeline; consolidates every place- and reward-
         cell methodology that gates a column in the persisted feather. For each requested trial type, loads
-        a single :class:`RunSessionData` and shares it across :class:`PlaceFieldDetector` and
-        :class:`RewardCellDetector` so the two flag sets operate on identical speed-filtered samples and
+        a single `RunSessionData` and shares it across `PlaceFieldDetector` and
+        `RewardCellDetector` so the two flag sets operate on identical speed-filtered samples and
         bit-identical rate maps. Place-field detection uses the thresholding-plus-connected-component
         pipeline of Dombeck et al. (2010) followed by the lap-coverage gate of Climer et al. (2025). The
         ``IS_STABLE`` and ``IS_PEAK_SIGNIFICANT`` flags follow the multi-criterion framework of Climer &
-        Dombeck (2021): per-cell circular-shift nulls computed inside :class:`PlaceFieldDetector` yield the
+        Dombeck (2021): per-cell circular-shift nulls computed inside `PlaceFieldDetector` yield the
         Stability (95th percentile of split-half r) and Peak (99th percentile of pooled-rate-map peak)
         classifiers. The reward-cell pipeline contributes ``IS_SPATIALLY_SIGNIFICANT`` via Skaggs spatial
         information (Skaggs et al. 1996) z-scored against the circular-shift null in the variant of Souza &
@@ -505,15 +584,15 @@ def compute_tuning_report(
         decomposition; the per-cell ``IS_POSITION_GLM_SIGNIFICANT`` flag implements the Sosa, Plitt &
         Giocomo (2025) and Hardcastle et al. (2017) cross-validated partial-variance test of position over
         speed and acceleration with a trial-label permutation null. All numba kernels and helpers in
-        :mod:`.place_tuning_protocol` and :mod:`.reward_tuning_protocol` inherit these references through
+        `.place_tuning_protocol` and `.reward_tuning_protocol` inherit these references through
         this accessor.
 
         The cells produced for each trial type are concatenated into a single long-format
-        :class:`polars.DataFrame` keyed by ``(cell_id, trial_type)``. Cell IDs are stable across trial types
+        `polars.DataFrame` keyed by ``(cell_id, trial_type)``. Cell IDs are stable across trial types
         (and across sessions) because the upstream multi-day cindra pipeline registers cells once per
         session, so cross-trial-type and cross-session aggregations downstream collapse to ``polars`` filters
         / joins on ``cell_id``. For paired-frame statistical tests (e.g. peak-shift comparisons across trial
-        types or sessions), :func:`.utilities.random_remapping_peak_shift_p_values` provides a reusable
+        types or sessions), `.utilities.random_remapping_peak_shift_p_values` provides a reusable
         cell-ID-shuffle helper.
 
     References:
@@ -555,17 +634,17 @@ def compute_tuning_report(
         fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
             analysis input.
         configuration: Wrapper holding the two sub-pipeline configurations. Uses defaults if None.
+        verbose: When True, emit per-trial-type and per-detector progress echoes via the ataraxis console.
+            Set to False by `run_tuning_analysis` when its session-level progress bar is the active visual
+            signal so the bar stays clean.
 
     Returns:
-        An in-memory :class:`TuningReport` with one long-format row per ``(cell_id, trial_type)`` pair.
+        An in-memory `TuningReport` with one long-format row per ``(cell_id, trial_type)`` pair.
     """
     resolved_configuration = configuration if configuration is not None else TuningConfiguration.default()
 
     geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY))
-    if trial_types is None:
-        resolved_trial_types = tuple(geometry.entries.keys())
-    else:
-        resolved_trial_types = tuple(trial_types)
+    resolved_trial_types = tuple(geometry.entries.keys()) if trial_types is None else tuple(trial_types)
     if not resolved_trial_types:
         message = (
             f"Unable to compute tuning report: no trial types resolved from {session_path}. The "
@@ -580,13 +659,15 @@ def compute_tuning_report(
     sampling_rate_hz: float = float("nan")
 
     for trial_type in resolved_trial_types:
-        console.echo(message=f"Evaluating tuning for trial type {trial_type!r}...", level=LogLevel.INFO)
+        if verbose:
+            console.echo(message=f"Evaluating tuning for trial type {trial_type!r}...", level=LogLevel.INFO)
         cells_frame, trial_summary, cell_count, trial_sampling_rate_hz = _compute_trial_type(
             session_path=session_path,
             trial_type=trial_type,
             geometry=geometry,
             fluorescence_column=fluorescence_column,
             configuration=resolved_configuration,
+            verbose=verbose,
         )
         per_trial_cells.append(cells_frame)
         trial_type_summaries[trial_type] = trial_summary
@@ -615,9 +696,6 @@ def compute_tuning_report(
     return TuningReport(cells=cells, summary=summary)
 
 
-# ===== Private helpers ==========================================================================================
-
-
 def _compute_trial_type(
     session_path: Path,
     trial_type: str,
@@ -625,12 +703,21 @@ def _compute_trial_type(
     geometry: TrialGeometry,
     fluorescence_column: FluorescenceColumn,
     configuration: TuningConfiguration,
+    verbose: bool = True,
 ) -> tuple[pl.DataFrame, TuningTrialSummary, int, float]:
     """Runs the place-field and reward-cell detectors on a single trial type and returns the long-format rows.
 
+    Args:
+        session_path: Path to the session's dataset directory.
+        trial_type: Trial type name to evaluate.
+        geometry: Pre-loaded trial geometry covering ``trial_type``.
+        fluorescence_column: Fluorescence column used as the analysis input.
+        configuration: Sub-pipeline configurations to pass to both detectors.
+        verbose: When True, emit per-detector progress echoes via the ataraxis console.
+
     Returns:
         A tuple of ``(cells_frame, trial_summary, cell_count, sampling_rate_hz)``. ``cells_frame`` already
-        carries a :attr:`TuningColumn.TRIAL_TYPE` column populated with ``trial_type`` for every row.
+        carries a `TuningColumn.TRIAL_TYPE` column populated with ``trial_type`` for every row.
     """
     geometry_entry = geometry.entries[trial_type]
     track_length_cm = float(geometry_entry.trial_length_cm)
@@ -645,7 +732,8 @@ def _compute_trial_type(
     )
     sampling_rate_hz = float(run_session.sampling_rate_hz)
 
-    console.echo(message="Running place field detection...", level=LogLevel.INFO)
+    if verbose:
+        console.echo(message="Running place field detection...", level=LogLevel.INFO)
     place_detector = PlaceFieldDetector(
         run_session=run_session,
         bin_size=_PLACE_FIELD_BIN_SIZE_CM,
@@ -654,27 +742,30 @@ def _compute_trial_type(
     place_fields = place_detector.detect()
     cell_count = int(place_fields.binned_fluorescence.shape[0])
     place_cell_count = int(place_fields.has_place_field.sum())
-    console.echo(
-        message=f"Place field detection complete: {place_cell_count}/{cell_count} place cells.",
-        level=LogLevel.SUCCESS,
-    )
+    if verbose:
+        console.echo(
+            message=f"Place field detection complete: {place_cell_count}/{cell_count} place cells.",
+            level=LogLevel.SUCCESS,
+        )
 
-    console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
+    if verbose:
+        console.echo(message="Running reward cell detection...", level=LogLevel.INFO)
     reward_detector = RewardCellDetector(
         run_session=run_session,
         configuration=configuration.reward,
     )
-    reward_results = reward_detector.detect()
+    reward_results = reward_detector.detect(display_progress=verbose)
     spatially_significant_count = int(np.sum(reward_results.spatial_results.is_significant))
     reward_cell_count = int(reward_results.reward_cell_count)
     reward_predictive_count = len(reward_results.reward_predictive_indices)
-    console.echo(
-        message=(
-            f"Reward cell detection complete: {reward_cell_count} reward cells, "
-            f"{reward_predictive_count} reward-predictive."
-        ),
-        level=LogLevel.SUCCESS,
-    )
+    if verbose:
+        console.echo(
+            message=(
+                f"Reward cell detection complete: {reward_cell_count} reward cells, "
+                f"{reward_predictive_count} reward-predictive."
+            ),
+            level=LogLevel.SUCCESS,
+        )
 
     rate_map_bin_count = int(reward_results.spatial_results.rate_maps.shape[1])
 
@@ -682,32 +773,33 @@ def _compute_trial_type(
         binned_fluorescence_per_trial=place_fields.binned_fluorescence_per_trial,
         cell_count=cell_count,
     )
-    console.echo(
-        message=(
-            f"Running multi-criterion shuffles "
-            f"({configuration.place.shuffle_repeat_count} iterations each for Peak and Stability)..."
-        ),
-        level=LogLevel.INFO,
-    )
+    if verbose:
+        console.echo(
+            message=(
+                f"Running multi-criterion shuffles "
+                f"({configuration.place.shuffle_repeat_count} iterations each for Peak and Stability)..."
+            ),
+            level=LogLevel.INFO,
+        )
     is_stable, is_peak_significant, stability_p_values, peak_p_values = _compute_multi_criterion_flags(
         place_detector=place_detector,
         place_fields=place_fields,
         stability_split_half=stability_split_half,
         configuration=configuration.place,
+        display_progress=verbose,
     )
-    console.echo(
-        message=(
-            f"Multi-criterion shuffles complete: {int(np.sum(is_stable))} stable, "
-            f"{int(np.sum(is_peak_significant))} peak-significant."
-        ),
-        level=LogLevel.SUCCESS,
-    )
+    if verbose:
+        console.echo(
+            message=(
+                f"Multi-criterion shuffles complete: {int(np.sum(is_stable))} stable, "
+                f"{int(np.sum(is_peak_significant))} peak-significant."
+            ),
+            level=LogLevel.SUCCESS,
+        )
     # noinspection PyTypeChecker
     is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
     # noinspection PyTypeChecker
-    is_reward_cell_array: NDArray[np.bool_] = (
-        reward_results.spatial_results.is_significant & reward_results.is_zone
-    )
+    is_reward_cell_array: NDArray[np.bool_] = reward_results.spatial_results.is_significant & reward_results.is_zone
     # noinspection PyTypeChecker
     is_place_only: NDArray[np.bool_] = place_fields.has_place_field & ~is_reward_cell_array
     # noinspection PyTypeChecker
@@ -796,7 +888,7 @@ def _compute_stability_metrics(
         odd_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 1::2, :], axis=1).astype(
             np.float32, copy=False
         )
-    even_odd = per_cell_pearson_safe(a=even_map, b=odd_map)
+    even_odd = per_cell_pearson_safe(first_matrix=even_map, second_matrix=odd_map)
 
     half_index = trial_count // 2
     if half_index > 0 and trial_count - half_index > 0:
@@ -810,7 +902,7 @@ def _compute_stability_metrics(
             second_map: NDArray[np.float32] = np.nanmean(
                 binned_fluorescence_per_trial[:, half_index:, :], axis=1
             ).astype(np.float32, copy=False)
-        split_half = per_cell_pearson_safe(a=first_map, b=second_map)
+        split_half = per_cell_pearson_safe(first_matrix=first_map, second_matrix=second_map)
 
     return even_odd, split_half
 
@@ -820,6 +912,8 @@ def _compute_multi_criterion_flags(
     place_fields: PlaceFields,
     stability_split_half: NDArray[np.float32],
     configuration: PlaceFieldDetectionConfiguration,
+    *,
+    display_progress: bool = True,
 ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
     """Computes the IS_STABLE / IS_PEAK_SIGNIFICANT per-cell flags and their per-cell shuffle p-values.
 
@@ -828,6 +922,8 @@ def _compute_multi_criterion_flags(
         place_fields: PlaceFields output containing the pooled and per-trial rate maps.
         stability_split_half: Observed per-cell split-half Pearson r from ``_compute_stability_metrics``.
         configuration: Place-field configuration carrying ``shuffle_repeat_count`` and ``peak_percentile``.
+        display_progress: When True, render the inner Peak / Stability shuffle tqdm bars; set to False by
+            `_compute_trial_type` when its caller silenced per-stage echoes.
 
     Returns:
         A tuple of (is_stable, is_peak_significant, stability_p_values, peak_p_values), each with length
@@ -841,6 +937,7 @@ def _compute_multi_criterion_flags(
             observed_split_half_r=stability_split_half,
             repeat_count=configuration.shuffle_repeat_count,
             peak_percentile=configuration.peak_percentile,
+            display_progress=display_progress,
         )
     )
     if is_stable.size != cell_count:
@@ -874,7 +971,7 @@ def _build_cell_table(
 ) -> pl.DataFrame:
     """Assembles the per-trial-type slice of the long-format DataFrame from the live detector outputs.
 
-    The returned DataFrame already carries a :attr:`TuningColumn.TRIAL_TYPE` column populated with
+    The returned DataFrame already carries a `TuningColumn.TRIAL_TYPE` column populated with
     ``trial_type`` for every row. The caller concatenates per-trial-type slices into the session-level
     long-format ``cells`` feather.
     """
@@ -917,9 +1014,7 @@ def _build_cell_table(
             TuningColumn.IS_STRICT_PLACE.value: pl.Series(values=is_strict_place, dtype=pl.Boolean),
             TuningColumn.PF_START_CM.value: pl.Series(values=place_rows["pf_start_cm"], dtype=pl.List(pl.Float32)),
             TuningColumn.PF_END_CM.value: pl.Series(values=place_rows["pf_end_cm"], dtype=pl.List(pl.Float32)),
-            TuningColumn.PF_CENTER_CM.value: pl.Series(
-                values=place_rows["pf_center_cm"], dtype=pl.List(pl.Float32)
-            ),
+            TuningColumn.PF_CENTER_CM.value: pl.Series(values=place_rows["pf_center_cm"], dtype=pl.List(pl.Float32)),
             TuningColumn.PF_MEAN_INTENSITY.value: pl.Series(
                 values=place_rows["pf_mean_intensity"], dtype=pl.List(pl.Float32)
             ),
@@ -934,9 +1029,7 @@ def _build_cell_table(
             ),
             TuningColumn.RATE_MAP.value: pl.Series(values=rate_maps_list, dtype=pl.List(pl.Float32)),
             TuningColumn.CENTER_OF_MASS_CM.value: pl.Series(values=spatial.centers_of_mass, dtype=pl.Float32),
-            TuningColumn.SPATIAL_INFORMATION_Z.value: pl.Series(
-                values=spatial.spatial_information_z, dtype=pl.Float32
-            ),
+            TuningColumn.SPATIAL_INFORMATION_Z.value: pl.Series(values=spatial.spatial_information_z, dtype=pl.Float32),
             TuningColumn.SPATIAL_FDR_SURVIVED.value: pl.Series(values=spatial.fdr_survived, dtype=pl.Boolean),
             TuningColumn.SPATIAL_SPLIT_HALF_R.value: pl.Series(values=spatial.split_half_r, dtype=pl.Float32),
             TuningColumn.SPATIAL_INFORMATION_BITS.value: pl.Series(

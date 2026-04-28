@@ -1,9 +1,9 @@
 """Per-session synchronous calcium event (SCE) report container.
 
-Wraps the :class:`SCEDetector` output as a triplet of persisted artifacts: a per-cell participation feather, a
+Wraps the `SCEDetector` output as a triplet of persisted artifacts: a per-cell participation feather, a
 per-period SCE-state feather, and a summary YAML. The report owns persistence (``save`` / ``load``) and the
-human-readable summary; per-session and cross-session plots live in :mod:`.plotting` and consume the report.
-Methodological references for the assembly pipeline are attached to :func:`compute_sce_report`.
+human-readable summary; per-session and cross-session plots live in `.plotting` and consume the report.
+Methodological references for the assembly pipeline are attached to `compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -12,21 +12,24 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
+from numba import set_num_threads
 import numpy as np
 import polars as pl
 from scipy.stats import chi2
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
 from ...forging import FluorescenceColumn
 from .sce_protocol import SCEResult, SCEDetector, SCEDetectionConfiguration
+from ...shared_assets import delay_terminal
+from ..shared_utilities import resolve_session_selection
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
 
-    from ...shared_assets import DatasetSession
+    from ...shared_assets import DatasetData, DatasetSession
 
 
 class SCECellColumn(StrEnum):
@@ -54,7 +57,7 @@ class SCEPeriodColumn(StrEnum):
 
     PERIOD_INDEX = "period_index"
     """0-based stationary-period index in temporal session order, matching the ``(period_index, sce_label)``
-    references in :attr:`SCECellColumn.SCE_EVENTS`."""
+    references in `SCECellColumn.SCE_EVENTS`."""
     PERIOD_STATE = "period_state"
     """``DatasetColumn.SYSTEM_STATE`` value of the protocol epoch this stationary chunk was extracted from
     (e.g. ``"rest"``, ``"run"``, or any custom protocol state)."""
@@ -119,14 +122,14 @@ class SCEReport:
     """Top-level per-session container for the SCE pipeline output.
 
     Holds the per-cell participation table (``cells``), the per-period SCE-state table (``periods``), and the YAML
-    summary (``summary``). Persistence is co-located here; plot regeneration lives in :mod:`.plotting`.
+    summary (``summary``). Persistence is co-located here; plot regeneration lives in `.plotting`.
     """
 
     cells: pl.DataFrame
-    """Per-cell wide table; one row per cell. Schema enumerated by :class:`SCECellColumn`."""
+    """Per-cell wide table; one row per cell. Schema enumerated by `SCECellColumn`."""
     periods: pl.DataFrame
     """Per-period SCE state table; one row per stationary period that yielded SCEs. Schema enumerated by
-    :class:`SCEPeriodColumn`."""
+    `SCEPeriodColumn`."""
     summary: SCESummary
     """YAML wrapper holding the configuration and session-level scalars."""
 
@@ -176,34 +179,100 @@ class SCEReport:
         )
 
 
-def evaluate_and_save_sce_report(
-    session: DatasetSession,
+def run_sce_analysis(
+    dataset: DatasetData,
     *,
+    animal: str | tuple[str, ...] | None = None,
+    session: str | tuple[str, ...] | None = None,
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
+    workers: int = -1,
+    aggregate_progress: bool = True,
     configuration: SCEDetectionConfiguration | None = None,
-) -> SCEReport:
-    """Evaluates the SCE pipeline for a single session and persists the report to disk.
+) -> tuple[SCEReport, ...]:
+    """Evaluates the SCE pipeline for every session matching the (animal, session) filter and persists each
+    report.
 
     Notes:
-        Sole orchestrator for assembling :class:`SCEReport` artifacts. Per-session compute and methodological
-        references live on :func:`compute_sce_report`; this function calls it once and persists the returned
-        report through :meth:`SCEReport.save`.
+        Sole orchestrator for assembling `SCEReport` artifacts. Per-session compute and methodological
+        references live on `compute_sce_report`; this function resolves the in-scope DatasetSession set,
+        configures the per-cell Numba thread pool to the resolved CPU budget, and walks the sessions
+        sequentially because the per-cell kernels already saturate the available threads on a single session.
+        Each report is written to ``<session>/sce_summary.yaml``, ``<session>/sce_cells.feather``, and
+        ``<session>/sce_periods.feather`` and returned to the caller for downstream plotting.
+
+        ``animal`` and ``session`` accept None (no filter), a single identifier, or a tuple of identifiers and
+        compose as a logical AND through `..shared_utilities.resolve_session_selection`. Feedback is
+        non-optional: ``aggregate_progress`` only chooses the form of feedback (a single session-level
+        progress bar versus the per-session per-stage echoes emitted by `compute_sce_report`).
 
     Args:
-        session: The DatasetSession to analyze.
-        fluorescence_column: Fluorescence column to use as the analysis input.
-        configuration: SCE detection parameters. Uses defaults if None.
+        dataset: The DatasetData whose sessions are evaluated.
+        animal: Animal-identifier filter; None evaluates every animal in the dataset.
+        session: Session-identifier filter; None evaluates every session within the resolved animal scope.
+        fluorescence_column: Fluorescence column to use as the analysis input across every session.
+        workers: The total number of CPU cores to use. A non-positive value requests every available core
+            minus the system reserve. The full budget is handed to the per-cell Numba thread pool because
+            sessions are processed sequentially.
+        aggregate_progress: When True, render a single session-level progress bar and silence per-stage
+            compute echoes so the bar is the only visual signal. When False, skip the bar and let
+            `compute_sce_report` emit per-stage echoes for each session as it is processed.
+        configuration: SCE detection parameters shared across every session. Uses defaults if None.
 
     Returns:
-        The SCEReport produced for the session, with all three artifacts persisted under the session directory.
+        A tuple of SCEReports in the same order as the resolved DatasetSession set, with each report's three
+        artifacts persisted under the corresponding session directory.
     """
-    report = compute_sce_report(
-        session_path=session.session_path,
-        fluorescence_column=fluorescence_column,
-        configuration=configuration,
+    sessions = resolve_session_selection(dataset=dataset, animal=animal, session=session)
+
+    total_workers = resolve_worker_count(requested_workers=workers)
+    set_num_threads(total_workers)
+
+    animal_count = len({dataset_session.animal for dataset_session in sessions})
+    console.echo(
+        message=(
+            f"Running SCE analysis on dataset {dataset.name!r} for "
+            f"{animal_count} animal{'s' if animal_count != 1 else ''} "
+            f"({len(sessions)} session{'s' if len(sessions) != 1 else ''} total): "
+            f"sequential session loop x {total_workers} Numba "
+            f"thread{'s' if total_workers != 1 else ''} per session."
+        ),
+        level=LogLevel.INFO,
     )
-    report.save(session=session)
-    return report
+    delay_terminal()
+
+    reports: list[SCEReport] = []
+    if aggregate_progress:
+        with console.progress(total=len(sessions), description="Running SCE analysis", unit="session") as progress_bar:
+            for dataset_session in sessions:
+                report = compute_sce_report(
+                    session_path=dataset_session.session_path,
+                    fluorescence_column=fluorescence_column,
+                    configuration=configuration,
+                    verbose=False,
+                )
+                report.save(session=dataset_session)
+                reports.append(report)
+                progress_bar.update()
+    else:
+        for dataset_session in sessions:
+            report = compute_sce_report(
+                session_path=dataset_session.session_path,
+                fluorescence_column=fluorescence_column,
+                configuration=configuration,
+                verbose=True,
+            )
+            report.save(session=dataset_session)
+            reports.append(report)
+
+    console.echo(
+        message=(
+            f"SCE analysis complete. Persisted {len(reports)} "
+            f"report{'s' if len(reports) != 1 else ''} under {dataset.dataset_data_path.parent}."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+    delay_terminal()
+    return tuple(reports)
 
 
 def compute_sce_report(
@@ -211,26 +280,27 @@ def compute_sce_report(
     *,
     fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
     configuration: SCEDetectionConfiguration | None = None,
+    verbose: bool = True,
 ) -> SCEReport:
     """Computes the per-session SCE report by running the SCE detection pipeline on the session.
 
     Notes:
         Per-session algorithmic entry-point for the SCE pipeline; consolidates every methodology that gates a
         column in the persisted feathers. Walks every contiguous protocol-state block in the session via
-        :class:`SCEDetector`, applies the state-appropriate stationarity gate (torque-stability for ``"rest"``
+        `SCEDetector`, applies the state-appropriate stationarity gate (torque-stability for ``"rest"``
         and encoder-stability elsewhere), runs SCE detection on each surviving stationary chunk, and aggregates
         per-cell participation, per-cell recruitment significance, and per-period SCE descriptors into the
         persisted artifacts.
 
-        SCE detection inside :class:`SCEDetector` mirrors the Malvache et al. (2016) pipeline (~250 ms
+        SCE detection inside `SCEDetector` mirrors the Malvache et al. (2016) pipeline (~250 ms
         co-activation window, >=5 cells, percentile-against-shuffle threshold). The per-cell jitter-null
-        p-values produced by :class:`SCEDetector` are combined across stationary periods via Fisher's method
+        p-values produced by `SCEDetector` are combined across stationary periods via Fisher's method
         (Fisher 1925) into the per-cell ``SCE_PARTICIPATION_P_VALUE`` column, following the Modol et al. (2020)
         SCE-recruitment significance ("super-rich" cells) framework. The percentile-against-shuffle idiom for
         the peak-coactive threshold follows Climer & Dombeck (2021) and matches the convention used elsewhere
         in the analysis package. Per-cell onset-rank-within-SCE descriptors persisted in the per-period feather
         derive from the Villette et al. (2015) recurring-sequences framework. All numba kernels and helpers in
-        :mod:`.sce_protocol` inherit these references through this accessor.
+        `.sce_protocol` inherit these references through this accessor.
 
     References:
         Canonical SCE detection pipeline (~250 ms co-activation window, >=5 cells, percentile-against-shuffle
@@ -256,33 +326,36 @@ def compute_sce_report(
         fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
             analysis input.
         configuration: SCE detection parameters. Uses defaults if None.
+        verbose: When True, emit per-stage progress echoes via the ataraxis console. Set to False by
+            `run_sce_analysis` when its session-level progress bar is the active visual signal so the bar
+            stays clean.
 
     Returns:
         An in-memory SCEReport ready to be saved or plotted.
     """
     resolved_configuration = configuration if configuration is not None else SCEDetectionConfiguration()
 
-    console.echo(message="Running SCE detection...", level=LogLevel.INFO)
+    if verbose:
+        console.echo(message="Running SCE detection...", level=LogLevel.INFO)
     sce_detector = SCEDetector(
         session_path=session_path,
         fluorescence_column=fluorescence_column,
         configuration=resolved_configuration,
     )
-    sce_detector.detect_events()
+    sce_detector.detect_events(progress=verbose)
     sce_results: list[SCEResult] = sce_detector.results
     cell_count = int(sce_detector.cell_count)
     sampling_rate_hz = float(sce_detector.sampling_rate_hz)
     period_count = len(sce_results)
     total_sces = int(sum(int(np.max(result.sce_labels)) for result in sce_results))
-    console.echo(
-        message=f"SCE detection complete: {period_count} stationary periods ({total_sces} SCEs).",
-        level=LogLevel.SUCCESS,
-    )
+    if verbose:
+        console.echo(
+            message=f"SCE detection complete: {period_count} stationary periods ({total_sces} SCEs).",
+            level=LogLevel.SUCCESS,
+        )
 
     cells = _build_sce_cells_table(cell_count=cell_count, sce_results=sce_results)
-    periods = _build_sce_periods_table(
-        sampling_rate_hz=sampling_rate_hz, results=sce_results, cell_count=cell_count
-    )
+    periods = _build_sce_periods_table(sampling_rate_hz=sampling_rate_hz, results=sce_results, cell_count=cell_count)
 
     # noinspection PyTypeChecker
     sce_cell_flag: NDArray[np.bool_] = cells[SCECellColumn.IS_SCE_CELL.value].to_numpy()
@@ -298,10 +371,7 @@ def compute_sce_report(
     return SCEReport(cells=cells, periods=periods, summary=summary)
 
 
-# ===== Private helpers ==========================================================================================
-
-
-_SCE_CELLS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
+_SCE_CELLS_EMPTY_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
     SCECellColumn.CELL_ID.value: pl.Int32,
     SCECellColumn.SCE_PARTICIPATION_COUNT.value: pl.Int32,
     SCECellColumn.SCE_PARTICIPATION_RATE.value: pl.Float32,
@@ -311,7 +381,7 @@ _SCE_CELLS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
 }
 
 
-_SCE_PERIODS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
+_SCE_PERIODS_EMPTY_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
     SCEPeriodColumn.PERIOD_INDEX.value: pl.Int32,
     SCEPeriodColumn.PERIOD_STATE.value: pl.Utf8,
     SCEPeriodColumn.CELL_COUNT.value: pl.Int32,
@@ -350,9 +420,9 @@ def _aggregate_sce_cell_columns(cell_count: int, sce_results: list[SCEResult]) -
     """Computes per-cell SCE participation and recruitment-significance metrics across every stationary period.
 
     Notes:
-        Per-period jitter-null p-values produced by :class:`SCEDetector` are combined via Fisher's method into
-        the per-cell ``SCE_PARTICIPATION_P_VALUE`` column. Methodological references live on the orchestrator
-        :func:`evaluate_and_save_sce_report`.
+        Per-period jitter-null p-values produced by `SCEDetector` are combined via Fisher's method into
+        the per-cell ``SCE_PARTICIPATION_P_VALUE`` column. Methodological references live on the per-session
+        compute entry-point `compute_sce_report`.
     """
     # noinspection PyTypeChecker
     participation: NDArray[np.int32] = np.zeros(cell_count, dtype=np.int32)
@@ -453,7 +523,7 @@ def _build_sce_periods_table(
         cell_count: Total number of cells in the session.
 
     Returns:
-        A polars DataFrame following :class:`SCEPeriodColumn`.
+        A polars DataFrame following `SCEPeriodColumn`.
     """
     if not results:
         return pl.DataFrame(schema=_SCE_PERIODS_EMPTY_SCHEMA)

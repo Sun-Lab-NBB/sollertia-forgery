@@ -1,6 +1,6 @@
 """Provides functionality for detecting and analyzing spatial tuning and place fields in neural recordings on
 a linear track. Methodological references for the tuning pipeline live on
-:func:`..tuning_report.compute_tuning_report`.
+`..tuning_report.compute_tuning_report`.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 
 from .utilities import (
-    RunSessionData,
     MINIMUM_VALID_BINS_FOR_PEARSON,
+    RunSessionData,
     bin_fluorescence_per_trial,
     bin_fluorescence_by_position,
 )
@@ -151,12 +151,12 @@ class PlaceFieldDetector:
         """Constructs the detector from already-loaded session data.
 
         Notes:
-            Takes the canonical data dependency (a :class:`RunSessionData` from
-            :func:`assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
+            Takes the canonical data dependency (a `RunSessionData` from
+            `assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
             detectors without re-reading the feather.
 
         Args:
-            run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
+            run_session: Pre-loaded session data from `assemble_run_session_data`.
             bin_size: Size of spatial bins in centimeters.
             configuration: Configuration parameters for place field detection. Uses defaults if None.
         """
@@ -227,7 +227,7 @@ class PlaceFieldDetector:
         Notes:
             Pipeline ordering: threshold-based detection -> per-trial binning -> lap-coverage filter.
             Significance is reported by the multi-criterion shuffles in
-            :meth:`compute_multi_criterion_significance`; the legacy combined "did a place field appear under
+            `compute_multi_criterion_significance`; the legacy combined "did a place field appear under
             shuffle?" filter is intentionally not applied here so downstream consumers can decide on a
             population using each criterion's per-cell p-value rather than a single conflated cutoff.
 
@@ -275,6 +275,8 @@ class PlaceFieldDetector:
         repeat_count: int = 1000,
         peak_percentile: float = 0.99,
         stability_percentile: float = 0.95,
+        *,
+        display_progress: bool = True,
     ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
         """Computes the per-cell IS_STABLE and IS_PEAK_SIGNIFICANT flags via per-cell shuffle distributions, and
         returns the corresponding per-cell p-values.
@@ -303,6 +305,9 @@ class PlaceFieldDetector:
             repeat_count: Number of shuffle iterations.
             peak_percentile: Percentile cutoff (0-1) for the peak-method classifier; default 0.99.
             stability_percentile: Percentile cutoff (0-1) for the stability classifier; default 0.95.
+            display_progress: When True, render the inner Peak / Stability shuffle tqdm bars; set to False by
+                ``..tuning_report.run_tuning_analysis`` when its session-level progress bar is the active visual
+                signal so the bars stay quiet.
 
         Returns:
             A tuple of (is_stable, is_peak_significant, stability_p_values, peak_p_values). All four arrays have
@@ -327,7 +332,7 @@ class PlaceFieldDetector:
         shuffled_peaks: NDArray[np.float32] = np.full((repeat_count, cell_count), np.nan, dtype=np.float32)
         smooth_size = int(self.configuration.smooth_size)
         peak_chunk_starts = list(range(0, repeat_count, _PEAK_SHUFFLE_CHUNK_SIZE))
-        for chunk_start in tqdm(peak_chunk_starts, desc="Peak shuffle", unit="chunk"):
+        for chunk_start in tqdm(peak_chunk_starts, desc="Peak shuffle", unit="chunk", disable=not display_progress):
             chunk_end = min(chunk_start + _PEAK_SHUFFLE_CHUNK_SIZE, repeat_count)
             _peak_shuffle_kernel(
                 fluorescence=self.fluorescence,
@@ -366,6 +371,7 @@ class PlaceFieldDetector:
                 repeat_count=repeat_count,
                 stability_percentile=stability_percentile,
                 observed_split_half_r=observed_split_half_r,
+                display_progress=display_progress,
             )
             # noinspection PyTypeChecker
             valid_observed: NDArray[np.bool_] = ~np.isnan(observed_split_half_r)
@@ -379,6 +385,8 @@ class PlaceFieldDetector:
         repeat_count: int,
         stability_percentile: float,
         observed_split_half_r: NDArray[np.float32],
+        *,
+        display_progress: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
         """Computes the per-cell stability threshold and per-cell stability p-value from a per-trial circular-shift
         null distribution.
@@ -402,6 +410,8 @@ class PlaceFieldDetector:
             stability_percentile: Percentile cutoff (0-1).
             observed_split_half_r: Observed per-cell split-half Pearson r with length cell_count. Used to compute the
                 per-cell p-value against the shuffled distribution.
+            display_progress: When True, render the inner Stability shuffle tqdm bar; set to False when the
+                session-level progress bar of ``..tuning_report.run_tuning_analysis`` is active.
 
         Returns:
             A tuple of (thresholds, p_values), each with length cell_count.
@@ -422,7 +432,7 @@ class PlaceFieldDetector:
         shuffled_split_half: NDArray[np.float32] = np.full((repeat_count, cell_count), np.nan, dtype=np.float32)
 
         chunk_starts = list(range(0, repeat_count, _STABILITY_SHUFFLE_CHUNK_SIZE))
-        for chunk_start in tqdm(chunk_starts, desc="Stability shuffle", unit="chunk"):
+        for chunk_start in tqdm(chunk_starts, desc="Stability shuffle", unit="chunk", disable=not display_progress):
             chunk_end = min(chunk_start + _STABILITY_SHUFFLE_CHUNK_SIZE, repeat_count)
             _stability_shuffle_kernel(
                 per_trial_rate_map=per_trial_rate_map,
@@ -448,7 +458,7 @@ class PlaceFieldDetector:
         """Runs the place field detection pipeline on dF/F0 normalized fluorescence data.
 
         Notes:
-            Speed-filters, bins by position, smooths, then hands off to :meth:`_detect_from_smoothed_rate_map` for
+            Speed-filters, bins by position, smooths, then hands off to `_detect_from_smoothed_rate_map` for
             the threshold + label + outside-field + peak filter steps.
 
         Args:
@@ -486,8 +496,8 @@ class PlaceFieldDetector:
         """Runs the threshold + label + outside-field + peak filter steps on a precomputed smoothed rate map.
 
         Notes:
-            Called from :meth:`_run_detection` after the speed-mask + bin-by-position + smooth steps. Does not
-            apply the lap-coverage filter (which requires per-trial binning); :meth:`detect` applies it after
+            Called from `_run_detection` after the speed-mask + bin-by-position + smooth steps. Does not
+            apply the lap-coverage filter (which requires per-trial binning); `detect` applies it after
             this method returns.
 
         Args:
@@ -1179,8 +1189,7 @@ def _peak_shuffle_kernel(
                     neighbor -= bin_count
                 total += bin_sums[neighbor]
             smoothed = total / np.float32(smooth_size)
-            if smoothed > peak:
-                peak = smoothed
+            peak = max(peak, smoothed)
         output[iteration, cell_index] = peak
 
 
@@ -1229,7 +1238,7 @@ def _lap_coverage_filter(
 
     Notes:
         Computes the per-cell out-of-field baseline from the pooled rate map (matching the convention in
-        :func:`_outside_field_threshold`). For each detected field, walks every lap, computes the mean in-field
+        `_outside_field_threshold`). For each detected field, walks every lap, computes the mean in-field
         fluorescence for that lap from the per-trial binned matrix, and counts laps where that mean exceeds
         the baseline. Laps where every in-field bin is NaN (no samples landed in the field that lap) are
         excluded from both the numerator and the denominator. Fields are dropped when the resulting coverage

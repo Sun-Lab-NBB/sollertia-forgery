@@ -14,7 +14,7 @@ from .tuning_report import (
     TuningSummary,
     TuningTrialSummary,
     TuningConfiguration,
-    evaluate_and_save_tuning_report,
+    run_tuning_analysis,
 )
 from .place_tuning_protocol import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_tuning_protocol import RewardCellResults, RewardCellDetector, RewardCellConfiguration
@@ -31,11 +31,11 @@ __all__ = [
     "TuningReport",
     "TuningSummary",
     "TuningTrialSummary",
-    "evaluate_and_save_tuning_report",
     "plot_per_trial_activity",
     "plot_place_cell_heatmap",
     "plot_population_activity_by_position",
     "plot_rate_map_heatmap",
     "plot_reward_com_histogram",
     "plot_speed_and_activity_by_position",
+    "run_tuning_analysis",
 ]

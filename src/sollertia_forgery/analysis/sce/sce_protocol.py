@@ -1,6 +1,6 @@
 """Provides functionality for detecting Synchronous Calcium Events (SCEs) in neural recordings.
 
-Methodological references for the SCE pipeline live on :func:`..sce_report.compute_sce_report`.
+Methodological references for the SCE pipeline live on `..sce_report.compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ from scipy.signal import savgol_filter
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
 
 from ...forging import FluorescenceColumn
-from ..shared_utilities import trim_acquisition_warmup
 from ...shared_assets import DatasetFiles, DatasetColumn
+from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -31,6 +31,10 @@ _MINIMUM_STABLE_SAMPLE_COUNT: int = 10
 """Minimum number of stable torque samples required for a rest period to be included in SCE analysis."""
 _DEFAULT_RNG_SEED: int = 42
 """Seed for the per-period numpy generator used for circular-shift shuffles. Fixed for reproducibility."""
+_REST_STATE: str = "rest"
+"""``DatasetColumn.SYSTEM_STATE`` value that uses the torque-based stationarity filter. Every other state
+value falls through to the speed/encoder-based filter. Both filters are stationarity gates: SCEs are
+restricted to moments when the animal is motionless, regardless of which protocol epoch the moment is in."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -800,12 +804,6 @@ def _identify_stable_rest_samples(
     return rolling_std <= stability_threshold
 
 
-_REST_STATE: str = "rest"
-"""``DatasetColumn.SYSTEM_STATE`` value that uses the torque-based stationarity filter. Every other state
-value falls through to the speed/encoder-based filter. Both filters are stationarity gates: SCEs are
-restricted to moments when the animal is motionless, regardless of which protocol epoch the moment is in."""
-
-
 def _identify_stable_run_samples(
     speed: NDArray[np.float32],
     sampling_rate: float,
@@ -815,7 +813,7 @@ def _identify_stable_run_samples(
     """Identifies non-rest samples where the wheel encoder is stable, marking pauses-within-run.
 
     Notes:
-        Mirrors :func:`_identify_stable_rest_samples` but uses wheel speed as the stationarity indicator. During
+        Mirrors `_identify_stable_rest_samples` but uses wheel speed as the stationarity indicator. During
         designated run epochs the animal is mostly locomoting, but brief pauses (encoder coasts to zero) are
         windows where SCE-class population synchrony can occur; this mask admits those samples.
 
@@ -846,7 +844,7 @@ class SCEDetector:
     the gate is animal stationarity, not which protocol epoch the sample sits in. Pauses-within-run survive
     and contribute their own SCE periods, tagged with the originating ``period_state`` so post-hoc analyses
     can split events by epoch. Methodological references live on
-    :func:`..sce_report.compute_sce_report`.
+    `..sce_report.compute_sce_report`.
 
     Args:
         session_path: Path to the session's dataset directory containing the data feather.
@@ -883,7 +881,7 @@ class SCEDetector:
             ],
             memory_map=True,
         )
-        df = trim_acquisition_warmup(df)
+        df = trim_acquisition_warmup(dataframe=df)
 
         time_us = df[DatasetColumn.TIME_US.value].to_numpy()
         median_interval_us = np.median(np.diff(time_us))
@@ -895,7 +893,9 @@ class SCEDetector:
         # noinspection PyTypeChecker
         self._fluorescence: NDArray[np.float32] = np.array(df[fluorescence_column.value].to_list(), dtype=np.float32).T
         # noinspection PyTypeChecker
-        self._torque: NDArray[np.float32] = df[DatasetColumn.TORQUE_N_CM.value].to_numpy().astype(np.float32, copy=False)
+        self._torque: NDArray[np.float32] = (
+            df[DatasetColumn.TORQUE_N_CM.value].to_numpy().astype(np.float32, copy=False)
+        )
         # noinspection PyTypeChecker
         self._speed: NDArray[np.float32] = df[DatasetColumn.SPEED_CM_S.value].to_numpy().astype(np.float32, copy=False)
         # noinspection PyTypeChecker

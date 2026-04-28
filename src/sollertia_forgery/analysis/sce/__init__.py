@@ -6,7 +6,7 @@ from .sce_report import (
     SCESummary,
     SCECellColumn,
     SCEPeriodColumn,
-    evaluate_and_save_sce_report,
+    run_sce_analysis,
 )
 from .sce_protocol import SCEResult, SCEDetector, SCEDetectionConfiguration
 
@@ -18,7 +18,7 @@ __all__ = [
     "SCEReport",
     "SCEResult",
     "SCESummary",
-    "evaluate_and_save_sce_report",
     "plot_sce_assemblies",
     "plot_sce_cells_across_periods",
+    "run_sce_analysis",
 ]

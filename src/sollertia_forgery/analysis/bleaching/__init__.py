@@ -7,16 +7,16 @@ from .plotting import (
     plot_dataset_baseline_trend,
     plot_within_session_average,
 )
-from .bleaching_protocol import (
-    BleachingConfiguration,
-    BleachingSessionResult,
-)
 from .bleaching_analysis import (
     BleachingColumn,
     BleachingReport,
     BleachingSummary,
     ExponentialDecayFit,
     run_bleaching_analysis,
+)
+from .bleaching_protocol import (
+    BleachingConfiguration,
+    BleachingSessionResult,
 )
 
 __all__ = [

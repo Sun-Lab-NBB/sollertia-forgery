@@ -1,8 +1,9 @@
 """Cross-package utilities shared by the bleaching, SCE, and tuning analysis pipelines.
 
-Currently exposes the acquisition-warmup trimming helper (every pipeline drops the same leading window) and the
+Currently exposes the acquisition-warmup trimming helper (every pipeline drops the same leading window), the
 session-day display-unit resolver (cross-session aggregates label x-axes the same way regardless of which
-modality they aggregate). Pipeline-specific helpers live in their per-package ``utilities`` modules.
+modality they aggregate), and the (animal, session) selection resolver consumed by the per-modality
+orchestrators. Pipeline-specific helpers live in their per-package ``utilities`` modules.
 """
 
 from __future__ import annotations
@@ -10,14 +11,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
-import polars as pl
 from ataraxis_time import TimeUnits, convert_time
 from ataraxis_base_utilities import console
 
 from ..shared_assets import DatasetColumn
 
 if TYPE_CHECKING:
+    import polars as pl
     from numpy.typing import NDArray
+
+    from ..shared_assets import DatasetData, DatasetSession
 
 
 _ACQUISITION_WARMUP_SECONDS: float = 60.0
@@ -29,9 +32,8 @@ place-field tuning). Trimming at load time guarantees every analyzer operates on
 needing to know the artifact exists."""
 
 
-def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
-    """Drops the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe based on the
-    ``time_us`` column.
+def trim_acquisition_warmup(dataframe: pl.DataFrame) -> pl.DataFrame:
+    """Drops the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe via ``time_us``.
 
     Notes:
         Operates on the polars dataframe directly (rather than the post-explode numpy arrays) so the warmup
@@ -40,16 +42,16 @@ def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
         NaN sentinels for such degenerate sessions.
 
     Args:
-        df: Session dataframe loaded from ``DatasetFiles.DATA``. Must include ``DatasetColumn.TIME_US`` among
-            the selected columns; all other columns are passed through untouched.
+        dataframe: Session dataframe loaded from ``DatasetFiles.DATA``. Must include ``DatasetColumn.TIME_US``
+            among the selected columns; all other columns are passed through untouched.
 
     Returns:
         The input dataframe sliced to drop every row whose ``time_us`` value precedes the warmup cutoff.
     """
-    if df.height == 0:
-        return df
+    if dataframe.height == 0:
+        return dataframe
     # noinspection PyTypeChecker
-    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
+    time_us: NDArray[np.int64] = dataframe[DatasetColumn.TIME_US.value].to_numpy()
     warmup_us = int(
         convert_time(
             time=_ACQUISITION_WARMUP_SECONDS,
@@ -61,8 +63,8 @@ def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
     cutoff_us = int(time_us[0]) + warmup_us
     warmup_index = int(np.searchsorted(a=time_us, v=cutoff_us, side="left"))
     if warmup_index <= 0:
-        return df
-    return df.slice(offset=warmup_index)
+        return dataframe
+    return dataframe.slice(offset=warmup_index)
 
 
 def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, NDArray[np.int64]]:
@@ -91,9 +93,7 @@ def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, N
 
     # Promotes through float64 first so the *24 multiplication does not lose precision near the float32 boundary.
     # noinspection PyTypeChecker
-    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(
-        np.int64, copy=False
-    )
+    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(np.int64, copy=False)
     if int(np.unique(rounded_hours).size) == int(rounded_hours.size):
         return "hour", rounded_hours
 
@@ -106,3 +106,93 @@ def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, N
     # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
     # noinspection PyUnreachableCode
     raise ValueError(message)  # pragma: no cover
+
+
+def resolve_session_selection(
+    dataset: DatasetData,
+    *,
+    animal: str | tuple[str, ...] | None,
+    session: str | tuple[str, ...] | None,
+) -> tuple[DatasetSession, ...]:
+    """Resolves the (animal, session) filter pair into a chronologically ordered tuple of DatasetSession instances.
+
+    Notes:
+        ``animal`` and ``session`` accept None, a single string, or a tuple of strings; None disables that
+        filter. The two filters compose as a logical AND: each returned session must (i) belong to one of the
+        requested animals (or to any animal when ``animal`` is None), and (ii) match one of the requested
+        session names (or any session name when ``session`` is None). The result is sorted by the canonical
+        timestamp-based session name so chronological per-animal aggregations downstream do not need to re-sort.
+
+    Args:
+        dataset: The DatasetData whose sessions are filtered.
+        animal: Animal identifier filter; None matches every animal.
+        session: Session identifier filter; None matches every session.
+
+    Returns:
+        A tuple of DatasetSession instances matching the resolved filters, sorted by ``(animal, session)``.
+
+    Raises:
+        ValueError: When the animal or session filter references identifiers absent from the dataset, or when
+            the resolved selection is empty.
+    """
+    requested_animals = _normalize_filter(value=animal)
+    requested_sessions = _normalize_filter(value=session)
+
+    available_animals = {dataset_animal.animal for dataset_animal in dataset.animals}
+    if requested_animals is not None:
+        unknown_animals = requested_animals - available_animals
+        if unknown_animals:
+            available = ", ".join(sorted(available_animals)) if available_animals else "<none>"
+            message = (
+                f"Unable to resolve session selection on dataset {dataset.name!r}. The animal filter "
+                f"references unknown animals: {sorted(unknown_animals)}. Available animals: {available}."
+            )
+            console.error(message=message, error=ValueError)
+
+    matched: list[DatasetSession] = []
+    for dataset_session in dataset.sessions:
+        if requested_animals is not None and dataset_session.animal not in requested_animals:
+            continue
+        if requested_sessions is not None and dataset_session.session not in requested_sessions:
+            continue
+        matched.append(dataset_session)
+
+    if requested_sessions is not None:
+        matched_session_names = {dataset_session.session for dataset_session in matched}
+        missing_sessions = requested_sessions - matched_session_names
+        if missing_sessions:
+            scope = (
+                f"animals {sorted(requested_animals)}" if requested_animals is not None else f"dataset {dataset.name!r}"
+            )
+            message = (
+                f"Unable to resolve session selection. The session filter references session names not present "
+                f"under {scope}: {sorted(missing_sessions)}."
+            )
+            console.error(message=message, error=ValueError)
+
+    if not matched:
+        message = (
+            f"Unable to resolve session selection on dataset {dataset.name!r}. The (animal, session) filter pair "
+            f"yielded zero matching sessions."
+        )
+        console.error(message=message, error=ValueError)
+
+    matched.sort(key=lambda dataset_session: (dataset_session.animal, dataset_session.session))
+    return tuple(matched)
+
+
+def _normalize_filter(value: str | tuple[str, ...] | None) -> set[str] | None:
+    """Normalizes a None / single-string / tuple-of-strings filter into either ``None`` or a set of strings.
+
+    Args:
+        value: The raw filter value as accepted by `resolve_session_selection`.
+
+    Returns:
+        ``None`` when ``value`` is ``None`` (filter disabled); otherwise a set holding every requested
+        identifier.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return {value}
+    return set(value)

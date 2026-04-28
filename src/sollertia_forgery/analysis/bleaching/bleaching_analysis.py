@@ -2,11 +2,11 @@
 for the same animal.
 
 Implements the canonical three-metric protocol for chronic GCaMP imaging by aggregating per-session inputs from
-:mod:`.bleaching_protocol`: per-cell session-median baseline fluorescence (estimated as a low percentile of the
+`.bleaching_protocol`: per-cell session-median baseline fluorescence (estimated as a low percentile of the
 raw trace within a baseline window) trend across days fit to a single exponential, within-session bleaching
 slope, and per-cell signal-to-noise change on the multi-recording registered cell intersection. The per-session
-compute kernel and its numba implementation live in :mod:`.bleaching_protocol`; per-animal and dataset-level
-plots live in :mod:`.plotting`.
+compute kernel and its numba implementation live in `.bleaching_protocol`; per-animal and dataset-level
+plots live in `.plotting`.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
 from itertools import pairwise
-from contextlib import nullcontext
 from dataclasses import dataclass
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -27,14 +26,16 @@ from scipy.optimize import curve_fit
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
-from .bleaching_protocol import BleachingConfiguration, BleachingSessionResult, compute_session_metrics
+from ...shared_assets import delay_terminal
 from ..shared_utilities import resolve_display_units
-from ...shared_assets import DatasetData, DatasetAnimal
+from .bleaching_protocol import BleachingConfiguration, BleachingSessionResult, compute_session_metrics
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from numpy.typing import NDArray
+
+    from ...shared_assets import DatasetData, DatasetAnimal
 
 
 _MINIMUM_SESSIONS_FOR_DECAY_FIT: int = 3
@@ -165,7 +166,7 @@ class BleachingReport:
             animal: The DatasetAnimal whose directory holds ``bleaching.yaml`` and ``bleaching.feather``.
 
         Returns:
-            A BleachingReport persisted by :func:`run_bleaching_analysis`.
+            A BleachingReport persisted by `run_bleaching_analysis`.
         """
         summary: BleachingSummary = BleachingSummary.from_yaml(file_path=animal.bleaching_path)
         table = pl.read_ipc(source=animal.bleaching_table_path, memory_map=True)
@@ -186,15 +187,14 @@ class BleachingReport:
         Notes:
             Covers all three protocol metrics — across-session baseline trend (chronic), within-session bleaching
             (acute), per-cell SNR change — with the configured thresholds and pass/fail status for each, plus a
-            per-session detail table. Together with :func:`.plotting.plot_baseline_trend`,
-            :func:`.plotting.plot_within_session`, and :func:`.plotting.plot_snr_distributions`, this is jointly
+            per-session detail table. Together with `.plotting.plot_baseline_trend`,
+            `.plotting.plot_within_session`, and `.plotting.plot_snr_distributions`, this is jointly
             sufficient for scientific presentation, discussion, and publication of the animal's photobleaching
             state. Designed to be human-readable and parseable by downstream agents.
 
         Returns:
             A multi-line string. Use ``print_summary`` for direct console output.
         """
-
         configuration = self.summary.configuration
         decay_fit = self.summary.baseline_fluorescence_decay_fit
         table = self.table
@@ -393,19 +393,19 @@ def _assemble_bleaching_report(
     session_results: tuple[BleachingSessionResult, ...],
     configuration: BleachingConfiguration,
 ) -> BleachingReport:
-    """Assembles a :class:`BleachingReport` from pre-computed per-session results.
+    """Assembles a `BleachingReport` from pre-computed per-session results.
 
     Notes:
         Pure aggregation step — no I/O, no per-cell compute. Validates chronological order of ``session_paths``
         and registered cell-count consistency across results before running the cross-session decay fit, paired
         Wilcoxon comparison, and combined-flag computation. Methodological references for the protocol live on
-        the public orchestrator :func:`run_bleaching_analysis`; this helper exists so the orchestrator can hand
+        the public orchestrator `run_bleaching_analysis`; this helper exists so the orchestrator can hand
         off its parallel session-results dispatch to a single deterministic aggregation pass.
 
     Args:
         session_paths: Chronologically ordered tuple of session directory paths, parallel to
             ``session_results``.
-        session_results: Per-session results produced by :func:`.bleaching_protocol.compute_session_metrics`,
+        session_results: Per-session results produced by `.bleaching_protocol.compute_session_metrics`,
             in the same order as ``session_paths``.
         configuration: Bleaching evaluation parameters that produced the results.
 
@@ -492,9 +492,7 @@ def _assemble_bleaching_report(
     table = pl.DataFrame(
         [
             pl.Series(name=BleachingColumn.SESSION.value, values=session_names, dtype=pl.Utf8),
-            pl.Series(
-                name=BleachingColumn.DAYS_SINCE_FIRST.value, values=days_since_first_values, dtype=pl.Float32
-            ),
+            pl.Series(name=BleachingColumn.DAYS_SINCE_FIRST.value, values=days_since_first_values, dtype=pl.Float32),
             pl.Series(name=BleachingColumn.SAMPLING_RATE_HZ.value, values=sampling_rates, dtype=pl.Float64),
             pl.Series(
                 name=BleachingColumn.CELL_BASELINE_FLUORESCENCE.value,
@@ -557,22 +555,24 @@ def run_bleaching_analysis(
     *,
     animal: str | None = None,
     workers: int = -1,
-    display_progress: bool = True,
     configuration: BleachingConfiguration | None = None,
 ) -> tuple[BleachingReport, ...]:
     """Evaluates bleaching for every animal in the dataset (or a single specified animal) and persists each report.
 
     Notes:
-        Sole orchestrator for assembling :class:`BleachingReport` artifacts. Per-session metrics are produced
-        by :func:`.bleaching_protocol.compute_session_metrics` and cross-session aggregation is delegated to
-        :func:`_assemble_bleaching_report`; methodological references and protocol context live on those
+        Sole orchestrator for assembling `BleachingReport` artifacts. Per-session metrics are produced
+        by `.bleaching_protocol.compute_session_metrics` and cross-session aggregation is delegated to
+        `_assemble_bleaching_report`; methodological references and protocol context live on those
         algorithmic entry-points. Each report is written to ``<dataset>/<animal>/bleaching.yaml`` and
         ``<dataset>/<animal>/bleaching.feather`` and returned to the caller for in-process figure rendering.
 
         ``workers`` controls the total CPU budget. Sessions are the natural unit of parallelism: the budget is
         split between across-session subprocesses and within-session Numba threads through cindra's saturating
-        allocator (:func:`_resolve_saturating_allocation`). A budget of one (or a single session in scope)
+        allocator (`_resolve_saturating_allocation`). A budget of one (or a single session in scope)
         collapses to an in-process run with every thread handed to Numba.
+
+        A session-level progress bar is always shown so the run surfaces feedback to the caller; the
+        per-session compute kernel does not emit additional console output, so the bar is the sole signal.
 
     Args:
         dataset: The DatasetData instance whose animals are evaluated.
@@ -580,8 +580,6 @@ def run_bleaching_analysis(
             is evaluated and the returned tuple preserves the order of ``DatasetData.animals``.
         workers: The total number of CPU cores to use. A non-positive value requests every available core minus
             the system reserve. ``workers=1`` forces a fully sequential, single-threaded run.
-        display_progress: Determines whether to display a progress bar tracking total sessions across every
-            in-scope animal as each session row is computed.
         configuration: Bleaching evaluation parameters shared across animals. Uses defaults if None.
 
     Returns:
@@ -626,9 +624,7 @@ def run_bleaching_analysis(
         sessions_by_animal[animal_name] = animal_session_paths
 
     session_jobs: tuple[tuple[str, Path], ...] = tuple(
-        (animal_name, session_path)
-        for animal_name in animal_names
-        for session_path in sessions_by_animal[animal_name]
+        (animal_name, session_path) for animal_name in animal_names for session_path in sessions_by_animal[animal_name]
     )
     total_sessions = len(session_jobs)
 
@@ -647,12 +643,13 @@ def run_bleaching_analysis(
             f"Running bleaching analysis on dataset {dataset.name!r} for "
             f"{len(animal_names)} animal{'s' if len(animal_names) != 1 else ''} "
             f"({total_sessions} session{'s' if total_sessions != 1 else ''} total): "
-            f"{parallel_sessions} parallel × {numba_threads_per_session} Numba "
+            f"{parallel_sessions} parallel x {numba_threads_per_session} Numba "
             f"thread{'s' if numba_threads_per_session != 1 else ''} per session "
             f"(total CPU budget: {total_workers})..."
         ),
         level=LogLevel.INFO,
     )
+    delay_terminal()
 
     # Computes per-session results. Each result keys back to its (animal, session_path) pair so the parent can
     # reorder them into chronological per-animal arrays before aggregation.
@@ -662,39 +659,30 @@ def run_bleaching_analysis(
         # Single-session or single-worker fast path: stay in-process and hand every thread to Numba so the
         # per-cell kernels saturate the local thread pool.
         set_num_threads(numba_threads_per_session)
-        progress_context = (
-            console.progress(total=total_sessions, description="Computing session rows", unit="session")
-            if display_progress
-            else nullcontext()
-        )
-        with progress_context as progress_bar:
+        with console.progress(
+            total=total_sessions, description="Computing session rows", unit="session"
+        ) as progress_bar:
             for animal_name, session_path in session_jobs:
                 results_by_animal[animal_name][session_path] = compute_session_metrics(
                     session_path=session_path,
                     configuration=resolved_configuration,
                 )
-                if progress_bar is not None:
-                    progress_bar.update()
+                progress_bar.update()
     else:
         # Multi-session path: dispatch session results across a process pool. Each subprocess sets its Numba
         # thread cap via the initializer so the per-cell kernels respect the per-process share, and the parent
         # process surfaces one session-level progress bar.
-        progress_context = (
-            console.progress(
-                total=total_sessions,
-                description=f"Computing session rows ({parallel_sessions} sessions in parallel)",
-                unit="session",
-            )
-            if display_progress
-            else nullcontext()
-        )
         with (
             ProcessPoolExecutor(
                 max_workers=parallel_sessions,
                 initializer=_configure_subprocess_numba_threads,
                 initargs=(numba_threads_per_session,),
             ) as executor,
-            progress_context as progress_bar,
+            console.progress(
+                total=total_sessions,
+                description=f"Computing session rows ({parallel_sessions} sessions in parallel)",
+                unit="session",
+            ) as progress_bar,
         ):
             future_to_job = {
                 executor.submit(
@@ -707,8 +695,7 @@ def run_bleaching_analysis(
             for future in as_completed(future_to_job):
                 completed_animal, completed_path = future_to_job[future]
                 results_by_animal[completed_animal][completed_path] = future.result()
-                if progress_bar is not None:
-                    progress_bar.update()
+                progress_bar.update()
 
     # Aggregates per animal in the parent. The cross-session step is cheap (population medians, curve_fit,
     # Wilcoxon, flag mask) compared to the per-session compute, and keeping it in the parent avoids round-tripping
@@ -733,6 +720,7 @@ def run_bleaching_analysis(
         ),
         level=LogLevel.SUCCESS,
     )
+    delay_terminal()
     return tuple(reports)
 
 
@@ -867,7 +855,7 @@ def _fit_exponential_decay(
             bounds=((-np.inf, 1e-6, -np.inf), (np.inf, np.inf, np.inf)),
             maxfev=10000,
         )
-    except (RuntimeError, ValueError):
+    except RuntimeError, ValueError:
         return _failed_decay_fit()
 
     amplitude, tau_days, offset = (float(parameter) for parameter in parameters)
@@ -934,7 +922,7 @@ def _compute_paired_snr_p_values(cell_snr_arrays: list[NDArray[np.float32]]) -> 
 
 
 class _FlagMasks(NamedTuple):
-    """Per-criterion and combined boolean masks produced by :func:`_compute_flag_masks`.
+    """Per-criterion and combined boolean masks produced by `_compute_flag_masks`.
 
     Each mask is aligned with the per-session arrays the helper consumed. ``combined`` is the elementwise OR of
     ``baseline``, ``within``, and ``snr`` and is what gets persisted into the FLAGGED column; the per-criterion
@@ -943,9 +931,13 @@ class _FlagMasks(NamedTuple):
     """
 
     baseline: NDArray[np.bool_]
+    """True for sessions whose baseline-fluorescence loss exceeds ``baseline_fluorescence_loss_threshold``."""
     within: NDArray[np.bool_]
+    """True for sessions whose within-session fractional drop exceeds ``within_session_loss_threshold``."""
     snr: NDArray[np.bool_]
+    """True for sessions failing both the SNR loss and paired Wilcoxon significance criteria."""
     combined: NDArray[np.bool_]
+    """Elementwise OR of ``baseline``, ``within``, and ``snr`` persisted into the FLAGGED column."""
 
 
 def _compute_flag_masks(
@@ -965,7 +957,7 @@ def _compute_flag_masks(
         configuration: Bleaching evaluation parameters that supply the threshold values.
 
     Returns:
-        A :class:`_FlagMasks` whose ``baseline``, ``within``, and ``snr`` fields hold per-criterion masks and
+        A `_FlagMasks` whose ``baseline``, ``within``, and ``snr`` fields hold per-criterion masks and
         whose ``combined`` field is the elementwise OR used for the persisted FLAGGED column.
     """
     session_count = population_baseline.shape[0]

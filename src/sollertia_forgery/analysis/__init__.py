@@ -8,8 +8,8 @@ from .sce import (
     SCECellColumn,
     SCEPeriodColumn,
     SCEDetectionConfiguration,
+    run_sce_analysis,
     plot_sce_assemblies,
-    evaluate_and_save_sce_report,
     plot_sce_cells_across_periods,
 )
 from .tuning import (
@@ -17,18 +17,18 @@ from .tuning import (
     TuningColumn,
     TuningReport,
     TuningSummary,
-    PlaceFieldDetector,
-    TuningConfiguration,
     RewardCellResults,
+    PlaceFieldDetector,
     RewardCellDetector,
     TuningTrialSummary,
+    TuningConfiguration,
     RewardCellConfiguration,
+    PlaceFieldDetectionConfiguration,
+    run_tuning_analysis,
     plot_rate_map_heatmap,
     plot_per_trial_activity,
     plot_place_cell_heatmap,
     plot_reward_com_histogram,
-    PlaceFieldDetectionConfiguration,
-    evaluate_and_save_tuning_report,
     plot_speed_and_activity_by_position,
     plot_population_activity_by_position,
 )
@@ -42,11 +42,11 @@ from .bleaching import (
     plot_baseline_trend,
     plot_within_session,
     plot_snr_distributions,
-    plot_within_session_average,
     run_bleaching_analysis,
     plot_dataset_baseline_trend,
+    plot_within_session_average,
 )
-from .shared_utilities import resolve_display_units
+from .shared_utilities import resolve_display_units, resolve_session_selection
 
 __all__ = [
     "BleachingColumn",
@@ -73,8 +73,6 @@ __all__ = [
     "TuningReport",
     "TuningSummary",
     "TuningTrialSummary",
-    "evaluate_and_save_sce_report",
-    "evaluate_and_save_tuning_report",
     "plot_baseline_trend",
     "plot_dataset_baseline_trend",
     "plot_per_trial_activity",
@@ -89,5 +87,8 @@ __all__ = [
     "plot_within_session",
     "plot_within_session_average",
     "resolve_display_units",
+    "resolve_session_selection",
     "run_bleaching_analysis",
+    "run_sce_analysis",
+    "run_tuning_analysis",
 ]

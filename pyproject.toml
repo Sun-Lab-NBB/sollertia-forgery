@@ -198,7 +198,7 @@ ignore_errors = true
 
 # Suppresses missing-stub warnings for third-party libraries that do not ship type information.
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*", "tqdm", "tqdm.*"]
+module = ["numba", "numba.*", "tqdm", "tqdm.*", "threadpoolctl", "threadpoolctl.*"]
 ignore_missing_imports = true
 
 # Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run

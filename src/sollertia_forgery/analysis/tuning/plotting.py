@@ -1,9 +1,9 @@
 """Per-session plotting helpers for the tuning pipeline.
 
-Module-level functions consume a :class:`TuningReport` plus the trial type the figure should depict, plus —
+Module-level functions consume a `TuningReport` plus the trial type the figure should depict, plus —
 where noted — the session's ``data.feather`` opened memory-mapped at plot time. Persistence and summarization
 stay on the report. Every function takes a ``trial_type`` argument that selects the long-format slice of the
-report's cells feather and the matching :class:`TuningTrialSummary` entry.
+report's cells feather and the matching `TuningTrialSummary` entry.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 
 from ...forging import FluorescenceColumn
-from ..shared_utilities import trim_acquisition_warmup
 from .utilities import assemble_run_session_data
+from .tuning_report import TuningColumn, TuningReport
 from ...shared_assets import DatasetColumn
-from .tuning_report import TuningReport, TuningColumn
+from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -198,9 +198,7 @@ def plot_reward_com_histogram(
     figure, axes = plt.subplots(1, 1, figsize=(10, 4), facecolor="white", dpi=figure_dpi)
     # noinspection PyTypeChecker
     hist_bins: NDArray[np.float64] = np.linspace(0, trial_summary.track_length_cm, bin_count + 1)
-    axes.hist(
-        valid_centers, bins=hist_bins.tolist(), color="0.7", edgecolor="0.5", density=True, label="Observed COMs"
-    )
+    axes.hist(valid_centers, bins=hist_bins.tolist(), color="0.7", edgecolor="0.5", density=True, label="Observed COMs")
 
     # noinspection PyTypeChecker
     positions: NDArray[np.float64] = np.linspace(0, trial_summary.track_length_cm, 200)
@@ -232,7 +230,9 @@ def plot_reward_com_histogram(
 
     axes.fill_between(positions, 0, uniform_band, alpha=0.3, color="lightblue", label="Uniform (place cells)")
     axes.fill_between(positions, uniform_band, landmark_band, alpha=0.3, color="khaki", label="Track-end Gaussians")
-    axes.fill_between(positions, landmark_band, mixture_density, alpha=0.4, color="mediumpurple", label="Reward Gaussian")
+    axes.fill_between(
+        positions, landmark_band, mixture_density, alpha=0.4, color="mediumpurple", label="Reward Gaussian"
+    )
     axes.plot(positions, mixture_density, color="black", linewidth=1.5, label="Mixture fit")
     axes.axvline(
         x=trial_summary.reward_position_cm,
@@ -283,9 +283,7 @@ def plot_rate_map_heatmap(
     """
     trial_summary = report.trial_summary(trial_type=trial_type)
     cells = report.trial_cells(trial_type=trial_type)
-    rate_maps = _stack_list_column(
-        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
-    )
+    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count)
     # noinspection PyTypeChecker
     centers_of_mass: NDArray[np.float32] = (
         cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
@@ -364,17 +362,13 @@ def plot_population_activity_by_position(
     """
     trial_summary = report.trial_summary(trial_type=trial_type)
     cells = report.trial_cells(trial_type=trial_type)
-    rate_maps = _stack_list_column(
-        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
-    )
+    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count)
     # noinspection PyTypeChecker
     is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
     is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = cells[
-        TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
-    ].to_numpy()
+    is_position_glm_significant: NDArray[np.bool_] = cells[TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value].to_numpy()
 
     bin_centers = (np.arange(trial_summary.bin_count) + 0.5) * trial_summary.bin_size_cm
     all_significant = is_significant
@@ -435,17 +429,13 @@ def plot_speed_and_activity_by_position(
     """
     trial_summary = report.trial_summary(trial_type=trial_type)
     cells = report.trial_cells(trial_type=trial_type)
-    rate_maps = _stack_list_column(
-        table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count
-    )
+    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count)
     # noinspection PyTypeChecker
     is_significant: NDArray[np.bool_] = cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
     is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = cells[
-        TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
-    ].to_numpy()
+    is_position_glm_significant: NDArray[np.bool_] = cells[TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value].to_numpy()
     reward_predictive_mask = is_significant & is_reward_proximal & is_position_glm_significant
 
     if int(np.sum(reward_predictive_mask)) == 0:
@@ -537,9 +527,7 @@ def plot_per_trial_activity(
     # noinspection PyTypeChecker
     is_reward_proximal: NDArray[np.bool_] = cells[TuningColumn.IS_REWARD_PROXIMAL.value].to_numpy()
     # noinspection PyTypeChecker
-    is_position_glm_significant: NDArray[np.bool_] = cells[
-        TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value
-    ].to_numpy()
+    is_position_glm_significant: NDArray[np.bool_] = cells[TuningColumn.IS_POSITION_GLM_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
     cv_partial_r2: NDArray[np.float32] = (
         cells[TuningColumn.CV_POSITION_PARTIAL_R2.value].to_numpy().astype(np.float32, copy=False)
@@ -692,9 +680,6 @@ def plot_per_trial_activity(
     return figure
 
 
-# ===== Private helpers ==========================================================================================
-
-
 def _stack_list_column(table: pl.DataFrame, column: TuningColumn, target_length: int) -> NDArray[np.float32]:
     """Materializes a List(Float32) column into a (cell_count, target_length) numpy array, padding with NaN
     rows for nulls.
@@ -745,7 +730,7 @@ def _bin_speed_by_position(
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.DISTANCE_CM.value, DatasetColumn.SPEED_CM_S.value],
         memory_map=True,
     )
-    df = trim_acquisition_warmup(df)
+    df = trim_acquisition_warmup(dataframe=df)
 
     # noinspection PyTypeChecker
     distance: NDArray[np.float32] = df[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float32, copy=False)
@@ -757,9 +742,7 @@ def _bin_speed_by_position(
     # noinspection PyTypeChecker
     bin_edges: NDArray[np.float32] = np.arange(0.0, track_length_cm + bin_size_cm, bin_size_cm, dtype=np.float32)
     # noinspection PyTypeChecker
-    bin_indices: NDArray[np.int64] = np.clip(
-        np.searchsorted(bin_edges, position, side="right") - 1, 0, bin_count - 1
-    )
+    bin_indices: NDArray[np.int64] = np.clip(np.searchsorted(bin_edges, position, side="right") - 1, 0, bin_count - 1)
     # noinspection PyTypeChecker
     speed_sums: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
     # noinspection PyTypeChecker
@@ -836,9 +819,7 @@ def _render_significance_strips(
         # noinspection PyTypeChecker
         p_values: NDArray[np.float32] = table[column.value].to_numpy().astype(np.float32, copy=False)
         # noinspection PyTypeChecker
-        ordered_p: NDArray[np.float32] = (
-            np.empty(0, dtype=np.float32) if cell_count == 0 else p_values[ordered_indices]
-        )
+        ordered_p: NDArray[np.float32] = np.empty(0, dtype=np.float32) if cell_count == 0 else p_values[ordered_indices]
         # noinspection PyTypeChecker
         clipped: NDArray[np.float32] = np.clip(ordered_p, floor, 1.0)
         with np.errstate(divide="ignore", invalid="ignore"):

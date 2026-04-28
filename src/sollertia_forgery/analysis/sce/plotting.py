@@ -1,9 +1,9 @@
 """Per-session plotting helpers for the SCE pipeline.
 
-Module-level functions consume an :class:`SCEReport` plus, where noted, the session's ``data.feather`` opened
+Module-level functions consume an `SCEReport` plus, where noted, the session's ``data.feather`` opened
 memory-mapped at plot time. Persistence and summarization stay on the report; assembly detection runs locally
 so the report itself does not need to carry a live detector. Methodological references for the SCE pipeline
-live on :func:`..sce_report.compute_sce_report`.
+live on `..sce_report.compute_sce_report`.
 """
 
 from __future__ import annotations
@@ -16,19 +16,19 @@ import numpy as np
 import polars as pl
 from scipy.signal import savgol_filter
 from threadpoolctl import threadpool_limits
-from scipy.sparse.linalg import LinearOperator, eigsh, ArpackNoConvergence
 import matplotlib.pyplot as plt
+from scipy.sparse.linalg import LinearOperator, ArpackNoConvergence, eigsh
 from ataraxis_base_utilities import resolve_worker_count
 
 from ...forging import FluorescenceColumn
-from ..shared_utilities import trim_acquisition_warmup
 from .sce_report import SCEReport, SCECellColumn, SCEPeriodColumn
-from .sce_protocol import SCEDetectionConfiguration
 from ...shared_assets import DatasetColumn
+from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+    from .sce_protocol import SCEDetectionConfiguration
     from ...shared_assets import DatasetSession
 
 
@@ -44,7 +44,7 @@ _ICA_PREFERRED_BLAS_THREADS_PER_SHUFFLE: int = 10
 """Preferred BLAS thread count per ICA-CS / reactivation shuffle worker. Mirrors the bleaching analyzer's
 ``_PREFERRED_WORKERS_PER_SESSION = 10`` constant: the Lanczos matvec and the per-period reactivation GEMMs
 are BLAS-bound and stop scaling cleanly past ten threads, so the shuffle-level allocator
-(:func:`_resolve_ica_shuffle_allocation`) targets this width and uses the remaining budget to spawn more
+(`_resolve_ica_shuffle_allocation`) targets this width and uses the remaining budget to spawn more
 parallel workers."""
 _ICA_MINIMUM_BLAS_THREADS_PER_SHUFFLE: int = 5
 """Floor on per-worker BLAS threads. Falling below this floor reduces parallel-shuffle count one worker at a
@@ -298,9 +298,6 @@ def plot_sce_assemblies(
     return figure
 
 
-# ===== Private helpers ==========================================================================================
-
-
 def _walk_session_periods(
     *,
     session: DatasetSession,
@@ -319,7 +316,7 @@ def _walk_session_periods(
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.SYSTEM_STATE.value, fluorescence_column.value],
         memory_map=True,
     )
-    df = trim_acquisition_warmup(df)
+    df = trim_acquisition_warmup(dataframe=df)
     # noinspection PyTypeChecker
     time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
     if time_us.size < _MINIMUM_OBSERVATIONS_FOR_VARIANCE:
@@ -489,7 +486,7 @@ def _shuffle_max_eigenvalue(
         eigenvalue of ``(shuffled @ shuffled.T) / N`` is recovered via ARPACK Lanczos with ``k=1`` on a
         ``LinearOperator`` whose ``matvec`` is ``shuffled @ (shuffled.T @ v) / N``; the (cell_count,
         cell_count) correlation matrix is never materialised. The shuffles run concurrently on a
-        ``ThreadPoolExecutor`` whose budget is split by :func:`_resolve_ica_shuffle_allocation`.
+        ``ThreadPoolExecutor`` whose budget is split by `_resolve_ica_shuffle_allocation`.
     """
     cell_count, sample_count = z.shape
     # noinspection PyTypeChecker
@@ -589,15 +586,16 @@ def _fast_ica_deflation(
     maximum_iterations: int = 200,
     tolerance: float = 1e-4,
 ) -> NDArray[np.float64]:
-    """Runs deflation FastICA with the ``tanh`` non-linearity on a whitened ``(n_components, n_samples)``
-    matrix and returns the unmixing matrix ``W`` with shape ``(n_components, n_components)``.
+    """Runs deflation FastICA with ``tanh`` non-linearity on a whitened (component_count, sample_count) matrix.
+
+    Returns the unmixing matrix ``W`` with shape ``(component_count, component_count)``.
     """
-    n_components, n_samples = whitened.shape
+    component_count, sample_count = whitened.shape
     # noinspection PyTypeChecker
-    unmixing: NDArray[np.float64] = np.zeros((n_components, n_components), dtype=np.float64)
-    for component_index in range(n_components):
+    unmixing: NDArray[np.float64] = np.zeros((component_count, component_count), dtype=np.float64)
+    for component_index in range(component_count):
         # noinspection PyTypeChecker
-        candidate: NDArray[np.float64] = rng.standard_normal(n_components).astype(np.float64, copy=False)
+        candidate: NDArray[np.float64] = np.asarray(rng.standard_normal(component_count), dtype=np.float64)
         candidate /= np.linalg.norm(candidate) + 1e-12
         for previous in range(component_index):
             candidate -= float(candidate @ unmixing[previous]) * unmixing[previous]
@@ -607,7 +605,7 @@ def _fast_ica_deflation(
             projection = candidate @ whitened
             g_value = np.tanh(projection)
             g_derivative = np.float64(1.0) - g_value * g_value
-            updated = (whitened @ g_value) / float(n_samples) - g_derivative.mean() * candidate
+            updated = (whitened @ g_value) / float(sample_count) - g_derivative.mean() * candidate
             for previous in range(component_index):
                 updated -= float(updated @ unmixing[previous]) * unmixing[previous]
             updated /= np.linalg.norm(updated) + 1e-12
