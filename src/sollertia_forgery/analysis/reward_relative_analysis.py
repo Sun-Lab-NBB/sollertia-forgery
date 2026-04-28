@@ -27,7 +27,6 @@ from ..forging import FluorescenceColumn
 from .cell_analysis import (
     CellAnalysisColumn,
     CellAnalysisReport,
-    CellAnalysisSummary,
     CellAnalysisConfiguration,
 )
 
@@ -277,12 +276,8 @@ class RewardRelativeReport:
         Returns:
             A RewardRelativeReport with the table memory-mapped and the summary loaded.
         """
-        table_path = session_path.joinpath(
-            _REWARD_RELATIVE_TABLE_TEMPLATE.format(a=trial_type_a, b=trial_type_b)
-        )
-        summary_path = session_path.joinpath(
-            _REWARD_RELATIVE_SUMMARY_TEMPLATE.format(a=trial_type_a, b=trial_type_b)
-        )
+        table_path = session_path.joinpath(_REWARD_RELATIVE_TABLE_TEMPLATE.format(a=trial_type_a, b=trial_type_b))
+        summary_path = session_path.joinpath(_REWARD_RELATIVE_SUMMARY_TEMPLATE.format(a=trial_type_a, b=trial_type_b))
         summary = RewardRelativeSummary.from_yaml(file_path=summary_path)
         table = pl.read_ipc(source=table_path, memory_map=True)
         return cls(table=table, summary=summary)
@@ -399,13 +394,9 @@ def compute_cross_block_classification(
     # Peaks in track-aligned coordinates: bin index of the per-cell argmax converted to centimeters at the bin
     # center. Cells whose rate map sums to zero (uniformly silent) get NaN peaks and are excluded downstream.
     # noinspection PyTypeChecker
-    peaks_track_a: NDArray[np.float32] = _resolve_peak_positions(
-        rate_maps=rate_maps_a, bin_size_cm=bin_size_a_cm
-    )
+    peaks_track_a: NDArray[np.float32] = _resolve_peak_positions(rate_maps=rate_maps_a, bin_size_cm=bin_size_a_cm)
     # noinspection PyTypeChecker
-    peaks_track_b: NDArray[np.float32] = _resolve_peak_positions(
-        rate_maps=rate_maps_b, bin_size_cm=bin_size_b_cm
-    )
+    peaks_track_b: NDArray[np.float32] = _resolve_peak_positions(rate_maps=rate_maps_b, bin_size_cm=bin_size_b_cm)
 
     # Reward-aligned coordinates: signed circular offset from the block-specific reward midpoint, in
     # ``[-track_length/2, track_length/2)``. Cells with NaN track peaks propagate NaN.
@@ -437,9 +428,7 @@ def compute_cross_block_classification(
         is_tested_mask = is_significant_a | is_significant_b
 
     # noinspection PyTypeChecker
-    valid_for_shuffle: NDArray[np.bool_] = (
-        is_tested_mask & ~np.isnan(peaks_track_a) & ~np.isnan(peaks_track_b)
-    )
+    valid_for_shuffle: NDArray[np.bool_] = is_tested_mask & ~np.isnan(peaks_track_a) & ~np.isnan(peaks_track_b)
 
     p_track = np.full(cell_count, np.nan, dtype=np.float32)
     p_reward = np.full(cell_count, np.nan, dtype=np.float32)
@@ -494,13 +483,9 @@ def _build_table(
     rate_maps_b = stack_rate_maps_from_table(report_b.table, target_length=int(summary_b.bin_count))
 
     # noinspection PyTypeChecker
-    is_significant_a: NDArray[np.bool_] = report_a.table[
-        CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value
-    ].to_numpy()
+    is_significant_a: NDArray[np.bool_] = report_a.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
-    is_significant_b: NDArray[np.bool_] = report_b.table[
-        CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value
-    ].to_numpy()
+    is_significant_b: NDArray[np.bool_] = report_b.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
 
     classification = compute_cross_block_classification(
         rate_maps_a=rate_maps_a,
@@ -575,9 +560,7 @@ def build_cross_block_table(
 
 def aggregate_cross_block_counts(*, classification: CrossBlockClassification) -> dict[str, int]:
     """Returns aggregate anchored-cell counts from a CrossBlockClassification."""
-    is_neither = (
-        classification.is_tested & ~classification.is_reward_anchored & ~classification.is_track_anchored
-    )
+    is_neither = classification.is_tested & ~classification.is_reward_anchored & ~classification.is_track_anchored
     return {
         "tested": int(np.sum(classification.is_tested)),
         "reward_anchored": int(np.sum(classification.is_reward_anchored)),
@@ -605,9 +588,7 @@ def stack_rate_maps_from_table(table: pl.DataFrame, target_length: int) -> NDArr
     return output
 
 
-def _resolve_peak_positions(
-    rate_maps: NDArray[np.float32], bin_size_cm: float
-) -> NDArray[np.float32]:
+def _resolve_peak_positions(rate_maps: NDArray[np.float32], bin_size_cm: float) -> NDArray[np.float32]:
     """Returns the per-cell peak position in centimeters at the bin center; NaN for cells with all-zero rate maps."""
     cell_count = rate_maps.shape[0]
     # noinspection PyTypeChecker
@@ -622,9 +603,7 @@ def _resolve_peak_positions(
     return peaks
 
 
-def _signed_circular_offset(
-    positions: NDArray[np.float32], anchor: float, track_length: float
-) -> NDArray[np.float32]:
+def _signed_circular_offset(positions: NDArray[np.float32], anchor: float, track_length: float) -> NDArray[np.float32]:
     """Returns the signed circular offset of each position from ``anchor`` in ``[-track_length/2, track_length/2)``.
 
     Notes:

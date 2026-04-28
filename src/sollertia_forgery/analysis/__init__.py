@@ -20,16 +20,16 @@ from .cell_analysis import (
     plot_dataset_place_cell_fraction,
     plot_dataset_reward_cell_fraction,
 )
-from .place_cell_protocol import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
-from .bleaching_evaluation import (
+from .bleaching_analysis import (
     BleachingColumn,
     BleachingReport,
     BleachingSummary,
     ExponentialDecayFit,
-    run_bleaching_analysis,
     BleachingConfiguration,
+    run_bleaching_analysis,
     plot_dataset_baseline_trend,
 )
+from .place_cell_protocol import PlaceFields, PlaceFieldDetector, PlaceFieldDetectionConfiguration
 from .reward_cell_protocol import RewardCellResults, RewardCellDetector, RewardCellConfiguration
 from .reward_relative_analysis import (
     RewardRelativeColumn,

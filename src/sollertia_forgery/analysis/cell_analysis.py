@@ -14,20 +14,28 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 import warnings
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from tqdm import tqdm
 import numpy as np
 import polars as pl
+from scipy.stats import chi2
 from scipy.signal import savgol_filter
+from threadpoolctl import threadpool_limits
+from scipy.sparse.linalg import LinearOperator, eigsh, ArpackNoConvergence
 from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
-from scipy.spatial.distance import pdist
-from ataraxis_base_utilities import LogLevel, console
-from scipy.cluster.hierarchy import linkage, fcluster
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
 from ..forging import FluorescenceColumn
-from .utilities import resolve_display_units, trim_acquisition_warmup, assemble_run_session_data
+from .utilities import (
+    resolve_display_units,
+    per_cell_pearson_safe,
+    trim_acquisition_warmup,
+    assemble_run_session_data,
+)
 from .sce_protocol import SCEResult, PeriodType, SCEDetector, SCEDetectionConfiguration
 from ..shared_assets import (
     DatasetData,
@@ -59,6 +67,22 @@ _MINIMUM_SCE_COUNT_FOR_ASSEMBLY: int = 2
 """Minimum number of SCEs required in a period to attempt cell-assembly detection."""
 _MINIMUM_PERIODS_FOR_REST_RUN_REST: int = 1
 """Minimum number of run periods required to render a rest-run-rest plot."""
+_MINIMUM_OBSERVATIONS_FOR_VARIANCE: int = 2
+"""Minimum number of samples or cells required for a variance-, PCA-, or rank-correlation-based step to
+produce a defined output. Below this threshold the corresponding helper short-circuits to NaN."""
+_ICA_PREFERRED_BLAS_THREADS_PER_SHUFFLE: int = 10
+"""Preferred BLAS thread count per ICA-CS / reactivation shuffle worker. Mirrors the bleaching analyzer's
+``_PREFERRED_WORKERS_PER_SESSION = 10`` constant: the Lanczos matvec and the per-period reactivation GEMMs
+are BLAS-bound and stop scaling cleanly past ten threads, so the shuffle-level allocator
+(:func:`_resolve_ica_shuffle_allocation`) targets this width and uses the remaining budget to spawn more
+parallel workers. On a 128-core host the allocator returns ``(10, 12)`` — twelve concurrent shuffles each
+with a ten-thread BLAS pool, totalling 120 cores in flight."""
+_ICA_MINIMUM_BLAS_THREADS_PER_SHUFFLE: int = 5
+"""Floor on per-worker BLAS threads. Falling below this floor reduces parallel-shuffle count one worker at a
+time rather than spawning under-resourced workers whose matvec performance would collapse."""
+_ICA_BLAS_THREAD_MULTIPLE: int = 5
+"""Per-worker BLAS thread counts are rounded down to this multiple for clean allocation. Mirrors the
+bleaching/cindra worker-multiple convention."""
 
 
 class CellAnalysisColumn(StrEnum):
@@ -171,14 +195,23 @@ class CellAnalysisColumn(StrEnum):
     """Fraction of rest-period SCEs the cell participated in."""
     SCE_PARTICIPATION_RATE_RUN = "sce_participation_rate_run"
     """Fraction of run-period SCEs the cell participated in."""
-    SCE_MEAN_ONSET_RANK_REST = "sce_mean_onset_rank_rest"
-    """Mean normalized onset rank within rest-period SCEs the cell participated in."""
-    SCE_MEAN_ONSET_RANK_RUN = "sce_mean_onset_rank_run"
-    """Mean normalized onset rank within run-period SCEs the cell participated in."""
     SCE_EVENTS_REST = "sce_events_rest"
     """Per-cell list of (period_index, sce_label) pairs for every rest-period SCE the cell participated in."""
     SCE_EVENTS_RUN = "sce_events_run"
     """Per-cell list of (period_index, sce_label) pairs for every run-period SCE the cell participated in."""
+    SCE_PARTICIPATION_P_VALUE_REST = "sce_participation_p_value_rest"
+    """Per-cell aggregated p-value for SCE recruitment across all rest periods. Combined via Fisher's method
+    over the per-period jitter-null p-values produced by ``SCEDetector``. NaN when no rest period contributed
+    SCEs (Modol et al. 2020 super-rich-cell logic; Fisher 1925 p-value combination)."""
+    SCE_PARTICIPATION_P_VALUE_RUN = "sce_participation_p_value_run"
+    """Per-cell aggregated p-value for SCE recruitment across all run periods. NaN when no run period
+    contributed SCEs."""
+    IS_SCE_CELL_REST = "is_sce_cell_rest"
+    """True for cells whose participation rate exceeds the per-cell jitter null in at least one rest period at
+    the configured ``participation_significance_percentile``."""
+    IS_SCE_CELL_RUN = "is_sce_cell_run"
+    """True for cells whose participation rate exceeds the per-cell jitter null in at least one run period at
+    the configured ``participation_significance_percentile``."""
 
 
 class SCEPeriodColumn(StrEnum):
@@ -209,6 +242,28 @@ class SCEPeriodColumn(StrEnum):
     ONSET_SAMPLE_INDICES = "onset_sample_indices"
     """Sparse encoding of the per-period onset matrix: sample index (local to the period) for each True onset
     entry. Same length as ``ONSET_CELL_INDICES``."""
+    TRIAL_IDS = "trial_ids"
+    """Per-sample trial id matching the dataset ``trial`` column (-1 outside any complete trial). Persisted so
+    reward- and position-aligned SCE analyses can locate every event without re-loading ``data.feather``."""
+    SCE_SIZE = "sce_size"
+    """Per-SCE distinct participating-cell count. Length equal to the per-period SCE count."""
+    SCE_WIDTH_SAMPLES = "sce_width_samples"
+    """Per-SCE duration in samples. Convert to seconds with ``SAMPLING_RATE_HZ``."""
+    SCE_PEAK_COACTIVE = "sce_peak_coactive"
+    """Per-SCE peak co-active count, the maximum of ``COACTIVE_COUNTS`` over the SCE window."""
+    SCE_INTER_EVENT_INTERVALS_SAMPLES = "sce_inter_event_intervals_samples"
+    """Per-SCE sample gap between consecutive events; length equal to ``max(sce_count - 1, 0)``."""
+    SCE_RATE_HZ = "sce_rate_hz"
+    """SCE rate in events per second over the period (post-stability or post-rate-map masking)."""
+    REACTIVATION_STRENGTHS = "reactivation_strengths"
+    """Per-SCE population reactivation strength against the run-derived assembly templates. Computed via the
+    Peyrache 2009 / Lopes-dos-Santos 2013 diagonal-removed projection on z-scored binary onsets. Length equal
+    to the per-period SCE count; empty for run periods (templates are derived from run, evaluated on rest)."""
+    MEAN_REACTIVATION_STRENGTH = "mean_reactivation_strength"
+    """Per-period mean reactivation strength across the period's SCEs; NaN when no SCEs were detected."""
+    REACTIVATING_SCE_FRACTION = "reactivating_sce_fraction"
+    """Per-period fraction of SCEs whose reactivation strength exceeds the per-period 95th-percentile of the
+    null distribution computed by independent circular shifts on the run-template projections."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +372,18 @@ class CellAnalysisSummary(YamlConfig):
     """Total SCEs detected across all rest periods."""
     total_run_sces: int
     """Total SCEs detected across all run periods."""
+    rest_sce_cell_count: int
+    """Per-session count of cells flagged as SCE-recruited during at least one rest period (Modol 2020
+    super-rich)."""
+    run_sce_cell_count: int
+    """Per-session count of cells flagged as SCE-recruited during at least one run period."""
+    mean_rest_reactivation_strength: float
+    """Mean reactivation strength of rest-period SCEs against the run-derived assembly templates (C2a in the
+    Peyrache 2009 / Lopes-dos-Santos 2013 sense). NaN when no rest period contributed SCEs or when too few
+    significant assemblies survived the Marchenko-Pastur cutoff to define a template."""
+    rest_reactivating_sce_fraction: float
+    """Fraction of rest-period SCEs whose reactivation strength exceeds the 95th percentile of a per-SCE
+    independent-shuffle null. NaN under the same conditions as ``mean_rest_reactivation_strength``."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,18 +517,30 @@ class CellAnalysisReport:
             binned_fluorescence_per_trial=place_fields.binned_fluorescence_per_trial,
             cell_count=cell_count,
         )
+        console.echo(
+            message=(
+                f"Running multi-criterion shuffles "
+                f"({resolved_configuration.place.shuffle_repeat_count} iterations each for Peak and Stability)..."
+            ),
+            level=LogLevel.INFO,
+        )
         is_stable, is_peak_significant, stability_p_values, peak_p_values = _compute_multi_criterion_flags(
             place_detector=place_detector,
             place_fields=place_fields,
             stability_split_half=stability_split_half,
             configuration=resolved_configuration.place,
         )
+        console.echo(
+            message=(
+                f"Multi-criterion shuffles complete: {int(np.sum(is_stable))} stable, "
+                f"{int(np.sum(is_peak_significant))} peak-significant."
+            ),
+            level=LogLevel.SUCCESS,
+        )
         # noinspection PyTypeChecker
         is_strict_place: NDArray[np.bool_] = place_fields.has_place_field & is_stable & is_peak_significant
         # noinspection PyTypeChecker
-        is_reward_cell_array: NDArray[np.bool_] = (
-            reward_results.spatial_results.is_significant & reward_results.is_zone
-        )
+        is_reward_cell_array: NDArray[np.bool_] = reward_results.spatial_results.is_significant & reward_results.is_zone
         # noinspection PyTypeChecker
         is_place_only: NDArray[np.bool_] = place_fields.has_place_field & ~is_reward_cell_array
         # noinspection PyTypeChecker
@@ -482,12 +561,55 @@ class CellAnalysisReport:
             is_strict_place=is_strict_place,
         )
 
-        # Assembles the per-period SCE table.
+        # Computes population reactivation strength (Peyrache 2009 / Lopes-dos-Santos 2013): templates from
+        # concatenated RUN onsets via ICA-CS, projected onto each REST period's SCE windows.
+        console.echo(
+            message=(
+                f"Running population reactivation analysis ({rest_period_count} rest periods, "
+                f"{run_period_count} run periods)..."
+            ),
+            level=LogLevel.INFO,
+        )
+        templates, per_period_reactivation = _compute_population_reactivation(
+            run_results=sce_detector.run_results,
+            rest_results=sce_detector.rest_results,
+            cell_count=cell_count,
+        )
+        rest_indices_in_results = [i for i, r in enumerate(sce_results) if r.period_type == PeriodType.REST]
+        reactivation_columns: dict[int, dict[str, object]] = {
+            rest_indices_in_results[rest_position]: payload
+            for rest_position, payload in per_period_reactivation.items()
+        }
+        if templates.shape[0] > 0 and per_period_reactivation:
+            mean_strength_value = float(
+                np.mean([float(entry["mean_reactivation_strength"]) for entry in per_period_reactivation.values()])
+            )
+            reactivating_fraction_value = float(
+                np.mean([float(entry["reactivating_sce_fraction"]) for entry in per_period_reactivation.values()])
+            )
+        else:
+            mean_strength_value = float("nan")
+            reactivating_fraction_value = float("nan")
+        console.echo(
+            message=(
+                f"Reactivation analysis complete: {templates.shape[0]} run-derived templates, "
+                f"mean strength {mean_strength_value:.3f}, reactivating fraction {reactivating_fraction_value:.3f}."
+            ),
+            level=LogLevel.INFO,
+        )
+
+        # Assembles the per-period SCE table with the reactivation columns folded in.
         sce_periods = _build_sce_periods_table(
             sampling_rate_hz=sampling_rate_hz,
             results=sce_results,
             cell_count=cell_count,
+            reactivation_columns=reactivation_columns,
         )
+
+        # noinspection PyTypeChecker
+        rest_sce_cell_flag: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL_REST.value].to_numpy()
+        # noinspection PyTypeChecker
+        run_sce_cell_flag: NDArray[np.bool_] = table[CellAnalysisColumn.IS_SCE_CELL_RUN.value].to_numpy()
 
         summary = CellAnalysisSummary(
             place_configuration=resolved_configuration.place,
@@ -520,6 +642,10 @@ class CellAnalysisReport:
             run_period_count=run_period_count,
             total_rest_sces=total_rest_sces,
             total_run_sces=total_run_sces,
+            rest_sce_cell_count=int(np.sum(rest_sce_cell_flag)),
+            run_sce_cell_count=int(np.sum(run_sce_cell_flag)),
+            mean_rest_reactivation_strength=mean_strength_value,
+            rest_reactivating_sce_fraction=reactivating_fraction_value,
         )
 
         return cls(table=table, sce_periods=sce_periods, summary=summary)
@@ -687,6 +813,12 @@ class CellAnalysisReport:
             "SCE detection:",
             f"  Rest periods: {summary.rest_period_count} ({summary.total_rest_sces} SCEs)",
             f"  Run periods:  {summary.run_period_count} ({summary.total_run_sces} SCEs)",
+            f"  SCE-recruited cells (rest): {summary.rest_sce_cell_count}",
+            f"  SCE-recruited cells (run):  {summary.run_sce_cell_count}",
+            "",
+            "Population reactivation (REST SCEs vs. RUN-derived templates):",
+            f"  Mean strength:           {summary.mean_rest_reactivation_strength:.3f}",
+            f"  Reactivating fraction:   {summary.rest_reactivating_sce_fraction:.3f}",
             "",
             "Geometry / sampling:",
             f"  Track length:      {summary.track_length_cm:.1f} cm",
@@ -869,18 +1001,15 @@ class CellAnalysisReport:
             track_start_std * np.sqrt(2.0 * np.pi)
         )
         track_end_std = max(summary.track_end_std_cm, 1.0)
-        gaussian_density_end = np.exp(
-            -0.5 * ((positions - summary.track_length_cm) / track_end_std) ** 2
-        ) / (track_end_std * np.sqrt(2.0 * np.pi))
-        uniform_weight = max(
-            1.0 - summary.mixture_weight - summary.track_start_weight - summary.track_end_weight, 0.0
+        gaussian_density_end = np.exp(-0.5 * ((positions - summary.track_length_cm) / track_end_std) ** 2) / (
+            track_end_std * np.sqrt(2.0 * np.pi)
         )
+        uniform_weight = max(1.0 - summary.mixture_weight - summary.track_start_weight - summary.track_end_weight, 0.0)
 
         # Stacks the four mixture components in plotting order so each band is filled cumulatively without overlap.
         uniform_band = uniform_weight * uniform_density
         landmark_band = uniform_band + (
-            summary.track_start_weight * gaussian_density_start
-            + summary.track_end_weight * gaussian_density_end
+            summary.track_start_weight * gaussian_density_start + summary.track_end_weight * gaussian_density_end
         )
         mixture_density = landmark_band + summary.mixture_weight * gaussian_density_reward
 
@@ -1237,9 +1366,7 @@ class CellAnalysisReport:
         ].to_numpy()
         # noinspection PyTypeChecker
         cv_partial_r2: NDArray[np.float32] = (
-            self.table[CellAnalysisColumn.CV_POSITION_PARTIAL_R2.value]
-            .to_numpy()
-            .astype(np.float32, copy=False)
+            self.table[CellAnalysisColumn.CV_POSITION_PARTIAL_R2.value].to_numpy().astype(np.float32, copy=False)
         )
         # noinspection PyTypeChecker
         centers_of_mass: NDArray[np.float32] = (
@@ -1381,9 +1508,7 @@ class CellAnalysisReport:
             axes.set_xticks(np.arange(0, summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
             cell_com = centers_of_mass[cell_index]
             cell_partial_r2 = float(cv_partial_r2[cell_index]) if not np.isnan(cv_partial_r2[cell_index]) else 0.0
-            axes.set_title(
-                f"{label} (cell {cell_index}, COM={cell_com:.0f} cm, ΔR²={cell_partial_r2:.2f})", fontsize=9
-            )
+            axes.set_title(f"{label} (cell {cell_index}, COM={cell_com:.0f} cm, ΔR²={cell_partial_r2:.2f})", fontsize=9)
 
         axes_predictive.set_ylabel("Trial")
         if title:
@@ -1526,14 +1651,16 @@ class CellAnalysisReport:
         period_type: PeriodType = PeriodType.REST,
         period_index: int = 0,
         top_n: int = 5,
-        max_clusters: int = 15,
-        activation_threshold: float = 0.3,
+        shuffle_count: int = 200,
+        eigenvalue_significance_percentile: float = 99.0,
+        membership_z_threshold: float = 2.0,
         minimum_assembly_size: int = 3,
         title: str | None = None,
         figure_dpi: int = 150,
     ) -> plt.Figure:
-        """Detects and plots the most frequent SCE cell assemblies as raster panels. The clustering is recomputed
-        from the persisted onset matrix on every call so no live detector is required.
+        """Detects and plots the most prominent SCE cell assemblies as raster panels using ICA-CS
+        (Lopes-dos-Santos 2013) on the persisted per-period SCE participation matrix. Recomputes assemblies
+        on every call so no live detector is required.
         """
         period_rows = _filter_period_rows(table=self.sce_periods, period_type=period_type)
         if period_index >= len(period_rows):
@@ -1560,11 +1687,25 @@ class CellAnalysisReport:
         )
         total_sce_count = int(np.max(sce_labels)) if sce_labels.size > 0 else 0
 
-        assemblies = _detect_assemblies_from_state(
-            sce_labels=sce_labels,
-            onset_matrix=onset_matrix,
-            max_clusters=max_clusters,
-            activation_threshold=activation_threshold,
+        # Build the per-SCE participation matrix (cells x sce_count) for ICA-CS, mirroring the upstream
+        # cell-feather aggregation but kept local to the plot so callers can rerun with different thresholds.
+        if total_sce_count < _MINIMUM_SCE_COUNT_FOR_ASSEMBLY:
+            participation_matrix: NDArray[np.float32] = np.empty((onset_matrix.shape[0], 0), dtype=np.float32)
+        else:
+            sample_count = onset_matrix.shape[1]
+            # noinspection PyTypeChecker
+            sce_sample_indices: NDArray[np.int64] = np.where(sce_labels > 0)[0]
+            # noinspection PyTypeChecker
+            sample_to_sce: NDArray[np.float32] = np.zeros((sample_count, total_sce_count), dtype=np.float32)
+            sample_to_sce[sce_sample_indices, sce_labels[sce_sample_indices] - 1] = 1.0
+            # noinspection PyTypeChecker
+            participation_matrix = (onset_matrix.astype(np.float32) @ sample_to_sce > 0).astype(np.float32)
+
+        _, assemblies = _detect_assemblies_ica_cs(
+            activity_matrix=participation_matrix,
+            shuffle_count=shuffle_count,
+            eigenvalue_significance_percentile=eigenvalue_significance_percentile,
+            membership_z_threshold=membership_z_threshold,
             minimum_assembly_size=minimum_assembly_size,
         )
         if not assemblies:
@@ -1825,51 +1966,30 @@ def _compute_stability_metrics(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         # noinspection PyTypeChecker
-        even_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 0::2, :], axis=1)
+        even_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 0::2, :], axis=1).astype(
+            np.float32, copy=False
+        )
         # noinspection PyTypeChecker
-        odd_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 1::2, :], axis=1)
-    even_odd = _per_cell_pearson(a=even_map, b=odd_map)
+        odd_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, 1::2, :], axis=1).astype(
+            np.float32, copy=False
+        )
+    even_odd = per_cell_pearson_safe(a=even_map, b=odd_map)
 
     half_index = trial_count // 2
     if half_index > 0 and trial_count - half_index > 0:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
             # noinspection PyTypeChecker
-            first_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, :half_index, :], axis=1)
+            first_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, :half_index, :], axis=1).astype(
+                np.float32, copy=False
+            )
             # noinspection PyTypeChecker
-            second_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, half_index:, :], axis=1)
-        split_half = _per_cell_pearson(a=first_map, b=second_map)
+            second_map: NDArray[np.float32] = np.nanmean(binned_fluorescence_per_trial[:, half_index:, :], axis=1).astype(
+                np.float32, copy=False
+            )
+        split_half = per_cell_pearson_safe(a=first_map, b=second_map)
 
     return even_odd, split_half
-
-
-def _per_cell_pearson(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
-    """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
-
-    Args:
-        a: First matrix with dimensions (cell_count, bin_count).
-        b: Second matrix with dimensions (cell_count, bin_count).
-
-    Returns:
-        Per-cell Pearson r with length cell_count; NaN when fewer than three pairwise-valid bins or zero variance.
-    """
-    cell_count = a.shape[0]
-    # Pearson r requires at least three pairwise-valid observations to be numerically meaningful; with two points
-    # the correlation is trivially +/-1 regardless of the underlying signal.
-    minimum_valid_bins = 3
-    # noinspection PyTypeChecker
-    out: NDArray[np.float32] = np.full(cell_count, np.nan, dtype=np.float32)
-    for cell_index in range(cell_count):
-        # noinspection PyTypeChecker
-        mask: NDArray[np.bool_] = ~np.isnan(a[cell_index]) & ~np.isnan(b[cell_index])
-        if int(np.sum(mask)) < minimum_valid_bins:
-            continue
-        ai = a[cell_index, mask]
-        bi = b[cell_index, mask]
-        if float(np.std(ai)) == 0.0 or float(np.std(bi)) == 0.0:
-            continue
-        out[cell_index] = float(np.corrcoef(ai, bi)[0, 1])
-    return out
 
 
 def _compute_multi_criterion_flags(
@@ -1991,9 +2111,7 @@ def _build_cell_table(
             CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value: pl.Series(
                 values=spatial.is_significant, dtype=pl.Boolean
             ),
-            CellAnalysisColumn.IS_REWARD_PROXIMAL.value: pl.Series(
-                values=reward_results.is_zone, dtype=pl.Boolean
-            ),
+            CellAnalysisColumn.IS_REWARD_PROXIMAL.value: pl.Series(values=reward_results.is_zone, dtype=pl.Boolean),
             CellAnalysisColumn.IS_APPROACH.value: pl.Series(values=reward_results.is_approach, dtype=pl.Boolean),
             CellAnalysisColumn.IS_ZONE.value: pl.Series(values=reward_results.is_zone, dtype=pl.Boolean),
             CellAnalysisColumn.IS_DEPARTURE.value: pl.Series(values=reward_results.is_departure, dtype=pl.Boolean),
@@ -2033,12 +2151,8 @@ def _build_cell_table(
             CellAnalysisColumn.SPATIAL_INFORMATION_Z.value: pl.Series(
                 values=spatial.spatial_information_z, dtype=pl.Float32
             ),
-            CellAnalysisColumn.SPATIAL_FDR_SURVIVED.value: pl.Series(
-                values=spatial.fdr_survived, dtype=pl.Boolean
-            ),
-            CellAnalysisColumn.SPATIAL_SPLIT_HALF_R.value: pl.Series(
-                values=spatial.split_half_r, dtype=pl.Float32
-            ),
+            CellAnalysisColumn.SPATIAL_FDR_SURVIVED.value: pl.Series(values=spatial.fdr_survived, dtype=pl.Boolean),
+            CellAnalysisColumn.SPATIAL_SPLIT_HALF_R.value: pl.Series(values=spatial.split_half_r, dtype=pl.Float32),
             CellAnalysisColumn.SPATIAL_INFORMATION_BITS.value: pl.Series(
                 values=spatial.spatial_information, dtype=pl.Float32
             ),
@@ -2058,8 +2172,6 @@ def _build_cell_table(
             CellAnalysisColumn.SCE_PARTICIPATION_COUNT_RUN.value: sce_columns["participation_count_run"],
             CellAnalysisColumn.SCE_PARTICIPATION_RATE_REST.value: sce_columns["participation_rate_rest"],
             CellAnalysisColumn.SCE_PARTICIPATION_RATE_RUN.value: sce_columns["participation_rate_run"],
-            CellAnalysisColumn.SCE_MEAN_ONSET_RANK_REST.value: sce_columns["mean_onset_rank_rest"],
-            CellAnalysisColumn.SCE_MEAN_ONSET_RANK_RUN.value: sce_columns["mean_onset_rank_run"],
             CellAnalysisColumn.SCE_EVENTS_REST.value: pl.Series(
                 name=CellAnalysisColumn.SCE_EVENTS_REST.value,
                 values=sce_columns["sce_events_rest"],
@@ -2069,6 +2181,18 @@ def _build_cell_table(
                 name=CellAnalysisColumn.SCE_EVENTS_RUN.value,
                 values=sce_columns["sce_events_run"],
                 dtype=pl.List(pl.List(pl.Int32)),
+            ),
+            CellAnalysisColumn.SCE_PARTICIPATION_P_VALUE_REST.value: pl.Series(
+                values=sce_columns["participation_p_value_rest"], dtype=pl.Float32
+            ),
+            CellAnalysisColumn.SCE_PARTICIPATION_P_VALUE_RUN.value: pl.Series(
+                values=sce_columns["participation_p_value_run"], dtype=pl.Float32
+            ),
+            CellAnalysisColumn.IS_SCE_CELL_REST.value: pl.Series(
+                values=sce_columns["is_sce_cell_rest"], dtype=pl.Boolean
+            ),
+            CellAnalysisColumn.IS_SCE_CELL_RUN.value: pl.Series(
+                values=sce_columns["is_sce_cell_run"], dtype=pl.Boolean
             ),
         },
     ).sort(CellAnalysisColumn.CELL_ID.value)
@@ -2124,19 +2248,38 @@ def _build_place_field_rows(cell_count: int, place_fields: PlaceFields) -> dict[
     }
 
 
+def _combine_pvalues_fisher(values: list[float]) -> float:
+    """Combines a list of independent p-values via Fisher's method, returning the combined survival function.
+
+    Notes:
+        Uses an epsilon floor of 1e-10 to avoid ``log(0)`` for cells whose per-period jitter null returned
+        ``p == 0``; the resulting combined p-value is bounded but conservative. Returns NaN for an empty input.
+    """
+    if not values:
+        return float("nan")
+    arr = np.clip(np.asarray(values, dtype=np.float64), 1e-10, 1.0)
+    chi2_stat = float(-2.0 * np.sum(np.log(arr)))
+    return float(chi2.sf(chi2_stat, df=2 * len(values)))
+
+
 def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
-    """Computes per-cell SCE participation and timing metrics across all detected periods."""
+    """Computes per-cell SCE participation and recruitment-significance metrics across all detected periods.
+
+    References:
+        - Modol et al. (2020). Hippocampal hub neurons. Nat Commun.
+          https://doi.org/10.1038/s41467-020-18432-6 -- per-cell SCE recruitment significance ("super-rich"
+          cells); per-period p-values combined here via Fisher's method (Fisher 1925).
+    """
     # noinspection PyTypeChecker
     participation: NDArray[np.int32] = np.zeros((2, cell_count), dtype=np.int32)
-    # noinspection PyTypeChecker
-    rank_sum: NDArray[np.float32] = np.zeros((2, cell_count), dtype=np.float32)
-    # noinspection PyTypeChecker
-    rank_count: NDArray[np.int32] = np.zeros((2, cell_count), dtype=np.int32)
     # noinspection PyTypeChecker
     total_sces: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
     # noinspection PyTypeChecker
     period_counter: NDArray[np.int32] = np.zeros(2, dtype=np.int32)
     sce_events: list[list[list[list[int]]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
+    p_value_lists: list[list[list[float]]] = [[[] for _ in range(cell_count)] for _ in range(2)]
+    # noinspection PyTypeChecker
+    is_sce_cell: NDArray[np.bool_] = np.zeros((2, cell_count), dtype=np.bool_)
 
     for result in sce_results:
         period = 0 if result.period_type == PeriodType.REST else 1
@@ -2144,6 +2287,15 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
         period_counter[period] += 1
         sce_count = int(np.max(result.sce_labels))
         total_sces[period] += sce_count
+
+        # Per-period participation significance flags OR-merge across periods of the same type.
+        is_sce_cell[period] |= result.is_sce_cell
+        if not bool(np.all(np.isnan(result.participation_p_values))):
+            for cell_index in range(cell_count):
+                p_value = float(result.participation_p_values[cell_index])
+                if not np.isnan(p_value):
+                    p_value_lists[period][cell_index].append(p_value)
+
         if sce_count == 0:
             continue
 
@@ -2159,70 +2311,81 @@ def _aggregate_sce_columns(cell_count: int, sce_results: list) -> dict:
         for sce_label in range(1, sce_count + 1):
             # noinspection PyTypeChecker
             participating_indices: NDArray[np.int64] = np.where(cell_sce_participation[:, sce_label - 1])[0]
-            participant_count = participating_indices.size
             for cell in participating_indices:
                 sce_events[period][cell].append([period_index, sce_label])
-            if participant_count > 1:
-                # noinspection PyTypeChecker
-                sce_samples: NDArray[np.int64] = np.where(result.sce_labels == sce_label)[0]
-                onset_window = result.onset_matrix[participating_indices][:, sce_samples]
-                first_onset = np.argmax(onset_window, axis=1)
-                # noinspection PyTypeChecker
-                normalized_ranks: NDArray[np.float32] = (
-                    np.argsort(np.argsort(first_onset)).astype(np.float32) / (participant_count - 1)
-                ).astype(np.float32)
-                rank_sum[period, participating_indices] += normalized_ranks
-                rank_count[period, participating_indices] += 1
-            elif participant_count == 1:
-                rank_sum[period, participating_indices] += 0.5
-                rank_count[period, participating_indices] += 1
 
     # noinspection PyTypeChecker
     rate: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
     # noinspection PyTypeChecker
-    mean_rank: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
+    combined_p: NDArray[np.float32] = np.full((2, cell_count), np.nan, dtype=np.float32)
     for period in range(2):
         if total_sces[period] > 0:
             rate[period] = (participation[period] / total_sces[period]).astype(np.float32)
-        # noinspection PyTypeChecker
-        has_ranks: NDArray[np.bool_] = rank_count[period] > 0
-        mean_rank[period, has_ranks] = rank_sum[period, has_ranks] / rank_count[period, has_ranks]
+        for cell_index in range(cell_count):
+            combined_p[period, cell_index] = _combine_pvalues_fisher(values=p_value_lists[period][cell_index])
 
     return {
         "participation_count_rest": participation[0],
         "participation_count_run": participation[1],
         "participation_rate_rest": rate[0],
         "participation_rate_run": rate[1],
-        "mean_onset_rank_rest": mean_rank[0],
-        "mean_onset_rank_run": mean_rank[1],
         "sce_events_rest": sce_events[0],
         "sce_events_run": sce_events[1],
+        "participation_p_value_rest": combined_p[0],
+        "participation_p_value_run": combined_p[1],
+        "is_sce_cell_rest": is_sce_cell[0],
+        "is_sce_cell_run": is_sce_cell[1],
     }
+
+
+_SCE_PERIODS_EMPTY_SCHEMA: dict[str, pl.DataType] = {
+    SCEPeriodColumn.PERIOD_TYPE.value: pl.Utf8,
+    SCEPeriodColumn.PERIOD_INDEX.value: pl.Int32,
+    SCEPeriodColumn.CELL_COUNT.value: pl.Int32,
+    SCEPeriodColumn.SAMPLE_COUNT.value: pl.Int32,
+    SCEPeriodColumn.SAMPLING_RATE_HZ.value: pl.Float32,
+    SCEPeriodColumn.THRESHOLD.value: pl.Float32,
+    SCEPeriodColumn.TIMESTAMPS_MINUTES.value: pl.List(pl.Float32),
+    SCEPeriodColumn.COACTIVE_COUNTS.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_LABELS.value: pl.List(pl.Int32),
+    SCEPeriodColumn.ONSET_CELL_INDICES.value: pl.List(pl.Int32),
+    SCEPeriodColumn.ONSET_SAMPLE_INDICES.value: pl.List(pl.Int32),
+    SCEPeriodColumn.TRIAL_IDS.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_SIZE.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_WIDTH_SAMPLES.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_PEAK_COACTIVE.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_INTER_EVENT_INTERVALS_SAMPLES.value: pl.List(pl.Int32),
+    SCEPeriodColumn.SCE_RATE_HZ.value: pl.Float32,
+    SCEPeriodColumn.REACTIVATION_STRENGTHS.value: pl.List(pl.Float32),
+    SCEPeriodColumn.MEAN_REACTIVATION_STRENGTH.value: pl.Float32,
+    SCEPeriodColumn.REACTIVATING_SCE_FRACTION.value: pl.Float32,
+}
 
 
 def _build_sce_periods_table(
     sampling_rate_hz: float,
     results: list,
     cell_count: int,
+    reactivation_columns: dict[int, dict[str, object]] | None = None,
 ) -> pl.DataFrame:
-    """Assembles the per-period SCE feather, encoding the dense onset matrix as sparse cell/sample index lists."""
+    """Assembles the per-period SCE feather, encoding the dense onset matrix as sparse cell/sample index lists
+    and persisting the per-SCE descriptors and the population reactivation strength columns.
+
+    Args:
+        sampling_rate_hz: Sampling rate in Hz; constant across all rows.
+        results: List of ``SCEResult`` instances in temporal session order.
+        cell_count: Total number of cells in the session.
+        reactivation_columns: Optional mapping from result index in ``results`` to a dict carrying
+            ``{"reactivation_strengths": list[float], "mean_reactivation_strength": float,
+            "reactivating_sce_fraction": float}``. Rows without an entry receive empty/NaN reactivation
+            columns. Run-period rows always receive empty/NaN values because the templates are derived from
+            run and evaluated on rest.
+
+    Returns:
+        A polars DataFrame following :class:`SCEPeriodColumn`.
+    """
     if not results:
-        # Empty schema-conforming dataframe so downstream readers do not need to special-case missing files.
-        return pl.DataFrame(
-            schema={
-                SCEPeriodColumn.PERIOD_TYPE.value: pl.Utf8,
-                SCEPeriodColumn.PERIOD_INDEX.value: pl.Int32,
-                SCEPeriodColumn.CELL_COUNT.value: pl.Int32,
-                SCEPeriodColumn.SAMPLE_COUNT.value: pl.Int32,
-                SCEPeriodColumn.SAMPLING_RATE_HZ.value: pl.Float32,
-                SCEPeriodColumn.THRESHOLD.value: pl.Float32,
-                SCEPeriodColumn.TIMESTAMPS_MINUTES.value: pl.List(pl.Float32),
-                SCEPeriodColumn.COACTIVE_COUNTS.value: pl.List(pl.Int32),
-                SCEPeriodColumn.SCE_LABELS.value: pl.List(pl.Int32),
-                SCEPeriodColumn.ONSET_CELL_INDICES.value: pl.List(pl.Int32),
-                SCEPeriodColumn.ONSET_SAMPLE_INDICES.value: pl.List(pl.Int32),
-            }
-        )
+        return pl.DataFrame(schema=_SCE_PERIODS_EMPTY_SCHEMA)
 
     period_type_column: list[str] = []
     period_index_column: list[int] = []
@@ -2235,11 +2398,20 @@ def _build_sce_periods_table(
     sce_labels_column: list[list[int]] = []
     onset_cell_indices_column: list[list[int]] = []
     onset_sample_indices_column: list[list[int]] = []
+    trial_ids_column: list[list[int]] = []
+    sce_size_column: list[list[int]] = []
+    sce_width_column: list[list[int]] = []
+    sce_peak_column: list[list[int]] = []
+    sce_inter_interval_column: list[list[int]] = []
+    sce_rate_column: list[float] = []
+    reactivation_strengths_column: list[list[float]] = []
+    mean_reactivation_column: list[float] = []
+    reactivating_fraction_column: list[float] = []
 
     rest_counter = 0
     run_counter = 0
 
-    for result in results:
+    for result_index, result in enumerate(results):
         if result.period_type == PeriodType.REST:
             period_index = rest_counter
             rest_counter += 1
@@ -2259,6 +2431,23 @@ def _build_sce_periods_table(
         sce_labels_column.append([int(value) for value in result.sce_labels.tolist()])
         onset_cell_indices_column.append([int(value) for value in onset_cells.tolist()])
         onset_sample_indices_column.append([int(value) for value in onset_samples.tolist()])
+        trial_ids_column.append([int(value) for value in result.trial_ids.tolist()])
+        sce_size_column.append([int(value) for value in result.sce_size.tolist()])
+        sce_width_column.append([int(value) for value in result.sce_width_samples.tolist()])
+        sce_peak_column.append([int(value) for value in result.sce_peak_coactive.tolist()])
+        sce_inter_interval_column.append([int(value) for value in result.sce_inter_event_intervals_samples.tolist()])
+        sce_rate_column.append(float(result.sce_rate_hz))
+
+        entry = reactivation_columns.get(result_index) if reactivation_columns is not None else None
+        if entry is not None:
+            strengths = list(entry.get("reactivation_strengths", []))  # type: ignore[arg-type]
+            reactivation_strengths_column.append([float(value) for value in strengths])
+            mean_reactivation_column.append(float(entry.get("mean_reactivation_strength", float("nan"))))  # type: ignore[arg-type]
+            reactivating_fraction_column.append(float(entry.get("reactivating_sce_fraction", float("nan"))))  # type: ignore[arg-type]
+        else:
+            reactivation_strengths_column.append([])
+            mean_reactivation_column.append(float("nan"))
+            reactivating_fraction_column.append(float("nan"))
 
     return pl.DataFrame(
         {
@@ -2276,6 +2465,23 @@ def _build_sce_periods_table(
             ),
             SCEPeriodColumn.ONSET_SAMPLE_INDICES.value: pl.Series(
                 values=onset_sample_indices_column, dtype=pl.List(pl.Int32)
+            ),
+            SCEPeriodColumn.TRIAL_IDS.value: pl.Series(values=trial_ids_column, dtype=pl.List(pl.Int32)),
+            SCEPeriodColumn.SCE_SIZE.value: pl.Series(values=sce_size_column, dtype=pl.List(pl.Int32)),
+            SCEPeriodColumn.SCE_WIDTH_SAMPLES.value: pl.Series(values=sce_width_column, dtype=pl.List(pl.Int32)),
+            SCEPeriodColumn.SCE_PEAK_COACTIVE.value: pl.Series(values=sce_peak_column, dtype=pl.List(pl.Int32)),
+            SCEPeriodColumn.SCE_INTER_EVENT_INTERVALS_SAMPLES.value: pl.Series(
+                values=sce_inter_interval_column, dtype=pl.List(pl.Int32)
+            ),
+            SCEPeriodColumn.SCE_RATE_HZ.value: pl.Series(values=sce_rate_column, dtype=pl.Float32),
+            SCEPeriodColumn.REACTIVATION_STRENGTHS.value: pl.Series(
+                values=reactivation_strengths_column, dtype=pl.List(pl.Float32)
+            ),
+            SCEPeriodColumn.MEAN_REACTIVATION_STRENGTH.value: pl.Series(
+                values=mean_reactivation_column, dtype=pl.Float32
+            ),
+            SCEPeriodColumn.REACTIVATING_SCE_FRACTION.value: pl.Series(
+                values=reactivating_fraction_column, dtype=pl.Float32
             ),
         }
     )
@@ -2491,63 +2697,673 @@ def _select_rest_run_cells(
     return selected[:cell_count]
 
 
-def _detect_assemblies_from_state(
-    sce_labels: NDArray[np.int32],
-    onset_matrix: NDArray[np.bool_],
-    max_clusters: int,
-    activation_threshold: float,
-    minimum_assembly_size: int,
-) -> list[NDArray[np.int32]]:
-    """Reproduces the live SCEDetector cell-assembly clustering from the persisted onset matrix and SCE labels."""
-    total_sce_count = int(np.max(sce_labels)) if sce_labels.size > 0 else 0
-    if total_sce_count < _MINIMUM_SCE_COUNT_FOR_ASSEMBLY:
-        return []
+def _z_score_along_samples(activity: NDArray[np.float32]) -> tuple[NDArray[np.float32], NDArray[np.bool_]]:
+    """Z-scores each row of ``activity`` along the sample axis and returns the (z, has_variance) pair.
 
-    sample_count = onset_matrix.shape[1]
+    Cells with zero sample-axis variance get a zeroed row in the returned z-matrix and a False entry in the
+    mask, so downstream consumers can either drop them or fall back to the all-zero contribution.
+    """
+    cell_mean = activity.mean(axis=1, keepdims=True).astype(np.float32, copy=False)
+    cell_std = activity.std(axis=1, keepdims=True).astype(np.float32, copy=False)
     # noinspection PyTypeChecker
-    sce_sample_mask: NDArray[np.bool_] = sce_labels > 0
+    has_variance: NDArray[np.bool_] = cell_std[:, 0] > 0
+    safe_std = np.where(cell_std > 0.0, cell_std, np.float32(1.0))
     # noinspection PyTypeChecker
-    sce_sample_indices: NDArray[np.int64] = np.where(sce_sample_mask)[0]
-    # noinspection PyTypeChecker
-    sample_to_sce: NDArray[np.float32] = np.zeros((sample_count, total_sce_count), dtype=np.float32)
-    sample_to_sce[sce_sample_indices, sce_labels[sce_sample_indices] - 1] = 1.0
-    # noinspection PyTypeChecker
-    participation: NDArray[np.bool_] = (onset_matrix.astype(np.float32) @ sample_to_sce > 0).T
+    z: NDArray[np.float32] = ((activity - cell_mean) / safe_std).astype(np.float32, copy=False)
+    z[~has_variance, :] = np.float32(0.0)
+    return z, has_variance
 
-    cell_participation_count = np.sum(participation, axis=0)
+
+def _resolve_ica_shuffle_allocation(budget: int, shuffle_count: int) -> tuple[int, int]:
+    """Splits a CPU budget between per-shuffle BLAS threads and concurrent shuffle workers.
+
+    Notes:
+        Mirrors the saturating allocator used by bleaching / cindra: each worker is filled to
+        ``_ICA_PREFERRED_BLAS_THREADS_PER_SHUFFLE`` BLAS threads before a new parallel shuffle is spawned, the
+        per-worker thread count is rounded down to a multiple of ``_ICA_BLAS_THREAD_MULTIPLE`` for clean
+        allocation, and parallelism is reduced one worker at a time whenever the per-worker share would fall
+        below ``_ICA_MINIMUM_BLAS_THREADS_PER_SHUFFLE``. Single-worker configurations collapse naturally: a
+        budget of N with one shuffle returns ``(round_down_to_multiple(N), 1)`` and hands every thread to BLAS.
+
+    Args:
+        budget: Total CPU cores available after the system reservation, as returned by ``resolve_worker_count``.
+        shuffle_count: Number of shuffle iterations to run.
+
+    Returns:
+        A tuple of ``(blas_threads_per_shuffle, parallel_shuffles)`` whose product never exceeds the budget.
+    """
+    if shuffle_count <= 1:
+        return max(1, budget), 1
+    max_at_preferred = max(1, budget // _ICA_PREFERRED_BLAS_THREADS_PER_SHUFFLE)
+    parallel_shuffles = min(shuffle_count, max_at_preferred)
+    raw_threads = budget // parallel_shuffles
+    blas_threads = max(1, (raw_threads // _ICA_BLAS_THREAD_MULTIPLE) * _ICA_BLAS_THREAD_MULTIPLE)
+
+    # Reduces parallelism one worker at a time until each worker clears the per-shuffle floor. Cannot reduce
+    # below a single worker; with ``parallel_shuffles == 1`` the floor stops applying because the entire
+    # budget collapses onto BLAS.
+    while blas_threads < _ICA_MINIMUM_BLAS_THREADS_PER_SHUFFLE and parallel_shuffles > 1:
+        parallel_shuffles -= 1
+        raw_threads = budget // parallel_shuffles
+        blas_threads = max(1, (raw_threads // _ICA_BLAS_THREAD_MULTIPLE) * _ICA_BLAS_THREAD_MULTIPLE)
+
+    return blas_threads, parallel_shuffles
+
+
+def _shuffle_max_eigenvalue(
+    z: NDArray[np.float32],
+    *,
+    shuffle_count: int,
+    rng: np.random.Generator,
+    minimum_shift_samples: int,
+    progress_description: str = "Assembly null shuffle",
+    requested_workers: int = 0,
+) -> NDArray[np.float32]:
+    """Returns the shuffled-distribution maximum eigenvalue per shuffle for the cell-by-cell correlation
+    matrix obtained after independent circular shifts of each cell's z-scored activity (Lopes-dos-Santos 2013
+    ICA-CS null).
+
+    Notes:
+        Each iteration draws independent per-cell shifts and gathers the shifted z-matrix. The largest eigenvalue
+        of ``(shuffled @ shuffled.T) / N`` is recovered via ARPACK Lanczos with ``k=1`` on a ``LinearOperator``
+        whose ``matvec`` is ``shuffled @ (shuffled.T @ v) / N`` -- so the (cell_count, cell_count) correlation
+        matrix is never materialised and the eigendecomp's ``O(cell_count^3)`` cost collapses to roughly
+        ``Lanczos_iters * 2 * cell_count * sample_count``. With cell counts in the thousands this is one to two
+        orders of magnitude faster than the previous ``np.linalg.eigvalsh`` call that computed every eigenvalue
+        only to read the last one. Falls back to ``eigvalsh`` on the rare ARPACK convergence failure (degenerate
+        spectrum) so the null distribution always has a defined value.
+
+        The shuffles run concurrently on a ``ThreadPoolExecutor``: the saturating allocator
+        :func:`_resolve_ica_shuffle_allocation` splits the resolved CPU budget into ``parallel_shuffles``
+        workers each granted ``blas_threads_per_shuffle`` BLAS threads via
+        ``threadpoolctl.threadpool_limits`` in the worker initializer. On 128-core hosts with the default
+        constants the allocator returns ``(30, 4)``: four Lanczos shuffles run concurrently, each saturating
+        thirty BLAS threads, for a total footprint of one hundred twenty cores. Per-shuffle shifts are
+        pre-drawn from the input rng in serial order so the rng state advances exactly as in the previous
+        sequential implementation -- downstream consumers that share the rng (FastICA in
+        :func:`_detect_assemblies_ica_cs`) see no behavior change despite the parallelism.
+
+    Args:
+        z: Z-scored activity with dimensions (cell_count, sample_count).
+        shuffle_count: Number of shuffle iterations.
+        rng: Per-call numpy random generator used to draw per-cell shifts.
+        minimum_shift_samples: Lower bound on the absolute circular shift per cell per shuffle.
+        progress_description: tqdm progress-bar description.
+        requested_workers: Optional cap on the total CPU budget passed to ``resolve_worker_count``. Non-positive
+            values request all available cores after the default system reservation.
+    """
+    cell_count, sample_count = z.shape
     # noinspection PyTypeChecker
-    active_cell_mask: NDArray[np.bool_] = cell_participation_count > 0
+    output: NDArray[np.float32] = np.zeros(shuffle_count, dtype=np.float32)
+    if cell_count == 0 or sample_count < _MINIMUM_OBSERVATIONS_FOR_VARIANCE or shuffle_count == 0:
+        return output
+    floor = max(1, int(minimum_shift_samples))
+    ceil = max(floor + 1, sample_count - floor)
     # noinspection PyTypeChecker
-    active_cell_indices: NDArray[np.int32] = np.where(active_cell_mask)[0].astype(np.int32)
+    sample_index_arange: NDArray[np.int64] = np.arange(sample_count, dtype=np.int64)
+    # noinspection PyTypeChecker
+    cell_arange: NDArray[np.int64] = np.arange(cell_count, dtype=np.int64)[:, np.newaxis]
+    inverse_sample_count = np.float32(1.0 / float(sample_count))
+
+    # Pre-draws every shuffle's shift vector from the input rng in the same order a serial implementation
+    # would consume them. The rng state after this call advances by ``shuffle_count * cell_count`` int64
+    # draws -- identical to the previous per-iteration loop -- so downstream consumers (FastICA) sharing the
+    # generator observe no behavior change.
+    # noinspection PyTypeChecker
+    all_shifts: NDArray[np.int64] = rng.integers(low=floor, high=ceil, size=(shuffle_count, cell_count)).astype(
+        np.int64
+    )
+
+    total_budget = resolve_worker_count(requested_workers=requested_workers)
+    blas_threads_per_shuffle, parallel_shuffles = _resolve_ica_shuffle_allocation(
+        budget=total_budget,
+        shuffle_count=shuffle_count,
+    )
+
+    def _one_shuffle(shuffle_index: int) -> tuple[int, float]:
+        # noinspection PyTypeChecker
+        gather: NDArray[np.int64] = (
+            sample_index_arange[np.newaxis, :] - all_shifts[shuffle_index][:, np.newaxis]
+        ) % sample_count
+        shuffled = z[cell_arange, gather]
+        return shuffle_index, _largest_zzt_eigenvalue(z=shuffled, inverse_sample_count=inverse_sample_count)
+
+    if parallel_shuffles <= 1:
+        # Serial fallback: hands the entire budget to BLAS so the single Lanczos call saturates the worker.
+        with threadpool_limits(limits=blas_threads_per_shuffle):
+            for shuffle_index in tqdm(
+                range(shuffle_count),
+                desc=progress_description,
+                unit="iter",
+                leave=False,
+            ):
+                _, eigval = _one_shuffle(shuffle_index)
+                output[shuffle_index] = eigval
+        return output
+
+    def _init_worker() -> None:
+        # Pins each worker's BLAS thread pool so the per-shuffle Lanczos matvec stays inside its slice of the
+        # CPU budget instead of fighting other workers for cores. ``threadpool_limits`` is invoked at worker
+        # startup so subsequent BLAS calls in that thread inherit the cap automatically.
+        threadpool_limits(limits=blas_threads_per_shuffle)
+
+    with ThreadPoolExecutor(max_workers=parallel_shuffles, initializer=_init_worker) as executor:
+        futures = [executor.submit(_one_shuffle, index) for index in range(shuffle_count)]
+        for future in tqdm(
+            as_completed(futures),
+            total=shuffle_count,
+            desc=progress_description,
+            unit="iter",
+            leave=False,
+        ):
+            shuffle_index, eigval = future.result()
+            output[shuffle_index] = eigval
+    return output
+
+
+def _largest_zzt_eigenvalue(
+    z: NDArray[np.float32],
+    inverse_sample_count: float | np.float32,
+) -> float:
+    """Returns the largest eigenvalue of ``(z @ z.T) / sample_count`` without materialising the correlation
+    matrix.
+
+    Notes:
+        Uses ARPACK Lanczos via ``scipy.sparse.linalg.eigsh`` with ``k=1`` and a matrix-free ``LinearOperator``
+        whose ``matvec`` is ``z @ (z.T @ v) * inverse_sample_count``. Each Lanczos iteration costs two BLAS
+        matvecs (``O(cell_count * sample_count)``); typical convergence is a few dozen iterations, dwarfing the
+        ``O(cell_count^3)`` cost of a full eigendecomposition for large cell counts. Falls back to a full
+        ``np.linalg.eigvalsh`` call on the rare ``ArpackNoConvergence`` (degenerate spectrum) so callers always
+        receive a defined value.
+    """
+    cell_count, sample_count = z.shape
+    if cell_count == 0 or sample_count == 0:
+        return 0.0
+
+    def matvec(vector: NDArray[np.float64]) -> NDArray[np.float64]:
+        # noinspection PyTypeChecker
+        projected: NDArray[np.float32] = z.T @ vector.astype(np.float32, copy=False)
+        # noinspection PyTypeChecker
+        result: NDArray[np.float32] = z @ projected
+        return (result.astype(np.float64, copy=False)) * float(inverse_sample_count)
+
+    operator = LinearOperator(shape=(cell_count, cell_count), matvec=matvec, dtype=np.float64)
+    try:
+        eigvals = eigsh(operator, k=1, which="LA", tol=1e-3, return_eigenvectors=False)
+        return float(eigvals[0])
+    except ArpackNoConvergence as failure:
+        # ARPACK occasionally fails to converge on degenerate spectra; reuse whatever Ritz values it produced
+        # before falling back to a full dense decomposition so the null still has a defined entry.
+        if failure.eigenvalues.size > 0:
+            return float(np.max(failure.eigenvalues.real))
+        correlation = (z @ z.T) * float(inverse_sample_count)
+        return float(np.linalg.eigvalsh(correlation)[-1])
+
+
+def _fast_ica_deflation(
+    whitened: NDArray[np.float64],
+    *,
+    rng: np.random.Generator,
+    maximum_iterations: int = 200,
+    tolerance: float = 1e-4,
+) -> NDArray[np.float64]:
+    """Runs deflation FastICA with the ``tanh`` non-linearity on a whitened ``(n_components, n_samples)``
+    matrix and returns the unmixing matrix ``W`` with shape ``(n_components, n_components)``.
+
+    Notes:
+        Implements the standard one-component-at-a-time fixed-point iteration of Hyvärinen 1999 with
+        Gram-Schmidt deflation. ``whitened`` must already have unit-variance, decorrelated rows (the caller
+        whitens via the significant-PC eigendecomposition).
+    """
+    n_components, n_samples = whitened.shape
+    # noinspection PyTypeChecker
+    unmixing: NDArray[np.float64] = np.zeros((n_components, n_components), dtype=np.float64)
+    for component_index in range(n_components):
+        # noinspection PyTypeChecker
+        candidate: NDArray[np.float64] = rng.standard_normal(n_components).astype(np.float64, copy=False)
+        candidate /= np.linalg.norm(candidate) + 1e-12
+        # Project out previously-found components.
+        for previous in range(component_index):
+            candidate -= float(candidate @ unmixing[previous]) * unmixing[previous]
+        candidate /= np.linalg.norm(candidate) + 1e-12
+
+        for _ in range(maximum_iterations):
+            projection = candidate @ whitened
+            g_value = np.tanh(projection)
+            g_derivative = np.float64(1.0) - g_value * g_value
+            updated = (whitened @ g_value) / float(n_samples) - g_derivative.mean() * candidate
+            for previous in range(component_index):
+                updated -= float(updated @ unmixing[previous]) * unmixing[previous]
+            updated /= np.linalg.norm(updated) + 1e-12
+
+            cos_similarity = float(np.abs(updated @ candidate))
+            candidate = updated
+            if abs(cos_similarity - 1.0) < tolerance:
+                break
+
+        unmixing[component_index] = candidate
+    return unmixing
+
+
+def _detect_assemblies_ica_cs(
+    activity_matrix: NDArray[np.bool_] | NDArray[np.float32],
+    *,
+    shuffle_count: int = 200,
+    eigenvalue_significance_percentile: float = 99.0,
+    membership_z_threshold: float = 2.0,
+    minimum_assembly_size: int = 3,
+    minimum_shift_samples: int = 5,
+    rng_seed: int = 0,
+) -> tuple[NDArray[np.float32], list[NDArray[np.int32]]]:
+    """Detects neural assemblies via the Lopes-dos-Santos 2013 ICA-CS pipeline.
+
+    Notes:
+        Z-scores activity along the sample axis, computes the cell-by-cell correlation matrix, retains
+        principal components whose eigenvalues exceed the configured percentile of a circular-shift null
+        distribution, whitens the data via these PCs, runs deflation FastICA, sign-corrects each independent
+        component so its peak weight is positive, and reports cells whose weight magnitudes exceed the
+        configured z-threshold as assembly members. Outperforms hierarchical Jaccard clustering on calcium
+        imaging benchmarks (Mölter, Avitan & Goodhill 2018, BMC Biol).
+
+    References:
+        - Lopes-dos-Santos, Ribeiro & Tort (2013). Detecting cell assemblies in large neuronal populations.
+          J Neurosci Methods. https://doi.org/10.1016/j.jneumeth.2013.04.010 -- the ICA-CS algorithm.
+        - Mölter, Avitan & Goodhill (2018). Detecting neural assemblies in calcium imaging data. BMC Biol.
+          https://doi.org/10.1186/s12915-018-0606-4 -- comparative benchmark recommending ICA-CS over
+          hierarchical clustering.
+        - Hyvärinen (1999). Fast and robust fixed-point algorithms for ICA. IEEE Trans Neural Netw.
+          https://doi.org/10.1109/72.761722 -- deflation FastICA fixed-point iteration used here.
+
+    Args:
+        activity_matrix: Cell-by-time-bin activity matrix. Boolean inputs are cast to float32; float inputs
+            are used as-is. Each column is one observation (time bin or SCE event).
+        shuffle_count: Number of circular-shift shuffles for the eigenvalue significance test.
+        eigenvalue_significance_percentile: Percentile cutoff applied to the shuffled max-eigenvalue
+            distribution.
+        membership_z_threshold: Per-component z-threshold (in units of the component-weight standard
+            deviation) above which a cell is reported as an assembly member.
+        minimum_assembly_size: Drop assemblies with fewer than this many member cells.
+        minimum_shift_samples: Lower bound on the absolute circular shift per cell per shuffle.
+        rng_seed: Seed for the per-call numpy random generator.
+
+    Returns:
+        A tuple of (templates, member_lists) where ``templates`` has shape ``(n_assemblies, cell_count)`` in
+        the original cell-index space (zero-padded for cells that contributed no variance) and
+        ``member_lists`` is a list of length ``n_assemblies`` each containing the member cell indices.
+    """
+    cell_count = int(activity_matrix.shape[0])
+    rng = np.random.default_rng(seed=rng_seed)
+
+    # noinspection PyTypeChecker
+    activity: NDArray[np.float32] = np.asarray(activity_matrix, dtype=np.float32)
+    if activity.shape[1] < _MINIMUM_OBSERVATIONS_FOR_VARIANCE:
+        # noinspection PyTypeChecker
+        return np.empty((0, cell_count), dtype=np.float32), []
+
+    z, has_variance = _z_score_along_samples(activity=activity)
+    active_cell_indices = np.where(has_variance)[0].astype(np.int32)
     if active_cell_indices.size < minimum_assembly_size:
-        return []
-
-    cell_vectors = participation[:, active_cell_mask].T.astype(np.float64)
-    distances = pdist(X=cell_vectors, metric="jaccard")
-    distances = np.nan_to_num(distances, nan=0.0)
-
-    cluster_target = min(max_clusters, active_cell_indices.size // minimum_assembly_size)
-    cluster_target = max(2, cluster_target)
-    linkage_matrix = linkage(distances, method="average")
-    cluster_labels = fcluster(linkage_matrix, t=cluster_target, criterion="maxclust")
-
-    assemblies: list[tuple[int, NDArray[np.int32]]] = []
-    for cluster_id in range(1, cluster_target + 1):
         # noinspection PyTypeChecker
-        member_mask: NDArray[np.bool_] = cluster_labels == cluster_id
-        if int(np.sum(member_mask)) < minimum_assembly_size:
-            continue
-        member_indices = active_cell_indices[member_mask]
-        member_participation = participation[:, member_indices]
-        active_fraction = np.mean(member_participation, axis=1)
-        # noinspection PyTypeChecker
-        activations: NDArray[np.int32] = np.where(active_fraction >= activation_threshold)[0].astype(np.int32)
-        if activations.size == 0:
-            continue
-        assemblies.append((int(activations.size), member_indices))
+        return np.empty((0, cell_count), dtype=np.float32), []
 
-    assemblies.sort(key=lambda entry: entry[0], reverse=True)
-    return [member_indices for _, member_indices in assemblies]
+    z_active = z[active_cell_indices, :]
+    sample_count = z_active.shape[1]
+
+    correlation = (z_active @ z_active.T) / float(sample_count)
+    eigvals_all, eigvecs_all = np.linalg.eigh(correlation)
+
+    shuffled_max = _shuffle_max_eigenvalue(
+        z=z_active,
+        shuffle_count=shuffle_count,
+        rng=rng,
+        minimum_shift_samples=minimum_shift_samples,
+        progress_description="ICA-CS template shuffle",
+    )
+    threshold = float(np.percentile(shuffled_max, eigenvalue_significance_percentile))
+    # noinspection PyTypeChecker
+    significant_mask: NDArray[np.bool_] = eigvals_all > threshold
+    if not significant_mask.any():
+        # noinspection PyTypeChecker
+        return np.empty((0, cell_count), dtype=np.float32), []
+
+    # noinspection PyTypeChecker
+    significant_eigvals: NDArray[np.float64] = eigvals_all[significant_mask].astype(np.float64, copy=False)
+    significant_eigvecs = eigvecs_all[:, significant_mask].astype(np.float64, copy=False)
+
+    # Whitener carries the data into a unit-variance, decorrelated PC subspace as the FastICA prerequisite.
+    whitener = significant_eigvecs / np.sqrt(significant_eigvals)[np.newaxis, :]
+    projected = whitener.T @ z_active.astype(np.float64, copy=False)
+
+    unmixing = _fast_ica_deflation(whitened=projected, rng=rng)
+
+    # Templates in active-cell space: V_active = whitener @ W.T -> (active_cells, n_components)
+    templates_active = (whitener @ unmixing.T).astype(np.float32, copy=False)
+
+    # Sign-correct so each template's largest-magnitude weight is positive.
+    for component_index in range(templates_active.shape[1]):
+        peak_index = int(np.argmax(np.abs(templates_active[:, component_index])))
+        if templates_active[peak_index, component_index] < 0.0:
+            templates_active[:, component_index] *= np.float32(-1.0)
+
+    # Lift back to the full cell-index space.
+    # noinspection PyTypeChecker
+    templates: NDArray[np.float32] = np.zeros((templates_active.shape[1], cell_count), dtype=np.float32)
+    templates[:, active_cell_indices] = templates_active.T
+
+    member_lists: list[NDArray[np.int32]] = []
+    surviving: list[NDArray[np.float32]] = []
+    for component_index in range(templates.shape[0]):
+        # Compute the membership threshold from the active-cell weights only so silent cells do not deflate
+        # the per-component standard deviation toward zero.
+        active_weights = templates[component_index, active_cell_indices]
+        weight_std = float(np.std(active_weights))
+        if weight_std == 0.0:
+            continue
+        # noinspection PyTypeChecker
+        member_mask: NDArray[np.bool_] = templates[component_index] > membership_z_threshold * weight_std
+        # noinspection PyTypeChecker
+        member_indices: NDArray[np.int32] = np.where(member_mask)[0].astype(np.int32)
+        if member_indices.size < minimum_assembly_size:
+            continue
+        member_lists.append(member_indices)
+        surviving.append(templates[component_index])
+
+    if not surviving:
+        # noinspection PyTypeChecker
+        return np.empty((0, cell_count), dtype=np.float32), []
+    # noinspection PyTypeChecker
+    surviving_templates: NDArray[np.float32] = np.stack(surviving, axis=0).astype(np.float32, copy=False)
+    return surviving_templates, member_lists
+
+
+def _per_sce_reactivation_strength(
+    z: NDArray[np.float32],
+    templates: NDArray[np.float32],
+    sce_labels: NDArray[np.int32],
+    sce_count: int,
+    *,
+    templates_squared: NDArray[np.float32] | None = None,
+    z_squared: NDArray[np.float32] | None = None,
+) -> NDArray[np.float32]:
+    """Returns the per-SCE mean diagonal-removed reactivation strength under the Peyrache 2009 / Lopes-dos-
+    Santos 2013 quadratic projection ``R(t) = sum_k ((P_k @ z(:,t))^2 - sum_i P_k[i]^2 * z(i,t)^2)``.
+
+    Notes:
+        Reformulates the Peyrache / Lopes-dos-Santos quadratic projection as two BLAS GEMMs so the per-sample
+        strength becomes a vectorised reduction. Lets ``A = templates @ z`` and ``B = (templates ** 2) @ (z ** 2)``;
+        the per-sample strength is ``(A ** 2 - B).sum(axis=0)``. Aggregating across SCEs is one ``np.bincount``
+        with weights. Replaces the previous numba-kernel implementation that walked
+        ``sample_count * n_assemblies * cell_count`` strided loads on a column-major access pattern (z is
+        C-contiguous (cell, sample)) and accumulated per-SCE sums via a non-atomic
+        ``sums[label - 1] += per_sample_strength`` scatter under ``prange`` -- the new path is roughly an
+        order of magnitude faster and is race-free.
+
+        ``templates_squared`` and ``z_squared`` are optional pre-computed elementwise squares. Inside the
+        shuffle loop the templates are shuffle-invariant so ``templates_squared`` is hoisted once per period;
+        ``z_squared`` is also reused per shuffle because the circular-shift gather commutes with elementwise
+        squaring (``shuffled_z ** 2 == shuffled(z ** 2)`` when both use identical per-cell shifts), so the
+        caller pre-computes ``z * z`` once per period and gathers it with the same indices used for ``z``.
+
+    Args:
+        z: Z-scored activity with dimensions (cell_count, sample_count).
+        templates: Assembly templates with dimensions (n_assemblies, cell_count).
+        sce_labels: Per-sample SCE labels (1-indexed; 0 outside any SCE) with length sample_count.
+        sce_count: Number of detected SCEs (the maximum value in ``sce_labels``).
+        templates_squared: Optional pre-computed ``templates * templates`` array; when provided the per-call
+            elementwise squaring is skipped. Useful inside shuffle loops where templates are invariant.
+        z_squared: Optional pre-computed ``z * z`` array (same shape and dtype as ``z``). When provided the
+            per-call ``z ** 2`` materialisation -- the dominant elementwise allocation at the typical
+            ``cell_count * sample_count`` of a rest period -- is skipped.
+
+    Returns:
+        Per-SCE mean reactivation strength with length sce_count; entries for SCEs whose sample slice is empty
+        remain at zero.
+    """
+    sample_count = z.shape[1]
+    n_assemblies = templates.shape[0]
+    # noinspection PyTypeChecker
+    means: NDArray[np.float32] = np.zeros(sce_count, dtype=np.float32)
+    if sce_count == 0 or n_assemblies == 0 or sample_count == 0:
+        return means
+
+    # noinspection PyTypeChecker
+    projection: NDArray[np.float32] = (templates @ z).astype(np.float32, copy=False)
+    if templates_squared is None:
+        # noinspection PyTypeChecker
+        templates_squared = (templates * templates).astype(np.float32, copy=False)
+    if z_squared is None:
+        # noinspection PyTypeChecker
+        z_squared = (z * z).astype(np.float32, copy=False)
+    # noinspection PyTypeChecker
+    diagonal: NDArray[np.float32] = (templates_squared @ z_squared).astype(np.float32, copy=False)
+    # noinspection PyTypeChecker
+    per_sample: NDArray[np.float32] = (projection * projection - diagonal).sum(axis=0).astype(
+        np.float32, copy=False
+    )
+
+    # ``np.bincount(sce_labels, weights=per_sample, minlength=sce_count + 1)`` puts samples whose label is 0
+    # into bin 0 (which we discard) and accumulates per_sample[t] into bin label[t] for valid SCEs. Counts use
+    # the same minlength so the per-SCE divisor is computed without a separate pass over the labels.
+    minlength = sce_count + 1
+    # noinspection PyTypeChecker
+    sums: NDArray[np.float64] = np.bincount(sce_labels, weights=per_sample, minlength=minlength)[1:]
+    # noinspection PyTypeChecker
+    counts: NDArray[np.int64] = np.bincount(sce_labels, minlength=minlength)[1:]
+    nonempty = counts > 0
+    if np.any(nonempty):
+        # noinspection PyTypeChecker
+        means[nonempty] = (sums[nonempty] / counts[nonempty]).astype(np.float32, copy=False)
+    return means
+
+
+def _build_run_template_matrix(
+    *,
+    run_results: list,
+    cell_count: int,
+    shuffle_count: int,
+    eigenvalue_significance_percentile: float,
+    minimum_shift_samples: int,
+    rng_seed: int,
+) -> NDArray[np.float32]:
+    """Concatenates RUN-period onset matrices column-wise and runs ICA-CS to derive the population-assembly
+    templates used for rest-period reactivation projection.
+    """
+    if not run_results:
+        # noinspection PyTypeChecker
+        return np.empty((0, cell_count), dtype=np.float32)
+
+    # noinspection PyTypeChecker
+    run_concat: NDArray[np.float32] = np.concatenate(
+        [result.onset_matrix.astype(np.float32, copy=False) for result in run_results], axis=1
+    )
+    if run_concat.shape[1] < max(2, minimum_shift_samples * 2):
+        # noinspection PyTypeChecker
+        return np.empty((0, cell_count), dtype=np.float32)
+
+    templates, _ = _detect_assemblies_ica_cs(
+        activity_matrix=run_concat,
+        shuffle_count=shuffle_count,
+        eigenvalue_significance_percentile=eigenvalue_significance_percentile,
+        minimum_shift_samples=minimum_shift_samples,
+        rng_seed=rng_seed,
+    )
+    return templates
+
+
+def _compute_population_reactivation(
+    *,
+    run_results: list,
+    rest_results: list,
+    cell_count: int,
+    shuffle_count: int = 200,
+    template_eigenvalue_significance_percentile: float = 99.0,
+    sce_significance_percentile: float = 95.0,
+    minimum_shift_samples: int = 5,
+    rng_seed: int = 0,
+) -> tuple[NDArray[np.float32], dict[int, dict[str, object]]]:
+    """Computes per-SCE population reactivation strength of REST SCEs against templates derived from the
+    concatenated RUN onset matrix (Peyrache 2009 / Lopes-dos-Santos 2013).
+
+    Notes:
+        Templates are derived once from RUN onsets via ICA-CS; each REST period's onsets are then
+        z-scored along the sample axis and projected onto the templates via the diagonal-removed quadratic
+        form so within-cell autocorrelation does not inflate the strength. A per-SCE significance flag is
+        derived from a per-period circular-shuffle null on the same projection.
+
+    Args:
+        run_results: List of RUN-period ``SCEResult`` instances supplying the onset matrix used for template
+            estimation.
+        rest_results: List of REST-period ``SCEResult`` instances onto which the templates are projected.
+        cell_count: Total number of cells in the session.
+        shuffle_count: Number of shuffle iterations both for template selection and for the per-SCE null.
+        template_eigenvalue_significance_percentile: Percentile cutoff for selecting significant principal
+            components during template estimation.
+        sce_significance_percentile: Percentile of the per-SCE shuffle null at which an SCE is flagged as
+            reactivating.
+        minimum_shift_samples: Lower bound on the absolute circular shift per cell per shuffle (template
+            estimation and per-SCE null).
+        rng_seed: Master seed for both the template-estimation rng and the per-period shuffle rngs.
+
+    Returns:
+        Tuple of (templates, per_period_dict). ``templates`` has shape ``(n_assemblies, cell_count)``;
+        ``per_period_dict`` maps result index in ``rest_results`` (also indexable as the position of the rest
+        result inside the combined results list when consumed by ``_build_sce_periods_table``) to a dict
+        carrying ``reactivation_strengths`` (per-SCE), ``mean_reactivation_strength`` (period mean), and
+        ``reactivating_sce_fraction`` (per-period significance fraction).
+    """
+    templates = _build_run_template_matrix(
+        run_results=run_results,
+        cell_count=cell_count,
+        shuffle_count=shuffle_count,
+        eigenvalue_significance_percentile=template_eigenvalue_significance_percentile,
+        minimum_shift_samples=minimum_shift_samples,
+        rng_seed=rng_seed,
+    )
+    if templates.shape[0] == 0 or not rest_results:
+        return templates, {}
+
+    master_rng = np.random.default_rng(seed=rng_seed + 1)
+    period_seeds = master_rng.integers(low=0, high=np.iinfo(np.int64).max, size=len(rest_results))
+
+    # Pre-computes ``templates ** 2`` once across every per-period reactivation call. Templates are
+    # shuffle-invariant (and period-invariant) so the elementwise square is hoisted out of the hot path.
+    # noinspection PyTypeChecker
+    templates_squared: NDArray[np.float32] = (templates * templates).astype(np.float32, copy=False)
+
+    total_budget = resolve_worker_count(requested_workers=0)
+    blas_threads_per_shuffle, parallel_shuffles = _resolve_ica_shuffle_allocation(
+        budget=total_budget,
+        shuffle_count=shuffle_count,
+    )
+
+    def _init_reactivation_worker() -> None:
+        # Same per-worker BLAS-thread pin used by ``_shuffle_max_eigenvalue``: each ICA-CS reactivation
+        # shuffle does two GEMMs (templates @ z and templates_squared @ z_squared), so capping BLAS to its
+        # share of the CPU budget prevents 4x oversubscription while still saturating each worker's matvec.
+        threadpool_limits(limits=blas_threads_per_shuffle)
+
+    per_period: dict[int, dict[str, object]] = {}
+    rest_iterator = tqdm(
+        list(enumerate(rest_results)),
+        desc="Reactivation per rest period",
+        unit="period",
+        leave=False,
+    )
+    for period_position, result in rest_iterator:
+        sce_count = int(np.max(result.sce_labels)) if result.sce_labels.size > 0 else 0
+        if sce_count == 0:
+            continue
+        # noinspection PyTypeChecker
+        rest_activity: NDArray[np.float32] = result.onset_matrix.astype(np.float32, copy=False)
+        z, _ = _z_score_along_samples(activity=rest_activity)
+        # Pre-computes ``z * z`` once per period. Circular shifts commute with elementwise squaring, so
+        # gathering ``z_squared`` with the same per-cell shifts used for ``z`` yields ``shuffled_z ** 2``
+        # without paying the per-shuffle elementwise allocation (the dominant non-GEMM allocation at
+        # ``cell_count * sample_count`` of a rest period).
+        # noinspection PyTypeChecker
+        z_squared_period: NDArray[np.float32] = (z * z).astype(np.float32, copy=False)
+        sce_labels_int32 = result.sce_labels.astype(np.int32, copy=False)
+
+        observed = _per_sce_reactivation_strength(
+            z=z,
+            templates=templates,
+            sce_labels=sce_labels_int32,
+            sce_count=sce_count,
+            templates_squared=templates_squared,
+            z_squared=z_squared_period,
+        )
+
+        # Per-SCE null: independent circular shifts of each cell, recompute reactivation strength.
+        period_rng = np.random.default_rng(seed=int(period_seeds[period_position]))
+        sample_count = rest_activity.shape[1]
+        floor = max(1, int(minimum_shift_samples))
+        ceil = max(floor + 1, sample_count - floor)
+        # noinspection PyTypeChecker
+        sample_index_arange: NDArray[np.int64] = np.arange(sample_count, dtype=np.int64)
+        # noinspection PyTypeChecker
+        cell_arange: NDArray[np.int64] = np.arange(cell_count, dtype=np.int64)[:, np.newaxis]
+        # noinspection PyTypeChecker
+        null_strengths: NDArray[np.float32] = np.zeros((shuffle_count, sce_count), dtype=np.float32)
+
+        # Pre-draws every shuffle's shift vector from the period rng in serial order so the rng state advances
+        # exactly as the previous sequential implementation -- preserves bit-for-bit reproducibility against
+        # legacy reports.
+        # noinspection PyTypeChecker
+        all_shifts: NDArray[np.int64] = period_rng.integers(
+            low=floor, high=ceil, size=(shuffle_count, cell_count)
+        ).astype(np.int64)
+
+        def _one_reactivation_shuffle(shuffle_index: int) -> tuple[int, NDArray[np.float32]]:
+            # noinspection PyTypeChecker
+            gather: NDArray[np.int64] = (
+                sample_index_arange[np.newaxis, :] - all_shifts[shuffle_index][:, np.newaxis]
+            ) % sample_count
+            shuffled_z = z[cell_arange, gather]
+            shuffled_z_squared = z_squared_period[cell_arange, gather]
+            strengths = _per_sce_reactivation_strength(
+                z=shuffled_z,
+                templates=templates,
+                sce_labels=sce_labels_int32,
+                sce_count=sce_count,
+                templates_squared=templates_squared,
+                z_squared=shuffled_z_squared,
+            )
+            return shuffle_index, strengths
+
+        # No inner per-shuffle progress bar -- the outer ``Reactivation per rest period`` bar already advances
+        # at period granularity, and at typical shuffle throughputs the inner bar emits hundreds of updates per
+        # period that flood non-TTY consoles (PyCharm Run windows, log files) without adding actionable
+        # information.
+        if parallel_shuffles <= 1:
+            with threadpool_limits(limits=blas_threads_per_shuffle):
+                for shuffle_index in range(shuffle_count):
+                    _, strengths = _one_reactivation_shuffle(shuffle_index)
+                    null_strengths[shuffle_index] = strengths
+        else:
+            with ThreadPoolExecutor(
+                max_workers=parallel_shuffles,
+                initializer=_init_reactivation_worker,
+            ) as executor:
+                futures = [
+                    executor.submit(_one_reactivation_shuffle, index) for index in range(shuffle_count)
+                ]
+                for future in as_completed(futures):
+                    shuffle_index, strengths = future.result()
+                    null_strengths[shuffle_index] = strengths
+
+        # noinspection PyTypeChecker
+        sce_threshold: NDArray[np.float32] = np.percentile(null_strengths, sce_significance_percentile, axis=0).astype(
+            np.float32, copy=False
+        )
+        # noinspection PyTypeChecker
+        is_significant: NDArray[np.bool_] = observed > sce_threshold
+        per_period[period_position] = {
+            "reactivation_strengths": observed.tolist(),
+            "mean_reactivation_strength": float(np.mean(observed)),
+            "reactivating_sce_fraction": float(np.mean(is_significant)),
+        }
+
+    return templates, per_period
 
 
 def _active_significance_columns(
@@ -2706,9 +3522,7 @@ def _resolve_dataset_place_metric_extractor(
     bools = (require_place, require_stable, require_peak_significant)
     if bools == (True, True, True):
         if mutually_exclusive:
-            return (
-                lambda summary: summary.strict_place_only_count / summary.cell_count if summary.cell_count else 0.0
-            )
+            return lambda summary: summary.strict_place_only_count / summary.cell_count if summary.cell_count else 0.0
         return lambda summary: summary.strict_place_cell_count / summary.cell_count if summary.cell_count else 0.0
     if bools == (True, False, False):
         if mutually_exclusive:

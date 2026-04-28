@@ -4,11 +4,9 @@ track.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 import warnings
 from dataclasses import field, replace, dataclass
-from concurrent.futures import ThreadPoolExecutor
 
 from tqdm import tqdm
 from numba import njit, prange
@@ -18,12 +16,11 @@ from scipy.ndimage import uniform_filter1d
 from ..forging import FluorescenceColumn
 from .utilities import (
     RunSessionData,
-    bin_fluorescence_per_trial,
+    MINIMUM_VALID_BINS_FOR_PEARSON,
     per_cell_pearson_safe,
     assemble_run_session_data,
+    bin_fluorescence_per_trial,
     bin_fluorescence_by_position,
-    accumulate_shuffled_rate_maps,
-    compute_shuffle_source_indices,
 )
 
 if TYPE_CHECKING:
@@ -32,10 +29,15 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-_WORKER_RESERVE: int = 4
-"""Number of CPU cores reserved for the OS when worker_count=-1 selects an automatic worker count."""
 _MINIMUM_TRIALS_FOR_STABILITY: int = 2
 """Minimum trial count required to compute a per-cell split-half Pearson r for the stability shuffle."""
+_STABILITY_SHUFFLE_CHUNK_SIZE: int = 50
+"""Number of stability-shuffle iterations dispatched into the numba kernel per tqdm progress tick. Small enough
+that the progress bar updates smoothly, large enough that per-call kernel-launch overhead stays negligible."""
+_PEAK_SHUFFLE_CHUNK_SIZE: int = 50
+"""Number of peak-shuffle iterations dispatched into the numba kernel per tqdm progress tick. Mirrors the
+stability-shuffle chunking so the progress bar advances smoothly while keeping per-call dispatch overhead
+negligible against the heavier per-iteration work."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,45 +301,6 @@ class PlaceFieldDetector:
         self._shuffle_total_samples: int = total_samples
         self._shuffle_bin_count: int = bin_count
 
-    def _compute_shuffled_smoothed_rate_map(self, seed: int) -> NDArray[np.float32]:
-        """Returns one smoothed shuffled rate map produced by the indirection-array shuffle.
-
-        Notes:
-            Uses ``compute_shuffle_source_indices`` with ``chunk_count=1`` for a pure circular shift (matches the
-            historical place-pipeline behaviour). The numba kernels are ``nogil=True`` so this method is safe to
-            call concurrently from worker threads.
-
-        Args:
-            seed: Random seed used by ``compute_shuffle_source_indices``.
-
-        Returns:
-            Smoothed shuffled rate map with dimensions (cell_count, bin_count).
-        """
-        # noinspection PyTypeChecker
-        source_indices: NDArray[np.int32] = compute_shuffle_source_indices(
-            filtered_sample_indices=self._shuffle_filtered_sample_indices,
-            sample_count=self._shuffle_total_samples,
-            minimum_shift=self._shuffle_minimum_shift,
-            chunk_count=1,
-            seed=seed,
-        )
-        # noinspection PyTypeChecker
-        rate_map: NDArray[np.float32] = np.empty(
-            (self.fluorescence.shape[0], self._shuffle_bin_count), dtype=np.float32
-        )
-        accumulate_shuffled_rate_maps(
-            fluorescence=self.fluorescence,
-            source_indices=source_indices,
-            bin_indices=self._shuffle_filtered_bin_indices,
-            sample_counts=self._shuffle_sample_counts,
-            output=rate_map,
-        )
-        # noinspection PyTypeChecker
-        smoothed: NDArray[np.float32] = uniform_filter1d(
-            input=rate_map, size=self.configuration.smooth_size, axis=1, mode="wrap"
-        ).astype(np.float32)
-        return smoothed
-
     def detect(self) -> PlaceFields:
         """Detects place fields from the original fluorescence and position data.
 
@@ -399,21 +362,23 @@ class PlaceFieldDetector:
         repeat_count: int = 1000,
         peak_percentile: float = 0.99,
         stability_percentile: float = 0.95,
-        worker_count: int = -1,
     ) -> tuple[NDArray[np.bool_], NDArray[np.bool_], NDArray[np.float32], NDArray[np.float32]]:
         """Computes the per-cell IS_STABLE and IS_PEAK_SIGNIFICANT flags via per-cell shuffle distributions, and
         returns the corresponding per-cell p-values.
 
         Notes:
-            The peak null uses the same time-domain circular-shift shuffle as
-            :meth:`_compute_shuffled_smoothed_rate_map`, captures the per-cell peak of each shuffled smoothed rate
-            map, and classifies cells whose observed peak
-            exceeds the per-cell ``peak_percentile`` of the shuffled distribution. The stability null is a per-trial
-            shuffle that circularly shifts each trial's rate map by an independent random bin offset and recomputes
-            the per-cell split-half Pearson r; cells whose observed r exceeds the per-cell ``stability_percentile``
-            of the shuffled distribution are classified as stable. The p-value for each measure is the fraction of
-            shuffles whose statistic is greater than or equal to the observed value (NaN where the observed statistic
-            is NaN or the shuffled distribution is empty).
+            The peak null uses a time-domain circular-shift shuffle, captures the per-cell peak of each shuffled
+            smoothed rate map, and classifies cells whose observed peak exceeds the per-cell ``peak_percentile`` of
+            the shuffled distribution. The stability null is a per-trial shuffle that circularly shifts each trial's
+            rate map by an independent random bin offset and recomputes the per-cell split-half Pearson r; cells
+            whose observed r exceeds the per-cell ``stability_percentile`` of the shuffled distribution are
+            classified as stable. The p-value for each measure is the fraction of shuffles whose statistic is greater
+            than or equal to the observed value (NaN where the observed statistic is NaN or the shuffled distribution
+            is empty).
+
+            Both nulls are produced by single ``@njit(parallel=True)`` kernels dispatched in chunks so the tqdm
+            progress bar advances smoothly while every CPU core stays saturated. The kernels parallelize over
+            ``(iteration * cell_count)`` so the per-iteration cell loop never serializes the heavy work.
 
         References:
             - Climer & Dombeck (2021). Choice of method of place cell classification determines the population of
@@ -430,8 +395,6 @@ class PlaceFieldDetector:
             repeat_count: Number of shuffle iterations.
             peak_percentile: Percentile cutoff (0-1) for the peak-method classifier; default 0.99.
             stability_percentile: Percentile cutoff (0-1) for the stability classifier; default 0.95.
-            worker_count: Number of parallel workers for shuffle iterations. If -1, uses all CPU cores minus a
-                small reserve.
 
         Returns:
             A tuple of (is_stable, is_peak_significant, stability_p_values, peak_p_values). All four arrays have
@@ -440,16 +403,34 @@ class PlaceFieldDetector:
         """
         cell_count = observed_pooled_rate_map.shape[0]
 
-        if worker_count == -1:
-            worker_count = max(1, (os.cpu_count() or 1) - _WORKER_RESERVE)
-
-        # Runs the time-domain shuffles in parallel; each iteration returns the per-cell peak of its shuffled
-        # smoothed rate map via the indirection-array shuffle.
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [executor.submit(self._shuffle_iteration_peak, iteration) for iteration in range(repeat_count)]
-            shuffled_peaks_list = [future.result() for future in tqdm(futures, desc="Peak shuffle", unit="iter")]
+        # Pre-generates one shift per iteration with ``default_rng(iteration)`` so the kernel reproduces the
+        # original per-iteration seeding exactly. Doing this in numpy keeps reproducibility intact while letting
+        # the kernel stay seed-agnostic and avoid contending on numpy's global random state from worker threads.
         # noinspection PyTypeChecker
-        shuffled_peaks: NDArray[np.float32] = np.vstack(shuffled_peaks_list).astype(np.float32)
+        peak_shifts: NDArray[np.int32] = np.empty(repeat_count, dtype=np.int32)
+        upper_bound = self._shuffle_total_samples - self._shuffle_minimum_shift
+        for iteration in range(repeat_count):
+            generator = np.random.default_rng(iteration)
+            peak_shifts[iteration] = int(
+                generator.integers(low=self._shuffle_minimum_shift, high=upper_bound, dtype=np.int64)
+            )
+
+        # noinspection PyTypeChecker
+        shuffled_peaks: NDArray[np.float32] = np.full((repeat_count, cell_count), np.nan, dtype=np.float32)
+        smooth_size = int(self.configuration.smooth_size)
+        peak_chunk_starts = list(range(0, repeat_count, _PEAK_SHUFFLE_CHUNK_SIZE))
+        for chunk_start in tqdm(peak_chunk_starts, desc="Peak shuffle", unit="chunk"):
+            chunk_end = min(chunk_start + _PEAK_SHUFFLE_CHUNK_SIZE, repeat_count)
+            _peak_shuffle_kernel(
+                fluorescence=self.fluorescence,
+                filtered_sample_indices=self._shuffle_filtered_sample_indices,
+                bin_indices=self._shuffle_filtered_bin_indices,
+                sample_counts=self._shuffle_sample_counts,
+                shift_amounts=peak_shifts[chunk_start:chunk_end],
+                smooth_size=smooth_size,
+                sample_count=self._shuffle_total_samples,
+                output=shuffled_peaks[chunk_start:chunk_end],
+            )
 
         # noinspection PyTypeChecker
         observed_peaks: NDArray[np.float32] = np.nanmax(observed_pooled_rate_map, axis=1)
@@ -484,12 +465,6 @@ class PlaceFieldDetector:
 
         return is_stable, is_peak_significant, stability_p_values, peak_p_values
 
-    def _shuffle_iteration_peak(self, iteration: int) -> NDArray[np.float32]:
-        """Returns the per-cell peak of the smoothed shuffled rate map for one indirection-array shuffle iteration."""
-        smoothed = self._compute_shuffled_smoothed_rate_map(seed=iteration)
-        # noinspection PyTypeChecker
-        return np.nanmax(smoothed, axis=1).astype(np.float32)
-
     def _stability_shuffle_threshold(
         self,
         per_trial_rate_map: NDArray[np.float32],
@@ -502,9 +477,16 @@ class PlaceFieldDetector:
 
         Notes:
             Each shuffle iteration shifts every trial's rate map by an independent random bin offset, then computes
-            the per-cell split-half Pearson r between the even-trial and odd-trial means of the shuffled per-trial
+            the per-cell split-half Pearson r between the first-half and second-half means of the shuffled per-trial
             matrix. Returns the per-cell ``stability_percentile`` quantile of the shuffle distribution alongside the
             per-cell p-value (fraction of shuffles whose r is greater than or equal to the observed r).
+
+            Hands the heavy work to ``_stability_shuffle_kernel`` (numba ``parallel=True`` over iterations) so the
+            entire shuffle distribution materializes in one shot rather than a Python loop with per-iteration
+            ``np.roll``, ``np.nanmean``, and ``per_cell_pearson_safe`` calls. The kernel is dispatched in chunks
+            of ``_STABILITY_SHUFFLE_CHUNK_SIZE`` so a tqdm progress bar can advance as iterations complete; per-cell
+            shifts are pre-generated with ``np.random.default_rng(iteration)`` to preserve the original
+            seed-per-iteration reproducibility.
 
         Args:
             per_trial_rate_map: Per-trial rate map with dimensions (cell_count, trial_count, bin_count).
@@ -518,33 +500,28 @@ class PlaceFieldDetector:
         """
         cell_count, trial_count, bin_count = per_trial_rate_map.shape
         half_index = trial_count // 2
+
+        # Pre-generates one shift vector per iteration with ``default_rng(iteration)`` so the kernel reproduces
+        # the original per-iteration seeding exactly; doing this in numpy keeps reproducibility intact while
+        # letting the kernel stay seed-agnostic.
+        # noinspection PyTypeChecker
+        all_shifts: NDArray[np.int32] = np.empty((repeat_count, trial_count), dtype=np.int32)
+        for iteration in range(repeat_count):
+            generator = np.random.default_rng(iteration)
+            all_shifts[iteration] = generator.integers(low=0, high=bin_count, size=trial_count, dtype=np.int32)
+
         # noinspection PyTypeChecker
         shuffled_split_half: NDArray[np.float32] = np.full((repeat_count, cell_count), np.nan, dtype=np.float32)
 
-        for iteration in range(repeat_count):
-            generator = np.random.default_rng(iteration)
-            # numpy's Generator.integers stubs pick the scalar overload when ``size`` is bound to an int variable,
-            # even though the runtime call returns an ndarray; the cast realigns the static type with reality.
-            # noinspection PyTypeChecker
-            shifts: NDArray[np.int32] = np.asarray(
-                generator.integers(low=0, high=bin_count, size=trial_count, dtype=np.int32),
-                dtype=np.int32,
+        chunk_starts = list(range(0, repeat_count, _STABILITY_SHUFFLE_CHUNK_SIZE))
+        for chunk_start in tqdm(chunk_starts, desc="Stability shuffle", unit="chunk"):
+            chunk_end = min(chunk_start + _STABILITY_SHUFFLE_CHUNK_SIZE, repeat_count)
+            _stability_shuffle_kernel(
+                per_trial_rate_map=per_trial_rate_map,
+                shifts=all_shifts[chunk_start:chunk_end],
+                half_index=half_index,
+                output=shuffled_split_half[chunk_start:chunk_end],
             )
-            # noinspection PyTypeChecker
-            shuffled_per_trial: NDArray[np.float32] = np.empty_like(per_trial_rate_map)
-            for trial_index in range(trial_count):
-                shuffled_per_trial[:, trial_index, :] = np.roll(
-                    per_trial_rate_map[:, trial_index, :], shift=int(shifts[trial_index]), axis=1
-                )
-
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
-                with np.errstate(invalid="ignore"):
-                    # noinspection PyTypeChecker
-                    first_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, :half_index, :], axis=1)
-                    # noinspection PyTypeChecker
-                    second_map: NDArray[np.float32] = np.nanmean(shuffled_per_trial[:, half_index:, :], axis=1)
-            shuffled_split_half[iteration] = per_cell_pearson_safe(a=first_map, b=second_map)
 
         with np.errstate(invalid="ignore"):
             # noinspection PyTypeChecker
@@ -1094,6 +1071,220 @@ def _compute_circular_connected_place_fields(
         centers=centers,
         bin_size=bin_size,
     )
+
+
+@njit(cache=True, parallel=True)
+def _stability_shuffle_kernel(
+    per_trial_rate_map: NDArray[np.float32],
+    shifts: NDArray[np.int32],
+    half_index: int,
+    output: NDArray[np.float32],
+) -> None:
+    """Computes per-cell shuffled split-half Pearson r values for a chunk of stability-shuffle iterations.
+
+    Notes:
+        Parallelism is flattened over ``prange(chunk_count * cell_count)`` so every (iteration, cell) pair is an
+        independent task. The previous version paralleled only over iterations (``chunk_count`` ≤ 50); with cell
+        counts in the thousands, that left most cores idle on per-iteration cell loops. The flat axis spawns
+        ``chunk_count * cell_count`` tasks, which numba schedules across all available cores for full saturation.
+
+        The trial-outer / bin-inner loop ordering replaces the prior bin-outer / trial-inner traversal so that for
+        every (cell, trial) the inner sweep walks ``per_trial_rate_map[cell, trial, :]`` contiguously (after a
+        single circular wrap), which is cache-friendly. Per-task ``first_map`` / ``second_map`` scratch buffers
+        sized to ``bin_count`` stay small enough that numba's allocator pools them across tasks per worker thread.
+
+        Replicates ``per_cell_pearson_safe`` semantics inline so the kernel fuses the mean accumulation and Pearson
+        computation into one walk over the cell's bins; matches ``MINIMUM_VALID_BINS_FOR_PEARSON`` and the
+        zero-variance guard of the standalone helper. Output entries whose mean or variance fail the validity
+        checks are left at their caller-supplied initial value (NaN).
+
+    Args:
+        per_trial_rate_map: Per-trial rate map with dimensions (cell_count, trial_count, bin_count), C-contiguous
+            fp32.
+        shifts: Random per-trial circular shifts for this chunk with dimensions (chunk_count, trial_count). Each
+            row is one iteration's full shift vector.
+        half_index: Number of trials in the first half (``trial_count // 2``).
+        output: Pre-allocated (chunk_count, cell_count) fp32 buffer pre-filled with NaN. The kernel writes the
+            per-iteration per-cell Pearson r in place.
+    """
+    chunk_count = shifts.shape[0]
+    cell_count = per_trial_rate_map.shape[0]
+    trial_count = per_trial_rate_map.shape[1]
+    bin_count = per_trial_rate_map.shape[2]
+    total_tasks = chunk_count * cell_count
+
+    for task in prange(total_tasks):
+        iteration = task // cell_count
+        cell_index = task % cell_count
+
+        # Per-task scratch sized to bin_count. Numba's allocator pools and reuses these across the tasks each
+        # worker thread receives, so allocation overhead is amortised even at hundreds of thousands of tasks.
+        # noinspection PyTypeChecker
+        first_sum: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        first_count: NDArray[np.int32] = np.zeros(bin_count, dtype=np.int32)
+        # noinspection PyTypeChecker
+        second_sum: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        second_count: NDArray[np.int32] = np.zeros(bin_count, dtype=np.int32)
+
+        # Phase 1a: accumulate first-half contributions. Trial-outer / bin-inner walks
+        # ``per_trial_rate_map[cell, trial, :]`` contiguously after one circular wrap.
+        for trial_index in range(half_index):
+            shift = shifts[iteration, trial_index]
+            for bin_index in range(bin_count):
+                source_bin = bin_index - shift
+                if source_bin < 0:
+                    source_bin += bin_count
+                elif source_bin >= bin_count:
+                    source_bin -= bin_count
+                value = per_trial_rate_map[cell_index, trial_index, source_bin]
+                if not np.isnan(value):
+                    first_sum[bin_index] += value
+                    first_count[bin_index] += 1
+
+        # Phase 1b: accumulate second-half contributions identically.
+        for trial_index in range(half_index, trial_count):
+            shift = shifts[iteration, trial_index]
+            for bin_index in range(bin_count):
+                source_bin = bin_index - shift
+                if source_bin < 0:
+                    source_bin += bin_count
+                elif source_bin >= bin_count:
+                    source_bin -= bin_count
+                value = per_trial_rate_map[cell_index, trial_index, source_bin]
+                if not np.isnan(value):
+                    second_sum[bin_index] += value
+                    second_count[bin_index] += 1
+
+        # Phase 2: NaN-safe Pearson r between the two split-half mean maps. Mirrors
+        # ``per_cell_pearson_safe``: skip bins with no valid contribution in either half; require at least
+        # ``MINIMUM_VALID_BINS_FOR_PEARSON`` valid bins; guard against zero variance. Bins are validated and
+        # converted to means inline so we do not need a separate scratch traversal.
+        valid_count = 0
+        sum_a = np.float32(0.0)
+        sum_b = np.float32(0.0)
+        for bin_index in range(bin_count):
+            count_a = first_count[bin_index]
+            count_b = second_count[bin_index]
+            if count_a > 0 and count_b > 0:
+                valid_count += 1
+                sum_a += first_sum[bin_index] / np.float32(count_a)
+                sum_b += second_sum[bin_index] / np.float32(count_b)
+        if valid_count < MINIMUM_VALID_BINS_FOR_PEARSON:
+            continue
+        mean_a = sum_a / np.float32(valid_count)
+        mean_b = sum_b / np.float32(valid_count)
+
+        var_a = np.float32(0.0)
+        var_b = np.float32(0.0)
+        cov = np.float32(0.0)
+        for bin_index in range(bin_count):
+            count_a = first_count[bin_index]
+            count_b = second_count[bin_index]
+            if count_a > 0 and count_b > 0:
+                value_a = first_sum[bin_index] / np.float32(count_a)
+                value_b = second_sum[bin_index] / np.float32(count_b)
+                diff_a = value_a - mean_a
+                diff_b = value_b - mean_b
+                var_a += diff_a * diff_a
+                var_b += diff_b * diff_b
+                cov += diff_a * diff_b
+        if var_a <= 0.0 or var_b <= 0.0:
+            continue
+        output[iteration, cell_index] = cov / np.sqrt(var_a * var_b)
+
+
+@njit(cache=True, parallel=True)
+def _peak_shuffle_kernel(
+    fluorescence: NDArray[np.float32],
+    filtered_sample_indices: NDArray[np.int32],
+    bin_indices: NDArray[np.int32],
+    sample_counts: NDArray[np.int32],
+    shift_amounts: NDArray[np.int32],
+    smooth_size: int,
+    sample_count: int,
+    output: NDArray[np.float32],
+) -> None:
+    """Computes the per-cell peak of one circularly-shifted, smoothed shuffled rate map for each iteration.
+
+    Notes:
+        Parallelism is flattened over ``prange(chunk_count * cell_count)``: every (iteration, cell) pair is an
+        independent task that builds its own rate map, smooths it inline with a wrap-around uniform kernel, and
+        writes the per-cell peak to ``output``. Replaces the legacy ThreadPoolExecutor-driven shuffle that
+        dispatched 1000 Python futures (each calling several numba kernels with their own parallel-over-cells
+        ``prange``); fanning out at the (iteration, cell) granularity keeps every core busy without nested
+        parallelism overhead.
+
+        Inlines the equivalent of ``compute_shuffle_source_indices(chunk_count=1)`` plus
+        ``accumulate_shuffled_rate_maps`` plus ``uniform_filter1d(mode="wrap")`` plus ``np.nanmax`` so the kernel
+        does the entire single-iteration pipeline without intermediate allocations beyond the per-task
+        ``bin_count``-sized scratch.
+
+    Args:
+        fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
+        filtered_sample_indices: Speed-filtered destination sample indices with length filtered_count.
+        bin_indices: Spatial bin assignment for each filtered sample with length filtered_count.
+        sample_counts: Per-bin occupancy counts with length bin_count (matches ``bincount`` on
+            ``bin_indices``).
+        shift_amounts: Per-iteration circular shift amounts with length chunk_count.
+        smooth_size: Width of the wrap-around uniform smoothing kernel applied along the bin axis. Must be odd.
+        sample_count: Total number of samples in the original fluorescence time series.
+        output: Pre-allocated (chunk_count, cell_count) fp32 buffer; the kernel writes per-cell peaks in place.
+    """
+    chunk_count = shift_amounts.shape[0]
+    cell_count = fluorescence.shape[0]
+    filtered_count = filtered_sample_indices.shape[0]
+    bin_count = sample_counts.shape[0]
+    half_smooth = smooth_size // 2
+    total_tasks = chunk_count * cell_count
+
+    for task in prange(total_tasks):
+        iteration = task // cell_count
+        cell_index = task % cell_count
+        shift = shift_amounts[iteration]
+
+        # Per-task scratch for the per-cell rate map. Allocated once per task and zeroed in place.
+        # noinspection PyTypeChecker
+        bin_sums: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+
+        # Accumulate fluorescence into bins via the indirection-array shuffle. ``filtered_sample_indices`` and
+        # ``bin_indices`` are shuffle-invariant and shared across all tasks.
+        for filtered_index in range(filtered_count):
+            destination = filtered_sample_indices[filtered_index]
+            source = destination - shift
+            if source < 0:
+                source += sample_count
+            elif source >= sample_count:
+                source -= sample_count
+            bin_sums[bin_indices[filtered_index]] += fluorescence[cell_index, source]
+
+        # Convert to per-bin means in place. Empty bins keep their zero value (matches the existing convention
+        # in ``accumulate_shuffled_rate_maps`` so smoothing remains numerically stable).
+        for bin_index in range(bin_count):
+            if sample_counts[bin_index] > 0:
+                bin_sums[bin_index] = bin_sums[bin_index] / np.float32(sample_counts[bin_index])
+            else:
+                bin_sums[bin_index] = np.float32(0.0)
+
+        # Inline circular uniform smoothing followed by per-cell peak. Matches
+        # ``uniform_filter1d(mode="wrap")`` semantics: each output bin averages a centered window of size
+        # ``smooth_size`` with wrap-around at the track boundary. Tracking the running maximum avoids
+        # materialising a separate smoothed buffer.
+        peak = np.float32(-np.inf)
+        for bin_index in range(bin_count):
+            total = np.float32(0.0)
+            for offset in range(-half_smooth, half_smooth + 1):
+                neighbor = bin_index + offset
+                if neighbor < 0:
+                    neighbor += bin_count
+                elif neighbor >= bin_count:
+                    neighbor -= bin_count
+                total += bin_sums[neighbor]
+            smoothed = total / np.float32(smooth_size)
+            if smoothed > peak:
+                peak = smoothed
+        output[iteration, cell_index] = peak
 
 
 def _per_cell_p_values(observed: NDArray[np.float32], shuffled: NDArray[np.float32]) -> NDArray[np.float32]:

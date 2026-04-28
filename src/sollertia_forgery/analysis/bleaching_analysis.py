@@ -25,7 +25,7 @@ from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_times
 from scipy.optimize import curve_fit
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
-from ataraxis_base_utilities import console, resolve_worker_count
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
 from .utilities import resolve_display_units, trim_acquisition_warmup
@@ -45,6 +45,16 @@ _MINIMUM_SESSIONS_FOR_EVALUATION: int = 2
 """Minimum number of sessions required to evaluate any across-session bleaching metric."""
 _MINIMUM_SAMPLES_FOR_RATE_ESTIMATE: int = 2
 """Minimum number of timestamp samples required to estimate the inter-sample sampling rate."""
+_PREFERRED_WORKERS_PER_SESSION: int = 10
+"""Preferred number of CPU cores per parallel session subprocess. The saturating allocator targets this width
+before spawning additional parallel sessions; a smaller width than cindra's 30 because per-session evaluation is
+dominated by per-cell Numba kernels that scale only modestly past ten threads, leaving the remaining budget for
+additional concurrent sessions."""
+_MINIMUM_WORKERS_PER_SESSION: int = 5
+"""Floor on the per-subprocess worker count when running multiple sessions in parallel. Falling below this floor
+reduces the across-session parallelism rather than spawning under-resourced subprocesses."""
+_WORKER_MULTIPLE: int = 5
+"""Worker counts are rounded down to the nearest multiple of this value for clean allocation."""
 _SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
 """``strptime`` format string for the canonical session-directory timestamp."""
 _SIGNIFICANCE_LEVELS: tuple[tuple[float, str], ...] = (
@@ -198,11 +208,11 @@ class BleachingReport:
             median) require that cell index N denote the same neuron across every session in the evaluation set.
             Only the multi-recording cindra column carries that information. Single-recording fluorescence carries no
             cell correspondence across days and would silently produce mathematically valid but biologically meaningless
-            paired statistics, so it is not exposed as an option. Sessions are processed sequentially so the heavy
-            per-cell percentile and SNR kernels saturate the active Numba thread pool one session at a time;
-            ``run_bleaching_analysis`` configures that pool, and across-animal parallelism is layered on top of it
-            via a separate process pool. Methodological references for every step are centralized in
-            ``run_bleaching_analysis``.
+            paired statistics, so it is not exposed as an option. Sessions are computed sequentially in this entry
+            point so the per-cell numba kernels saturate the active Numba thread pool one session at a time;
+            ``run_bleaching_analysis`` parallelizes session compute across a process pool by dispatching session
+            rows directly and feeding them to ``_build_from_session_rows``. Methodological references for every
+            step are centralized in ``run_bleaching_analysis``.
 
         Args:
             session_paths: Chronologically ordered tuple of session directory paths. Sessions are validated to be
@@ -216,12 +226,55 @@ class BleachingReport:
             A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
             cross-session aggregates and configuration.
         """
-        # Resolves the optional configuration into a non-None local with an explicit type so PyCharm narrows the
-        # type downstream; the parameter itself stays Optional for the public signature.
         resolved_configuration: BleachingConfiguration = (
             configuration if configuration is not None else BleachingConfiguration()
         )
 
+        progress_context = (
+            console.progress(total=len(session_paths), description="Evaluating bleaching", unit="session")
+            if display_progress
+            else nullcontext()
+        )
+        session_rows: list[_SessionRow] = []
+        with progress_context as progress_bar:
+            for session_path in session_paths:
+                session_rows.append(
+                    _compute_session_row(session_path=session_path, configuration=resolved_configuration)
+                )
+                if progress_bar is not None:
+                    progress_bar.update()
+
+        return cls._build_from_session_rows(
+            session_paths=session_paths,
+            session_rows=tuple(session_rows),
+            configuration=resolved_configuration,
+        )
+
+    @classmethod
+    def _build_from_session_rows(
+        cls,
+        session_paths: tuple[Path, ...],
+        session_rows: tuple[_SessionRow, ...],
+        configuration: BleachingConfiguration,
+    ) -> BleachingReport:
+        """Assembles the report from pre-computed per-session rows.
+
+        Notes:
+            Pure aggregation step — no I/O, no per-cell compute. Used by ``BleachingReport.evaluate`` after its
+            sequential loop and by ``run_bleaching_analysis`` after its parallel session-row dispatch. Validates
+            chronological order of ``session_paths`` and registered cell-count consistency across rows before
+            running the cross-session decay fit, paired Wilcoxon comparison, and combined-flag computation.
+
+        Args:
+            session_paths: Chronologically ordered tuple of session directory paths, parallel to ``session_rows``.
+            session_rows: Per-session rows produced by ``_compute_session_row``, in the same order as
+                ``session_paths``.
+            configuration: Bleaching evaluation parameters that produced the rows.
+
+        Returns:
+            A BleachingReport whose ``table`` holds one row per session and whose ``summary`` holds the
+            cross-session aggregates and the configuration.
+        """
         if len(session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
             message = (
                 f"Unable to evaluate bleaching across the supplied sessions. The protocol requires at least two "
@@ -245,53 +298,30 @@ class BleachingReport:
             for session_us in session_microseconds
         ]
 
-        # Accumulators for the per-session columns of the resulting feather. Sessions are processed sequentially
-        # so the per-cell numba kernels can use every available core for one session at a time; spreading sessions
-        # across threads here would just oversubscribe the CPU and starve the kernels of threads, while also
-        # blocking progress reporting until every session finished.
-        session_count = len(session_paths)
-        session_names: list[str] = []
-        sampling_rates: list[float] = []
-        cell_baseline_arrays: list[NDArray[np.float32]] = []
-        cell_snr_arrays: list[NDArray[np.float32]] = []
-        within_session_time_arrays: list[NDArray[np.float32]] = []
-        within_session_baseline_arrays: list[NDArray[np.float32]] = []
-        within_session_drops: list[float] = []
-
+        # Validates that every session sees the same registered cell count before any cross-session reduction
+        # touches the per-cell arrays. Mismatched cell counts would silently produce broadcasting errors in the
+        # paired Wilcoxon test or the population-median trend.
         cell_count_reference: int | None = None
-        progress_context = (
-            console.progress(total=session_count, description="Evaluating bleaching", unit="session")
-            if display_progress
-            else nullcontext()
-        )
-        with progress_context as progress_bar:
-            for session_path in session_paths:
-                row = _compute_session_row(
-                    session_path=session_path,
-                    configuration=resolved_configuration,
+        for session_path, row in zip(session_paths, session_rows, strict=True):
+            row_cell_count = int(row.cell_baseline_fluorescence.shape[0])
+            if cell_count_reference is None:
+                cell_count_reference = row_cell_count
+            elif row_cell_count != cell_count_reference:
+                message = (
+                    f"Unable to evaluate bleaching across the supplied sessions. The cell count must match "
+                    f"across all sessions for the multi-recording registered comparison, but session "
+                    f"{session_path.name!r} has {row_cell_count} cells while the first session has "
+                    f"{cell_count_reference}."
                 )
-                row_cell_count = int(row.cell_baseline_fluorescence.shape[0])
-                if cell_count_reference is None:
-                    cell_count_reference = row_cell_count
-                elif row_cell_count != cell_count_reference:
-                    message = (
-                        f"Unable to evaluate bleaching across the supplied sessions. The cell count must match "
-                        f"across all sessions for the multi-recording registered comparison, but session "
-                        f"{session_path.name!r} has {row_cell_count} cells while the first session has "
-                        f"{cell_count_reference}."
-                    )
-                    console.error(message=message, error=ValueError)
+                console.error(message=message, error=ValueError)
 
-                session_names.append(session_path.name)
-                sampling_rates.append(row.sampling_rate_hz)
-                cell_baseline_arrays.append(row.cell_baseline_fluorescence)
-                cell_snr_arrays.append(row.cell_snr)
-                within_session_time_arrays.append(row.within_session_time_seconds)
-                within_session_baseline_arrays.append(row.within_session_baseline)
-                within_session_drops.append(row.within_session_fractional_drop)
-
-                if progress_bar is not None:
-                    progress_bar.update()
+        session_names = [session_path.name for session_path in session_paths]
+        sampling_rates = [row.sampling_rate_hz for row in session_rows]
+        cell_baseline_arrays = [row.cell_baseline_fluorescence for row in session_rows]
+        cell_snr_arrays = [row.cell_snr for row in session_rows]
+        within_session_time_arrays = [row.within_session_time_seconds for row in session_rows]
+        within_session_baseline_arrays = [row.within_session_baseline for row in session_rows]
+        within_session_drops = [row.within_session_fractional_drop for row in session_rows]
 
         # Cross-session aggregates derived from the per-session arrays.
         population_baseline_values = [float(np.median(array)) for array in cell_baseline_arrays]
@@ -314,7 +344,7 @@ class BleachingReport:
             population_snr=population_snr_array,
             snr_paired_p_values=snr_paired_p_values,
             within_session_drops=within_session_drop_array,
-            configuration=resolved_configuration,
+            configuration=configuration,
         )
 
         # Assembles the per-session feather. Equal-length cell columns are promoted by polars to
@@ -376,7 +406,7 @@ class BleachingReport:
         )
 
         summary = BleachingSummary(
-            configuration=resolved_configuration,
+            configuration=configuration,
             baseline_fluorescence_decay_fit=decay_fit,
         )
 
@@ -910,19 +940,24 @@ def run_bleaching_analysis(
     Notes:
         When ``animal`` is omitted, every animal returned by ``DatasetData.animals`` is processed; when ``animal``
         is provided, evaluation is scoped to that single animal. For each animal, sessions are sorted
-        chronologically before invoking ``BleachingReport.evaluate`` (lexicographic order on the canonical
-        'YYYY-MM-DD-HH-MM-SS-microseconds' session name is equivalent to chronological order). Each report is
-        written to ``<dataset>/<animal>/bleaching.yaml`` and ``<dataset>/<animal>/bleaching.feather`` as it
-        completes and returned to the caller for in-process figure rendering.
+        chronologically (lexicographic order on the canonical 'YYYY-MM-DD-HH-MM-SS-microseconds' session name is
+        equivalent to chronological order). Each report is written to ``<dataset>/<animal>/bleaching.yaml`` and
+        ``<dataset>/<animal>/bleaching.feather`` and returned to the caller for in-process figure rendering.
 
         ``workers`` controls the total CPU budget used by the pipeline and is split between two layers of
         parallelism modeled on cindra: the inner Numba thread pool that drives the per-cell percentile, MAD, and
-        SNR kernels within a session, and the outer process pool that dispatches independent animals concurrently.
-        The total core count is resolved via ``resolve_worker_count``; if more than one animal is in scope and the
-        budget allows, animals are dispatched across a ``ProcessPoolExecutor`` of size ``min(animal_count, total)``
-        and each subprocess caps its Numba pool at ``total // pool_size`` so the two layers stack without
-        oversubscribing the CPU. Single-animal scope (or a budget of one) collapses to an in-process run with all
-        threads handed to Numba, matching the original behavior.
+        SNR kernels within a session, and the outer process pool that dispatches independent sessions concurrently
+        across the union of all in-scope animals. Sessions are the natural unit of parallelism because they are
+        typically far more numerous than animals and ``_compute_session_row`` is independent per session — the
+        cross-session aggregation (decay fit, paired Wilcoxon, flag mask) collects rows back in the parent
+        process and runs sequentially per animal. The split uses cindra's saturating allocator
+        (``_resolve_saturating_allocation``): the resolved budget first saturates a single subprocess up to
+        ``_PREFERRED_WORKERS_PER_SESSION`` (10) Numba threads before any second session is dispatched, the
+        per-subprocess thread count is rounded down to a multiple of ``_WORKER_MULTIPLE`` (5) for clean
+        allocation, and the across-session parallelism is reduced one step at a time whenever the per-subprocess
+        share would fall below ``_MINIMUM_WORKERS_PER_SESSION`` (5) so underresourced subprocesses are never
+        spawned. A budget of one (or a single session in scope) collapses to an in-process run with every thread
+        handed to Numba.
 
         The pipeline collapses every methodological step routed through this entry point. The multi-day registered
         cell intersection that anchors all longitudinal per-cell comparisons follows Ziv et al. (2013) and Rubin
@@ -970,24 +1005,28 @@ def run_bleaching_analysis(
         animal: The unique identifier of a single animal to evaluate. When None, every animal in the dataset
             is evaluated and the returned tuple preserves the order of ``DatasetData.animals``.
         workers: The total number of CPU cores to use. A non-positive value requests every available core minus
-            the system reserve. The budget is split between across-animal processes and within-session Numba
+            the system reserve. The budget is split between across-session processes and within-session Numba
             threads as described in Notes; ``workers=1`` forces a fully sequential, single-threaded run.
-        display_progress: Determines whether to display a progress bar. In single-animal mode the bar tracks
-            sessions; in multi-animal mode it tracks animals and per-session bars in subprocesses are suppressed
-            to avoid interleaved output.
+        display_progress: Determines whether to display a progress bar tracking total sessions across every
+            in-scope animal as each session row is computed.
         configuration: Bleaching evaluation parameters shared across animals. Uses defaults if None.
 
     Returns:
         A tuple of BleachingReports in the same order as the resolved animal set, with each report's two artifacts
         persisted under the corresponding animal directory.
     """
-    # Routes through annotated locals so PyCharm narrows the if/else union to a single tuple type and the per-animal
-    # name extraction lands as a plain ``tuple[str, ...]`` rather than re-deriving ``.animal`` inside every
-    # downstream comprehension.
-    target_animals: tuple[DatasetAnimal, ...] = (
-        (dataset.get_animal(animal=animal),) if animal is not None else dataset.animals
+    resolved_configuration: BleachingConfiguration = (
+        configuration if configuration is not None else BleachingConfiguration()
     )
-    animal_names: tuple[str, ...] = tuple(dataset_animal.animal for dataset_animal in target_animals)
+
+    # Routes through an explicitly typed local so PyCharm narrows ``DatasetData.get_animal`` (whose trailing
+    # ``console.error`` makes the IDE infer an unreachable None branch) and the multi-animal iteration both land
+    # as plain ``str``. The single-animal branch reuses the supplied name after ``get_animal`` validates it.
+    if animal is not None:
+        resolved_animal: DatasetAnimal = dataset.get_animal(animal=animal)
+        animal_names: tuple[str, ...] = (resolved_animal.animal,)
+    else:
+        animal_names = tuple(dataset_animal.animal for dataset_animal in dataset.animals)
 
     if not animal_names:
         message = (
@@ -996,69 +1035,132 @@ def run_bleaching_analysis(
         )
         console.error(message=message, error=ValueError)
 
-    # Splits the resolved CPU budget between the across-animal process pool (outer) and the per-session Numba
-    # thread pool (inner). ``parallel_animals`` caps the pool size at the number of animals in scope so we never
-    # spawn idle subprocesses; ``numba_threads_per_process`` divides the remaining budget so the two layers stack
-    # exactly to the resolved budget.
-    total_workers = resolve_worker_count(requested_workers=workers)
-    parallel_animals = min(len(animal_names), total_workers)
-    numba_threads_per_process = max(1, total_workers // parallel_animals)
-
-    # Single-animal or single-worker fast path: stay in-process and hand every thread to Numba so the per-cell
-    # kernels saturate the local thread pool.
-    if parallel_animals == 1:
-        set_num_threads(numba_threads_per_process)
-        reports: list[BleachingReport] = []
-        for animal_name in animal_names:
-            reports.append(
-                _evaluate_animal_bleaching(
-                    dataset=dataset,
-                    animal=animal_name,
-                    configuration=configuration,
-                    display_progress=display_progress,
-                )
+    # Resolves chronologically ordered session paths per animal up front so the orchestrator can validate the
+    # per-animal session minimum before any compute is dispatched. Sessions are paired with their owning animal
+    # in a flat job list that the inner ProcessPoolExecutor can consume without further grouping.
+    sessions_by_animal: dict[str, tuple[Path, ...]] = {}
+    for animal_name in animal_names:
+        animal_sessions = dataset.get_sessions_for_animal(animal=animal_name)
+        sorted_sessions = sorted(animal_sessions, key=lambda dataset_session: dataset_session.session)
+        animal_session_paths = tuple(dataset_session.session_path for dataset_session in sorted_sessions)
+        if len(animal_session_paths) < _MINIMUM_SESSIONS_FOR_EVALUATION:
+            message = (
+                f"Unable to run bleaching analysis on dataset {dataset.name!r}. The protocol requires at least "
+                f"{_MINIMUM_SESSIONS_FOR_EVALUATION} sessions per animal, but animal {animal_name!r} has "
+                f"{len(animal_session_paths)}."
             )
-        return tuple(reports)
+            console.error(message=message, error=ValueError)
+        sessions_by_animal[animal_name] = animal_session_paths
 
-    # Multi-animal path: dispatch animals across a process pool. Each subprocess sets its Numba thread cap via the
-    # initializer so the per-cell kernels respect the per-process share, and the parent process surfaces a single
-    # animal-level progress bar instead of a sea of interleaved per-session bars.
-    progress_context = (
-        console.progress(
-            total=len(animal_names),
-            description=f"Running bleaching analysis ({parallel_animals} animals in parallel)",
-            unit="animal",
-        )
-        if display_progress
-        else nullcontext()
+    session_jobs: tuple[tuple[str, Path], ...] = tuple(
+        (animal_name, session_path)
+        for animal_name in animal_names
+        for session_path in sessions_by_animal[animal_name]
+    )
+    total_sessions = len(session_jobs)
+
+    # Splits the resolved CPU budget between the across-session process pool (outer) and the per-cell Numba
+    # thread pool (inner) using the same saturating allocator that cindra uses for its compute-bound jobs:
+    # saturate each subprocess up to the preferred worker count before spawning a new parallel session, and
+    # never drop below the per-session minimum when running in parallel.
+    total_workers = resolve_worker_count(requested_workers=workers)
+    numba_threads_per_session, parallel_sessions = _resolve_saturating_allocation(
+        budget=total_workers,
+        session_count=total_sessions,
     )
 
-    reports_by_animal: dict[str, BleachingReport] = {}
-    with (
-        ProcessPoolExecutor(
-            max_workers=parallel_animals,
-            initializer=_configure_subprocess_numba_threads,
-            initargs=(numba_threads_per_process,),
-        ) as executor,
-        progress_context as progress_bar,
-    ):
-        future_to_animal = {
-            executor.submit(
-                _evaluate_animal_bleaching,
-                dataset=dataset,
-                animal=animal_name,
-                configuration=configuration,
-                display_progress=False,
-            ): animal_name
-            for animal_name in animal_names
-        }
-        for future in as_completed(future_to_animal):
-            completed_animal = future_to_animal[future]
-            reports_by_animal[completed_animal] = future.result()
-            if progress_bar is not None:
-                progress_bar.update()
+    console.echo(
+        message=(
+            f"Running bleaching analysis on dataset {dataset.name!r} for "
+            f"{len(animal_names)} animal{'s' if len(animal_names) != 1 else ''} "
+            f"({total_sessions} session{'s' if total_sessions != 1 else ''} total): "
+            f"{parallel_sessions} parallel × {numba_threads_per_session} Numba "
+            f"thread{'s' if numba_threads_per_session != 1 else ''} per session "
+            f"(total CPU budget: {total_workers})..."
+        ),
+        level=LogLevel.INFO,
+    )
 
-    return tuple(reports_by_animal[animal_name] for animal_name in animal_names)
+    # Computes per-session rows. Each row keys back to its (animal, session_path) pair so the parent can reorder
+    # them into chronological per-animal arrays before aggregation.
+    rows_by_animal: dict[str, dict[Path, _SessionRow]] = {animal_name: {} for animal_name in animal_names}
+
+    if parallel_sessions == 1:
+        # Single-session or single-worker fast path: stay in-process and hand every thread to Numba so the
+        # per-cell kernels saturate the local thread pool.
+        set_num_threads(numba_threads_per_session)
+        progress_context = (
+            console.progress(total=total_sessions, description="Computing session rows", unit="session")
+            if display_progress
+            else nullcontext()
+        )
+        with progress_context as progress_bar:
+            for animal_name, session_path in session_jobs:
+                rows_by_animal[animal_name][session_path] = _compute_session_row(
+                    session_path=session_path,
+                    configuration=resolved_configuration,
+                )
+                if progress_bar is not None:
+                    progress_bar.update()
+    else:
+        # Multi-session path: dispatch session rows across a process pool. Each subprocess sets its Numba thread
+        # cap via the initializer so the per-cell kernels respect the per-process share, and the parent process
+        # surfaces one session-level progress bar.
+        progress_context = (
+            console.progress(
+                total=total_sessions,
+                description=f"Computing session rows ({parallel_sessions} sessions in parallel)",
+                unit="session",
+            )
+            if display_progress
+            else nullcontext()
+        )
+        with (
+            ProcessPoolExecutor(
+                max_workers=parallel_sessions,
+                initializer=_configure_subprocess_numba_threads,
+                initargs=(numba_threads_per_session,),
+            ) as executor,
+            progress_context as progress_bar,
+        ):
+            future_to_job = {
+                executor.submit(
+                    _compute_session_row,
+                    session_path=session_path,
+                    configuration=resolved_configuration,
+                ): (animal_name, session_path)
+                for animal_name, session_path in session_jobs
+            }
+            for future in as_completed(future_to_job):
+                completed_animal, completed_path = future_to_job[future]
+                rows_by_animal[completed_animal][completed_path] = future.result()
+                if progress_bar is not None:
+                    progress_bar.update()
+
+    # Aggregates per animal in the parent. The cross-session step is cheap (population medians, curve_fit,
+    # Wilcoxon, flag mask) compared to the per-session compute, and keeping it in the parent avoids round-tripping
+    # whole reports through the IPC layer.
+    reports: list[BleachingReport] = []
+    for animal_name in animal_names:
+        ordered_paths = sessions_by_animal[animal_name]
+        ordered_rows = tuple(rows_by_animal[animal_name][session_path] for session_path in ordered_paths)
+        report = BleachingReport._build_from_session_rows(
+            session_paths=ordered_paths,
+            session_rows=ordered_rows,
+            configuration=resolved_configuration,
+        )
+        report.save(animal=dataset.get_animal(animal=animal_name))
+        reports.append(report)
+
+    console.echo(
+        message=(
+            f"Bleaching analysis complete. Persisted {len(animal_names)} "
+            f"report{'s' if len(animal_names) != 1 else ''} under "
+            f"{dataset.dataset_data_path.parent}."
+        ),
+        level=LogLevel.SUCCESS,
+    )
+    return tuple(reports)
 
 
 def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
@@ -1162,40 +1264,38 @@ def plot_dataset_baseline_trend(dataset: DatasetData) -> plt.Figure:
     return figure
 
 
-def _evaluate_animal_bleaching(
-    dataset: DatasetData,
-    animal: str,
-    configuration: BleachingConfiguration | None,
-    *,
-    display_progress: bool,
-) -> BleachingReport:
-    """Evaluates and persists a single animal's bleaching report.
+def _resolve_saturating_allocation(budget: int, session_count: int) -> tuple[int, int]:
+    """Splits a CPU budget between per-session Numba threads and across-session subprocesses.
 
     Notes:
-        Used as the per-animal work unit by ``run_bleaching_analysis``. Lives at module level so that the
-        ``ProcessPoolExecutor`` used in multi-animal mode can pickle and dispatch it; arguments and the returned
-        ``BleachingReport`` are likewise picklable.
+        Mirrors cindra's compute-bound saturating allocator with bleaching-specific constants: each subprocess is
+        filled to ``_PREFERRED_WORKERS_PER_SESSION`` (10) before a new parallel session is added, the
+        per-subprocess thread count is rounded down to a multiple of ``_WORKER_MULTIPLE`` for clean allocation,
+        and parallelism is reduced one step at a time whenever the per-subprocess share would fall below
+        ``_MINIMUM_WORKERS_PER_SESSION`` (5). The single-session path collapses naturally: a budget of N with one
+        session returns ``(round_down_to_5(N), 1)`` and hands every thread to Numba.
 
     Args:
-        dataset: The DatasetData instance whose animal is evaluated.
-        animal: The unique identifier of the animal to evaluate.
-        configuration: Bleaching evaluation parameters. Uses defaults if None.
-        display_progress: Determines whether ``BleachingReport.evaluate`` shows its per-session progress bar.
+        budget: Total CPU cores available after the system reservation, as returned by ``resolve_worker_count``.
+        session_count: Number of sessions scheduled for parallel evaluation, summed across every animal in scope.
 
     Returns:
-        The BleachingReport produced for the animal, with both files persisted under the animal directory.
+        A tuple of ``(numba_threads_per_session, parallel_sessions)`` whose product never exceeds the budget.
     """
-    dataset_animal = dataset.get_animal(animal=animal)
-    animal_sessions = dataset.get_sessions_for_animal(animal=animal)
-    sorted_sessions = sorted(animal_sessions, key=lambda dataset_session: dataset_session.session)
-    session_paths = tuple(dataset_session.session_path for dataset_session in sorted_sessions)
-    report = BleachingReport.evaluate(
-        session_paths=session_paths,
-        configuration=configuration,
-        display_progress=display_progress,
-    )
-    report.save(animal=dataset_animal)
-    return report
+    max_at_preferred = max(1, budget // _PREFERRED_WORKERS_PER_SESSION)
+    parallel_sessions = min(session_count, max_at_preferred)
+    raw_workers = budget // parallel_sessions
+    numba_threads = max(1, (raw_workers // _WORKER_MULTIPLE) * _WORKER_MULTIPLE)
+
+    # Reduces parallelism one session at a time until each subprocess clears the per-session floor. The loop
+    # cannot reduce below a single subprocess; with ``parallel_sessions == 1`` the floor stops applying because
+    # the in-process branch hands every thread to Numba directly.
+    while numba_threads < _MINIMUM_WORKERS_PER_SESSION and parallel_sessions > 1:
+        parallel_sessions -= 1
+        raw_workers = budget // parallel_sessions
+        numba_threads = max(1, (raw_workers // _WORKER_MULTIPLE) * _WORKER_MULTIPLE)
+
+    return numba_threads, parallel_sessions
 
 
 def _configure_subprocess_numba_threads(thread_count: int) -> None:
@@ -1853,7 +1953,7 @@ def _fit_exponential_decay(
             bounds=((-np.inf, 1e-6, -np.inf), (np.inf, np.inf, np.inf)),
             maxfev=10000,
         )
-    except (RuntimeError, ValueError):
+    except RuntimeError, ValueError:
         return _failed_decay_fit()
 
     amplitude, tau_days, offset = (float(parameter) for parameter in parameters)

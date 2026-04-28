@@ -34,8 +34,8 @@ from .reward_relative_analysis import (
     CrossBlockClassification,
     RewardRelativeConfiguration,
     build_cross_block_table,
-    aggregate_cross_block_counts,
     stack_rate_maps_from_table,
+    aggregate_cross_block_counts,
     compute_cross_block_classification,
 )
 
@@ -196,9 +196,7 @@ class LongitudinalRewardShiftReport:
         Raises:
             ValueError: When inputs are malformed or no reward shift is detectable.
         """
-        resolved_configuration = (
-            configuration if configuration is not None else LongitudinalRewardShiftConfiguration()
-        )
+        resolved_configuration = configuration if configuration is not None else LongitudinalRewardShiftConfiguration()
         if len(reports) != len(session_names):
             message = (
                 f"reports and session_names must have the same length; got {len(reports)} reports vs. "
@@ -206,9 +204,7 @@ class LongitudinalRewardShiftReport:
             )
             raise ValueError(message)
         if len(reports) < 2:
-            message = (
-                f"Need at least two sessions to detect a reward shift; got {len(reports)}."
-            )
+            message = f"Need at least two sessions to detect a reward shift; got {len(reports)}."
             raise ValueError(message)
 
         # Sort chronologically by session name (Sollertia session names are timestamp-prefixed).
@@ -269,9 +265,7 @@ class LongitudinalRewardShiftReport:
         post_rate_maps, post_sig_fraction = _aggregate_block(reports=post_reports, cell_count=cell_count)
 
         # noinspection PyTypeChecker
-        is_significant_pre: NDArray[np.bool_] = (
-            pre_sig_fraction >= resolved_configuration.minimum_significance_fraction
-        )
+        is_significant_pre: NDArray[np.bool_] = pre_sig_fraction >= resolved_configuration.minimum_significance_fraction
         # noinspection PyTypeChecker
         is_significant_post: NDArray[np.bool_] = (
             post_sig_fraction >= resolved_configuration.minimum_significance_fraction
@@ -386,18 +380,14 @@ def _aggregate_block(
     """
     bin_count = int(reports[0].summary.bin_count)
     # noinspection PyTypeChecker
-    stacked_maps: NDArray[np.float32] = np.full(
-        (len(reports), cell_count, bin_count), np.nan, dtype=np.float32
-    )
+    stacked_maps: NDArray[np.float32] = np.full((len(reports), cell_count, bin_count), np.nan, dtype=np.float32)
     # noinspection PyTypeChecker
     significance_counts: NDArray[np.int32] = np.zeros(cell_count, dtype=np.int32)
     for index, report in enumerate(reports):
         rate_maps = stack_rate_maps_from_table(table=report.table, target_length=bin_count)
         stacked_maps[index] = rate_maps
         # noinspection PyTypeChecker
-        is_significant: NDArray[np.bool_] = report.table[
-            CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value
-        ].to_numpy()
+        is_significant: NDArray[np.bool_] = report.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
         significance_counts += is_significant.astype(np.int32)
 
     # NaN-aware mean across the session axis; cells that are NaN in every session collapse to NaN here, which the
@@ -411,9 +401,7 @@ def _aggregate_block(
             mean_rate_maps: NDArray[np.float32] = np.nanmean(stacked_maps, axis=0).astype(np.float32)
 
     # noinspection PyTypeChecker
-    significance_fraction: NDArray[np.float32] = (
-        significance_counts.astype(np.float32) / float(len(reports))
-    )
+    significance_fraction: NDArray[np.float32] = significance_counts.astype(np.float32) / float(len(reports))
     return mean_rate_maps, significance_fraction
 
 

@@ -325,9 +325,7 @@ def _align_pulses_to_scanimage(
     # Each TTL pulse is matched to the nearest aligned ScanImage frame. Conflicts where multiple pulses claim the
     # same frame are resolved by keeping the pulse closer to the frame's expected time. Pulses outside the
     # tolerance window are treated as noise and dropped.
-    nearest_si_index = _nearest_target_index(
-        values=pulse_microseconds, sorted_targets=aligned_si_microseconds
-    )
+    nearest_si_index = _nearest_target_index(values=pulse_microseconds, sorted_targets=aligned_si_microseconds)
     nearest_distance = np.abs(pulse_microseconds - aligned_si_microseconds[nearest_si_index])
     within_tolerance = nearest_distance < _SI_MATCH_TOLERANCE_US
 
@@ -362,9 +360,7 @@ def _align_pulses_to_scanimage(
     ).sort("frame")
 
 
-def _count_matches_within_tolerance(
-    pulse_microseconds: NDArray[np.int64], si_microseconds: NDArray[np.int64]
-) -> int:
+def _count_matches_within_tolerance(pulse_microseconds: NDArray[np.int64], si_microseconds: NDArray[np.int64]) -> int:
     """Counts how many TTL pulse rising edges have a ScanImage frame within ``_SI_MATCH_TOLERANCE_US``.
 
     Args:
@@ -380,9 +376,7 @@ def _count_matches_within_tolerance(
     return int((nearest_distance < _SI_MATCH_TOLERANCE_US).sum())
 
 
-def _nearest_target_index(
-    values: NDArray[np.int64], sorted_targets: NDArray[np.int64]
-) -> NDArray[np.intp]:
+def _nearest_target_index(values: NDArray[np.int64], sorted_targets: NDArray[np.int64]) -> NDArray[np.intp]:
     """Returns the index, into ``sorted_targets``, of the nearest target for each query value.
 
     Args:

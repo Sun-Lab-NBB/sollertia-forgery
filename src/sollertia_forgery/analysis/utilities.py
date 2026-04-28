@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from numba import njit, prange
 import numpy as np
 import polars as pl
-from scipy.ndimage import uniform_filter1d
 from ataraxis_time import TimeUnits, convert_time, interval_to_rate
 from ataraxis_base_utilities import console
 
@@ -525,6 +524,12 @@ def bin_fluorescence_per_trial(
         numerical rounding. Bins and lap slices with no valid speed-filtered samples are filled with NaN so consumers
         can treat them as missing without downstream guards.
 
+        The hot loop is hoisted into ``_bin_fluorescence_per_trial_kernel`` (``@njit(parallel=True)``) which fans
+        out across ``(cell × trial)`` pairs. The previous version walked trials sequentially in Python, calling a
+        ``bin_fluorescence_by_position`` + ``uniform_filter1d`` pair per trial; the kernel replaces both with a
+        single fused pass that accumulates per-bin sums, computes per-bin means, and applies wrap-around uniform
+        smoothing in place.
+
     Args:
         fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
         position: The animal's per-sample within-trial position in centimeters with length sample_count.
@@ -549,32 +554,143 @@ def bin_fluorescence_per_trial(
     # noinspection PyTypeChecker
     output: NDArray[np.float32] = np.full((cell_count, trial_count, bin_count), np.nan, dtype=np.float32)
 
-    for trial_index, trial_id in enumerate(unique_trials):
+    if trial_count == 0:
+        return output
+
+    # Builds a CSR-style trial->sample lookup so the kernel only walks each trial's samples instead of scanning
+    # the full sample axis for every (cell, trial). Computes the trial slot per sample once (samples outside any
+    # retained trial or below the speed cut get slot -1, then drop out), sorts samples by slot to group them, and
+    # records per-trial start/end offsets into the sorted index array.
+    # noinspection PyTypeChecker
+    sample_trial_slot: NDArray[np.int32] = np.full(trial_ids.shape[0], -1, dtype=np.int32)
+    # noinspection PyTypeChecker
+    speed_mask: NDArray[np.bool_] = speed > minimum_speed
+    for slot, trial_id in enumerate(unique_trials):
         # noinspection PyTypeChecker
-        trial_mask: NDArray[np.bool_] = (trial_ids == trial_id) & (speed > minimum_speed)
-        if not np.any(trial_mask):
-            continue
+        slot_mask: NDArray[np.bool_] = (trial_ids == trial_id) & speed_mask
+        sample_trial_slot[slot_mask] = slot
 
-        trial_position = position[trial_mask]
-        trial_fluorescence = fluorescence[:, trial_mask]
+    # noinspection PyTypeChecker
+    valid_sample_mask: NDArray[np.bool_] = sample_trial_slot >= 0
+    # noinspection PyTypeChecker
+    valid_sample_indices: NDArray[np.int32] = np.flatnonzero(valid_sample_mask).astype(np.int32)
+    # noinspection PyTypeChecker
+    valid_slots: NDArray[np.int32] = sample_trial_slot[valid_sample_indices]
+    # noinspection PyTypeChecker
+    sort_order: NDArray[np.int64] = np.argsort(valid_slots, kind="stable")
+    # noinspection PyTypeChecker
+    trial_sample_indices: NDArray[np.int32] = valid_sample_indices[sort_order]
+    # noinspection PyTypeChecker
+    sorted_slots: NDArray[np.int32] = valid_slots[sort_order]
+    # noinspection PyTypeChecker
+    trial_sample_offsets: NDArray[np.int32] = np.zeros(trial_count + 1, dtype=np.int32)
+    # noinspection PyTypeChecker
+    counts_per_slot: NDArray[np.int32] = np.bincount(sorted_slots, minlength=trial_count).astype(np.int32)
+    trial_sample_offsets[1:] = np.cumsum(counts_per_slot)
 
-        raw_trial_binned, _ = bin_fluorescence_by_position(
-            fluorescence=trial_fluorescence,
-            position=trial_position,
-            position_bin_edges=bin_edges,
-        )
+    # Per-sample bin indices stay in original sample-index space; the kernel reads them via
+    # ``trial_sample_indices`` to fetch only the samples for its trial.
+    # noinspection PyTypeChecker
+    raw_bin_indices: NDArray[np.int64] = np.searchsorted(bin_edges, position, side="right") - 1
+    # noinspection PyTypeChecker
+    bin_indices: NDArray[np.int32] = np.clip(raw_bin_indices, 0, bin_count - 1).astype(np.int32)
 
-        # noinspection PyTypeChecker
-        smoothed_trial_binned: NDArray[np.float32] = uniform_filter1d(
-            input=raw_trial_binned,
-            size=smooth_size,
-            axis=1,
-            mode="wrap",
-        ).astype(np.float32)
-
-        output[:, trial_index, :] = smoothed_trial_binned
+    _bin_fluorescence_per_trial_kernel(
+        fluorescence=fluorescence,
+        trial_sample_indices=trial_sample_indices,
+        trial_sample_offsets=trial_sample_offsets,
+        bin_indices=bin_indices,
+        trial_count=trial_count,
+        smooth_size=int(smooth_size),
+        output=output,
+    )
 
     return output
+
+
+@njit(cache=True, parallel=True)
+def _bin_fluorescence_per_trial_kernel(
+    fluorescence: NDArray[np.float32],
+    trial_sample_indices: NDArray[np.int32],
+    trial_sample_offsets: NDArray[np.int32],
+    bin_indices: NDArray[np.int32],
+    trial_count: int,
+    smooth_size: int,
+    output: NDArray[np.float32],
+) -> None:
+    """Accumulates, averages, and wrap-smooths per-trial binned fluorescence into ``output`` in place.
+
+    Notes:
+        Parallelism fans out across ``prange(cell_count * trial_count)`` so every (cell, trial) is an independent
+        task. Each task indexes a CSR-style trial->sample lookup (``trial_sample_indices`` /
+        ``trial_sample_offsets``) so it only walks its own trial's samples; per-bin sum and count scratch sized
+        to ``bin_count`` stays small enough for numba's allocator to pool across tasks. Replaces the previous
+        Python loop that sequentially called ``bin_fluorescence_by_position`` and ``uniform_filter1d`` per trial,
+        each pass driving its own parallel-over-cells kernel and dispatching back through scipy.
+
+    Args:
+        fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
+        trial_sample_indices: Sample indices grouped by trial slot in ``[0, trial_count)`` with length
+            equal to the number of speed-filtered, in-trial samples.
+        trial_sample_offsets: Per-trial start offsets into ``trial_sample_indices`` with length trial_count + 1.
+            Trial t owns ``trial_sample_indices[trial_sample_offsets[t]:trial_sample_offsets[t + 1]]``.
+        bin_indices: Per-sample bin index in ``[0, bin_count)`` indexed in original sample-axis space; the kernel
+            reads ``bin_indices[trial_sample_indices[k]]`` to resolve the bin for the k-th sample of a trial.
+        trial_count: Number of unique retained trials (size of the trial axis of ``output``).
+        smooth_size: Width of the wrap-around uniform smoothing kernel applied along the bin axis. Must be odd.
+        output: Pre-allocated (cell_count, trial_count, bin_count) buffer pre-filled with NaN.
+    """
+    cell_count = fluorescence.shape[0]
+    bin_count = output.shape[2]
+    half_smooth = smooth_size // 2
+    total_tasks = cell_count * trial_count
+
+    for task in prange(total_tasks):
+        cell_index = task // trial_count
+        trial_slot = task % trial_count
+        sample_start = trial_sample_offsets[trial_slot]
+        sample_end = trial_sample_offsets[trial_slot + 1]
+        if sample_start == sample_end:
+            continue
+
+        # noinspection PyTypeChecker
+        bin_sums: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
+        # noinspection PyTypeChecker
+        bin_counts: NDArray[np.int32] = np.zeros(bin_count, dtype=np.int32)
+
+        for offset in range(sample_start, sample_end):
+            sample_index = trial_sample_indices[offset]
+            bin_index = bin_indices[sample_index]
+            bin_sums[bin_index] += fluorescence[cell_index, sample_index]
+            bin_counts[bin_index] += 1
+
+        # Convert to per-bin means; empty bins become NaN so smoothing propagates the gap downstream consumers
+        # already handle.
+        # noinspection PyTypeChecker
+        raw_means: NDArray[np.float32] = np.empty(bin_count, dtype=np.float32)
+        any_valid = False
+        for bin_index in range(bin_count):
+            if bin_counts[bin_index] > 0:
+                raw_means[bin_index] = bin_sums[bin_index] / np.float32(bin_counts[bin_index])
+                any_valid = True
+            else:
+                raw_means[bin_index] = np.float32(np.nan)
+        if not any_valid:
+            continue
+
+        # Wrap-around uniform smoothing of size ``smooth_size`` (matches scipy's
+        # ``uniform_filter1d(mode="wrap")`` for odd kernels). Writes directly into ``output`` so we never
+        # materialise a separate smoothed buffer.
+        for bin_index in range(bin_count):
+            total = np.float32(0.0)
+            for window_offset in range(-half_smooth, half_smooth + 1):
+                neighbor = bin_index + window_offset
+                if neighbor < 0:
+                    neighbor += bin_count
+                elif neighbor >= bin_count:
+                    neighbor -= bin_count
+                total += raw_means[neighbor]
+            output[cell_index, trial_slot, bin_index] = total / np.float32(smooth_size)
 
 
 @njit(cache=True, parallel=True)

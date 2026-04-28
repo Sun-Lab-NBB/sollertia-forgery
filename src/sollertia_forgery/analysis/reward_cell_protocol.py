@@ -15,9 +15,9 @@ from scipy.optimize import minimize
 from sollertia_forgery.forging import FluorescenceColumn
 from sollertia_forgery.analysis.utilities import (
     RunSessionData,
-    bin_fluorescence_per_trial,
     per_cell_pearson_safe,
     assemble_run_session_data,
+    bin_fluorescence_per_trial,
     bin_fluorescence_by_position,
     accumulate_shuffled_rate_maps,
     compute_shuffle_source_indices,
@@ -371,8 +371,7 @@ def _compute_reward_relativity_score(
         zone_peak = 0.0
         for bin_index in range(bin_count):
             value = rate_maps[cell_index, bin_index]
-            if value > overall_peak:
-                overall_peak = value
+            overall_peak = max(overall_peak, value)
             # Signed circular offset for this bin, in [-track_length/2, track_length/2).
             offset = ((bin_centers[bin_index] - reward_position + track_length / 2.0) % track_length) - (
                 track_length / 2.0
@@ -540,20 +539,18 @@ def _compute_cv_partial_r2(
         cv_residuals_full[block.test_mask] = y_test - block.x_test_full @ beta_full
         cv_residuals_reduced[block.test_mask] = y_test - block.x_test_reduced @ beta_reduced
 
-    cv_sse_full = (cv_residuals_full ** 2).sum(axis=0)
-    cv_sse_reduced = (cv_residuals_reduced ** 2).sum(axis=0)
+    cv_sse_full = (cv_residuals_full**2).sum(axis=0)
+    cv_sse_reduced = (cv_residuals_reduced**2).sum(axis=0)
     y_mean = y.mean(axis=0, keepdims=True)
     total_ss = ((y - y_mean) ** 2).sum(axis=0)
 
     with np.errstate(invalid="ignore", divide="ignore"):
         # noinspection PyTypeChecker
-        full_r2: NDArray[np.float32] = np.where(
-            total_ss > 0.0, 1.0 - cv_sse_full / total_ss, 0.0
-        ).astype(np.float32)
+        full_r2: NDArray[np.float32] = np.where(total_ss > 0.0, 1.0 - cv_sse_full / total_ss, 0.0).astype(np.float32)
         # noinspection PyTypeChecker
-        reduced_r2: NDArray[np.float32] = np.where(
-            total_ss > 0.0, 1.0 - cv_sse_reduced / total_ss, 0.0
-        ).astype(np.float32)
+        reduced_r2: NDArray[np.float32] = np.where(total_ss > 0.0, 1.0 - cv_sse_reduced / total_ss, 0.0).astype(
+            np.float32
+        )
     return (full_r2 - reduced_r2).astype(np.float32)
 
 
@@ -655,17 +652,12 @@ def _extended_mixture_negative_log_likelihood(
     std_end = max(parameters[6], 1.0)
 
     uniform_density = 1.0 / track_length
-    gaussian_reward = np.exp(-0.5 * ((centers - mean_reward) / std_reward) ** 2) / (
-        std_reward * np.sqrt(2.0 * np.pi)
-    )
+    gaussian_reward = np.exp(-0.5 * ((centers - mean_reward) / std_reward) ** 2) / (std_reward * np.sqrt(2.0 * np.pi))
     gaussian_start = np.exp(-0.5 * ((centers - 0.0) / std_start) ** 2) / (std_start * np.sqrt(2.0 * np.pi))
     gaussian_end = np.exp(-0.5 * ((centers - track_length) / std_end) ** 2) / (std_end * np.sqrt(2.0 * np.pi))
 
     mixture_density = (
-        w_uniform * uniform_density
-        + w_reward * gaussian_reward
-        + w_start * gaussian_start
-        + w_end * gaussian_end
+        w_uniform * uniform_density + w_reward * gaussian_reward + w_start * gaussian_start + w_end * gaussian_end
     )
     mixture_density = np.clip(mixture_density, 1e-300, None)
     return -np.sum(np.log(mixture_density))
@@ -965,9 +957,7 @@ class RewardCellDetector:
 
         # noinspection PyTypeChecker
         is_significant: NDArray[np.bool_] = (
-            fdr_survived
-            & (split_half_r > configuration.minimum_split_half_r)
-            & ~np.isnan(split_half_r)
+            fdr_survived & (split_half_r > configuration.minimum_split_half_r) & ~np.isnan(split_half_r)
         )
 
         # Computes the circular center of mass for each neuron.
@@ -982,9 +972,9 @@ class RewardCellDetector:
         # Computes the per-cell continuous reward-relativity score from the smoothed rate maps.
         bin_count = smoothed_maps.shape[1]
         # noinspection PyTypeChecker
-        bin_centers: NDArray[np.float32] = (
-            self._bin_edges[:bin_count] + configuration.bin_size / 2.0
-        ).astype(np.float32)
+        bin_centers: NDArray[np.float32] = (self._bin_edges[:bin_count] + configuration.bin_size / 2.0).astype(
+            np.float32
+        )
         # noinspection PyTypeChecker
         reward_relativity_score: NDArray[np.float32] = np.zeros(cell_count, dtype=np.float32)
         _compute_reward_relativity_score(
@@ -1065,9 +1055,7 @@ class RewardCellDetector:
         )
         chunk_based_shift = sample_count // configuration.shuffle_minimum_chunk_count
         upper_bound = sample_count // 4
-        minimum_shift = (
-            seconds_based_shift if 0 < seconds_based_shift <= upper_bound else max(chunk_based_shift, 1)
-        )
+        minimum_shift = seconds_based_shift if 0 < seconds_based_shift <= upper_bound else max(chunk_based_shift, 1)
 
         # Precomputes destination-sample indices and their spatial bin assignments; both are invariant across shuffles.
         # noinspection PyTypeChecker
@@ -1085,7 +1073,7 @@ class RewardCellDetector:
             (configuration.shuffle_count, cell_count), dtype=np.float32
         )
 
-        for iteration in tqdm(range(configuration.shuffle_count), desc="Running shuffling", unit="iter"):
+        for iteration in tqdm(range(configuration.shuffle_count), desc="Reward spatial shuffle", unit="iter"):
             source_indices = compute_shuffle_source_indices(
                 filtered_sample_indices=filtered_sample_indices,
                 sample_count=sample_count,
@@ -1417,22 +1405,23 @@ class RewardCellDetector:
         # noinspection PyTypeChecker
         null_partial_r2: NDArray[np.float32] = np.zeros((permutation_count, candidate_count), dtype=np.float32)
         for permutation_index in tqdm(
-            range(permutation_count), desc="Running GLM null", unit="iter", leave=False
+            range(permutation_count),
+            desc="Reward GLM permutation null",
+            unit="iter",
+            leave=False,
         ):
             generator = np.random.default_rng(seed=permutation_index)
             # noinspection PyTypeChecker
             permutation: NDArray[np.int64] = generator.permutation(trial_count)
             permuted_grid = activity_grid[permutation]
             permuted_valid = permuted_grid.reshape(trial_count * bin_count, candidate_count)[valid_flat]
-            null_partial_r2[permutation_index] = _compute_cv_partial_r2(
-                fold_blocks=fold_blocks, y=permuted_valid
-            )
+            null_partial_r2[permutation_index] = _compute_cv_partial_r2(fold_blocks=fold_blocks, y=permuted_valid)
 
         # Per-cell p-value with additive smoothing so a permutation count of 200 cannot yield exactly 0.
         exceed_count = np.sum(null_partial_r2 >= observed_partial_r2[np.newaxis, :], axis=0)
         # noinspection PyTypeChecker
-        p_value_per_candidate: NDArray[np.float32] = (
-            (exceed_count + 1).astype(np.float32) / float(permutation_count + 1)
+        p_value_per_candidate: NDArray[np.float32] = (exceed_count + 1).astype(np.float32) / float(
+            permutation_count + 1
         )
 
         # Active-trial gate: cells with too few non-zero-activity trials are not admitted to the test.
