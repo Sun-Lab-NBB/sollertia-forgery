@@ -13,19 +13,14 @@ from numba import njit, prange
 import numpy as np
 from scipy.ndimage import uniform_filter1d
 
-from ...forging import FluorescenceColumn
-from ..utilities import (
+from .utilities import (
     RunSessionData,
     MINIMUM_VALID_BINS_FOR_PEARSON,
-    per_cell_pearson_safe,
-    assemble_run_session_data,
     bin_fluorescence_per_trial,
     bin_fluorescence_by_position,
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from numpy.typing import NDArray
 
 
@@ -124,43 +119,6 @@ class PlaceFields:
         # noinspection PyTypeChecker
         return np.any(self.label_image > 0, axis=1)
 
-    @property
-    def order(self) -> NDArray[np.int32]:
-        """Returns cell ordering indices based on place field centers.
-
-        For cells with multiple place fields, the field with the highest mean intensity is used for ordering.
-        """
-        cell_count = self.binned_fluorescence.shape[0]
-
-        # With no detected fields, falls back to the natural cell order so callers can rely on a length-cell_count
-        # permutation regardless of detection results.
-        if self.centers.size == 0:
-            # noinspection PyTypeChecker
-            return np.arange(cell_count, dtype=np.int32)
-
-        # Initializes sort order with infinity to ensure cells without place fields are sorted to the end.
-        # noinspection PyTypeChecker
-        sort_order: NDArray[np.float32] = np.full(cell_count, np.inf, dtype=np.float32)
-        intensity = self.mean_intensity
-        field_centers = self.centers
-        # noinspection PyTypeChecker
-        field_cell_id: NDArray[np.int32] = field_centers[:, 0].astype(np.int32)
-
-        # Orders cells with multiple place fields based on the field with the highest mean intensity.
-        for cell_index in range(cell_count):
-            # noinspection PyTypeChecker
-            cell_field_mask: NDArray[np.bool_] = field_cell_id == cell_index
-            # noinspection PyTypeChecker
-            cell_field_indices: NDArray[np.int64] = np.flatnonzero(cell_field_mask)
-            if cell_field_indices.size > 0:
-                max_intensity_index = np.argmax(intensity[cell_field_mask])
-                # Assigns the position coordinate of the highest intensity field as the sort key.
-                sort_order[cell_index] = field_centers[cell_field_indices[max_intensity_index], 1]
-
-        # Returns indices that would sort cells by their place field position along the track.
-        # noinspection PyTypeChecker
-        return np.argsort(sort_order).astype(np.int32)
-
     def remove_fields(self, indices: NDArray[np.int32]) -> PlaceFields:
         """Removes specified place fields and returns a new PlaceFields object.
 
@@ -200,9 +158,9 @@ class PlaceFieldDetector:
         """Constructs the detector from already-loaded session data.
 
         Notes:
-            Use :meth:`from_session_path` when starting from a session directory; this constructor takes the canonical
-            data dependency (a :class:`RunSessionData`) so the same loaded session can feed multiple detectors without
-            re-reading the feather.
+            Takes the canonical data dependency (a :class:`RunSessionData` from
+            :func:`assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
+            detectors without re-reading the feather.
 
         Args:
             run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
@@ -230,37 +188,6 @@ class PlaceFieldDetector:
         # rate-map accumulation, not the speed mask or bin assignments. Computed at init time because the
         # configuration is stable for the lifetime of the detector.
         self._build_shuffle_invariants()
-
-    @classmethod
-    def from_session_path(
-        cls,
-        session_path: Path,
-        trial_type: str,
-        *,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
-        bin_size: float = 5.0,
-        configuration: PlaceFieldDetectionConfiguration | None = None,
-    ) -> PlaceFieldDetector:
-        """Loads fluorescence, position, speed, and trial data from the session feather and constructs the detector.
-
-        Args:
-            session_path: Path to the session's dataset directory.
-            trial_type: Trial type to analyze (e.g. "ABC", "ABCD"). Must match an entry in the session's trial
-                geometry data file.
-            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
-                analysis input.
-            bin_size: Size of spatial bins in centimeters.
-            configuration: Configuration parameters for place field detection. Uses defaults if None.
-
-        Returns:
-            A constructed PlaceFieldDetector ready to call ``detect()`` on.
-        """
-        run_session = assemble_run_session_data(
-            session_path=session_path,
-            trial_type=trial_type,
-            fluorescence_column=fluorescence_column,
-        )
-        return cls(run_session=run_session, bin_size=bin_size, configuration=configuration)
 
     def _build_shuffle_invariants(self) -> None:
         """Builds the shuffle-invariant arrays (speed-filtered sample indices, bin indices, occupancy, minimum shift)
@@ -1118,7 +1045,7 @@ def _stability_shuffle_kernel(
         cell_index = task % cell_count
 
         # Per-task scratch sized to bin_count. Numba's allocator pools and reuses these across the tasks each
-        # worker thread receives, so allocation overhead is amortised even at hundreds of thousands of tasks.
+        # worker thread receives, so allocation overhead is amortized even at hundreds of thousands of tasks.
         # noinspection PyTypeChecker
         first_sum: NDArray[np.float32] = np.zeros(bin_count, dtype=np.float32)
         # noinspection PyTypeChecker
@@ -1270,7 +1197,7 @@ def _peak_shuffle_kernel(
         # Inline circular uniform smoothing followed by per-cell peak. Matches
         # ``uniform_filter1d(mode="wrap")`` semantics: each output bin averages a centered window of size
         # ``smooth_size`` with wrap-around at the track boundary. Tracking the running maximum avoids
-        # materialising a separate smoothed buffer.
+        # materializing a separate smoothed buffer.
         peak = np.float32(-np.inf)
         for bin_index in range(bin_count):
             total = np.float32(0.0)

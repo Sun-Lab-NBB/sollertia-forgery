@@ -24,11 +24,7 @@ import polars as pl
 from ataraxis_data_structures import YamlConfig
 
 from ...forging import FluorescenceColumn
-from .cell_analysis import (
-    CellAnalysisColumn,
-    CellAnalysisReport,
-    CellAnalysisConfiguration,
-)
+from .tuning_report import TuningColumn, TuningReport, TuningConfiguration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,7 +43,7 @@ class RewardRelativeColumn(StrEnum):
     """Defines every column written to the per-session reward-relative per-cell table."""
 
     CELL_ID = "cell_id"
-    """Contiguous integer cell identifier; matches ``CellAnalysisColumn.CELL_ID`` in both source reports."""
+    """Contiguous integer cell identifier; matches ``TuningColumn.CELL_ID`` in both source reports."""
     PEAK_POSITION_TRACK_A_CM = "peak_position_track_a_cm"
     """Trial-type-A peak position in track-aligned coordinates (centimeters from track start)."""
     PEAK_POSITION_TRACK_B_CM = "peak_position_track_b_cm"
@@ -108,7 +104,7 @@ class RewardRelativeSummary(YamlConfig):
 
     Notes:
         Holds the trial-type pair, geometry, count statistics, and the configuration so the analysis is
-        self-describing on disk. Fields parallel the ``CellAnalysisSummary`` style.
+        self-describing on disk. Fields parallel the ``TuningSummary`` style.
     """
 
     trial_type_a: str
@@ -160,14 +156,14 @@ class RewardRelativeReport:
         trial_type_b: str,
         fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
         configuration: RewardRelativeConfiguration | None = None,
-        cell_analysis_configuration: CellAnalysisConfiguration | None = None,
+        tuning_configuration: TuningConfiguration | None = None,
     ) -> RewardRelativeReport:
         """Runs both per-trial-type cell analyses and assembles the cross-trial-type reward-relative report.
 
         Notes:
-            Calls ``CellAnalysisReport.evaluate`` once per trial type and forwards both reports to
+            Calls ``TuningReport.evaluate`` once per trial type and forwards both reports to
             :meth:`from_reports`. The two per-trial-type reports are not persisted; callers who want them on disk
-            should run :meth:`CellAnalysisReport.evaluate` themselves and use :meth:`from_reports`.
+            should run :meth:`TuningReport.evaluate` themselves and use :meth:`from_reports`.
 
         Args:
             session_path: Path to the session's dataset directory.
@@ -177,23 +173,23 @@ class RewardRelativeReport:
             fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
                 analysis input. Applied uniformly to both trial-type analyses.
             configuration: Reward-relative configuration; uses defaults if None.
-            cell_analysis_configuration: Cell-analysis configuration forwarded to both per-trial-type evaluations;
+            tuning_configuration: Cell-analysis configuration forwarded to both per-trial-type evaluations;
                 uses defaults if None.
 
         Returns:
             A RewardRelativeReport instance with the per-cell cross-trial-type table and summary.
         """
-        report_a = CellAnalysisReport.evaluate(
+        report_a = TuningReport.evaluate(
             session_path=session_path,
             trial_type=trial_type_a,
             fluorescence_column=fluorescence_column,
-            configuration=cell_analysis_configuration,
+            configuration=tuning_configuration,
         )
-        report_b = CellAnalysisReport.evaluate(
+        report_b = TuningReport.evaluate(
             session_path=session_path,
             trial_type=trial_type_b,
             fluorescence_column=fluorescence_column,
-            configuration=cell_analysis_configuration,
+            configuration=tuning_configuration,
         )
         return cls.from_reports(
             report_a=report_a,
@@ -206,8 +202,8 @@ class RewardRelativeReport:
     @classmethod
     def from_reports(
         cls,
-        report_a: CellAnalysisReport,
-        report_b: CellAnalysisReport,
+        report_a: TuningReport,
+        report_b: TuningReport,
         *,
         trial_type_a: str,
         trial_type_b: str,
@@ -470,8 +466,8 @@ def compute_cross_block_classification(
 
 
 def _build_table(
-    report_a: CellAnalysisReport,
-    report_b: CellAnalysisReport,
+    report_a: TuningReport,
+    report_b: TuningReport,
     configuration: RewardRelativeConfiguration,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Builds the per-cell cross-trial-type table and returns aggregate anchored-cell counts."""
@@ -479,13 +475,13 @@ def _build_table(
     summary_a = report_a.summary
     summary_b = report_b.summary
 
-    rate_maps_a = stack_rate_maps_from_table(report_a.table, target_length=int(summary_a.bin_count))
-    rate_maps_b = stack_rate_maps_from_table(report_b.table, target_length=int(summary_b.bin_count))
+    rate_maps_a = stack_rate_maps_from_table(report_a.cells, target_length=int(summary_a.bin_count))
+    rate_maps_b = stack_rate_maps_from_table(report_b.cells, target_length=int(summary_b.bin_count))
 
     # noinspection PyTypeChecker
-    is_significant_a: NDArray[np.bool_] = report_a.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant_a: NDArray[np.bool_] = report_a.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
     # noinspection PyTypeChecker
-    is_significant_b: NDArray[np.bool_] = report_b.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+    is_significant_b: NDArray[np.bool_] = report_b.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
 
     classification = compute_cross_block_classification(
         rate_maps_a=rate_maps_a,
@@ -577,7 +573,7 @@ def stack_rate_maps_from_table(table: pl.DataFrame, target_length: int) -> NDArr
         Pads or truncates each row to ``target_length`` so callers can rely on a uniform second axis even when the
         list column carries variable-length entries from older saved reports.
     """
-    rows = table[CellAnalysisColumn.RATE_MAP.value].to_list()
+    rows = table[TuningColumn.RATE_MAP.value].to_list()
     cell_count = len(rows)
     # noinspection PyTypeChecker
     output: NDArray[np.float32] = np.zeros((cell_count, target_length), dtype=np.float32)

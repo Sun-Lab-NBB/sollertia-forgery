@@ -9,7 +9,7 @@ References:
     - Villette, Malvache, Tressard, Dupuy & Cossart (2015). Internally Recurring Hippocampal Sequences as a
       Population Template of Spatiotemporal Information. Neuron. https://doi.org/10.1016/j.neuron.2015.09.052
       -- per-cell onset-rank-within-SCE motivation; consumed downstream by the rank-correlation analysis in
-      :mod:`sollertia_forgery.analysis.cell_tuning.cell_analysis`.
+      :mod:`sollertia_forgery.analysis.tuning.cell_analysis`.
     - Modol, Sousa, Malvache, Tressard et al. (2020). Hippocampal hub neurons maintain distinct connectivity
       throughout their lifetime. Nat Commun. https://doi.org/10.1038/s41467-020-18432-6 -- per-cell
       SCE-recruitment significance test ("super-rich" cells) implemented here as the per-cell participation
@@ -32,7 +32,7 @@ from scipy.signal import savgol_filter
 from scipy.ndimage import maximum_filter1d, uniform_filter1d
 
 from ...forging import FluorescenceColumn
-from ..utilities import trim_acquisition_warmup
+from ..shared_utilities import trim_acquisition_warmup
 from ...shared_assets import DatasetFiles, DatasetColumn
 
 if TYPE_CHECKING:
@@ -943,6 +943,11 @@ class SCEDetector:
     def sampling_rate_hz(self) -> float:
         """Returns the sampling rate estimated from the median inter-sample interval at construction time."""
         return self._sampling_rate
+
+    @property
+    def cell_count(self) -> int:
+        """Returns the number of cells in the loaded fluorescence trace."""
+        return int(self._fluorescence.shape[0])
 
     def detect_events(self, *, progress: bool = True) -> list[SCEResult]:
         """Detects SCEs in every stationary chunk across every protocol epoch in the session.

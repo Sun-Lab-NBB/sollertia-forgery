@@ -2,7 +2,7 @@
 
 Implements the longitudinal counterpart to :mod:`reward_relative_analysis` for animals whose reward zone is moved
 mid-cohort (e.g., MF11, MF15 — last five days at a shifted reward location). Consumes per-session
-:class:`CellAnalysisReport` instances, partitions them into pre-shift and post-shift groups by reward midpoint,
+:class:`TuningReport` instances, partitions them into pre-shift and post-shift groups by reward midpoint,
 averages rate maps within each group, and runs the shared cross-block kernel
 (:func:`compute_cross_block_classification`) to classify each longitudinally-tracked cell as reward-anchored or
 track-anchored.
@@ -28,7 +28,7 @@ import numpy as np
 import polars as pl
 from ataraxis_data_structures import YamlConfig
 
-from .cell_analysis import CellAnalysisColumn, CellAnalysisReport
+from .tuning_report import TuningColumn, TuningReport
 from .reward_relative_analysis import (
     RewardRelativeColumn,
     CrossBlockClassification,
@@ -164,7 +164,7 @@ class LongitudinalRewardShiftReport:
         cls,
         *,
         animal: str,
-        reports: Sequence[CellAnalysisReport],
+        reports: Sequence[TuningReport],
         session_names: Sequence[str],
         configuration: LongitudinalRewardShiftConfiguration | None = None,
     ) -> LongitudinalRewardShiftReport:
@@ -184,7 +184,7 @@ class LongitudinalRewardShiftReport:
 
         Args:
             animal: Animal identifier; persisted in the summary.
-            reports: Per-session :class:`CellAnalysisReport` instances; must share a common cell-ID space (multi-day
+            reports: Per-session :class:`TuningReport` instances; must share a common cell-ID space (multi-day
                 registration). Length must equal ``len(session_names)``.
             session_names: Session identifiers aligned with ``reports``. Used both for chronological ordering and for
                 recording the pre/post split in the summary.
@@ -367,7 +367,7 @@ class LongitudinalRewardShiftReport:
 
 
 def _aggregate_block(
-    reports: Sequence[CellAnalysisReport],
+    reports: Sequence[TuningReport],
     cell_count: int,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Returns the per-cell mean rate map and per-cell significance fraction across a block of sessions.
@@ -384,10 +384,10 @@ def _aggregate_block(
     # noinspection PyTypeChecker
     significance_counts: NDArray[np.int32] = np.zeros(cell_count, dtype=np.int32)
     for index, report in enumerate(reports):
-        rate_maps = stack_rate_maps_from_table(table=report.table, target_length=bin_count)
+        rate_maps = stack_rate_maps_from_table(table=report.cells, target_length=bin_count)
         stacked_maps[index] = rate_maps
         # noinspection PyTypeChecker
-        is_significant: NDArray[np.bool_] = report.table[CellAnalysisColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
+        is_significant: NDArray[np.bool_] = report.cells[TuningColumn.IS_SPATIALLY_SIGNIFICANT.value].to_numpy()
         significance_counts += is_significant.astype(np.int32)
 
     # NaN-aware mean across the session axis; cells that are NaN in every session collapse to NaN here, which the

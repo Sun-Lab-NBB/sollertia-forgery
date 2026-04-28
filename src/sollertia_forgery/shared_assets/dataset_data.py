@@ -117,17 +117,29 @@ class DatasetSession:
         return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
 
     @property
-    def cell_analysis_summary_path(self) -> Path:
-        """Returns the path to the session's ``cell_analysis.yaml`` summary file within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.CELL_ANALYSIS_SUMMARY)
+    def tuning_summary_path(self) -> Path:
+        """Returns the path to the session's ``tuning_summary.yaml`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.TUNING_SUMMARY)
 
     @property
-    def cell_analysis_table_path(self) -> Path:
-        """Returns the path to the session's ``cell_analysis.feather`` per-cell table within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.CELL_ANALYSIS_TABLE)
+    def tuning_cells_path(self) -> Path:
+        """Returns the path to the session's ``tuning_cells.feather`` per-cell table within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.TUNING_CELLS_TABLE)
 
     @property
-    def sce_periods_table_path(self) -> Path:
+    def sce_summary_path(self) -> Path:
+        """Returns the path to the session's ``sce_summary.yaml`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.SCE_SUMMARY)
+
+    @property
+    def sce_cells_path(self) -> Path:
+        """Returns the path to the session's ``sce_cells.feather`` per-cell SCE participation table within the
+        dataset hierarchy.
+        """
+        return self.session_path.joinpath(DatasetFiles.SCE_CELLS_TABLE)
+
+    @property
+    def sce_periods_path(self) -> Path:
         """Returns the path to the session's ``sce_periods.feather`` per-period SCE-state table within the dataset
         hierarchy.
         """

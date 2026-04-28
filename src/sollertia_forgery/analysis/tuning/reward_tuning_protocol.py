@@ -12,11 +12,9 @@ import numpy as np
 from scipy.ndimage import uniform_filter1d
 from scipy.optimize import minimize
 
-from ...forging import FluorescenceColumn
-from ..utilities import (
+from .utilities import (
     RunSessionData,
     per_cell_pearson_safe,
-    assemble_run_session_data,
     bin_fluorescence_per_trial,
     bin_fluorescence_by_position,
     accumulate_shuffled_rate_maps,
@@ -24,8 +22,6 @@ from ..utilities import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from numpy.typing import NDArray
 
 
@@ -118,8 +114,6 @@ class SpatiallyModulatedNeurons:
 
     rate_maps: NDArray[np.float32]
     """Smoothed spatial rate maps with dimensions (cell_count, bin_count)."""
-    occupancy: NDArray[np.int32]
-    """Per-bin occupancy sample counts with length bin_count (from bin_fluorescence_by_position)."""
     spatial_information: NDArray[np.float32]
     """Spatial information content in bits/event with length cell_count."""
     spatial_information_z: NDArray[np.float32]
@@ -147,20 +141,6 @@ class SpatiallyModulatedNeurons:
     values < 1.0 mean the cell's peak falls outside the zone (with magnitude reflecting how much weaker the in-zone
     signal is). Used by the Phase-2 mutual-exclusion winner-take-all and naturally extends to multi-block analysis
     in Phase 3."""
-    bin_size: float
-    """Spatial bin size in centimeters."""
-    track_length: float
-    """Length of the track in centimeters."""
-
-    @property
-    def significant_centers(self) -> NDArray[np.float32]:
-        """Returns the centers of mass for only the spatially significant neurons."""
-        return self.centers_of_mass[self.is_significant]
-
-    @property
-    def significant_count(self) -> int:
-        """Returns the number of spatially significant neurons."""
-        return int(np.sum(self.is_significant))
 
 
 @dataclass(slots=True)
@@ -169,8 +149,6 @@ class RewardCellResults:
 
     spatial_results: SpatiallyModulatedNeurons
     """The underlying spatial modulation analysis results."""
-    reward_position: float
-    """The reward position in centimeters used for classification."""
     mixture_weight: float
     """Fraction of spatially modulated neurons attributed to the reward Gaussian component of the extended mixture."""
     gaussian_mean: float
@@ -214,26 +192,14 @@ class RewardCellResults:
         return self.is_zone
 
     @property
-    def reward_cell_indices(self) -> NDArray[np.int32]:
-        """Returns the indices of neurons classified as reward-associated (significant spatial field in the zone)."""
-        mask = self.spatial_results.is_significant & self.is_zone
-        return np.argwhere(mask).flatten().astype(np.int32)
-
-    @property
     def reward_cell_count(self) -> int:
-        """Returns the number of neurons classified as reward-associated."""
-        return len(self.reward_cell_indices)
+        """Returns the number of neurons classified as reward-associated (significant spatial field in the zone)."""
+        return int(np.sum(self.spatial_results.is_significant & self.is_zone))
 
     @property
     def reward_predictive_indices(self) -> NDArray[np.int32]:
         """Returns the indices of zone-classified, GLM-significant reward-predictive neurons."""
         mask = self.spatial_results.is_significant & self.is_zone & self.is_position_glm_significant
-        return np.argwhere(mask).flatten().astype(np.int32)
-
-    @property
-    def non_reward_place_cell_indices(self) -> NDArray[np.int32]:
-        """Returns the indices of spatially modulated neurons not classified as reward-associated."""
-        mask = self.spatial_results.is_significant & ~self.is_zone
         return np.argwhere(mask).flatten().astype(np.int32)
 
 
@@ -743,16 +709,16 @@ class RewardCellDetector:
         """Constructs the detector from already-loaded session data.
 
         Notes:
-            Use :meth:`from_session_path` when starting from a session directory; this constructor takes the canonical
-            data dependency (a :class:`RunSessionData`) so the same loaded session can feed both detectors without
-            re-reading the feather. The reward position is taken as the midpoint of the stimulus trigger zone defined
-            in the session's trial geometry data file, since water is delivered wherever in the lick-active zone the
-            animal happens to lick rather than at a single point.
+            Takes the canonical data dependency (a :class:`RunSessionData` from
+            :func:`assemble_run_session_data`) so the same loaded session can feed both place- and reward-cell
+            detectors without re-reading the feather. The reward position is taken as the midpoint of the
+            stimulus trigger zone defined in the session's trial geometry data file, since water is delivered
+            wherever in the lick-active zone the animal happens to lick rather than at a single point.
 
         Args:
             run_session: Pre-loaded session data from :func:`assemble_run_session_data`.
-            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if
-                None.
+            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults
+                if None.
         """
         self.fluorescence = run_session.fluorescence
         self.position = run_session.position
@@ -771,36 +737,6 @@ class RewardCellDetector:
         self._bin_edges: NDArray[np.float32] = np.arange(
             0, self.track_length + self.configuration.bin_size, self.configuration.bin_size, dtype=np.float32
         )
-
-    @classmethod
-    def from_session_path(
-        cls,
-        session_path: Path,
-        trial_type: str,
-        *,
-        fluorescence_column: FluorescenceColumn = FluorescenceColumn.MULTI_DAY_SUBTRACTED,
-        configuration: RewardCellConfiguration | None = None,
-    ) -> RewardCellDetector:
-        """Loads fluorescence, position, speed, and trial data from the session feather and constructs the detector.
-
-        Args:
-            session_path: Path to the session's dataset directory.
-            trial_type: Trial type to analyze (e.g. "ABC", "ABCD"). Must match an entry in the session's trial
-                geometry data file.
-            fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to use as the
-                analysis input.
-            configuration: Configuration parameters for detection thresholds and shuffle testing. Uses defaults if
-                None.
-
-        Returns:
-            A constructed RewardCellDetector ready to call ``detect()`` on.
-        """
-        run_session = assemble_run_session_data(
-            session_path=session_path,
-            trial_type=trial_type,
-            fluorescence_column=fluorescence_column,
-        )
-        return cls(run_session=run_session, configuration=configuration)
 
     def detect(self) -> RewardCellResults:
         """Runs the full reward cell detection pipeline.
@@ -839,7 +775,7 @@ class RewardCellDetector:
             track_start_std,
             track_end_std,
         ) = _compute_extended_mixture(
-            centers=spatial_results.significant_centers,
+            centers=spatial_results.centers_of_mass[spatial_results.is_significant],
             track_length=self.track_length,
             reward_position=self.reward_position,
         )
@@ -857,7 +793,6 @@ class RewardCellDetector:
 
         return RewardCellResults(
             spatial_results=spatial_results,
-            reward_position=self.reward_position,
             mixture_weight=mixture_weight,
             gaussian_mean=gaussian_mean,
             gaussian_std=gaussian_std,
@@ -988,7 +923,6 @@ class RewardCellDetector:
 
         return SpatiallyModulatedNeurons(
             rate_maps=smoothed_maps,
-            occupancy=sample_counts,
             spatial_information=observed_information,
             spatial_information_z=spatial_information_z,
             is_significant=is_significant,
@@ -997,8 +931,6 @@ class RewardCellDetector:
             split_half_r=split_half_r,
             centers_of_mass=centers_of_mass,
             reward_relativity_score=reward_relativity_score,
-            bin_size=configuration.bin_size,
-            track_length=self.track_length,
         )
 
     def _compute_shuffle_significance(

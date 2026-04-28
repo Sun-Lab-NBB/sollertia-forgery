@@ -1,4 +1,9 @@
-"""Provides shared utility assets for other analysis modules."""
+"""Tuning-pipeline utilities: run-state assembly, per-trial binning, and shuffle-source helpers.
+
+These helpers are package-private to the tuning analysis. The place- and reward-cell detectors share them so
+both pipelines operate on bit-identical speed-filtered samples and rate-map binning. Helpers that any analysis
+package may need (e.g. acquisition-warmup trimming) live in :mod:`..shared_utilities`.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +13,11 @@ from dataclasses import dataclass
 from numba import njit, prange
 import numpy as np
 import polars as pl
-from ataraxis_time import TimeUnits, convert_time, interval_to_rate
-from ataraxis_base_utilities import console
+from ataraxis_time import TimeUnits, interval_to_rate
 
-from ..forging import FluorescenceColumn
-from ..shared_assets import (
+from ...forging import FluorescenceColumn
+from ..shared_utilities import trim_acquisition_warmup
+from ...shared_assets import (
     DatasetFiles,
     DatasetColumn,
     TrialGeometry,
@@ -25,19 +30,11 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-_ACQUISITION_WARMUP_SECONDS: float = 60.0
-"""Number of leading seconds discarded from every loaded session trace before any analysis runs. Sollertia
-experiments include a multi-minute pre-imaging baseline period during which the PMT gain, resonant scanner phase,
-shutter, and laser power have not yet stabilized; the resulting initial fluorescence valley would otherwise
-contaminate downstream estimates (per-cell baselines, within-session bleaching, SCE statistics, place-field
-tuning). Trimming at load time guarantees every analyzer operates on stabilized samples without needing to know
-the artifact exists."""
-
-NO_TRIAL_SENTINEL: int = 255
-"""Sentinel trial id used by the acquisition pipeline to mark samples outside of any trial. Hoisted to utilities so
-detector modules consume one canonical sentinel without redefining it."""
 MINIMUM_VALID_BINS_FOR_PEARSON: int = 3
 """Minimum number of pairwise-non-NaN bins required for a numerically stable per-cell Pearson r."""
+_NO_TRIAL_SENTINEL: int = 255
+"""Sentinel trial id the acquisition pipeline writes for samples outside any trial. Used by
+:func:`bin_fluorescence_per_trial` to drop the sentinel slot before the per-trial binning fans out."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,42 +59,6 @@ class RunSessionData:
     run-state filtering. NaN when the session has fewer than two samples."""
 
 
-def trim_acquisition_warmup(df: pl.DataFrame) -> pl.DataFrame:
-    """Drops the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe based on the
-    ``time_us`` column.
-
-    Notes:
-        Operates on the polars dataframe directly (rather than the post-explode numpy arrays) so the warmup window
-        never enters any subsequent column-level reshape. Sessions whose entire trace falls within the warmup
-        window collapse to an empty dataframe; downstream loaders' existing length guards then produce NaN sentinels
-        for such degenerate sessions.
-
-    Args:
-        df: Session dataframe loaded from ``DatasetFiles.DATA``. Must include ``DatasetColumn.TIME_US`` among the
-            selected columns; all other columns are passed through untouched.
-
-    Returns:
-        The input dataframe sliced to drop every row whose ``time_us`` value precedes the warmup cutoff.
-    """
-    if df.height == 0:
-        return df
-    # noinspection PyTypeChecker
-    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
-    warmup_us = int(
-        convert_time(
-            time=_ACQUISITION_WARMUP_SECONDS,
-            from_units=TimeUnits.SECOND,
-            to_units=TimeUnits.MICROSECOND,
-            as_float=True,
-        )
-    )
-    cutoff_us = int(time_us[0]) + warmup_us
-    warmup_index = int(np.searchsorted(a=time_us, v=cutoff_us, side="left"))
-    if warmup_index <= 0:
-        return df
-    return df.slice(offset=warmup_index)
-
-
 def assemble_run_session_data(
     session_path: Path,
     trial_type: str,
@@ -107,22 +68,22 @@ def assemble_run_session_data(
 
     Notes:
         Resolves the canonical track length from the session's trial geometry data file, drops the leading
-        acquisition-warmup window so downstream binning operates on stabilized samples, filters the session's data
-        feather to system_state == 'run' and trial_type == trial_type, computes within-trial position, and drops
-        samples belonging to incomplete trials so downstream binning never sees NaN positions. All returned arrays
-        share the same sample axis and are aligned in lockstep.
+        acquisition-warmup window so downstream binning operates on stabilized samples, filters the session's
+        data feather to system_state == 'run' and trial_type == trial_type, computes within-trial position, and
+        drops samples belonging to incomplete trials so downstream binning never sees NaN positions. All returned
+        arrays share the same sample axis and are aligned in lockstep.
 
     Args:
         session_path: Path to the session's dataset directory containing the data feather and the trial geometry
             data file.
         trial_type: Trial type to load (e.g., "ABC", "ABCD"). Must match an entry in the session's trial geometry
             data file.
-        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to load. Selects between
-            single-recording and multi-recording cindra outputs.
+        fluorescence_column: The neuropil-subtracted, baseline-corrected fluorescence column to load. Selects
+            between single-recording and multi-recording cindra outputs.
 
     Returns:
-        A RunSessionData instance containing the aligned per-sample arrays, the trial type string, and the resolved
-        TrialGeometryEntry.
+        A RunSessionData instance containing the aligned per-sample arrays, the trial type string, and the
+        resolved TrialGeometryEntry.
     """
     geometry_entry = TrialGeometry.from_yaml(
         file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY),
@@ -187,13 +148,14 @@ def compute_within_trial_position(
 
     Notes:
         Trials whose measured length falls below completeness_threshold * track_length are masked with NaN so
-        downstream binning can drop them via ~np.isnan(position). Assumes samples are time-ordered so each trial's
-        samples form one contiguous block.
+        downstream binning can drop them via ~np.isnan(position). Assumes samples are time-ordered so each
+        trial's samples form one contiguous block.
 
     Args:
         distance: The cumulative distance traveled by the animal at each sample of the session.
         trial_ids: The trial identifier at each sample of the session.
-        track_length: The total length of the virtual reality track for the processed type of trials, in centimeters.
+        track_length: The total length of the virtual reality track for the processed type of trials, in
+            centimeters.
         completeness_threshold: Minimum fraction of track_length that a trial's measured length must reach to be
             considered complete. Samples in below-threshold trials are returned as NaN.
 
@@ -225,47 +187,6 @@ def compute_within_trial_position(
     return position
 
 
-def resolve_display_units(days_since_first: NDArray[np.float32]) -> tuple[str, NDArray[np.int64]]:
-    """Resolves the integer display unit and per-session tick array used by dataset-level summaries and plots.
-
-    Notes:
-        Returns ``("day", round(days_since_first))`` when every session's day-rounded offset is unique. Otherwise,
-        falls back to ``("hour", round(days_since_first * 24))``. Storage and any cross-session fits continue to
-        operate on float days; the integer ticks returned here are display-only.
-
-    Args:
-        days_since_first: Per-session day offsets relative to the first session.
-
-    Returns:
-        A tuple of unit label (``"day"`` or ``"hour"``) and an int64 tick array aligned with ``days_since_first``.
-
-    Raises:
-        ValueError: When sessions cannot be assigned unique day or hour ticks. Sollertia acquisition protocols
-            mandate at least one hour between consecutive sessions, so the hour-rounded values are by construction
-            distinct; a collision indicates a violated input invariant.
-    """
-    # noinspection PyTypeChecker
-    rounded_days: NDArray[np.int64] = np.round(days_since_first).astype(np.int64, copy=False)
-    if int(np.unique(rounded_days).size) == int(rounded_days.size):
-        return "day", rounded_days
-
-    # Promotes through float64 first so the *24 multiplication does not lose precision near the float32 boundary.
-    # noinspection PyTypeChecker
-    rounded_hours: NDArray[np.int64] = np.round(days_since_first.astype(np.float64) * 24.0).astype(np.int64, copy=False)
-    if int(np.unique(rounded_hours).size) == int(rounded_hours.size):
-        return "hour", rounded_hours
-
-    message = (
-        "Unable to assign unique integer day or hour labels to the supplied sessions. Sollertia acquisition "
-        "protocols require at least one hour of separation between consecutive sessions, but at least two sessions "
-        "in this set rounded to the same hour-since-first value, which violates that invariant."
-    )
-    console.error(message=message, error=ValueError)
-    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-    # noinspection PyUnreachableCode
-    raise ValueError(message)  # pragma: no cover
-
-
 def bin_fluorescence_by_position(
     fluorescence: NDArray[np.float32],
     position: NDArray[np.float32],
@@ -283,8 +204,8 @@ def bin_fluorescence_by_position(
         compute_mean: Determines whether to compute the per-bin mean. When False, the per-bin sum is returned.
 
     Returns:
-        A tuple containing the binned fluorescence array with dimensions (cell_count, bin_count) and the sample count
-        per bin with length bin_count.
+        A tuple containing the binned fluorescence array with dimensions (cell_count, bin_count) and the sample
+        count per bin with length bin_count.
     """
     # Assigns each position to a spatial bin and clips to the range [0, bin_count - 1].
     # noinspection PyTypeChecker
@@ -304,7 +225,6 @@ def bin_fluorescence_by_position(
     # noinspection PyTypeChecker
     output: NDArray[np.float32] = np.full(shape=(cell_count, bin_count), fill_value=np.nan, dtype=np.float32)
 
-    # Hands off to vectorized and compiled accumulator.
     _accumulate_binned_fluorescence(
         fluorescence=fluorescence,
         bin_indices=bin_indices,
@@ -328,8 +248,8 @@ def compute_shuffle_source_indices(
 
     Notes:
         Encodes the circular shift (when ``chunk_count == 1``) and circular-shift + chunk-permute (when
-        ``chunk_count > 1``) as an indirection array rather than materializing a full shuffled fluorescence matrix.
-        Hoisted from the reward-cell pipeline so both protocols share the same shuffle implementation.
+        ``chunk_count > 1``) as an indirection array rather than materializing a full shuffled fluorescence
+        matrix. Hoisted from the reward-cell pipeline so both protocols share the same shuffle implementation.
 
     References:
         - Climer, Davoudi, Oh & Dombeck (2025). Hippocampal representations drift in stable multisensory
@@ -353,7 +273,8 @@ def compute_shuffle_source_indices(
     chunk_size = sample_count // chunk_count
     permutation = np.random.permutation(chunk_count)  # noqa: NPY002
 
-    # Computes cumulative output-chunk start positions so each destination can be located within the permuted layout.
+    # Computes cumulative output-chunk start positions so each destination can be located within the permuted
+    # layout.
     output_chunk_starts = np.empty(chunk_count + 1, dtype=np.int32)
     output_chunk_starts[0] = 0
     for output_chunk_position in range(chunk_count):
@@ -393,9 +314,9 @@ def accumulate_shuffled_rate_maps(
     """Bins fluorescence into a per-cell rate map by gathering source samples through an indirection array.
 
     Notes:
-        Shared by the place- and reward-cell pipelines. Empty bins are written as 0.0 (not NaN) so callers can apply
-        smoothing without a NaN-aware kernel; smoothing in the calling code uses ``mode="wrap"`` and is robust to
-        zero-occupancy bins.
+        Shared by the place- and reward-cell pipelines. Empty bins are written as 0.0 (not NaN) so callers can
+        apply smoothing without a NaN-aware kernel; smoothing in the calling code uses ``mode="wrap"`` and is
+        robust to zero-occupancy bins.
 
     Args:
         fluorescence: Fluorescence data with dimensions (cell_count, sample_count).
@@ -420,46 +341,14 @@ def accumulate_shuffled_rate_maps(
                 output[cell_index, bin_index] = 0.0
 
 
-def _resolve_sampling_rate_hz(df: pl.DataFrame) -> float:
-    """Computes the acquisition sampling rate in Hz from the ``time_us`` column of a session dataframe.
-
-    Notes:
-        Uses the median per-sample inter-time interval to be robust to gaps that arise from system-state transitions
-        within the session. Returns NaN when the dataframe has fewer than two samples.
-
-    Args:
-        df: Session dataframe loaded from ``DatasetFiles.DATA`` (post-warmup, pre-filter). Must include the
-            ``DatasetColumn.TIME_US`` column.
-
-    Returns:
-        The acquisition sampling rate in Hz, or NaN when the dataframe has fewer than two samples.
-    """
-    # np.diff over N samples yields N-1 intervals; computing a median requires at least one interval.
-    minimum_samples_for_interval = 2
-    if df.height < minimum_samples_for_interval:
-        return float("nan")
-    # noinspection PyTypeChecker
-    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
-    median_interval_us = float(np.median(np.diff(time_us)))
-    if median_interval_us <= 0.0:
-        return float("nan")
-    return float(
-        interval_to_rate(
-            interval=median_interval_us,
-            from_units=TimeUnits.MICROSECOND,
-            as_float=True,
-        )
-    )
-
-
 @njit(cache=True)
 def per_cell_pearson_safe(a: NDArray[np.float32], b: NDArray[np.float32]) -> NDArray[np.float32]:
     """Computes per-cell Pearson r between two (cell_count, bin_count) matrices, NaN-safe and zero-variance-safe.
 
     Notes:
-        Returns NaN for cells with fewer than three pairwise-valid bins or zero variance in either half. Compiled with
-        numba so it runs without GIL contention inside shuffle loops. Hoisted from the place-cell pipeline so the
-        place- and reward-cell detectors compute split-half stability against the same kernel.
+        Returns NaN for cells with fewer than three pairwise-valid bins or zero variance in either half.
+        Compiled with numba so it runs without GIL contention inside shuffle loops. Hoisted from the place-cell
+        pipeline so the place- and reward-cell detectors compute split-half stability against the same kernel.
 
     Args:
         a: First matrix with dimensions (cell_count, bin_count).
@@ -518,17 +407,18 @@ def bin_fluorescence_per_trial(
     """Bins per-sample fluorescence per lap into a (cell_count, trial_count, bin_count) array.
 
     Notes:
-        Excludes the trial id sentinel that the acquisition pipeline uses to mark "no trial" samples. Applies the
-        same speed filter and uniform_filter1d smoothing the place- and reward-cell detectors apply to their pooled
-        rate maps so averaging the returned array across the trial axis reproduces the pooled rate map within
-        numerical rounding. Bins and lap slices with no valid speed-filtered samples are filled with NaN so consumers
-        can treat them as missing without downstream guards.
+        Excludes the ``_NO_TRIAL_SENTINEL`` trial id that the acquisition pipeline uses to mark "no trial"
+        samples. Applies the same speed filter and uniform_filter1d smoothing the place- and reward-cell
+        detectors apply to their pooled rate maps so averaging the returned array across the trial axis
+        reproduces the pooled rate map within numerical rounding. Bins and lap slices with no valid
+        speed-filtered samples are filled with NaN so consumers can treat them as missing without downstream
+        guards.
 
-        The hot loop is hoisted into ``_bin_fluorescence_per_trial_kernel`` (``@njit(parallel=True)``) which fans
-        out across ``(cell × trial)`` pairs. The previous version walked trials sequentially in Python, calling a
-        ``bin_fluorescence_by_position`` + ``uniform_filter1d`` pair per trial; the kernel replaces both with a
-        single fused pass that accumulates per-bin sums, computes per-bin means, and applies wrap-around uniform
-        smoothing in place.
+        The hot loop is hoisted into ``_bin_fluorescence_per_trial_kernel`` (``@njit(parallel=True)``) which
+        fans out across ``(cell × trial)`` pairs. The previous version walked trials sequentially in Python,
+        calling a ``bin_fluorescence_by_position`` + ``uniform_filter1d`` pair per trial; the kernel replaces
+        both with a single fused pass that accumulates per-bin sums, computes per-bin means, and applies
+        wrap-around uniform smoothing in place.
 
     Args:
         fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
@@ -543,7 +433,7 @@ def bin_fluorescence_per_trial(
         Per-lap binned fluorescence with dimensions (cell_count, trial_count, bin_count).
     """
     # noinspection PyTypeChecker
-    valid_trial_mask: NDArray[np.bool_] = trial_ids != NO_TRIAL_SENTINEL
+    valid_trial_mask: NDArray[np.bool_] = trial_ids != _NO_TRIAL_SENTINEL
     # noinspection PyTypeChecker
     unique_trials: NDArray[np.int32] = np.unique(trial_ids[valid_trial_mask])
     trial_count = len(unique_trials)
@@ -558,9 +448,9 @@ def bin_fluorescence_per_trial(
         return output
 
     # Builds a CSR-style trial->sample lookup so the kernel only walks each trial's samples instead of scanning
-    # the full sample axis for every (cell, trial). Computes the trial slot per sample once (samples outside any
-    # retained trial or below the speed cut get slot -1, then drop out), sorts samples by slot to group them, and
-    # records per-trial start/end offsets into the sorted index array.
+    # the full sample axis for every (cell, trial). Computes the trial slot per sample once (samples below the
+    # speed cut get slot -1, then drop out), sorts samples by slot to group them, and records per-trial
+    # start/end offsets into the sorted index array.
     # noinspection PyTypeChecker
     sample_trial_slot: NDArray[np.int32] = np.full(trial_ids.shape[0], -1, dtype=np.int32)
     # noinspection PyTypeChecker
@@ -608,6 +498,37 @@ def bin_fluorescence_per_trial(
     return output
 
 
+def _resolve_sampling_rate_hz(df: pl.DataFrame) -> float:
+    """Computes the acquisition sampling rate in Hz from the ``time_us`` column of a session dataframe.
+
+    Notes:
+        Uses the median per-sample inter-time interval to be robust to gaps that arise from system-state
+        transitions within the session. Returns NaN when the dataframe has fewer than two samples.
+
+    Args:
+        df: Session dataframe loaded from ``DatasetFiles.DATA`` (post-warmup, pre-filter). Must include the
+            ``DatasetColumn.TIME_US`` column.
+
+    Returns:
+        The acquisition sampling rate in Hz, or NaN when the dataframe has fewer than two samples.
+    """
+    minimum_samples_for_interval = 2
+    if df.height < minimum_samples_for_interval:
+        return float("nan")
+    # noinspection PyTypeChecker
+    time_us: NDArray[np.int64] = df[DatasetColumn.TIME_US.value].to_numpy()
+    median_interval_us = float(np.median(np.diff(time_us)))
+    if median_interval_us <= 0.0:
+        return float("nan")
+    return float(
+        interval_to_rate(
+            interval=median_interval_us,
+            from_units=TimeUnits.MICROSECOND,
+            as_float=True,
+        )
+    )
+
+
 @njit(cache=True, parallel=True)
 def _bin_fluorescence_per_trial_kernel(
     fluorescence: NDArray[np.float32],
@@ -621,21 +542,19 @@ def _bin_fluorescence_per_trial_kernel(
     """Accumulates, averages, and wrap-smooths per-trial binned fluorescence into ``output`` in place.
 
     Notes:
-        Parallelism fans out across ``prange(cell_count * trial_count)`` so every (cell, trial) is an independent
-        task. Each task indexes a CSR-style trial->sample lookup (``trial_sample_indices`` /
+        Parallelism fans out across ``prange(cell_count * trial_count)`` so every (cell, trial) is an
+        independent task. Each task indexes a CSR-style trial->sample lookup (``trial_sample_indices`` /
         ``trial_sample_offsets``) so it only walks its own trial's samples; per-bin sum and count scratch sized
-        to ``bin_count`` stays small enough for numba's allocator to pool across tasks. Replaces the previous
-        Python loop that sequentially called ``bin_fluorescence_by_position`` and ``uniform_filter1d`` per trial,
-        each pass driving its own parallel-over-cells kernel and dispatching back through scipy.
+        to ``bin_count`` stays small enough for numba's allocator to pool across tasks.
 
     Args:
         fluorescence: Pre-normalized dF/F0 fluorescence with dimensions (cell_count, sample_count).
-        trial_sample_indices: Sample indices grouped by trial slot in ``[0, trial_count)`` with length
-            equal to the number of speed-filtered, in-trial samples.
+        trial_sample_indices: Sample indices grouped by trial slot in ``[0, trial_count)`` with length equal to
+            the number of speed-filtered, in-trial samples.
         trial_sample_offsets: Per-trial start offsets into ``trial_sample_indices`` with length trial_count + 1.
-            Trial t owns ``trial_sample_indices[trial_sample_offsets[t]:trial_sample_offsets[t + 1]]``.
-        bin_indices: Per-sample bin index in ``[0, bin_count)`` indexed in original sample-axis space; the kernel
-            reads ``bin_indices[trial_sample_indices[k]]`` to resolve the bin for the k-th sample of a trial.
+        bin_indices: Per-sample bin index in ``[0, bin_count)`` indexed in original sample-axis space; the
+            kernel reads ``bin_indices[trial_sample_indices[k]]`` to resolve the bin for the k-th sample of a
+            trial.
         trial_count: Number of unique retained trials (size of the trial axis of ``output``).
         smooth_size: Width of the wrap-around uniform smoothing kernel applied along the bin axis. Must be odd.
         output: Pre-allocated (cell_count, trial_count, bin_count) buffer pre-filled with NaN.
@@ -664,8 +583,6 @@ def _bin_fluorescence_per_trial_kernel(
             bin_sums[bin_index] += fluorescence[cell_index, sample_index]
             bin_counts[bin_index] += 1
 
-        # Convert to per-bin means; empty bins become NaN so smoothing propagates the gap downstream consumers
-        # already handle.
         # noinspection PyTypeChecker
         raw_means: NDArray[np.float32] = np.empty(bin_count, dtype=np.float32)
         any_valid = False
@@ -679,8 +596,7 @@ def _bin_fluorescence_per_trial_kernel(
             continue
 
         # Wrap-around uniform smoothing of size ``smooth_size`` (matches scipy's
-        # ``uniform_filter1d(mode="wrap")`` for odd kernels). Writes directly into ``output`` so we never
-        # materialise a separate smoothed buffer.
+        # ``uniform_filter1d(mode="wrap")`` for odd kernels).
         for bin_index in range(bin_count):
             total = np.float32(0.0)
             for window_offset in range(-half_smooth, half_smooth + 1):
@@ -720,21 +636,13 @@ def _accumulate_binned_fluorescence(
     sample_count = fluorescence.shape[1]
     bin_count = output.shape[1]
 
-    # Parallelizes over cells. Each thread processes one cell at a time, so per-cell scratch buffers stay private and
-    # the writes to output never collide.
     for cell_index in prange(cell_count):
-        # Allocates a thread-private scratch buffer sized to bin_count. At typical bin counts (under ~100 bins) this
-        # easily fits in L1, which keeps the random-access scatter in the next loop fast.
         bin_sums = np.zeros(bin_count, dtype=np.float32)
 
-        # Scatter-adds each sample's fluorescence into the bin it falls under. Reads fluorescence row-sequentially
-        # (cache-friendly) and bin_indices once per sample (small, stays hot in cache across cells).
         for sample_index in range(sample_count):
             bin_index = bin_indices[sample_index]
             bin_sums[bin_index] += fluorescence[cell_index, sample_index]
 
-        # Writes the per-bin result for this cell. Empty bins are skipped intentionally — the caller pre-fills
-        # output with NaN, so leaving those entries untouched gives the correct empty-bin sentinel for free.
         for bin_index in range(bin_count):
             count = sample_counts[bin_index]
             if count > 0:
