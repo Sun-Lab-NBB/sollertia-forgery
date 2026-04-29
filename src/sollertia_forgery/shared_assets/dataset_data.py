@@ -175,6 +175,21 @@ class DatasetAnimal:
         """Returns the path to the animal's ``bleaching.feather`` per-session table within the dataset hierarchy."""
         return self.animal_path.joinpath(DatasetFiles.BLEACHING_TABLE)
 
+    @property
+    def drift_summary_path(self) -> Path:
+        """Returns the path to the animal's ``drift.yaml`` summary file within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_SUMMARY)
+
+    @property
+    def drift_cells_path(self) -> Path:
+        """Returns the path to the animal's ``drift_cells.feather`` per-cell table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_CELLS_TABLE)
+
+    @property
+    def drift_pairs_path(self) -> Path:
+        """Returns the path to the animal's ``drift_pairs.feather`` per-pair table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_PAIRS_TABLE)
+
 
 @dataclass
 class DatasetData(YamlConfig):

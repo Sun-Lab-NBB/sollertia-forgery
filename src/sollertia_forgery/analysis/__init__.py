@@ -1,4 +1,4 @@
-"""Provides cell analysis pipelines for tuning, SCE detection, and bleaching."""
+"""Provides cell analysis pipelines for tuning, SCE detection, bleaching, and cross-session drift."""
 
 from .sce import (
     SCEReport,
@@ -11,6 +11,22 @@ from .sce import (
     run_sce_analysis,
     plot_sce_assemblies,
     plot_sce_cells_across_periods,
+)
+from .drift import (
+    DriftReport,
+    DriftSummary,
+    DriftCellColumn,
+    DriftPairColumn,
+    CellDriftMetrics,
+    PairwiseDriftMetrics,
+    PopulationDriftMetrics,
+    DriftDetectionConfiguration,
+    run_drift_analysis,
+    plot_drift_vs_bleaching,
+    plot_recurrence_heatmap,
+    plot_classification_raster,
+    plot_peak_shift_distribution,
+    plot_population_vector_correlation_vs_lag,
 )
 from .tuning import (
     PlaceFields,
@@ -54,10 +70,18 @@ __all__ = [
     "BleachingReport",
     "BleachingSessionResult",
     "BleachingSummary",
+    "CellDriftMetrics",
+    "DriftCellColumn",
+    "DriftDetectionConfiguration",
+    "DriftPairColumn",
+    "DriftReport",
+    "DriftSummary",
     "ExponentialDecayFit",
+    "PairwiseDriftMetrics",
     "PlaceFieldDetectionConfiguration",
     "PlaceFieldDetector",
     "PlaceFields",
+    "PopulationDriftMetrics",
     "RewardCellConfiguration",
     "RewardCellDetector",
     "RewardCellResults",
@@ -74,11 +98,16 @@ __all__ = [
     "TuningSummary",
     "TuningTrialSummary",
     "plot_baseline_trend",
+    "plot_classification_raster",
     "plot_dataset_baseline_trend",
+    "plot_drift_vs_bleaching",
+    "plot_peak_shift_distribution",
     "plot_per_trial_activity",
     "plot_place_cell_heatmap",
     "plot_population_activity_by_position",
+    "plot_population_vector_correlation_vs_lag",
     "plot_rate_map_heatmap",
+    "plot_recurrence_heatmap",
     "plot_reward_com_histogram",
     "plot_sce_assemblies",
     "plot_sce_cells_across_periods",
@@ -89,6 +118,7 @@ __all__ = [
     "resolve_display_units",
     "resolve_session_selection",
     "run_bleaching_analysis",
+    "run_drift_analysis",
     "run_sce_analysis",
     "run_tuning_analysis",
 ]

@@ -106,6 +106,19 @@ class DatasetFiles(StrEnum):
     SCE_PERIODS_TABLE = "sce_periods.feather"
     """The per-session SCE detection state feather paired with ``SCE_SUMMARY``. Holds one row per detected
     stationary period and a sparse representation of the SCE onset matrix."""
+    DRIFT_SUMMARY = "drift.yaml"
+    """The per-animal cross-session tuning-drift summary YAML produced by the drift evaluation pipeline.
+    Carries the drift configuration, lag-binned population-vector correlation fit, and animal-level
+    persistent-cell counts."""
+    DRIFT_CELLS_TABLE = "drift_cells.feather"
+    """The per-animal drift per-cell feather paired with ``DRIFT_SUMMARY``. Holds one row per multi-day-registered
+    cell with classification trajectories, persistence flags, mean rate-map correlation, peak / COM shift
+    statistics, Fisher-combined random-remapping p-value, bleaching-baseline slope, and composite
+    ``is_stably_tuned_*`` flags."""
+    DRIFT_PAIRS_TABLE = "drift_pairs.feather"
+    """The per-animal drift per-pair feather paired with ``DRIFT_SUMMARY``. Holds one row per ordered
+    (session_a, session_b) session pair with the population-vector correlation, recurrence counts, lag in
+    days, and per-cell rate-map-r / peak-shift / COM-shift list columns."""
 
 
 class StimulusMode(StrEnum):
