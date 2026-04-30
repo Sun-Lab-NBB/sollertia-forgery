@@ -2,18 +2,29 @@
 Bleaching check module (rewritten)
 
 Assesses photobleaching in calcium imaging data across sessions and across days.
-Uses raw fluorescence (single_day_f) — not ΔF/F — because ΔF/F normalizes away baseline decay.
+Uses raw fluorescence — not ΔF/F — because ΔF/F normalizes away baseline decay.
+
+Two signal sources are used for different purposes:
+
+    single_day_f — all cells detected each day (cell count varies per session).
+        Used for population-level metrics: per-day mean, intra-session trace, half-session
+        comparison. Captures the full bleaching picture including cells that drop below the
+        detection threshold entirely (cell loss), not just dimming of surviving cells.
+
+    multi_day_f — only cells tracked across all sessions (fixed cell count).
+        Used exclusively for per-cell exponential decay fitting. Requires the same cells on
+        every day so the fit tracks a real trajectory. Note: these are survivor-biased cells
+        (the most bleach-resistant), so per-cell tau is a conservative underestimate of
+        bleaching severity.
 
 Plots:
-    1. Overall mean F per day — one point per session, detects cross-day signal loss
-    2. Per-frame mean F within session — time-series per day, shows intra-session decay
-    3. Per-cell exponential decay fits — distribution of decay rates across days
-    4. Half-session comparison — first vs second half per day, paired scatter
+    1. Overall mean F per day (single_day_f) — one point per session, detects cross-day signal loss
+    2. Per-frame mean F within session (single_day_f) — time-series per day, intra-session decay
+    3. Per-cell exponential decay fits (multi_day_f) — distribution of tau across tracked cells
+    4. Half-session comparison (single_day_f) — first vs second half per day, paired scatter
 
 Usage:
-    from df_processing import load_multiday_sessions
-    sessions = load_multiday_sessions(mouse_dir, dates=[...])
-    fig = plot_bleaching_summary(sessions)
+    fig = plot_bleaching_summary(mouse_dir, date_range=('2025-08-10', '2025-09-16'))
 """
 
 
@@ -109,8 +120,13 @@ def compute_per_cell_decay(
     Returns tau values (time constant in units of days).
     Positive tau = decay, negative = unlikely but means signal grew.
 
+    IMPORTANT: signals must come from a column with a fixed cell count across all sessions
+    (i.e., multi_day_f, not single_day_f). single_day_f has a different number of cells per
+    day and will raise an error when column-stacking, and would not be scientifically valid
+    even if it didn't — you cannot fit a per-cell decay curve across different cell populations.
+
     Args:
-        signals: from extract_session_signals(), keyed by date (sorted).
+        signals: from extract_session_signals() using multi_day_f, keyed by date (sorted).
         max_cells: cap on number of cells to fit (for speed). None = all cells.
 
     Returns:
@@ -318,7 +334,7 @@ def print_bleaching_stats(
     tau_stats: dict = {
         "n_converged": n_converged,
         "n_total": n_total_cells,
-        "percent_converged": n_converged / max(n_total_cells, 1) * 100.0,
+        "percent_converged": n_converged / max(n_total_cells, 1) * 100,
     }
     if n_converged > 0:
         tau_stats["median"] = float(np.median(valid_taus))
@@ -327,7 +343,7 @@ def print_bleaching_stats(
         tau_stats["iqr_25"] = float(np.percentile(valid_taus, 25))
         tau_stats["iqr_75"] = float(np.percentile(valid_taus, 75))
         # Fraction of cells with a tau shorter than 3 days (rapid bleaching).
-        tau_stats["percent_below_3"] = float(np.mean(valid_taus < 3.0) * 100.0)
+        tau_stats["percent_below_3"] = float(np.mean(valid_taus < 3.0) * 100)
     results["tau_distribution"] = tau_stats
 
     # --- Half-session comparison (Panel 4) ---
@@ -697,13 +713,13 @@ def plot_intra_session(
         )
 
     # Extend x-axis to make room for the legend (no ticks in the extra space)
-    x_data_max = max(len(per_frame_mean[d]) for d in dates) * downsample
-    ax.set_xlim(0, x_data_max * 1.35)
+    # x_data_max = max(len(per_frame_mean[d]) for d in dates) * downsample
+    # ax.set_xlim(0, x_data_max * 1.35)
 
     ax.set_xlabel('Frame')
     ax.set_ylabel('Mean raw F (across cells)')
     ax.set_title('Intra-session signal')
-    ax.legend(fontsize=7, frameon=False, loc='upper right')
+    ax.legend(fontsize=7, frameon=False, loc='upper left', bbox_to_anchor=(1.01, 1.0))
     ax.grid(True, alpha=0.3)
 
 
@@ -711,16 +727,33 @@ def plot_decay_distribution(
     ax: plt.Axes,
     taus: np.ndarray,
     tau_unit: str = 'hours',
+    total_recording_hours: float | None = None,
+    display_max: float = 2000.0,
     stats: dict | None = None,
+    decay_only: bool = True,
 ) -> None:
-    """Distribution of tau across cells, with optional IQR shading and convergence annotation.
+    """Distribution of tau across cells.
+
+    When decay_only=True (default), only cells with tau < display_max are shown
+    in the histogram — cells above that threshold are considered "no detectable
+    decay" and excluded but reported in the annotation. When decay_only=False,
+    all cells with positive tau are included regardless of display_max.
+
+    The headline metric is the fraction of cells showing decay, not the median —
+    the median of a filtered subset is only meaningful in context.
 
     Args:
         ax: Matplotlib axes.
-        taus: Array of tau values from compute_per_cell_decay or compute_per_cell_decay_multi.
+        taus: Array of tau values (NaN for failed fits).
         tau_unit: Unit label for tau values ('hours' or 'days').
-        stats: Full stats dictionary from print_bleaching_stats. When provided, shades the IQR
-            region and annotates convergence rate and percent of rapidly-bleaching cells.
+        total_recording_hours: Total experiment span in hours. Shown as a
+            reference line for interpreting tau magnitudes.
+        display_max: Tau threshold — cells above this are considered
+            "no detectable decay" and excluded from the histogram when
+            decay_only=True.
+        stats: Full stats dictionary from print_bleaching_stats.
+        decay_only: When True (default), only plot cells with tau < display_max.
+            When False, plot all cells with positive tau values.
     """
     valid = taus[~np.isnan(taus)]
     if len(valid) == 0:
@@ -729,49 +762,84 @@ def plot_decay_distribution(
         ax.set_title('Per-cell decay τ')
         return
 
-    # Uses log-spaced bins because tau values typically span orders of magnitude.
     positive = valid[valid > 0]
+    n_non_positive = len(valid) - len(positive)
     if len(positive) == 0:
         ax.text(0.5, 0.5, 'No positive τ values',
                 ha='center', va='center', transform=ax.transAxes, fontsize=12)
         ax.set_title('Per-cell decay τ')
         return
 
-    log_bins = np.logspace(np.log10(positive.min()), np.log10(positive.max()), 51)
-    ax.hist(positive, bins=log_bins, color='#59A14F', edgecolor='white', linewidth=0.5)
+    # Split into decaying vs no-detectable-decay
+    displayable = positive[positive < display_max]
+    n_excluded = len(positive) - len(displayable)
+    frac_decaying = len(displayable) / len(positive) * 100
+
+    plotted = displayable if decay_only else positive
+
+    if len(displayable) == 0:
+        ax.text(0.5, 0.5,
+                f'All {len(positive)} cells have τ > {display_max:.0f}h\n(no detectable decay)',
+                ha='center', va='center', transform=ax.transAxes, fontsize=11)
+        ax.set_title('Per-cell decay time constants')
+        return
+
+    # Histogram of selected cells
+    log_bins = np.logspace(np.log10(plotted.min()), np.log10(plotted.max()), 51)
+    ax.hist(plotted, bins=log_bins, color='#59A14F', edgecolor='white', linewidth=0.5)
     ax.set_xscale('log')
 
-    median_tau = float(np.median(positive))
-    ax.axvline(median_tau, color='#E15759', linewidth=2, linestyle='--',
-               label=f'median τ = {median_tau:.1f}')
+    from matplotlib.ticker import ScalarFormatter
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.ticklabel_format(axis='x', style='plain')
 
-    n_excluded = len(valid) - len(positive)
+    # Reference line: total recording span
+    if total_recording_hours is not None:
+        ax.axvline(total_recording_hours, color='#4E79A7', linewidth=2, linestyle=':',
+                   label=f'recording span = {total_recording_hours:.0f}h')
 
-    # Shades the IQR region and adds a summary annotation when stats are available.
-    if stats is not None and "median" in stats["tau_distribution"]:
-        tau_stats = stats["tau_distribution"]
-        iqr_25 = tau_stats["iqr_25"]
-        iqr_75 = tau_stats["iqr_75"]
+    # Median of plotted cells (labeled honestly)
+    median_label = 'decaying' if decay_only else 'all'
+    median_disp = float(np.median(plotted))
+    ax.axvline(median_disp, color='#E15759', linewidth=2, linestyle='--',
+               label=f'median τ ({median_label}) = {median_disp:.1f}h')
+
+    # IQR shading (of plotted cells only)
+    if len(plotted) > 4:
+        iqr_25 = float(np.percentile(plotted, 25))
+        iqr_75 = float(np.percentile(plotted, 75))
         if iqr_25 > 0 and iqr_75 > iqr_25:
             ax.axvspan(iqr_25, iqr_75, alpha=0.15, color='#59A14F',
                        label=f'IQR: {iqr_25:.1f}–{iqr_75:.1f}')
 
-        label_text = (
-            f'{tau_stats["percent_converged"]:.0f}% converged\n'
-            f'{tau_stats["percent_below_3"]:.0f}% with τ<3'
-        )
-        if n_excluded > 0:
-            label_text += f'\n{n_excluded} non-positive hidden'
-        ax.text(
-            0.97, 0.97, label_text,
-            transform=ax.transAxes, fontsize=8, verticalalignment='top', horizontalalignment='right',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='gray', alpha=0.8),
-        )
+    # Verdict based on fraction of cells decaying, not median
+    if frac_decaying < 15:
+        verdict = f'{frac_decaying:.0f}% of cells show decay — minimal bleaching'
+    elif frac_decaying < 40:
+        verdict = f'{frac_decaying:.0f}% of cells show decay — moderate concern'
+    else:
+        verdict = f'{frac_decaying:.0f}% of cells show decay — significant bleaching'
+    ax.text(0.03, 0.97, verdict, transform=ax.transAxes, fontsize=8,
+            va='top', ha='left',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                      edgecolor='gray', alpha=0.9))
+
+    # Stats annotation (upper right)
+    if decay_only:
+        label_text = f'{n_excluded}/{len(positive)} cells with τ>{display_max:.0f}h excluded'
+    else:
+        label_text = f'All {len(positive)} cells shown'
+    if n_non_positive > 0:
+        label_text += f'\n{n_non_positive} non-positive τ hidden'
+    ax.text(0.97, 0.97, label_text, transform=ax.transAxes, fontsize=8,
+            va='top', ha='right',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      edgecolor='gray', alpha=0.8))
 
     ax.set_xlabel(f'Decay τ ({tau_unit})')
     ax.set_ylabel('Cell count')
     ax.set_title('Per-cell decay time constants')
-    ax.legend(fontsize=8, frameon=False)
+    ax.legend(fontsize=7, frameon=False, loc='upper center')
     ax.grid(True, alpha=0.3)
 
 
@@ -1007,10 +1075,11 @@ def plot_bleaching_summary(
         for i in range(decay_n_cells):
             y = all_means[:, i]
             try:
+                max_tau = 5000  #hours
                 p0 = [y[0] - y[-1], max(all_times[-1] / 2, 1.0), y[-1]]
                 popt, _ = curve_fit(
                     _exp_decay, all_times, y, p0=p0, maxfev=2000,
-                    bounds=([-np.inf, 1e-3, -np.inf], [np.inf, np.inf, np.inf]),
+                    bounds=([-np.inf, 1e-3, -np.inf], [np.inf, max_tau, np.inf]),
                 )
                 taus[i] = popt[1]
             except (RuntimeError, ValueError):
@@ -1039,7 +1108,8 @@ def plot_bleaching_summary(
 
     plot_daily_mean(axes[0, 0], per_day, stats=stats)
     plot_intra_session(axes[0, 1], per_frame, downsample=downsample, stats=stats)
-    plot_decay_distribution(axes[1, 0], taus, tau_unit='hours', stats=stats)
+    plot_decay_distribution(axes[1, 0], taus, tau_unit='hours',
+                            total_recording_hours=cumulative_hours, stats=stats)
     plot_half_session(axes[1, 1], halves, stats=stats)
 
     plt.subplots_adjust(hspace=0.35, wspace=0.3, top=0.92, bottom=0.08)
@@ -1055,7 +1125,7 @@ def plot_bleaching_summary(
 
 
 if __name__ == '__main__':
-    mouse_id = '26'
+    mouse_id = '14'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     fig = plot_bleaching_summary(
