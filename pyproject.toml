@@ -58,6 +58,10 @@ dependencies = [
     "PySide6>=6,<7",  # Qt backend for matplotlib interactive plots
     "plotly>=6,<7",
 
+    # Interactive Notebooks
+    "notebook>=7,<8",
+    "ipympl>=0,<1",  # Enables `%matplotlib widget` for interactive matplotlib in notebooks
+
     # Trajectory plotting
     "umap-learn>=0,<1",
 

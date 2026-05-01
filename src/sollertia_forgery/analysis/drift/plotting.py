@@ -25,11 +25,6 @@ if TYPE_CHECKING:
     from ...shared_assets import DatasetSession
 
 
-_CLASSIFICATION_RASTER_COLORS: tuple[str, str, str, str] = ("#f0f0f0", "#377eb8", "#e41a1c", "#984ea3")
-"""(none, place-only, reward-only, place AND reward) palette for the per-cell classification raster.
-Colorblind-friendly choices from the ColorBrewer Set1 family with a light-gray "not classified" base so the
-raster reads as presence-of-tuning over time."""
-
 _MINIMUM_SESSIONS_FOR_RECURRENCE_HEATMAP: int = 2
 """Minimum number of sessions required to fill the recurrence heatmap. With fewer than two sessions there is
 no off-diagonal entry to render, so the heatmap collapses to a placeholder."""
@@ -42,94 +37,6 @@ def _animal_title_prefix(animal_id: str | None) -> str:
     title without each helper duplicating the conditional.
     """
     return f"Animal {animal_id} — " if animal_id else ""
-
-
-def plot_classification_raster(
-    report: DriftReport,
-    *,
-    classifier: str = "place",
-    sort_by_persistence: bool = True,
-    animal_id: str | None = None,
-    figure_dpi: int = 150,
-) -> plt.Figure:
-    """Plots a per-cell-by-per-session classification raster colored by tuning identity.
-
-    Notes:
-        Each row is one multi-day-registered cell, each column is one session in chronological order. The
-        colormap encodes (none, place-only, reward-only, both) so the raster shows simultaneously when a cell
-        is classified and which classification fired. Cells are optionally sorted by total session-fraction
-        of the requested classifier so persistent cells cluster at the top of the figure. The classifier
-        selection is ``"place"``, ``"reward"``, or ``"strict_place"`` and only changes the sort order; the
-        cell-by-session colors always reflect the joint place / reward classification.
-
-    Args:
-        report: The drift report whose ``cells`` and ``summary`` drive the plot.
-        classifier: Which classification persistence column to sort by (``"place"``, ``"reward"``,
-            ``"strict_place"``). Defaults to ``"place"``.
-        sort_by_persistence: When True (default), sort cells by descending fraction of sessions classified
-            as the requested classifier; when False, preserve the canonical ``cell_id`` order.
-        figure_dpi: Output figure DPI.
-
-    Returns:
-        A matplotlib Figure with one axes carrying the raster, a top legend, and chronological session ticks.
-    """
-    cells = report.cells
-    cell_count = cells.height
-    session_count = report.summary.session_count
-
-    if cell_count == 0 or session_count == 0:
-        figure, axes = plt.subplots(figsize=(6, 4), facecolor="white", dpi=figure_dpi)
-        axes.text(0.5, 0.5, "No drift data available", ha="center", va="center", transform=axes.transAxes)
-        axes.set_axis_off()
-        return figure
-
-    place_trajectory = np.asarray(cells[DriftCellColumn.PLACE_TRAJECTORY.value].to_list(), dtype=np.bool_)
-    reward_trajectory = np.asarray(
-        cells[DriftCellColumn.REWARD_TRAJECTORY.value].to_list(), dtype=np.bool_
-    )
-    # noinspection PyTypeChecker
-    classification_codes: NDArray[np.int8] = np.zeros((cell_count, session_count), dtype=np.int8)
-    classification_codes[place_trajectory & ~reward_trajectory] = 1
-    classification_codes[~place_trajectory & reward_trajectory] = 2
-    classification_codes[place_trajectory & reward_trajectory] = 3
-
-    sort_column = {
-        "place": DriftCellColumn.PLACE_SESSION_FRACTION.value,
-        "reward": DriftCellColumn.REWARD_SESSION_FRACTION.value,
-        "strict_place": DriftCellColumn.STRICT_PLACE_SESSION_FRACTION.value,
-    }.get(classifier, DriftCellColumn.PLACE_SESSION_FRACTION.value)
-
-    if sort_by_persistence:
-        # noinspection PyTypeChecker
-        sort_keys: NDArray[np.float32] = (
-            cells[sort_column].to_numpy().astype(np.float32, copy=False)
-        )
-        finite_keys = np.where(np.isfinite(sort_keys), sort_keys, -1.0)
-        order = np.argsort(-finite_keys, kind="stable")
-        classification_codes = classification_codes[order]
-
-    figure, axes = plt.subplots(figsize=(8, max(3.0, 0.04 * cell_count)), facecolor="white", dpi=figure_dpi)
-    cmap = ListedColormap(_CLASSIFICATION_RASTER_COLORS)
-    axes.imshow(
-        classification_codes,
-        aspect="auto",
-        interpolation="nearest",
-        cmap=cmap,
-        vmin=0,
-        vmax=3,
-    )
-    axes.set_xlabel("Session index (chronological)")
-    axes.set_ylabel("Cell" + (f" (sorted by {classifier} session fraction)" if sort_by_persistence else ""))
-    axes.set_title(f"{_animal_title_prefix(animal_id)}Cross-session classification raster")
-    legend_handles = [
-        Patch(facecolor=_CLASSIFICATION_RASTER_COLORS[0], edgecolor="black", label="not classified"),
-        Patch(facecolor=_CLASSIFICATION_RASTER_COLORS[1], edgecolor="black", label="place"),
-        Patch(facecolor=_CLASSIFICATION_RASTER_COLORS[2], edgecolor="black", label="reward"),
-        Patch(facecolor=_CLASSIFICATION_RASTER_COLORS[3], edgecolor="black", label="place AND reward"),
-    ]
-    axes.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=4, frameon=False)
-    figure.tight_layout()
-    return figure
 
 
 def plot_population_vector_correlation_vs_lag(
@@ -201,78 +108,6 @@ def plot_population_vector_correlation_vs_lag(
     axes.set_title(f"{_animal_title_prefix(animal_id)}PV correlation versus calendar-day lag")
     axes.set_ylim(-0.2, 1.0)
     axes.axhline(0.0, color="black", linewidth=0.5)
-    axes.legend(loc="upper right", frameon=False)
-    figure.tight_layout()
-    return figure
-
-
-def plot_peak_shift_distribution(
-    report: DriftReport, *, animal_id: str | None = None, figure_dpi: int = 150,
-) -> plt.Figure:
-    """Plots the per-cell mean peak-shift distribution split by classification persistence.
-
-    Notes:
-        Two histograms overlay on the same axes — persistent place cells versus the rest of the population
-        — so the reader can immediately see whether the cells the pipeline calls "stable" actually have
-        smaller peak shifts than the unstable cells. Cells with NaN ``mean_peak_shift_cm`` (no surviving
-        pair contributed a finite shift) are excluded from both histograms.
-
-    Args:
-        report: The drift report whose ``cells`` drive the plot.
-        figure_dpi: Output figure DPI.
-
-    Returns:
-        A matplotlib Figure with one axes.
-    """
-    cells = report.cells
-    figure, axes = plt.subplots(figsize=(6, 4), facecolor="white", dpi=figure_dpi)
-    if cells.height == 0:
-        axes.text(0.5, 0.5, "No cells", ha="center", va="center", transform=axes.transAxes)
-        axes.set_axis_off()
-        return figure
-
-    # noinspection PyTypeChecker
-    peak_shifts: NDArray[np.float32] = (
-        cells[DriftCellColumn.MEAN_PEAK_SHIFT_CM.value].to_numpy().astype(np.float32, copy=False)
-    )
-    # noinspection PyTypeChecker
-    persistent_place: NDArray[np.bool_] = cells[DriftCellColumn.IS_PERSISTENT_PLACE.value].to_numpy()
-
-    finite_mask = np.isfinite(peak_shifts)
-    persistent_values = peak_shifts[finite_mask & persistent_place]
-    other_values = peak_shifts[finite_mask & ~persistent_place]
-    if persistent_values.size + other_values.size == 0:
-        axes.text(0.5, 0.5, "No finite peak shifts", ha="center", va="center", transform=axes.transAxes)
-        axes.set_axis_off()
-        return figure
-
-    bin_edges_array = np.linspace(
-        0.0,
-        float(max(persistent_values.max() if persistent_values.size > 0 else 0.0,
-                  other_values.max() if other_values.size > 0 else 0.0)) + 1e-3,
-        num=30,
-    )
-    bin_edges = [float(value) for value in bin_edges_array.tolist()]
-    if persistent_values.size > 0:
-        axes.hist(
-            persistent_values,
-            bins=bin_edges,
-            alpha=0.55,
-            label=f"persistent place (n={persistent_values.size})",
-            color="#1b7837",
-        )
-    if other_values.size > 0:
-        axes.hist(
-            other_values,
-            bins=bin_edges,
-            alpha=0.55,
-            label=f"other cells (n={other_values.size})",
-            color="#762a83",
-        )
-
-    axes.set_xlabel("Mean |peak shift| across pairs (cm)")
-    axes.set_ylabel("Cell count")
-    axes.set_title(f"{_animal_title_prefix(animal_id)}Peak shift split by place persistence")
     axes.legend(loc="upper right", frameon=False)
     figure.tight_layout()
     return figure
@@ -668,10 +503,11 @@ def plot_reference_day_sorted_rate_maps(
     Args:
         report: The drift report whose ``cells`` and ``summary`` drive the cell selection and ordering.
         sessions: Chronologically ordered DatasetSession entries aligned with ``report.summary.session_names``.
-        display_sessions: 1-indexed session numbers to render as columns. Defaults to every session in
-            the report.
+        display_sessions: 1-indexed session numbers to render as columns. Defaults to five evenly-spaced
+            sessions across the report (or every session when fewer than five are present).
         reference_sessions: 1-indexed session numbers to use as reference rows. Defaults to the first /
-            middle / last entries of the resolved displayed sessions.
+            middle / last entries of the resolved displayed sessions, which for the default five-session
+            view yields the 1st / 3rd / 5th displayed sessions.
         classifier: Which classification to use for cell selection (``"place"``, ``"reward"``,
             ``"strict_place"``).
         cmap: Matplotlib colormap name for the rate-map intensities.
@@ -694,7 +530,17 @@ def plot_reference_day_sorted_rate_maps(
         return tuple(resolved)
 
     if display_sessions is None:
-        display_session_indices: tuple[int, ...] = tuple(range(session_count))
+        if session_count >= 5:
+            # Five evenly-spaced 0-indexed sessions across the full window. Brackets any mid-window
+            # protocol shift cleanly and keeps the figure's column count manageable.
+            spaced = (int(round(value)) for value in np.linspace(0, session_count - 1, num=5))
+            deduped: list[int] = []
+            for idx in spaced:
+                if idx not in deduped:
+                    deduped.append(idx)
+            display_session_indices: tuple[int, ...] = tuple(deduped)
+        else:
+            display_session_indices = tuple(range(session_count))
     else:
         display_session_indices = _resolve_indices(display_sessions)
 
@@ -858,9 +704,6 @@ _DRIFT_PROFILE_COLORS: tuple[str, ...] = (
     "#999999",  # mostly-unstable: gray
 )
 """Per-category colors for the bar chart and the per-cell stability raster's right-edge category strip."""
-
-_STABILITY_RASTER_COLORS: tuple[str, str, str] = ("#f0f0f0", "#fdae61", "#1b7837")
-"""(inactive, active-but-unstable, stable-at-anchor) palette for the per-cell stability raster."""
 
 _MINIMUM_ACTIVE_SESSIONS_FOR_PROFILE: int = 3
 """Cells must be classified ``IS_PLACE`` in at least this many sessions to receive a drift-profile
@@ -1108,116 +951,6 @@ def plot_drift_profile_categories(
         f"|peak shift| <= {peak_match_cm:.0f} cm)"
     )
     figure.tight_layout()
-    return figure
-
-
-def plot_per_cell_stability_raster(
-    report: DriftReport,
-    sessions: tuple[DatasetSession, ...],
-    *,
-    peak_match_cm: float = 20.0,
-    animal_id: str | None = None,
-    figure_dpi: int = 150,
-) -> plt.Figure:
-    """Plots a per-cell stability raster sorted by drift-profile category.
-
-    Notes:
-        Each row is one multi-day-registered cell that received a drift-profile category; each column
-        is one session in chronological order. Cells are colored with three states: inactive,
-        active-but-unstable (peak outside ±``peak_match_cm`` of the cell's anchor), and stable. Rows are
-        grouped by category in the legend order so the per-category drift-profile signature is read off
-        the raster directly:
-
-        * Block-stable cells → solid horizontal stable runs across most of the columns.
-        * Drift-out cells → stable on the left, active-but-unstable on the right.
-        * Drift-in cells → mirror of drift-out; stable on the right, active-but-unstable on the left.
-        * Cycling cells → striped rows with multiple stable / unstable runs.
-        * Mostly-unstable cells → predominantly active-but-unstable with at most a short stable patch.
-
-    Args:
-        report: The drift report whose ``cells`` and ``summary`` drive the analysis.
-        sessions: Chronologically ordered DatasetSession entries aligned with the report.
-        peak_match_cm: Forwarded to ``classify_drift_profile``; default 20 cm.
-        animal_id: Optional animal label injected into the title.
-        figure_dpi: Output figure DPI.
-
-    Returns:
-        A matplotlib Figure.
-    """
-    category_index, included_mask, stability_trace = classify_drift_profile(
-        report=report, sessions=sessions, peak_match_cm=peak_match_cm,
-    )
-    summary = report.summary
-    cells = report.cells
-    cell_count = cells.height
-    session_count = summary.session_count
-
-    figure, axes = plt.subplots(figsize=(8, 8), facecolor="white", dpi=figure_dpi)
-    if cell_count == 0 or session_count == 0 or not included_mask.any():
-        axes.text(0.5, 0.5, "No cells with sufficient activity for profile classification",
-                  ha="center", va="center", transform=axes.transAxes)
-        axes.set_axis_off()
-        return figure
-
-    # noinspection PyTypeChecker
-    place_trajectory: NDArray[np.bool_] = np.asarray(
-        cells[DriftCellColumn.PLACE_TRAJECTORY.value].to_list(), dtype=np.bool_
-    )
-
-    # Three-state code: 0 = inactive, 1 = active-but-unstable, 2 = stable.
-    # noinspection PyTypeChecker
-    raster: NDArray[np.int8] = np.zeros((cell_count, session_count), dtype=np.int8)
-    raster[place_trajectory] = 1
-    raster[stability_trace] = 2
-
-    # Sort included cells by category, then by first stable session within each category. This makes
-    # drift-out / drift-in / cycling rows visually contiguous and the per-category band easy to read.
-    included_indices = np.where(included_mask)[0]
-    sort_keys = []
-    for cell in included_indices:
-        first_stable = np.argmax(stability_trace[cell]) if stability_trace[cell].any() else session_count
-        sort_keys.append((int(category_index[cell]), int(first_stable), int(cell)))
-    order = np.array([cell for _, _, cell in sorted(sort_keys)], dtype=np.int64)
-
-    sorted_raster = raster[order]
-    sorted_categories = category_index[order]
-
-    cmap = ListedColormap(_STABILITY_RASTER_COLORS)
-    axes.imshow(sorted_raster, aspect="auto", interpolation="nearest", cmap=cmap, vmin=0, vmax=2)
-
-    # Right-edge category band: solid color stripe per-category so the raster's grouping is obvious.
-    band_axes = axes.inset_axes((1.005, 0.0, 0.025, 1.0))
-    band_image = np.zeros((sorted_categories.size, 1), dtype=np.int8)
-    band_image[:, 0] = sorted_categories
-    band_cmap = ListedColormap(_DRIFT_PROFILE_COLORS)
-    band_axes.imshow(
-        band_image, aspect="auto", interpolation="nearest", cmap=band_cmap,
-        vmin=0, vmax=len(_DRIFT_PROFILE_CATEGORIES) - 1,
-    )
-    band_axes.set_xticks([])
-    band_axes.set_yticks([])
-
-    axes.set_xlabel("Session index (chronological)")
-    axes.set_ylabel(f"Cell (sorted by category, then first stable session) — n={int(included_mask.sum())}")
-    axes.set_title(
-        f"{_animal_title_prefix(animal_id)}Per-cell stability raster "
-        f"(|peak shift| <= {peak_match_cm:.0f} cm of cell anchor)"
-    )
-
-    legend_handles = [
-        Patch(facecolor=_STABILITY_RASTER_COLORS[2], edgecolor="black", label="stable @ anchor"),
-        Patch(facecolor=_STABILITY_RASTER_COLORS[1], edgecolor="black", label="active but unstable"),
-        Patch(facecolor=_STABILITY_RASTER_COLORS[0], edgecolor="black", label="inactive"),
-    ]
-    legend_handles += [
-        Patch(facecolor=color, edgecolor="black", label=name)
-        for name, color in zip(_DRIFT_PROFILE_CATEGORIES, _DRIFT_PROFILE_COLORS, strict=True)
-    ]
-    axes.legend(
-        handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, 1.12),
-        ncol=4, frameon=False, fontsize=8,
-    )
-    figure.tight_layout(rect=(0, 0, 0.97, 1.0))
     return figure
 
 

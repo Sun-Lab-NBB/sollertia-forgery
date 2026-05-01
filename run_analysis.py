@@ -25,10 +25,8 @@ import matplotlib.pyplot as plt
 from sollertia_forgery.shared_assets import DatasetData
 from sollertia_forgery.analysis import (
     plot_baseline_trend,
-    plot_classification_raster,
     plot_dataset_baseline_trend,
     plot_drift_vs_bleaching,
-    plot_peak_shift_distribution,
     plot_population_vector_correlation_vs_lag,
     plot_recurrence_heatmap,
     plot_snr_distributions,
@@ -85,14 +83,8 @@ def _run_drift(dataset: DatasetData, animal: str | None) -> None:
         report.print_summary()
         animal_id = dataset_animal.animal
         prefix = f"drift_animal_{animal_id}"
-        plot_classification_raster(report, animal_id=animal_id).savefig(
-            dataset_root / f"{prefix}_classification_raster.png", bbox_inches="tight"
-        )
         plot_population_vector_correlation_vs_lag(report, animal_id=animal_id).savefig(
             dataset_root / f"{prefix}_pv_correlation_vs_lag.png", bbox_inches="tight"
-        )
-        plot_peak_shift_distribution(report, animal_id=animal_id).savefig(
-            dataset_root / f"{prefix}_peak_shift_distribution.png", bbox_inches="tight"
         )
         plot_drift_vs_bleaching(report, animal_id=animal_id).savefig(
             dataset_root / f"{prefix}_drift_vs_bleaching.png", bbox_inches="tight"
