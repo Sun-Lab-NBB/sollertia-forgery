@@ -684,29 +684,31 @@ if __name__ == "__main__":
 
 
     # #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
-    # # sessions = load_multiday_sessions(mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False)
-    # sessions = load_multiday_sessions(mouse_dir, dates=[    #pre ext '2025-09-','2025-09-03'
-    #                                                     '2025-09-08', '2025-09-09',     #add ext
-    #                                                     '2025-09-10', '2025-09-11', '2025-09-12',
-    #                                                     '2025-09-15', '2025-09-16'],    #last 2 days
-    #                                                     auto_process=False)
+    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-08-01', '2025-09-20'), auto_process=False)
+
+    sessions = load_multiday_sessions(mouse_dir, dates=['2025-08-20', '2025-08-25',  # pre ext
+                                                        '2025-09-02', '2025-09-03'  # pre ext
+                                                        '2025-09-08', '2025-09-09',  # add ext
+                                                        '2025-09-11',
+                                                        '2025-09-15', '2025-09-16'],  # last 2 days
+                                      auto_process=False)
     #
     # #filter for place cells
-    # multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
     #
     #
     # # Build the place_fields dict from per-day results
-    # pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
+    pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
     #
     #
-    # plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
+    plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
     #
     #
-    # for i in multiday.union_indices[:5]:
-    #     plot_multiday_comparison(
-    #         sessions, cell_idx=i+5, signal_col='multi_day_spikes',
-    #         global_ylim=True, place_fields=None,
-    #     )
+    for i in multiday.union_indices[:5]:
+        plot_multiday_comparison(
+            sessions, cell_idx=i+5, signal_col='multi_day_spikes',
+            global_ylim=True, place_fields=None,
+        )
 
 #______________________________
 
