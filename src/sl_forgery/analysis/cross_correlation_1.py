@@ -37,6 +37,7 @@ import polars as pl
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+from matplotlib.colors import TwoSlopeNorm
 from matplotlib.lines import Line2D
 
 from df_processing import (compute_session_averages, get_track_length, get_cue_regions, get_bin_size)
@@ -1772,7 +1773,7 @@ def plot_multiday_combined_grid(
 
                 last_im = ax.imshow(
                     matrix.T, origin='lower', aspect='auto',
-                    cmap='RdBu_r', vmin=-0.3, vmax=1.0,
+                    cmap='RdBu_r', norm=TwoSlopeNorm(vcenter=0, vmin=-0.3, vmax=1.0),
                     extent=[0, len_x, 0, len_y],
                 )
 
@@ -1822,8 +1823,8 @@ def plot_multiday_combined_grid(
 
                 ax.scatter(
                     [0.5], [0.5], s=marker_size, c=[mean_r], alpha=0.6,
-                    cmap='RdBu_r', vmin=-0.3, vmax=1.0, transform=ax.transAxes,
-                    zorder=3,
+                    cmap='RdBu_r', norm=TwoSlopeNorm(vcenter=0, vmin=-0.3, vmax=1.0),
+                    transform=ax.transAxes,zorder=3,
                 )
                 ax.annotate(
                     corr_text, xy=(0.5, 0.5), xycoords='axes fraction',
@@ -2846,9 +2847,15 @@ if __name__ == "__main__":
 
 #     # ── Multiday analysis ──
     # b3, b5, e1, e4, e7
+    # sessions = load_multiday_sessions(
+    #     mouse_dir, dates=('2025-08-18', '2025-08-20', '2025-08-22',
+    #                       '2025-08-27', '2025-09-03', '2025-09-05' ),
+    #     auto_process=True,
+    #     signal_cols=['multi_day_spikes'],
+    # )
+
     sessions = load_multiday_sessions(
-        mouse_dir, dates=('2025-08-18', '2025-08-20', '2025-08-22',
-                          '2025-08-27', '2025-09-03', '2025-09-05' ),
+        mouse_dir, dates=('2025-08-18', '2025-08-20'),
         auto_process=True,
         signal_cols=['multi_day_spikes'],
     )
