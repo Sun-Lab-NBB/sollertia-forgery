@@ -62,7 +62,7 @@ class DetectionParams:
         n_shuffles: Number of shuffle iterations for validation.
         n_chunks: Number of chunks for temporal shuffle.
     """
-    smooth_sigma: float = 3.0
+    smooth_sigma: float = 1.0
     base_quantile: float = 0.25
     signal_threshold: float = 0.25
     min_bins: int = 3
@@ -95,15 +95,15 @@ class PlaceFields1d:
         self,
         label_im: np.ndarray,
         binF: np.ndarray,
+        bin_size: float,
         centers: np.ndarray | None = None,
-        bin_size: float = 5.0,
     ):
         self.bin_size = bin_size
         self.label_im = label_im.astype(int)
         self.binF = binF.astype(float)
 
         if centers is not None and len(centers) > 0:
-            self.centers = centers
+            self.centers = centers * np.array([1, bin_size])
         else:
             props = regionprops(self.label_im, self.binF, cache=False)
             if props:
@@ -470,7 +470,8 @@ def _quantile_threshold(
 def circular_connected_placefields(
     thres_im: np.ndarray,
     binF: np.ndarray,
-    min_bins: int = 3,
+    min_bins: int,
+    bin_size_cm: float,
 ) -> PlaceFields1d:
     """Detect place fields with optional wrap-around merging.
 
@@ -482,7 +483,7 @@ def circular_connected_placefields(
     Args:
         thres_im: Binary thresholded image, shape (n_cells, n_bins).
         binF: Binned fluorescence, shape (n_cells, n_bins).
-        min_bins: Minimum contiguous bins for a valid field.
+        min_bins: Minimum contiguous bins for a valid field (3 == 15 cm)
 
     Returns:
         PlaceFields1d with detected fields.
@@ -497,6 +498,7 @@ def circular_connected_placefields(
         return PlaceFields1d(
             np.zeros(thres_im.shape, dtype=np.uint32), binF,
             centers=np.empty((0, 2)),
+            bin_size = bin_size_cm,
         )
 
     # Step 2: merge wrap-around fields per cell
@@ -555,7 +557,7 @@ def circular_connected_placefields(
         counter += 1
 
     centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
-    return PlaceFields1d(result_label, binF, centers=centers_out)
+    return PlaceFields1d(result_label, binF, centers=centers_out, bin_size=bin_size_cm)
 
 
 def outside_field_threshold(
@@ -593,7 +595,7 @@ def _detect_on_tuning_curves(
     binF: np.ndarray,
     params: DetectionParams,
     signal_type: str,
-    bin_size: float = 5.0,
+    bin_size_cm: float,
 ) -> PlaceFields1d:
     """Run detection pipeline on pre-computed tuning curves.
 
@@ -630,8 +632,7 @@ def _detect_on_tuning_curves(
         smoothed, signal_type, params.base_quantile, params.signal_threshold,
     )
     # Connected components (circular) — use raw binF so heatmaps aren't blurred
-    pf = circular_connected_placefields(thres_im, binF, min_bins=params.min_bins)
-    pf.bin_size = bin_size
+    pf = circular_connected_placefields(thres_im, binF, min_bins=params.min_bins, bin_size_cm=bin_size_cm)
 
     # Filter: outside-field ratio
     pf = outside_field_threshold(pf, params.outside_threshold)
@@ -698,7 +699,7 @@ def detect_place_fields(
 
         print(f"Detecting place fields for {tt}: {binF.shape[0]} cells × {binF.shape[1]} bins...")
 
-        pf = _detect_on_tuning_curves(binF, params, signal_type, bin_size=bin_size_cm)
+        pf = _detect_on_tuning_curves(binF, params, signal_type, bin_size_cm=bin_size_cm)
 
         result.fields[tt] = pf
         result.is_place_cell[tt] = pf.has_place_field
@@ -1299,7 +1300,6 @@ def load_multiday_result(path: Path) -> MultidayPlaceFieldResult:
 
 
 
-
 if __name__ == '__main__':
     from df_processing import (find_session_dir, get_session_paths, load_session_context,
                                load_processed_session, load_multiday_sessions)
@@ -1316,13 +1316,15 @@ if __name__ == '__main__':
     paths = get_session_paths(session_dir, session_data)
     data, meta = load_processed_session(paths['parquet'])
 
-    signals = data.get_column('multi_day_dff').to_list()
+
+# decide on spikes or dff
+    signals = data.get_column('multi_day_spikes').to_list()
     flat = np.concatenate(signals)
     print(f"min={flat.min():.2f}, median={np.median(flat):.2f}, "
           f"mean={flat.mean():.2f}, 95th={np.percentile(flat, 95):.2f}, max={flat.max():.2f}")
 
-    params = DetectionParams(signal_threshold=.5)
-    result = detect_place_fields(data, exp_config, signal_col='multi_day_dff',
+    params = DetectionParams(smooth_sigma=0, signal_threshold=.3)      #modify for testing
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes',
                                  bin_size_cm=meta['bin_size_cm'], params=params)
     print(result.summary())
 
@@ -1343,7 +1345,7 @@ if __name__ == '__main__':
 
         print(f"centers range: {pf.centers[:, 1].min():.1f} to {pf.centers[:, 1].max():.1f}")
         print(f"num_bins: {pf.binF.shape[1]}")
-        centers = pf.centers[:,1] * meta['bin_size_cm']
+        centers = pf.centers[:,1]
 
         plt.hist(centers, bins=36)
         plt.xlabel('Field center (cm)')
