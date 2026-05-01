@@ -637,11 +637,11 @@ def fit_population_decay(
     """Fits ``amplitude * exp(-lag / tau_days) + offset`` to per-pair PV correlation versus session lag.
 
     Notes:
-        Mirrors `..bleaching.bleaching_analysis._fit_exponential_decay` but operates on the cross-session
-        population-vector correlation versus calendar lag (Climer et al. 2025): a stable representation has a
-        slow tau (large) and a high asymptotic offset; a drifting representation has a fast tau and a low
-        asymptotic offset. Returns the failure sentinel when fewer than three unique lag bins are available
-        or the fit does not converge.
+        Operates on the cross-session population-vector correlation versus calendar lag following the
+        representational-similarity decay convention of Climer et al. 2025: a stable representation has a slow
+        tau (large) and a high asymptotic offset; a drifting representation has a fast tau and a low asymptotic
+        offset. Returns the failure sentinel when fewer than three unique lag bins are available or the fit does
+        not converge.
 
     Args:
         lag_days: Per-pair calendar-day lag, length ``pair_count``.

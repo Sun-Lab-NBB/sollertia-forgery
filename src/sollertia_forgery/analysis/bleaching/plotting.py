@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 import warnings
 
 import numpy as np
-from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 
 from ..shared_utilities import resolve_display_units
@@ -22,20 +21,6 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from ...shared_assets import DatasetData
-
-
-_SIGNIFICANCE_LEVELS: tuple[tuple[float, str], ...] = (
-    (0.001, "*\n**"),
-    (0.01, "**"),
-    (0.05, "*"),
-)
-"""Ordered (p-value upper bound, asterisk marker) pairs used to annotate the SNR violins with the standard
-biomedical-publication significance convention. The first level whose threshold the p-value falls below wins;
-p-values that fail every threshold (or are non-finite) fall through to the ``ns`` (not significant) marker. The
-top-level (p < 0.001) marker renders as a tight triangle (``*`` centered over ``**``) so it stays visually distinct
-from the two-asterisk marker. The triangle alignment depends on monospace text rendering — the consumer must pass
-``family='monospace'`` to ``axes.text`` and the legend so the apex sits above the boundary between the two base
-asterisks rather than over one of them."""
 
 
 def plot_baseline_trend(report: BleachingReport) -> plt.Figure:
@@ -63,10 +48,8 @@ def plot_baseline_trend(report: BleachingReport) -> plt.Figure:
     ]
     cell_count = len(cell_baseline_distributions[0]) if cell_baseline_distributions else 0
 
-    # Plots in display units (integer day or hour ticks); evaluates the model in days so ``tau_days`` keeps its
-    # native scale regardless of which unit the x-axis uses.
+    # Plots in display units (integer day or hour ticks).
     unit, ticks = resolve_display_units(days_since_first=days)
-    days_per_unit = 1.0 if unit == "day" else 1.0 / 24.0
 
     # Computes a box width that scales with the smallest tick step. Integer ticks guarantee step >= 1, so the
     # prior float-step floor is no longer needed.
@@ -85,27 +68,6 @@ def plot_baseline_trend(report: BleachingReport) -> plt.Figure:
         linewidth=1.5,
         label="Population median",
     )
-
-    # Draws the fitted exponential when the fit converged. The fit lives in day-space; the dense x-coordinates
-    # are converted back to days when evaluating the model so the curve and the boxplots stay aligned on the
-    # display-unit x-axis.
-    decay_fit = report.summary.baseline_fluorescence_decay_fit
-    if decay_fit.fit_succeeded:
-        # noinspection PyTypeChecker
-        dense_ticks: NDArray[np.float32] = np.linspace(
-            float(ticks.min()), float(ticks.max()), num=200, dtype=np.float32
-        )
-        # noinspection PyTypeChecker
-        dense_days: NDArray[np.float32] = dense_ticks * np.float32(days_per_unit)
-        fit_curve = decay_fit.evaluate(days=dense_days)
-        axes.plot(
-            dense_ticks,
-            fit_curve,
-            color="tab:red",
-            linestyle="--",
-            linewidth=1.0,
-            label=f"Exp fit (tau = {decay_fit.tau_days:.1f} d)",
-        )
 
     axes.set_xlabel(f"{unit.capitalize()}s since first session")
     axes.set_ylabel("Baseline fluorescence (a.u.)")
@@ -181,7 +143,7 @@ def plot_within_session_average(report: BleachingReport) -> plt.Figure:
     overlaid as a translucent gray curve for context.
 
     Notes:
-        All sessions share the same bin-center time grid (5 s, 15 s, 25 s, ... by default — the bin spacing
+        All sessions share the same bin-center time grid (10 s, 30 s, 50 s, ... by default — the bin spacing
         equals ``session_baseline_window_seconds`` regardless of per-session sampling rate). Per-session
         baselines are NaN-padded to the longest session's length and the mean is taken over each bin via
         ``np.nanmean`` so the bold trace extends to the rightmost gray trace; bins beyond a given session's end
@@ -241,89 +203,42 @@ def plot_within_session_average(report: BleachingReport) -> plt.Figure:
 
 
 def plot_snr_distributions(report: BleachingReport) -> plt.Figure:
-    """Plots per-session per-cell SNR distributions as violins, annotated with significance markers based on the
-    paired Wilcoxon p-values relative to the first session.
+    """Plots per-session per-cell SNR distributions as violins with the population-median trend overlaid.
 
     Args:
-        report: The cross-session bleaching report whose per-cell SNR arrays and paired p-values drive the plot.
+        report: The cross-session bleaching report whose per-cell SNR arrays drive the plot.
 
     Returns:
-        A matplotlib Figure showing the SNR-vs-session comparison.
+        A matplotlib Figure showing the SNR-vs-session distribution.
     """
-    # Wider canvas reserves room for the significance-key legend that is anchored outside the right of the axes.
-    figure, axes = plt.subplots(1, 1, figsize=(9, 4), facecolor="white", dpi=150)
+    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
 
     table = report.table
     # noinspection PyTypeChecker
     days: NDArray[np.float32] = table[BleachingColumn.DAYS_SINCE_FIRST.value].to_numpy().astype(np.float32, copy=False)
     snr_data = [np.asarray(values, dtype=np.float32) for values in table[BleachingColumn.CELL_SNR.value].to_list()]
     # noinspection PyTypeChecker
-    p_values: NDArray[np.float64] = (
-        table[BleachingColumn.SNR_PAIRED_P_VALUE.value].to_numpy().astype(np.float64, copy=False)
+    population_snr: NDArray[np.float32] = (
+        table[BleachingColumn.POPULATION_SNR.value].to_numpy().astype(np.float32, copy=False)
     )
 
     # Plots in display units so the SNR violins line up with the baseline-trend boxplots on the same x-axis.
     unit, ticks = resolve_display_units(days_since_first=days)
 
     axes.violinplot(snr_data, positions=ticks, showmedians=True)
-
-    # Annotates each session past the first with the standard ``*** / ** / * / ns`` significance convention
-    # derived from the paired Wilcoxon p-value relative to session 0. Each marker hovers just above its own
-    # violin tip rather than at a global y so the marker tracks the bar; monospace text is required so the
-    # triangle apex centers above the boundary between the two base asterisks. The y-axis is extended so the
-    # tallest marker (the two-line triangle above the tallest violin) is not clipped against the axis frame.
-    y_data_max = float(max(snr.max() for snr in snr_data))
-    for index in range(1, len(ticks)):
-        p_value = float(p_values[index])
-        marker = "ns"
-        if np.isfinite(p_value):
-            for threshold, level_marker in _SIGNIFICANCE_LEVELS:
-                if p_value < threshold:
-                    marker = level_marker
-                    break
-        axes.text(
-            int(ticks[index]),
-            float(snr_data[index].max()) * 1.02,
-            marker,
-            ha="center",
-            va="bottom",
-            fontsize=10,
-            multialignment="center",
-            family="monospace",
-            linespacing=0.7,
-        )
-    axes.set_ylim(top=y_data_max * 1.20)
-
-    # Builds a text-only legend on the right side that maps the asterisk markers to their p-value thresholds.
-    # Line2D handles with no visual marker plus zero handle width / pad collapse the legend to plain text rows;
-    # the top-level entry is multi-line so the legend's triangle layout mirrors the in-plot rendering. Monospace
-    # text on the legend ensures the triangle apex aligns with the gap between the base asterisks just like the
-    # in-plot markers.
-    significance_handles = [
-        Line2D([], [], color="none", label=" *\n**   p < 0.001"),
-        Line2D([], [], color="none", label="**   p < 0.01"),
-        Line2D([], [], color="none", label="*    p < 0.05"),
-        Line2D([], [], color="none", label="ns   p >= 0.05"),
-    ]
-    legend = axes.legend(
-        handles=significance_handles,
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        frameon=False,
-        handlelength=0,
-        handletextpad=0,
-        title="Significance",
-        title_fontsize=8,
-        prop={"family": "monospace", "size": 8},
+    axes.plot(
+        ticks,
+        population_snr,
+        marker="o",
+        color="tab:blue",
+        linewidth=1.5,
+        label="Population median",
     )
-    # ``prop`` does not propagate linespacing, so the legend's per-entry text objects need to be tightened
-    # individually to match the in-plot triangle (top star pulled close to the bottom asterisk pair).
-    for legend_text in legend.get_texts():
-        legend_text.set_linespacing(0.7)
 
     axes.set_xlabel(f"{unit.capitalize()}s since first session")
     axes.set_ylabel("Per-cell SNR")
-    axes.set_title("Per-cell SNR across sessions (paired Wilcoxon vs session 0)", fontsize=10)
+    axes.set_title("Per-cell SNR across sessions", fontsize=10)
+    axes.legend(loc="best", fontsize=8)
     figure.tight_layout()
     return figure
 

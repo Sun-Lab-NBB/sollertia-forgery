@@ -11,7 +11,6 @@ from .bleaching_analysis import (
     BleachingColumn,
     BleachingReport,
     BleachingSummary,
-    ExponentialDecayFit,
     run_bleaching_analysis,
 )
 from .bleaching_protocol import (
@@ -25,7 +24,6 @@ __all__ = [
     "BleachingReport",
     "BleachingSessionResult",
     "BleachingSummary",
-    "ExponentialDecayFit",
     "plot_baseline_trend",
     "plot_dataset_baseline_trend",
     "plot_snr_distributions",

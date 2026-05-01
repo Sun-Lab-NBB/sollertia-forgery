@@ -3,9 +3,9 @@
 Computes the per-session inputs that the cross-session bleaching analysis aggregates: per-cell session-median
 baseline fluorescence (estimated as a low percentile of the raw trace within a baseline window), per-cell
 signal-to-noise contrast (transient amplitude over MAD noise floor), and the within-session FOV-mean baseline
-trace used to quantify acute single-session bleaching. The cross-session aggregates (decay fit, paired Wilcoxon
-SNR test, combined flag mask) live alongside in `.bleaching_analysis`; per-session and cross-session plots
-live in `.plotting`.
+trace used to quantify acute single-session bleaching. The cross-session aggregates (population-median trends,
+combined flag mask) live alongside in `.bleaching_analysis`; per-session and cross-session plots live in
+`.plotting`.
 """
 
 from __future__ import annotations
@@ -44,16 +44,15 @@ class BleachingConfiguration:
     cell_baseline_window_seconds: int = 60
     """Width of each non-overlapping window in seconds over which ``baseline_percentile`` is evaluated per cell to
     produce the per-cell baseline fluorescence trace used for the across-session trend and for SNR detrending."""
-    session_baseline_window_seconds: int = 10
+    session_baseline_window_seconds: int = 20
     """Width of each non-overlapping window in seconds over which ``baseline_percentile`` is evaluated on the FOV-mean
     trace (fluorescence averaged across all cells first) to produce the within-session baseline curve used to quantify
     acute, single-session bleaching."""
     snr_signal_percentile: int = 95
     """Per-cell percentile (0-100) of the detrended trace (raw minus baseline) treated as the typical calcium-event
     amplitude — the upper-tail counterpart to ``baseline_percentile`` and the SNR numerator. The denominator is the
-    median absolute deviation (MAD) of the same trace as a transient-robust noise floor; ``snr_loss_threshold`` and
-    ``snr_significance_threshold`` use the resulting SNR to flag sessions where events lose contrast against the
-    noise."""
+    median absolute deviation (MAD) of the same trace as a transient-robust noise floor; ``snr_loss_threshold`` uses
+    the resulting SNR to flag sessions where events lose contrast against the noise."""
     baseline_fluorescence_loss_threshold: float = 0.30
     """Fractional drop in population-median baseline fluorescence from the first session above which the session
     is flagged as chronically bleached."""
@@ -62,11 +61,9 @@ class BleachingConfiguration:
     is flagged as acutely bleaching within itself."""
     snr_loss_threshold: float = 0.30
     """Fractional drop in population-median per-cell SNR (transient amplitude over noise floor) from the first session
-    above which the session is flagged, provided the paired Wilcoxon comparison is also significant at
-    ``snr_significance_threshold``."""
-    snr_significance_threshold: float = 0.01
-    """Significance level for the paired Wilcoxon signed-rank test comparing each session's per-cell SNR distribution
-    to the first session, applied alongside ``snr_loss_threshold`` as the second criterion for SNR-based flagging."""
+    above which the session is flagged. Sollertia engineering convention motivated by detection-theory degradation
+    (~30 % SNR loss roughly halves event-detection efficiency at fixed false-alarm rate); not a literature-derived
+    threshold."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,10 +93,10 @@ def compute_session_metrics(
 
     Notes:
         Operates exclusively on ``DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE``. The protocol's across-session
-        per-cell comparisons (paired Wilcoxon SNR test, per-cell baseline trend, decay fit on the population
-        median) require that cell index N denote the same neuron across every session in the evaluation set.
-        Only the multi-recording cindra column carries that information. Single-recording fluorescence carries no
-        cell correspondence across days, so it is not exposed as an option here.
+        per-cell comparisons (per-cell baseline trend, population-median SNR trajectory) require that cell index N
+        denote the same neuron across every session in the evaluation set. Only the multi-recording cindra column
+        carries that information. Single-recording fluorescence carries no cell correspondence across days, so it
+        is not exposed as an option here.
 
         Per-cell baseline fluorescence is estimated as a low percentile of the raw trace within non-overlapping
         windows, after the Suite2p convention from Pachitariu et al. (2017). Per-cell SNR uses median-absolute-

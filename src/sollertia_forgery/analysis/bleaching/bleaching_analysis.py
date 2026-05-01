@@ -2,11 +2,10 @@
 for the same animal.
 
 Implements the canonical three-metric protocol for chronic GCaMP imaging by aggregating per-session inputs from
-`.bleaching_protocol`: per-cell session-median baseline fluorescence (estimated as a low percentile of the
-raw trace within a baseline window) trend across days fit to a single exponential, within-session bleaching
-slope, and per-cell signal-to-noise change on the multi-recording registered cell intersection. The per-session
-compute kernel and its numba implementation live in `.bleaching_protocol`; per-animal and dataset-level
-plots live in `.plotting`.
+`.bleaching_protocol`: per-cell session-median baseline fluorescence (estimated as a low percentile of the raw
+trace within a baseline window) across-day trend, within-session bleaching slope, and population-median SNR
+across the multi-recording registered cell intersection. The per-session compute kernel and its numba
+implementation live in `.bleaching_protocol`; per-animal and dataset-level plots live in `.plotting`.
 """
 
 from __future__ import annotations
@@ -20,9 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from numba import set_num_threads
 import numpy as np
 import polars as pl
-from scipy.stats import wilcoxon
 from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp
-from scipy.optimize import curve_fit
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import YamlConfig
 
@@ -38,8 +35,6 @@ if TYPE_CHECKING:
     from ...shared_assets import DatasetData, DatasetAnimal
 
 
-_MINIMUM_SESSIONS_FOR_DECAY_FIT: int = 3
-"""Minimum number of sessions required to fit a single-exponential decay model."""
 _MINIMUM_SESSIONS_FOR_EVALUATION: int = 2
 """Minimum number of sessions required to evaluate any across-session bleaching metric."""
 _PREFERRED_WORKERS_PER_SESSION: int = 10
@@ -79,64 +74,23 @@ class BleachingColumn(StrEnum):
     """Precomputed population-median baseline fluorescence; equals the median of ``cell_baseline_fluorescence``."""
     POPULATION_SNR = "population_snr"
     """Precomputed population-median SNR; equals the median of ``cell_snr``."""
-    SNR_PAIRED_P_VALUE = "snr_paired_p_value"
-    """Paired Wilcoxon signed-rank p-value comparing this session's per-cell SNR distribution to the first session.
-    The first row is NaN by construction (self-comparison) and is not a test failure."""
     FLAGGED = "flagged"
     """Boolean flag combining the baseline-fluorescence-loss, within-session, and SNR criteria evaluated at the
     configuration thresholds active when the report was generated."""
-
-
-@dataclass(frozen=True, slots=True)
-class ExponentialDecayFit:
-    """Stores the result of fitting ``amplitude * exp(-d / tau_days) + offset`` (with ``d`` in days since the first
-    session) to the per-session population-median baseline fluorescence.
-    """
-
-    amplitude: float
-    """Decaying-component amplitude in raw fluorescence units."""
-    tau_days: float
-    """Decay time constant in days. NaN when the fit failed or fewer than the required number of sessions were
-    available."""
-    offset: float
-    """Asymptotic baseline component in raw fluorescence units."""
-    fit_succeeded: bool
-    """True when ``scipy.optimize.curve_fit`` converged on a finite, in-bounds solution; False otherwise."""
-
-    def evaluate(self, days: NDArray[np.floating]) -> NDArray[np.float64]:
-        """Evaluates the fitted single-exponential decay at the supplied day offsets.
-
-        Args:
-            days: Day offsets relative to the first session. Accepts any floating dtype; the result is fp64 to
-                match the precision of ``scipy.optimize.curve_fit``.
-
-        Returns:
-            ``amplitude * exp(-days / tau_days) + offset`` evaluated at every entry of ``days``.
-        """
-        return _exponential_decay_model(
-            days=days.astype(np.float64, copy=False),
-            amplitude=self.amplitude,
-            tau_days=self.tau_days,
-            offset=self.offset,
-        )
 
 
 @dataclass
 class BleachingSummary(YamlConfig):
     """Animal-level YAML companion to ``bleaching.feather`` carrying only fields not derivable from the table.
 
-    The per-session list-typed arrays, precomputed scalar trends, the paired Wilcoxon p-values, and the combined
-    flag column all live in ``bleaching.feather``. Quantities derivable from those columns (cell count,
-    fractional loss) are exposed as properties on ``BleachingReport`` and are not duplicated here.
+    The per-session list-typed arrays, precomputed scalar trends, and the combined flag column all live in
+    ``bleaching.feather``. Quantities derivable from those columns (cell count, fractional loss) are exposed as
+    properties on ``BleachingReport`` and are not duplicated here.
     """
 
     configuration: BleachingConfiguration
     """The configuration that produced the report. Load-bearing because the flag column was computed against its
     threshold values; reinterpreting the flags requires the configuration that produced them."""
-    baseline_fluorescence_decay_fit: ExponentialDecayFit
-    """Single-exponential decay fit applied to the population-median per-session baseline fluorescence. Persisted
-    rather than rederived because ``scipy.optimize.curve_fit`` is non-trivial and may fail; the failure sentinel
-    is itself information that has to be preserved."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,10 +107,9 @@ class BleachingReport:
     table: pl.DataFrame
     """The per-session table. One row per session in chronological order; columns enumerated by BleachingColumn.
     List-typed columns hold the per-cell and within-session arrays; scalar columns hold precomputed population
-    trends, the paired SNR p-value, and the combined flag."""
+    trends and the combined flag."""
     summary: BleachingSummary
-    """The animal-level YAML wrapper holding configuration, the cross-session decay fit, the cross-session
-    fractional loss, and audit metadata."""
+    """The animal-level YAML wrapper holding the configuration that produced the report."""
 
     @classmethod
     def load(cls, animal: DatasetAnimal) -> BleachingReport:
@@ -196,7 +149,6 @@ class BleachingReport:
             A multi-line string. Use ``print_summary`` for direct console output.
         """
         configuration = self.summary.configuration
-        decay_fit = self.summary.baseline_fluorescence_decay_fit
         table = self.table
 
         # noinspection PyTypeChecker
@@ -210,10 +162,6 @@ class BleachingReport:
         # noinspection PyTypeChecker
         population_snr: NDArray[np.float32] = (
             table[BleachingColumn.POPULATION_SNR.value].to_numpy().astype(np.float32, copy=False)
-        )
-        # noinspection PyTypeChecker
-        snr_p_values: NDArray[np.float64] = (
-            table[BleachingColumn.SNR_PAIRED_P_VALUE.value].to_numpy().astype(np.float64, copy=False)
         )
         # noinspection PyTypeChecker
         within_drops: NDArray[np.float32] = (
@@ -256,7 +204,6 @@ class BleachingReport:
         flag_masks = _compute_flag_masks(
             population_baseline=population_baseline,
             population_snr=population_snr,
-            snr_paired_p_values=snr_p_values,
             within_session_drops=within_drops,
             configuration=configuration,
         )
@@ -296,24 +243,14 @@ class BleachingReport:
         lines.append(f"SNR signal percentile: {configuration.snr_signal_percentile}")
         lines.append(
             f"Thresholds:            F0 loss > {configuration.baseline_fluorescence_loss_threshold:.0%}, "
-            f"within-session drop > {configuration.within_session_loss_threshold:.0%},"
-        )
-        lines.append(
-            f"                       SNR loss > {configuration.snr_loss_threshold:.0%} combined "
-            f"with paired p < {configuration.snr_significance_threshold}"
+            f"within-session drop > {configuration.within_session_loss_threshold:.0%}, "
+            f"SNR loss > {configuration.snr_loss_threshold:.0%}"
         )
         lines.append("")
         lines.append("Across-session baseline fluorescence (chronic photobleaching)")
         lines.append("-------------------------------------------------------------")
         lines.append(f"Population F0 (first -> last):  {f0_first:.2f} -> {f0_last:.2f}")
         lines.append(f"Fractional loss:                {f0_loss:.1%}  [{f0_status}]")
-        if decay_fit.fit_succeeded:
-            lines.append(
-                f"Decay fit:                      amplitude={decay_fit.amplitude:.2f}, "
-                f"tau={decay_fit.tau_days:.2f} days, offset={decay_fit.offset:.2f}  [converged]"
-            )
-        else:
-            lines.append("Decay fit:                      did not converge")
         lines.append("")
         lines.append("Within-session baseline (acute bleaching)")
         lines.append("-----------------------------------------")
@@ -327,7 +264,7 @@ class BleachingReport:
         lines.append("-------------------------------------------------------")
         lines.append(f"Population SNR (first -> last): {snr_first:.2f} -> {snr_last:.2f}")
         lines.append(f"Fractional loss:                {snr_loss:.1%}  [{snr_status}]")
-        lines.append(f"Sessions failing both criteria: {snr_violations} / {session_count}")
+        lines.append(f"Sessions above threshold:       {snr_violations} / {session_count}")
         lines.append("")
         lines.append("Per-session detail")
         lines.append("------------------")
@@ -341,7 +278,7 @@ class BleachingReport:
         # invariant guarantees the hour resolution is sufficient to identify each session uniquely.
         table_header = (
             f"{unit:>4} | {'population_F0':>13} | {'F0_loss':>7} | {'within_session_drop':>19} | "
-            f"{'population_SNR':>14} | {'SNR_paired_p_value':>18} | {'flagged':>7} | {'session':<11}"
+            f"{'population_SNR':>14} | {'SNR_loss':>8} | {'flagged':>7} | {'session':<11}"
         )
         table_separator = "".join("+" if character == "|" else "-" for character in table_header)
         lines.append(table_header)
@@ -352,13 +289,9 @@ class BleachingReport:
             f0_loss_str = "-" if index == 0 else f"{f0_loss_session:.1%}"
             within_value = float(within_drops[index])
             within_str = f"{within_value:.1%}" if np.isfinite(within_value) else "N/A"
-            snr_p = float(snr_p_values[index])
-            if index == 0:
-                snr_p_str = "-"
-            elif np.isfinite(snr_p):
-                snr_p_str = f"{snr_p:.2e}"
-            else:
-                snr_p_str = "N/A"
+            snr_pop_value = float(population_snr[index])
+            snr_loss_session = (snr_first - snr_pop_value) / snr_first if snr_first > 0 else float("nan")
+            snr_loss_str = "-" if index == 0 else f"{snr_loss_session:.1%}"
             flag_str = "yes" if bool(flagged_mask[index]) else "-"
             # Slices the canonical ``YYYY-MM-DD-HH-MM-SS-microseconds`` directory name to ``YY-MM-DD-HH``; the >=1h
             # separation invariant makes the minute / second / microsecond fields redundant for identification here.
@@ -368,8 +301,8 @@ class BleachingReport:
                 f"{f0_pop_value:>13.2f} | "
                 f"{f0_loss_str:>7} | "
                 f"{within_str:>19} | "
-                f"{float(population_snr[index]):>14.2f} | "
-                f"{snr_p_str:>18} | "
+                f"{snr_pop_value:>14.2f} | "
+                f"{snr_loss_str:>8} | "
                 f"{flag_str:>7} | "
                 f"{short_session:<11}"
             )
@@ -397,10 +330,10 @@ def _assemble_bleaching_report(
 
     Notes:
         Pure aggregation step — no I/O, no per-cell compute. Validates chronological order of ``session_paths``
-        and registered cell-count consistency across results before running the cross-session decay fit, paired
-        Wilcoxon comparison, and combined-flag computation. Methodological references for the protocol live on
-        the public orchestrator `run_bleaching_analysis`; this helper exists so the orchestrator can hand
-        off its parallel session-results dispatch to a single deterministic aggregation pass.
+        and registered cell-count consistency across results before running the cross-session population-median
+        trends and combined-flag computation. Methodological references for the protocol live on the public
+        orchestrator `run_bleaching_analysis`; this helper exists so the orchestrator can hand off its parallel
+        session-results dispatch to a single deterministic aggregation pass.
 
     Args:
         session_paths: Chronologically ordered tuple of session directory paths, parallel to
@@ -438,7 +371,7 @@ def _assemble_bleaching_report(
 
     # Validates that every session sees the same registered cell count before any cross-session reduction
     # touches the per-cell arrays. Mismatched cell counts would silently produce broadcasting errors in the
-    # paired Wilcoxon test or the population-median trend.
+    # population-median trend.
     cell_count_reference: int | None = None
     for session_path, result in zip(session_paths, session_results, strict=True):
         result_cell_count = int(result.cell_baseline_fluorescence.shape[0])
@@ -471,16 +404,9 @@ def _assemble_bleaching_report(
     population_snr_array: NDArray[np.float32] = np.array(population_snr_values, dtype=np.float32)
     # noinspection PyTypeChecker
     within_session_drop_array: NDArray[np.float32] = np.array(within_session_drops, dtype=np.float32)
-    # noinspection PyTypeChecker
-    days_array: NDArray[np.float32] = np.array(days_since_first_values, dtype=np.float32)
-
-    decay_fit = _fit_exponential_decay(days=days_array, baseline=population_baseline_array)
-
-    snr_paired_p_values = _compute_paired_snr_p_values(cell_snr_arrays=cell_snr_arrays)
     flag_masks = _compute_flag_masks(
         population_baseline=population_baseline_array,
         population_snr=population_snr_array,
-        snr_paired_p_values=snr_paired_p_values,
         within_session_drops=within_session_drop_array,
         configuration=configuration,
     )
@@ -493,7 +419,7 @@ def _assemble_bleaching_report(
         [
             pl.Series(name=BleachingColumn.SESSION.value, values=session_names, dtype=pl.Utf8),
             pl.Series(name=BleachingColumn.DAYS_SINCE_FIRST.value, values=days_since_first_values, dtype=pl.Float32),
-            pl.Series(name=BleachingColumn.SAMPLING_RATE_HZ.value, values=sampling_rates, dtype=pl.Float64),
+            pl.Series(name=BleachingColumn.SAMPLING_RATE_HZ.value, values=sampling_rates, dtype=pl.Float32),
             pl.Series(
                 name=BleachingColumn.CELL_BASELINE_FLUORESCENCE.value,
                 values=cell_baseline_arrays,
@@ -530,11 +456,6 @@ def _assemble_bleaching_report(
                 dtype=pl.Float32,
             ),
             pl.Series(
-                name=BleachingColumn.SNR_PAIRED_P_VALUE.value,
-                values=snr_paired_p_values,
-                dtype=pl.Float64,
-            ),
-            pl.Series(
                 name=BleachingColumn.FLAGGED.value,
                 values=flagged_mask,
                 dtype=pl.Boolean,
@@ -542,10 +463,7 @@ def _assemble_bleaching_report(
         ]
     )
 
-    summary = BleachingSummary(
-        configuration=configuration,
-        baseline_fluorescence_decay_fit=decay_fit,
-    )
+    summary = BleachingSummary(configuration=configuration)
 
     return BleachingReport(table=table, summary=summary)
 
@@ -697,9 +615,9 @@ def run_bleaching_analysis(
                 results_by_animal[completed_animal][completed_path] = future.result()
                 progress_bar.update()
 
-    # Aggregates per animal in the parent. The cross-session step is cheap (population medians, curve_fit,
-    # Wilcoxon, flag mask) compared to the per-session compute, and keeping it in the parent avoids round-tripping
-    # whole reports through the IPC layer.
+    # Aggregates per animal in the parent. The cross-session step is cheap (population medians, flag mask)
+    # compared to the per-session compute, and keeping it in the parent avoids round-tripping whole reports
+    # through the IPC layer.
     reports: list[BleachingReport] = []
     for animal_name in animal_names:
         ordered_paths = sessions_by_animal[animal_name]
@@ -817,110 +735,6 @@ def _validate_chronological_order(
             console.error(message=message, error=ValueError)
 
 
-def _fit_exponential_decay(
-    days: NDArray[np.float32],
-    baseline: NDArray[np.float32],
-) -> ExponentialDecayFit:
-    """Fits ``amplitude * exp(-d / tau_days) + offset`` (with ``d`` in days) to the per-session baseline fluorescence.
-
-    Notes:
-        Returns a sentinel ExponentialDecayFit with ``fit_succeeded=False`` and NaN parameters when fewer than the
-        required number of sessions are supplied, when ``curve_fit`` raises, or when any fitted parameter is
-        non-finite.
-
-    Args:
-        days: Per-session day offsets relative to the first session.
-        baseline: Per-session population-median baseline fluorescence values aligned with ``days``.
-
-    Returns:
-        An ExponentialDecayFit holding the fitted amplitude, tau, and offset, or the failure sentinel described
-        above.
-    """
-    if days.size < _MINIMUM_SESSIONS_FOR_DECAY_FIT:
-        return _failed_decay_fit()
-
-    initial_amplitude = float(baseline[0] - baseline[-1])
-    day_span = float(days[-1] - days[0])
-    if day_span <= 0:
-        day_span = 1.0
-    initial_tau = max(day_span / 2.0, 1e-3)
-    initial_offset = float(baseline[-1])
-
-    try:
-        parameters, _ = curve_fit(
-            f=_exponential_decay_model,
-            xdata=days.astype(np.float64),
-            ydata=baseline.astype(np.float64),
-            p0=(initial_amplitude, initial_tau, initial_offset),
-            bounds=((-np.inf, 1e-6, -np.inf), (np.inf, np.inf, np.inf)),
-            maxfev=10000,
-        )
-    except RuntimeError, ValueError:
-        return _failed_decay_fit()
-
-    amplitude, tau_days, offset = (float(parameter) for parameter in parameters)
-    if not (np.isfinite(amplitude) and np.isfinite(tau_days) and np.isfinite(offset)):
-        return _failed_decay_fit()
-
-    return ExponentialDecayFit(amplitude=amplitude, tau_days=tau_days, offset=offset, fit_succeeded=True)
-
-
-def _failed_decay_fit() -> ExponentialDecayFit:
-    """Returns the sentinel ExponentialDecayFit used when the decay fit cannot be produced."""
-    return ExponentialDecayFit(
-        amplitude=float("nan"),
-        tau_days=float("nan"),
-        offset=float("nan"),
-        fit_succeeded=False,
-    )
-
-
-def _exponential_decay_model(
-    days: NDArray[np.float64],
-    amplitude: float,
-    tau_days: float,
-    offset: float,
-) -> NDArray[np.float64]:
-    """Single-exponential decay model used by ``_fit_exponential_decay``.
-
-    Args:
-        days: Day offsets at which to evaluate the model.
-        amplitude: Decaying-component amplitude.
-        tau_days: Decay time constant in days.
-        offset: Asymptotic baseline component.
-
-    Returns:
-        The model values at each day in ``days``.
-    """
-    return amplitude * np.exp(-days / tau_days) + offset
-
-
-def _compute_paired_snr_p_values(cell_snr_arrays: list[NDArray[np.float32]]) -> NDArray[np.float64]:
-    """Computes paired Wilcoxon signed-rank p-values comparing each session's per-cell SNR to the first session.
-
-    Args:
-        cell_snr_arrays: Per-session per-cell SNR arrays in chronological order; the first element is the reference.
-
-    Returns:
-        An array with length ``len(cell_snr_arrays)`` holding the per-session paired Wilcoxon p-values. The first
-        entry is NaN because it would compare the reference to itself, and entries are also NaN for sessions whose
-        SNR is identical to the reference or for which the test raises.
-    """
-    # noinspection PyTypeChecker
-    p_values: NDArray[np.float64] = np.full(len(cell_snr_arrays), np.nan, dtype=np.float64)
-    reference_snr = cell_snr_arrays[0]
-    for index in range(1, len(cell_snr_arrays)):
-        target_snr = cell_snr_arrays[index]
-        if np.all(target_snr == reference_snr):
-            continue
-        try:
-            result = wilcoxon(x=target_snr, y=reference_snr, zero_method="wilcox", alternative="two-sided")
-        except ValueError:
-            continue
-        p_values[index] = float(result.pvalue)
-    return p_values
-
-
 class _FlagMasks(NamedTuple):
     """Per-criterion and combined boolean masks produced by `_compute_flag_masks`.
 
@@ -935,7 +749,7 @@ class _FlagMasks(NamedTuple):
     within: NDArray[np.bool_]
     """True for sessions whose within-session fractional drop exceeds ``within_session_loss_threshold``."""
     snr: NDArray[np.bool_]
-    """True for sessions failing both the SNR loss and paired Wilcoxon significance criteria."""
+    """True for sessions whose population-median SNR loss exceeds ``snr_loss_threshold``."""
     combined: NDArray[np.bool_]
     """Elementwise OR of ``baseline``, ``within``, and ``snr`` persisted into the FLAGGED column."""
 
@@ -943,7 +757,6 @@ class _FlagMasks(NamedTuple):
 def _compute_flag_masks(
     population_baseline: NDArray[np.float32],
     population_snr: NDArray[np.float32],
-    snr_paired_p_values: NDArray[np.float64],
     within_session_drops: NDArray[np.float32],
     configuration: BleachingConfiguration,
 ) -> _FlagMasks:
@@ -952,7 +765,6 @@ def _compute_flag_masks(
     Args:
         population_baseline: Population-median baseline fluorescence per session.
         population_snr: Population-median SNR per session.
-        snr_paired_p_values: Paired Wilcoxon p-values per session; the first entry is NaN.
         within_session_drops: Within-session fractional drop per session (NaN allowed).
         configuration: Bleaching evaluation parameters that supply the threshold values.
 
@@ -978,16 +790,11 @@ def _compute_flag_masks(
             else 0.0
         )
         snr_loss = (snr_reference - float(population_snr[index])) / snr_reference if snr_reference > 0 else 0.0
-        snr_p_value = float(snr_paired_p_values[index])
         within_drop = float(within_session_drops[index])
 
         baseline_mask[index] = baseline_loss > configuration.baseline_fluorescence_loss_threshold
         within_mask[index] = np.isfinite(within_drop) and within_drop > configuration.within_session_loss_threshold
-        snr_mask[index] = (
-            snr_loss > configuration.snr_loss_threshold
-            and np.isfinite(snr_p_value)
-            and snr_p_value < configuration.snr_significance_threshold
-        )
+        snr_mask[index] = snr_loss > configuration.snr_loss_threshold
 
     # noinspection PyTypeChecker
     combined: NDArray[np.bool_] = baseline_mask | within_mask | snr_mask
