@@ -608,7 +608,7 @@ def plot_recruitment_categories(
         for i, key in enumerate(pair_keys):
             day_b = recruitment[key]['day_b']
             if day_b == introduction_day:
-                ax.axvline(i + .5, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
+                ax.axvline(i - .5, color='red', linestyle='--', linewidth=1.5, alpha=0.7,
                            label='ABDC introduced')
                 break
 
@@ -1223,7 +1223,7 @@ if __name__ == '__main__':
 
 
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-02', '2025-09-16'), auto_process=False,
+        mouse_dir, date_range=('2025-09-02', '2025-09-08'), auto_process=False,
     )
 
     results = run_recruitment_analysis(
