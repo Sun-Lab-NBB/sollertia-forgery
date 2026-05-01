@@ -678,9 +678,42 @@ def plot_speed_profile(
 
     fig, ax = plt.subplots(figsize=figsize)
 
-    # Cue shading for longest track
     longest_tt = max(trial_types, key=lambda tt: get_track_length(config, tt))
-    pfmt.add_cue_shading(ax, config, longest_tt, alpha=0.12)
+    track_length = get_track_length(config, longest_tt)
+
+    # Shade shared cue prefix with cue colors, diverging region with trial type colors
+    cue_colors = pfmt.get_cue_colors(config)
+    cue_widths = config.get('cue_map', {})
+    sequences = {
+        tt: config.get('trial_structures', {}).get(tt, {}).get('cue_sequence', [])
+        for tt in trial_types
+    }
+    min_len = min(len(seq) for seq in sequences.values())
+    shared_prefix_len = 0
+    for i in range(min_len):
+        cue_ids_at_i = {seq[i] for seq in sequences.values()}
+        if len(cue_ids_at_i) == 1:
+            shared_prefix_len = i + 1
+        else:
+            break
+
+    # Shade shared cues
+    ref_seq = sequences[trial_types[0]]
+    pos = 0.0
+    for i, cue_id in enumerate(ref_seq[:shared_prefix_len]):
+        w = cue_widths[cue_id]
+        ax.axvspan(pos, pos + w, alpha=0.12, color=cue_colors.get(cue_id, '#D3D3D3'), zorder=0)
+        pos += w
+
+    # Shade diverging region with each trial type's line color
+    for tt in trial_types:
+        seq = sequences[tt]
+        tt_pos = sum(cue_widths[c] for c in seq[:shared_prefix_len])
+        color = trial_type_colors.get(tt, '#999999')
+        for cue_id in seq[shared_prefix_len:]:
+            w = cue_widths[cue_id]
+            ax.axvspan(tt_pos, tt_pos + w, alpha=0.08, color=color, zorder=0)
+            tt_pos += w
 
     for tt in trial_types:
         stats = _compute_speed_by_position(df, config, tt, bin_size_cm)
@@ -695,7 +728,7 @@ def plot_speed_profile(
             color=color, alpha=0.2, zorder=2,
         )
 
-    # Reward zones
+    # Reward zones per trial type
     for tt in trial_types:
         ts = config.get('trial_structures', {}).get(tt, {})
         if 'reward_zone_start_cm' in ts:
@@ -712,7 +745,7 @@ def plot_speed_profile(
     ax.legend(frameon=False, fontsize=10)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.set_xlim(0, get_track_length(config, longest_tt))
+    ax.set_xlim(0, track_length)
     pfmt.set_cue_boundary_ticks(ax, config, longest_tt)
 
     plt.tight_layout()
@@ -1267,6 +1300,8 @@ def plot_multiday_reward_summary(
     x = np.arange(n_sessions)
     bar_width = 0.8 / len(trial_types)
 
+    water_bottom = np.zeros(n_sessions)
+
     for i_tt, tt in enumerate(trial_types):
         hit_rates = []
         total_waters = []
@@ -1285,8 +1320,12 @@ def plot_multiday_reward_summary(
         offsets = x + (i_tt - len(trial_types) / 2 + 0.5) * bar_width
         ax_hit.bar(offsets, hit_rates, width=bar_width, color=color,
                    alpha=0.7, label=tt, edgecolor='white', linewidth=0.5)
-        ax_water.bar(offsets, total_waters, width=bar_width, color=color,
+
+        water_arr = np.array(total_waters, dtype=float)
+        water_arr = np.where(np.isnan(water_arr), 0.0, water_arr)
+        ax_water.bar(x, water_arr, width=0.6, bottom=water_bottom, color=color,
                      alpha=0.7, label=tt, edgecolor='white', linewidth=0.5)
+        water_bottom += water_arr
 
     ax_hit.set_ylabel('Hit Rate', fontsize=10 * font_scale)
     ax_hit.set_ylim(0, 1.05)
@@ -1639,7 +1678,7 @@ if __name__ == '__main__':
                                load_session_context, load_multiday_sessions)
 
     mouse_id = '26'
-    date = '2025-08-25'
+    date = '2025-09-10'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1652,7 +1691,7 @@ if __name__ == '__main__':
     figs = plot_behavior_analysis(data, exp_config, animal_id=mouse_id, date=date)
 
     sessions = load_multiday_sessions(
-        mouse_dir, date_range=('2025-09-02', '2025-09-10'), auto_process=False,
+        mouse_dir, date_range=('2025-08-30', '2025-09-11'), auto_process=False,
     )
     multiday_figs = plot_multiday_behavior_analysis(sessions, animal_id=mouse_id)
 
