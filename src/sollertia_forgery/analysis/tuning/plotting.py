@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
+from scipy.stats import binomtest
+from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp
 from scipy.ndimage import gaussian_filter1d
 import matplotlib.pyplot as plt
 
@@ -31,149 +33,8 @@ if TYPE_CHECKING:
 
 _PLOT_TICK_INTERVAL_CM: float = 25.0
 """Spacing in centimeters between x-axis ticks on track-position plots."""
-_PLACE_STRIP_WIDTH_RATIO: float = 0.04
-"""Per-strip width ratio (relative to the main heatmap) used by the per-cell significance strips."""
-_PLACE_PVALUE_DISPLAY_FLOOR: float = 1e-4
-"""P-value floor used when computing the ``-log10(p)`` color scale; keeps the dynamic range bounded."""
-
-
-def plot_place_cell_heatmap(
-    report: TuningReport,
-    *,
-    trial_type: str,
-    title: str | None = None,
-    sort_by_position: bool = True,
-    show_only_place_cells: bool = True,
-    require_place: bool = True,
-    require_stable: bool = True,
-    require_peak_significant: bool = True,
-    mutually_exclusive: bool = True,
-    show_significance_strip: bool = True,
-    figure_dpi: int = 150,
-    minimum_percentile: float = 0.5,
-    maximum_percentile: float = 0.9,
-    cmap: str = "gray_r",
-    show_color_bar: bool = True,
-) -> plt.Figure:
-    """Plots the position-ordered binned-fluorescence heatmap for ``trial_type`` from the persisted rate maps.
-
-    Args:
-        report: TuningReport whose persisted long-format rate-map column drives the heatmap.
-        trial_type: Trial type to extract; must match an entry in ``report.summary.trial_type_summaries``.
-        title: Optional title displayed at the top of the figure.
-        sort_by_position: Order cells by their place-field center along the track before plotting.
-        show_only_place_cells: Display only cells that pass every requested criterion (the AND of the three
-            ``require_*`` flags below).
-        require_place: Require ``IS_PLACE`` (place-field morphology + lap coverage).
-        require_stable: Require ``IS_STABLE`` (split-half stability shuffle).
-        require_peak_significant: Require ``IS_PEAK_SIGNIFICANT`` (per-cell peak shuffle).
-        mutually_exclusive: When True (default), cells also flagged as ``IS_REWARD_CELL`` are removed from the
-            place population so the panel shows only place cells that are not reward cells.
-        show_significance_strip: When True, renders one thin per-cell ``-log10(p)`` strip to the left of the
-            main heatmap for each active p-value-bearing criterion (Stable / Peak).
-        figure_dpi: Figure resolution in dots per inch.
-        minimum_percentile: Percentile used as the lower bound of the color scale.
-        maximum_percentile: Percentile used as the upper bound of the color scale.
-        cmap: Matplotlib colormap name for the rate-map panel.
-        show_color_bar: Render a color bar alongside the heatmap.
-
-    Returns:
-        The matplotlib Figure containing the heatmap.
-    """
-    trial_summary = report.trial_summary(trial_type=trial_type)
-    cells = report.trial_cells(trial_type=trial_type)
-    bin_size_cm = trial_summary.bin_size_cm
-    bin_count = trial_summary.bin_count
-
-    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=bin_count)
-    cell_population, _ = report.resolve_population_masks(
-        trial_type=trial_type,
-        require_place=require_place,
-        require_stable=require_stable,
-        require_peak_significant=require_peak_significant,
-        mutually_exclusive=mutually_exclusive,
-    )
-    order = _resolve_place_cell_order(table=cells)
-
-    if not sort_by_position:
-        # noinspection PyTypeChecker
-        order = np.arange(rate_maps.shape[0], dtype=np.int64)
-
-    if show_only_place_cells:
-        order = order[np.isin(order, np.flatnonzero(cell_population))]
-
-    sorted_data = rate_maps[order, :]
-    if sorted_data.size == 0:
-        sorted_data = rate_maps[:0, :]
-
-    minimum_value = float(np.nanquantile(sorted_data, minimum_percentile)) if sorted_data.size > 0 else 0.0
-    maximum_value = float(np.nanquantile(sorted_data, maximum_percentile)) if sorted_data.size > 0 else 1.0
-
-    strip_columns = _active_significance_columns(
-        require_stable=require_stable,
-        require_peak_significant=require_peak_significant,
-        table=cells,
-    )
-    strip_count = len(strip_columns) if show_significance_strip else 0
-    figure = _make_heatmap_figure(strip_count=strip_count, figure_dpi=figure_dpi)
-    strip_axes, axes, colorbar_axes = _layout_heatmap_axes(
-        figure=figure,
-        strip_count=strip_count,
-        include_colorbar=show_color_bar,
-    )
-
-    population_label = _compose_population_label(
-        require_place=require_place,
-        require_stable=require_stable,
-        require_peak_significant=require_peak_significant,
-    )
-    if title is not None:
-        axes.set_title(f"{title} — {population_label} (n={order.size})", fontsize=8)
-    elif show_only_place_cells:
-        axes.set_title(f"{population_label} (n={order.size})", fontsize=8)
-
-    extent: tuple[float, float, float, float] = (
-        0.0,
-        float(bin_size_cm * bin_count),
-        float(sorted_data.shape[0]),
-        0.0,
-    )
-    image = axes.imshow(
-        sorted_data,
-        cmap=cmap,
-        extent=extent,
-        interpolation="none",
-        vmin=minimum_value,
-        vmax=maximum_value,
-        origin="upper",
-    )
-    axes.set_aspect("auto")
-    axes.set_xlabel("Position (cm)")
-    axes.set_ylabel("Cell number")
-    if show_significance_strip and strip_axes:
-        _render_significance_strips(
-            figure=figure,
-            strip_axes=strip_axes,
-            strip_columns=strip_columns,
-            table=cells,
-            ordered_indices=order,
-        )
-
-    track_length_cm = trial_summary.track_length_cm
-    # noinspection PyTypeChecker
-    x_ticks: NDArray[np.float64] = np.arange(0, track_length_cm + 1, _PLOT_TICK_INTERVAL_CM)
-    axes.set_xticks(x_ticks)
-
-    if show_color_bar and colorbar_axes is not None:
-        color_bar = figure.colorbar(image, cax=colorbar_axes)
-        color_bar.set_label("ΔF/F₀")
-        cbar_min = np.floor(minimum_value / 0.5) * 0.5
-        cbar_max = np.ceil(maximum_value / 0.5) * 0.5
-        # noinspection PyTypeChecker
-        cbar_ticks: NDArray[np.float64] = np.arange(cbar_min, cbar_max, 0.5)
-        color_bar.set_ticks(cbar_ticks.tolist())
-
-    return figure
+_SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
+"""``strptime`` format string for the canonical ``YYYY-MM-DD-HH-MM-SS-microseconds`` session-directory name."""
 
 
 def plot_reward_com_histogram(
@@ -266,89 +127,6 @@ def plot_reward_com_histogram(
     if title:
         axes.set_title(title, fontsize=9)
     figure.tight_layout()
-    return figure
-
-
-def plot_rate_map_heatmap(
-    report: TuningReport,
-    *,
-    trial_type: str,
-    title: str | None = None,
-    require_place: bool = True,
-    require_stable: bool = True,
-    require_peak_significant: bool = True,
-    mutually_exclusive: bool = True,
-    figure_dpi: int = 150,
-) -> plt.Figure:
-    """Plots row-normalized rate maps for reward cells and place cells side by side, sorted by COM, restricted
-    to ``trial_type``.
-    """
-    trial_summary = report.trial_summary(trial_type=trial_type)
-    cells = report.trial_cells(trial_type=trial_type)
-    rate_maps = _stack_list_column(table=cells, column=TuningColumn.RATE_MAP, target_length=trial_summary.bin_count)
-    # noinspection PyTypeChecker
-    centers_of_mass: NDArray[np.float32] = (
-        cells[TuningColumn.CENTER_OF_MASS_CM.value].to_numpy().astype(np.float32, copy=False)
-    )
-
-    place_mask, reward_mask = report.resolve_population_masks(
-        trial_type=trial_type,
-        require_place=require_place,
-        require_stable=require_stable,
-        require_peak_significant=require_peak_significant,
-        mutually_exclusive=mutually_exclusive,
-    )
-
-    reward_zone_half = report.summary.reward_configuration.reward_zone_width / 2.0
-    reward_left = trial_summary.reward_position_cm - reward_zone_half
-    reward_right = trial_summary.reward_position_cm + reward_zone_half
-
-    figure, (axes_reward, axes_place) = plt.subplots(
-        1, 2, figsize=(12, 6), facecolor="white", dpi=figure_dpi, sharey=False
-    )
-
-    place_label = "Place Cells — " + _compose_population_label(
-        require_place=require_place,
-        require_stable=require_stable,
-        require_peak_significant=require_peak_significant,
-    )
-    for axes, mask, panel_title in [
-        (axes_reward, reward_mask, "Reward Cells"),
-        (axes_place, place_mask, place_label),
-    ]:
-        maps = rate_maps[mask]
-        coms = centers_of_mass[mask]
-        # noinspection PyTypeChecker
-        sort_order: NDArray[np.int64] = np.argsort(coms)
-        sorted_maps = maps[sort_order]
-
-        row_maxima = sorted_maps.max(axis=1, keepdims=True)
-        row_maxima[row_maxima == 0] = 1.0
-        normalized_maps = sorted_maps / row_maxima
-
-        extent = [0, trial_summary.bin_size_cm * sorted_maps.shape[1], normalized_maps.shape[0], 0]
-        axes.imshow(
-            normalized_maps,
-            cmap="gray_r",
-            extent=extent,
-            interpolation="none",
-            vmin=0.0,
-            vmax=1.0,
-            origin="upper",
-            aspect="auto",
-        )
-        axes.axvline(x=reward_left, color="red", linestyle="--", linewidth=1, alpha=0.7)
-        axes.axvline(x=reward_right, color="red", linestyle="--", linewidth=1, alpha=0.7)
-        axes.set_xlabel("Track Position (cm)")
-        axes.set_xticks(np.arange(0, trial_summary.track_length_cm + 1, _PLOT_TICK_INTERVAL_CM))
-        axes.set_title(f"{panel_title} (n={int(np.sum(mask))})", fontsize=9)
-
-    axes_reward.set_ylabel("Neuron (sorted by COM)")
-    if title:
-        figure.suptitle(title, fontsize=9)
-        figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.96))
-    else:
-        figure.tight_layout()
     return figure
 
 
@@ -683,28 +461,158 @@ def plot_per_trial_activity(
     return figure
 
 
-def plot_per_day_sorted_rate_maps(
+def _resolve_display_session_indices(
+    session_count: int,
+    display_sessions: tuple[int, ...] | None,
+) -> tuple[int, ...]:
+    """Maps 1-indexed display-session numbers to 0-indexed positions, dropping out-of-range entries.
+
+    Notes:
+        Used by every per-day plotting helper that exposes a ``display_sessions`` parameter so the
+        1-indexed → 0-indexed mapping, dedup, and out-of-range filtering match across plots.
+
+    Args:
+        session_count: Total number of sessions available to the caller.
+        display_sessions: Caller-supplied 1-indexed session numbers, or ``None`` to render every session.
+
+    Returns:
+        A tuple of 0-indexed positions in caller order, with duplicates removed and out-of-range
+        entries silently dropped.
+    """
+    if display_sessions is None:
+        return tuple(range(session_count))
+    resolved: list[int] = []
+    for target in display_sessions:
+        idx = int(target) - 1
+        if 0 <= idx < session_count and idx not in resolved:
+            resolved.append(idx)
+    return tuple(resolved)
+
+
+def _compute_day_offsets_per_session(
+    sessions: tuple[DatasetSession, ...],
+    display_session_indices: tuple[int, ...],
+) -> dict[int, int | None]:
+    """Returns per-session integer day offsets relative to ``sessions[0]``.
+
+    Notes:
+        Anchored at ``sessions[0]`` so the day numbering matches the chronological ordering used to
+        build ``sessions`` regardless of which subset the caller picked through ``display_sessions``.
+        Sessions whose name fails to parse as the canonical ``YYYY-MM-DD-HH-MM-SS-microseconds`` format
+        receive ``None`` so callers can render them without a ``Day Y`` suffix.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries; element 0 anchors the day axis.
+        display_session_indices: 0-indexed positions for which to resolve day offsets.
+
+    Returns:
+        Mapping from each entry of ``display_session_indices`` to its rounded day offset, or ``None``
+        when the session name cannot be parsed.
+    """
+    day_per_session: dict[int, int | None] = {}
+    if not sessions:
+        return day_per_session
+    try:
+        first_us = int(parse_timestamp(
+            date_string=sessions[0].session,
+            format_string=_SESSION_TIMESTAMP_FORMAT,
+            output_format=TimestampFormats.INTEGER,
+        ))
+    except ValueError:
+        first_us = None
+    for sess_idx in display_session_indices:
+        if first_us is None:
+            day_per_session[sess_idx] = None
+            continue
+        try:
+            session_us = int(parse_timestamp(
+                date_string=sessions[sess_idx].session,
+                format_string=_SESSION_TIMESTAMP_FORMAT,
+                output_format=TimestampFormats.INTEGER,
+            ))
+        except ValueError:
+            day_per_session[sess_idx] = None
+            continue
+        day_per_session[sess_idx] = round(float(convert_time(
+            time=session_us - first_us,
+            from_units=TimeUnits.MICROSECOND,
+            to_units=TimeUnits.DAY,
+            as_float=True,
+        )))
+    return day_per_session
+
+
+def _resolve_panel_cue_boundaries_cm(
+    sessions: tuple[DatasetSession, ...],
+    display_session_indices: tuple[int, ...],
+    resolved_trial_type: str | None,
+    track_length_cm: float,
+    show_cue_boundaries: bool,
+) -> tuple[float, ...]:
+    """Resolves canonical cue-zone boundaries for the per-day plotting helpers.
+
+    Notes:
+        The cue layout is constant per trial type, so the first session whose realignment yields a
+        non-empty boundary set is reused for every panel. Routes through
+        `_resolve_canonical_cue_boundaries`, which itself uses `assemble_run_session_data` — the
+        same realignment path the rate maps consume — so canonical coordinates are guaranteed to
+        match between the cue overlay and the heatmap x-axis.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries.
+        display_session_indices: 0-indexed positions to consult when sourcing the canonical walk.
+        resolved_trial_type: Trial type whose cue layout is being requested, or ``None`` to skip.
+        track_length_cm: Trial length used to clip boundaries to the open interval
+            ``(0, track_length_cm)``.
+        show_cue_boundaries: When False, skips the work and returns an empty tuple.
+
+    Returns:
+        A tuple of canonical cm positions of cue-identity transitions, or an empty tuple when the
+        overlay is disabled or no session yields usable data.
+    """
+    if not show_cue_boundaries or resolved_trial_type is None or track_length_cm <= 0:
+        return ()
+    for sess_idx in display_session_indices:
+        session = sessions[sess_idx]
+        if not session.data_path.exists():
+            continue
+        boundaries = _resolve_canonical_cue_boundaries(
+            session_path=session.session_path,
+            trial_type=resolved_trial_type,
+            track_length_cm=track_length_cm,
+        )
+        if boundaries:
+            return boundaries
+    return ()
+
+
+def plot_sorted_heatmap(
     sessions: tuple[DatasetSession, ...],
     *,
     trial_type: str | None = None,
     display_sessions: tuple[int, ...] | None = None,
-    classifier: str = "place",
     cmap: str = "magma",
     show_cue_boundaries: bool = True,
+    minimum_percentile: float = 0.0,
+    maximum_percentile: float = 0.95,
     animal_id: str | None = None,
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Plots row-normalized rate maps for each displayed session sorted independently by that session's peak.
+    """Plots raw ΔF/F₀ rate maps for every registered cell, sorted independently by each session's peak.
 
     Notes:
-        Each panel filters the session's persisted ``tuning_cells.feather`` to cells classified by the
-        requested classifier (``IS_PLACE`` / ``IS_REWARD_CELL`` / ``IS_STRICT_PLACE``) on that day,
-        sorts them by their rate-map peak position on the same day, and renders the row-normalized
-        rate maps. There is no across-session correspondence: each panel uses the within-session
-        classification only, so the figure shows the population's day-level tuning band rather than
-        per-cell drift. Cell counts are reported per panel because the active-cell set differs across
-        days. Pair with ``..drift.plotting.plot_reference_day_sorted_rate_maps`` for the per-cell
-        drift view.
+        Each panel renders every registered cell as one row and sorts the rows by the cell's
+        rate-map peak position on that session. There is no across-session correspondence (each panel
+        sorts independently), so the figure shows the population's day-level tuning band rather than
+        per-cell drift. Per-panel titles read ``Session X (Day Y)`` where ``Y`` is the integer day
+        offset from the first chronologically ordered session in ``sessions``. Pair with
+        `plot_classified_heatmap` for the row-normalized active-cells-only band, or with
+        ``..drift.plotting.plot_reference_day_sorted_rate_maps`` for the per-cell drift view.
+
+        Rate maps render as raw ΔF/F₀ values (no row normalization). A single shared color scale runs
+        from the ``minimum_percentile`` quantile to the ``maximum_percentile`` quantile of the pooled
+        rate-map values across every panel, so colors are directly comparable between sessions and
+        the single horizontal colorbar at the bottom of the figure annotates the absolute scale.
 
         Sessions are addressed by 1-indexed chronological session number (``1`` is the first session
         in ``sessions``, ``2`` is the second, etc.). Out-of-range entries are silently skipped, and
@@ -713,9 +621,8 @@ def plot_per_day_sorted_rate_maps(
         ``trial_type`` is resolved once from the first available session's tuning feather when not
         supplied by the caller, then applied uniformly to every panel.
 
-        Sessions render in a single chronological row at a tall-rectangular panel aspect ratio. A
-        shared horizontal colorbar at the bottom of the figure documents the 0..1 row-normalized
-        intensity scale that every panel shares.
+        Sessions render in a single chronological row at a tall-rectangular panel aspect ratio with a
+        shared y-axis (the registered cell count is constant across multi-day-registered sessions).
 
     Args:
         sessions: Chronologically ordered DatasetSession entries to render.
@@ -723,15 +630,16 @@ def plot_per_day_sorted_rate_maps(
             the first session's tuning feather. Applied uniformly across panels.
         display_sessions: 1-indexed session numbers to render as columns. Defaults to every session
             in the supplied tuple — pass an explicit selection to render a subset.
-        classifier: Within-session classification used to pick cells (``"place"``, ``"reward"``,
-            ``"strict_place"``).
         cmap: Matplotlib colormap name for the rate-map intensities. Default ``"magma"`` is a
             perceptually-uniform colormap with strong contrast on dark backgrounds.
         show_cue_boundaries: When True, draw cyan dotted verticals on every panel at the start and
-            end of the cue zone that contains the trigger zone for that session. Cue layout is
-            derived once from the first available session's ``data.feather`` (using the ``cue`` and
-            ``distance_cm`` columns) and reused for every panel; the per-session trigger zone center
-            then selects which cue interval to highlight.
+            end of the cue zone that contains the trigger zone for that session.
+        minimum_percentile: Quantile (in ``[0, 1]``) of the pooled rate-map values used as the shared
+            lower bound of the color scale. Clamped at zero so negative ΔF/F₀ noise renders at the
+            colormap floor and the value 0 reads as "no signal" on the colorbar.
+        maximum_percentile: Quantile (in ``[0, 1]``) of the pooled rate-map values used as the shared
+            upper bound of the color scale. Default ``0.95`` clips the top 5% of pixels so
+            outlier-bright bumps don't saturate the panel.
         animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
         figure_dpi: Output figure DPI.
 
@@ -739,22 +647,250 @@ def plot_per_day_sorted_rate_maps(
         A matplotlib Figure.
     """
     session_count: int = len(sessions)
+    display_session_indices = _resolve_display_session_indices(
+        session_count=session_count, display_sessions=display_sessions,
+    )
+    n_panels: int = len(display_session_indices)
+    n_cols: int = max(n_panels, 1)
 
-    def _resolve_indices(requested: tuple[int, ...]) -> tuple[int, ...]:
-        """Maps each 1-indexed session number to a 0-indexed position; out-of-range entries are skipped."""
-        resolved: list[int] = []
-        for target in requested:
-            idx = int(target) - 1
-            if 0 <= idx < session_count and idx not in resolved:
-                resolved.append(idx)
-        return tuple(resolved)
+    figure, axes_array = plt.subplots(
+        1, n_cols,
+        figsize=(2.0 * n_cols + 1.2, 4.5),
+        facecolor="white", dpi=figure_dpi, squeeze=False,
+        layout="constrained",
+        sharey=True,
+    )
+    if session_count == 0 or n_panels == 0:
+        axes_array[0, 0].text(0.5, 0.5, "No sessions supplied", ha="center", va="center",
+                              transform=axes_array[0, 0].transAxes)
+        for axes in axes_array.flat:
+            axes.set_axis_off()
+        return figure
 
-    if display_sessions is None:
-        # Renders every session by default; subsetting is opt-in through ``display_sessions``.
-        display_session_indices: tuple[int, ...] = tuple(range(session_count))
+    # Pre-loads each session's filtered tuning frame once and caches the per-cell rate maps the render
+    # loop will consume. The per-session trigger zone is captured here too so the cyan cue-zone overlay
+    # can locate which canonical interval to bracket without re-reading geometry on every panel; the
+    # cue boundaries themselves come from the realignment path used by `assemble_run_session_data` and
+    # are computed once for the whole figure below.
+    rate_maps_per_session: dict[int, NDArray[np.float32] | None] = {}
+    trigger_zones: dict[int, tuple[float, float] | None] = {}
+    bin_count_reference: int | None = None
+    track_length_reference: float | None = None
+    resolved_trial_type: str | None = trial_type
+    pooled_chunks: list[NDArray[np.float32]] = []
+    for sess_idx in display_session_indices:
+        path = sessions[sess_idx].tuning_cells_path
+        if not path.exists():
+            rate_maps_per_session[sess_idx] = None
+            trigger_zones[sess_idx] = None
+            continue
+        frame = pl.read_ipc(source=path, memory_map=True)
+        if resolved_trial_type is None and TuningColumn.TRIAL_TYPE.value in frame.columns:
+            unique_trial_types = frame[TuningColumn.TRIAL_TYPE.value].unique().to_list()
+            if unique_trial_types:
+                resolved_trial_type = str(unique_trial_types[0])
+        if resolved_trial_type is not None and TuningColumn.TRIAL_TYPE.value in frame.columns:
+            frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type)
+        frame = frame.sort(TuningColumn.CELL_ID.value)
+        if frame.height == 0:
+            rate_maps_per_session[sess_idx] = None
+        else:
+            # noinspection PyTypeChecker
+            session_rate_maps: NDArray[np.float32] = np.asarray(
+                frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+            )
+            rate_maps_per_session[sess_idx] = session_rate_maps
+            if bin_count_reference is None and session_rate_maps.size > 0:
+                bin_count_reference = int(session_rate_maps.shape[1])
+            if session_rate_maps.size > 0:
+                pooled_chunks.append(session_rate_maps.ravel())
+        geometry_path = sessions[sess_idx].geometry_path
+        if geometry_path.exists() and resolved_trial_type is not None:
+            geometry = TrialGeometry.from_yaml(file_path=geometry_path)
+            entry = geometry.entries.get(resolved_trial_type)
+            if entry is not None:
+                trigger_zones[sess_idx] = (
+                    float(entry.stimulus_trigger_zone_start_cm),
+                    float(entry.stimulus_trigger_zone_end_cm),
+                )
+                if track_length_reference is None:
+                    track_length_reference = float(entry.trial_length_cm)
+            else:
+                trigger_zones[sess_idx] = None
+        else:
+            trigger_zones[sess_idx] = None
+
+    bin_count: int = bin_count_reference if bin_count_reference is not None else 0
+    track_length_cm: float = (
+        track_length_reference if track_length_reference is not None else float(bin_count)
+    )
+    bin_size_cm: float = track_length_cm / bin_count if bin_count > 0 else 1.0
+
+    # Resolves a single shared color scale from every cell pooled across panels so colors are directly
+    # comparable between sessions. ``np.nanquantile`` skips NaN bins (occupancy gaps in the per-bin
+    # mean). The lower bound is clamped to zero so negative ΔF/F₀ noise still renders at the floor.
+    if pooled_chunks:
+        # noinspection PyTypeChecker
+        pooled_values: NDArray[np.float32] = np.concatenate(pooled_chunks)
+        if pooled_values.size > 0 and np.any(np.isfinite(pooled_values)):
+            color_min: float = max(0.0, float(np.nanquantile(pooled_values, minimum_percentile)))
+            color_max: float = float(np.nanquantile(pooled_values, maximum_percentile))
+        else:
+            color_min, color_max = 0.0, 1.0
     else:
-        display_session_indices = _resolve_indices(display_sessions)
+        color_min, color_max = 0.0, 1.0
+    if color_max <= color_min:
+        color_max = color_min + 1e-3
 
+    day_per_session = _compute_day_offsets_per_session(
+        sessions=sessions, display_session_indices=display_session_indices,
+    )
+    cue_boundaries_cm = _resolve_panel_cue_boundaries_cm(
+        sessions=sessions,
+        display_session_indices=display_session_indices,
+        resolved_trial_type=resolved_trial_type,
+        track_length_cm=track_length_cm,
+        show_cue_boundaries=show_cue_boundaries,
+    )
+
+    last_image = None
+    for column_position, sess_idx in enumerate(display_session_indices):
+        axes = axes_array[0, column_position]
+        rate_maps = rate_maps_per_session.get(sess_idx)
+        if rate_maps is None or rate_maps.shape[0] == 0:
+            axes.text(0.5, 0.5, "no data", ha="center", va="center", transform=axes.transAxes)
+            # Uses ``set_axis_off`` rather than clearing tick lists so the shared y-axis on the
+            # neighboring rendered panels keeps its tick locations.
+            axes.set_axis_off()
+            continue
+        n_cells: int = int(rate_maps.shape[0])
+
+        # Sorts every cell by its rate-map peak position so the panel forms a position-sorted tuning
+        # band. Peak positions ignore NaN bins (occupancy gaps) by replacing them with -inf before the
+        # ``argmax``.
+        finite_for_argmax = np.where(np.isfinite(rate_maps), rate_maps, -np.inf)
+        # noinspection PyTypeChecker
+        peak_bins: NDArray[np.int64] = np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+        # noinspection PyTypeChecker
+        order: NDArray[np.int64] = np.argsort(peak_bins, kind="stable")
+        sorted_maps = rate_maps[order]
+
+        last_image = axes.imshow(
+            sorted_maps, aspect="auto", origin="upper", cmap=cmap,
+            extent=[0, bin_count * bin_size_cm, n_cells, 0],
+            vmin=color_min, vmax=color_max,
+            interpolation="nearest",
+        )
+        _draw_cue_zone_overlay(
+            axes=axes,
+            cue_boundaries_cm=cue_boundaries_cm,
+            trigger_zone=trigger_zones.get(sess_idx),
+            track_length_cm=track_length_cm,
+        )
+        axes.set_xlim(0, bin_count * bin_size_cm)
+        day_offset = day_per_session.get(sess_idx)
+        panel_title = (
+            f"Session {sess_idx + 1} (Day {day_offset})" if day_offset is not None
+            else f"Session {sess_idx + 1}"
+        )
+        axes.set_title(panel_title, fontsize=10)
+        axes.set_xlabel("Position (cm)", fontsize=9)
+        if column_position == 0:
+            axes.set_ylabel("Cell #", fontsize=9)
+
+    if last_image is not None:
+        # Shared horizontal colorbar at the bottom of the figure documents the absolute ΔF/F₀ scale.
+        color_bar = figure.colorbar(
+            last_image,
+            ax=axes_array.ravel().tolist(),
+            orientation="horizontal",
+            shrink=0.5,
+            aspect=40,
+            pad=0.04,
+        )
+        color_bar.set_label("ΔF/F₀", fontsize=9)
+        color_bar.ax.tick_params(labelsize=8)
+
+    animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
+    suptitle_subject: str = "tunings sorted by track position"
+    figure.suptitle(
+        f"{animal_prefix}{suptitle_subject}".capitalize() if animal_id is None
+        else f"{animal_prefix}{suptitle_subject}",
+        fontsize=12,
+    )
+    return figure
+
+
+def plot_classified_heatmap(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    classifier: str = "place",
+    trial_type: str | None = None,
+    display_sessions: tuple[int, ...] | None = None,
+    cmap: str = "magma",
+    show_cue_boundaries: bool = True,
+    animal_id: str | None = None,
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots row-normalized rate maps of classified cells per session, sorted by each session's peak.
+
+    Notes:
+        Each panel filters its session's persisted ``tuning_cells.feather`` to cells classified by the
+        requested ``classifier`` on that session, sorts the surviving cells by their rate-map peak
+        position, and renders the row-normalized rate maps. There is no across-session correspondence:
+        each panel uses the within-session classification only, so the figure shows the day-level
+        active-cell tuning band rather than per-cell drift. Cell counts vary across panels (the
+        classifier-active set differs by day), which is reflected by the per-panel ``Session X
+        (Day Y, n=N)`` titles and a tickless y-axis. Pair with `plot_sorted_heatmap` for the
+        all-cells raw ΔF/F₀ view.
+
+        ``classifier="place"`` always selects ``IS_STRICT_PLACE`` (place-field morphology + lap
+        coverage + split-half stability + per-cell peak shuffle). ``classifier="reward"`` selects
+        ``IS_REWARD_CELL``. Each row in the heatmap is divided by its own per-cell peak so the color
+        scale is fixed at ``[0, 1]`` regardless of the cell's absolute ΔF/F₀ amplitude; this matches
+        the convention used before the all-cells variant switched to raw fluorescence.
+
+        Sessions are addressed by 1-indexed chronological session number (``1`` is the first session
+        in ``sessions``, ``2`` is the second, etc.). Out-of-range entries are silently skipped, and
+        duplicates that resolve to the same session are deduplicated. ``trial_type`` is resolved once
+        from the first available session's tuning feather when not supplied by the caller, then
+        applied uniformly to every panel.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries to render.
+        classifier: ``"place"`` (default) maps to ``IS_STRICT_PLACE``; ``"reward"`` maps to
+            ``IS_REWARD_CELL``.
+        trial_type: Trial type to evaluate; when ``None``, defaults to the first trial type present in
+            the first session's tuning feather. Applied uniformly across panels.
+        display_sessions: 1-indexed session numbers to render as columns. Defaults to every session
+            in the supplied tuple — pass an explicit selection to render a subset.
+        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"magma"`` is a
+            perceptually-uniform colormap with strong contrast on dark backgrounds.
+        show_cue_boundaries: When True, draw cyan dotted verticals on every panel at the start and
+            end of the cue zone that contains the trigger zone for that session.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure.
+    """
+    if classifier not in ("place", "reward"):
+        message = (
+            f"Unable to plot per-day classified rate maps. ``classifier`` must be 'place' or 'reward', "
+            f"but got {classifier!r}."
+        )
+        raise ValueError(message)
+
+    classifier_column = (
+        TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
+        else TuningColumn.IS_REWARD_CELL.value
+    )
+    classifier_label = "strict-place" if classifier == "place" else "reward"
+
+    session_count: int = len(sessions)
+    display_session_indices = _resolve_display_session_indices(
+        session_count=session_count, display_sessions=display_sessions,
+    )
     n_panels: int = len(display_session_indices)
     n_cols: int = max(n_panels, 1)
 
@@ -771,32 +907,22 @@ def plot_per_day_sorted_rate_maps(
             axes.set_axis_off()
         return figure
 
-    classifier_column = {
-        "place": TuningColumn.IS_PLACE.value,
-        "reward": TuningColumn.IS_REWARD_CELL.value,
-        "strict_place": TuningColumn.IS_STRICT_PLACE.value,
-    }.get(classifier, TuningColumn.IS_PLACE.value)
-    label = {"place": "place", "reward": "reward", "strict_place": "strict-place"}.get(classifier, classifier)
-
-    # Pre-loads each session's filtered tuning frame once so the trial-type / track-length resolution
-    # logic stays out of the per-panel render loop. The per-session trigger zone is also captured here
-    # so the render loop can overlay zone bounds without re-reading geometry on every panel. The
-    # per-session ``cue_offset_cm`` lets the cue overlay shift data-derived runtime-trial-rel boundaries
-    # back into canonical coordinates so rate maps and overlays share the same coord frame post-realign.
-    frames_per_session: dict[int, pl.DataFrame | None] = {}
+    # Pre-loads each session's classified rate maps, the per-session trigger zone (used to anchor the
+    # cyan cue-zone overlay on the panel that contains the trigger), and ``cue_offset_cm`` (so the cue
+    # overlay matches realigned rate maps). Only cells that pass the classifier survive into
+    # ``rate_maps_per_session``; non-classified cells never enter the render loop.
+    rate_maps_per_session: dict[int, NDArray[np.float32] | None] = {}
     trigger_zones: dict[int, tuple[float, float] | None] = {}
-    cue_offset_per_session: dict[int, float] = {}
     bin_count_reference: int | None = None
     track_length_reference: float | None = None
     resolved_trial_type: str | None = trial_type
     for sess_idx in display_session_indices:
         path = sessions[sess_idx].tuning_cells_path
         if not path.exists():
-            frames_per_session[sess_idx] = None
+            rate_maps_per_session[sess_idx] = None
             trigger_zones[sess_idx] = None
             continue
         frame = pl.read_ipc(source=path, memory_map=True)
-        # Resolves the trial type from the first available frame when the caller did not specify one.
         if resolved_trial_type is None and TuningColumn.TRIAL_TYPE.value in frame.columns:
             unique_trial_types = frame[TuningColumn.TRIAL_TYPE.value].unique().to_list()
             if unique_trial_types:
@@ -804,17 +930,23 @@ def plot_per_day_sorted_rate_maps(
         if resolved_trial_type is not None and TuningColumn.TRIAL_TYPE.value in frame.columns:
             frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type)
         frame = frame.sort(TuningColumn.CELL_ID.value)
-        frames_per_session[sess_idx] = frame
-        if bin_count_reference is None and frame.height > 0:
+        if frame.height == 0 or classifier_column not in frame.columns:
+            rate_maps_per_session[sess_idx] = None
+        else:
             # noinspection PyTypeChecker
-            first_rate_map = np.asarray(
+            full_rate_maps: NDArray[np.float32] = np.asarray(
                 frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
             )
-            if first_rate_map.size > 0:
-                bin_count_reference = int(first_rate_map.shape[1])
-        # Reads the per-session trigger zone (and the track-length reference, when not yet set) from
-        # the trial geometry. This runs every iteration because trigger zones can shift across
-        # sessions in protocols like the void reward shift.
+            # noinspection PyTypeChecker
+            classifier_mask: NDArray[np.bool_] = (
+                frame[classifier_column].to_numpy().astype(np.bool_, copy=False)
+            )
+            active_rate_maps = full_rate_maps[classifier_mask] if classifier_mask.any() else (
+                full_rate_maps[:0]
+            )
+            rate_maps_per_session[sess_idx] = active_rate_maps
+            if bin_count_reference is None and full_rate_maps.size > 0:
+                bin_count_reference = int(full_rate_maps.shape[1])
         geometry_path = sessions[sess_idx].geometry_path
         if geometry_path.exists() and resolved_trial_type is not None:
             geometry = TrialGeometry.from_yaml(file_path=geometry_path)
@@ -824,15 +956,12 @@ def plot_per_day_sorted_rate_maps(
                     float(entry.stimulus_trigger_zone_start_cm),
                     float(entry.stimulus_trigger_zone_end_cm),
                 )
-                cue_offset_per_session[sess_idx] = float(entry.cue_offset_cm)
                 if track_length_reference is None:
                     track_length_reference = float(entry.trial_length_cm)
             else:
                 trigger_zones[sess_idx] = None
-                cue_offset_per_session[sess_idx] = 0.0
         else:
             trigger_zones[sess_idx] = None
-            cue_offset_per_session[sess_idx] = 0.0
 
     bin_count: int = bin_count_reference if bin_count_reference is not None else 0
     track_length_cm: float = (
@@ -840,96 +969,71 @@ def plot_per_day_sorted_rate_maps(
     )
     bin_size_cm: float = track_length_cm / bin_count if bin_count > 0 else 1.0
 
-    # Derives cue-zone boundaries once per call from the first available session's ``data.feather``.
-    # The cue layout is constant per trial type (each trial type owns a fixed Segment.cue_sequence
-    # upstream), so a single canonical-trial walk supplies the boundary positions for every panel.
-    cue_boundaries_cm: tuple[float, ...] = ()
-    if show_cue_boundaries and resolved_trial_type is not None and track_length_cm > 0:
-        for sess_idx in display_session_indices:
-            data_path = sessions[sess_idx].data_path
-            if not data_path.exists():
-                continue
-            cue_boundaries_cm = _derive_cue_boundaries_cm(
-                data_path=data_path,
-                trial_type=resolved_trial_type,
-                track_length_cm=track_length_cm,
-            )
-            if cue_boundaries_cm:
-                break
+    day_per_session = _compute_day_offsets_per_session(
+        sessions=sessions, display_session_indices=display_session_indices,
+    )
+    cue_boundaries_cm = _resolve_panel_cue_boundaries_cm(
+        sessions=sessions,
+        display_session_indices=display_session_indices,
+        resolved_trial_type=resolved_trial_type,
+        track_length_cm=track_length_cm,
+        show_cue_boundaries=show_cue_boundaries,
+    )
 
     last_image = None
     for column_position, sess_idx in enumerate(display_session_indices):
         axes = axes_array[0, column_position]
-        frame = frames_per_session.get(sess_idx)
-        if frame is None or frame.height == 0 or classifier_column not in frame.columns:
-            axes.text(0.5, 0.5, "no data", ha="center", va="center", transform=axes.transAxes)
-            axes.set_xticks([])
-            axes.set_yticks([])
-            continue
-        # noinspection PyTypeChecker
-        active_mask: NDArray[np.bool_] = frame[classifier_column].to_numpy().astype(np.bool_, copy=False)
-        if not active_mask.any():
+        active_rate_maps = rate_maps_per_session.get(sess_idx)
+        if active_rate_maps is None or active_rate_maps.shape[0] == 0:
             axes.text(0.5, 0.5, "no active cells", ha="center", va="center", transform=axes.transAxes)
-            axes.set_xticks([])
-            axes.set_yticks([])
+            axes.set_axis_off()
             continue
-        # noinspection PyTypeChecker
-        rate_maps: NDArray[np.float32] = np.asarray(
-            frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
-        )
-        active_rate_maps = rate_maps[active_mask]
+        n_active: int = int(active_rate_maps.shape[0])
+
         finite_for_argmax = np.where(np.isfinite(active_rate_maps), active_rate_maps, -np.inf)
-        peak_bins = np.argmax(finite_for_argmax, axis=1)
-        order = np.argsort(peak_bins)
+        # noinspection PyTypeChecker
+        peak_bins: NDArray[np.int64] = np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+        # noinspection PyTypeChecker
+        order: NDArray[np.int64] = np.argsort(peak_bins, kind="stable")
         sorted_maps = active_rate_maps[order]
-        row_max = np.nanmax(sorted_maps, axis=1, keepdims=True)
-        row_max = np.where(np.isfinite(row_max) & (row_max > 0), row_max, 1.0)
-        normalized = np.clip(sorted_maps / row_max, 0.0, 1.0)
+        # Row-normalizes each cell to its own peak so the color scale is fixed at [0, 1] regardless of
+        # absolute ΔF/F₀ amplitude. Rows whose peak is non-positive or non-finite stay at zero.
+        # noinspection PyTypeChecker
+        row_max: NDArray[np.float32] = np.nanmax(sorted_maps, axis=1, keepdims=True)
+        # noinspection PyTypeChecker
+        safe_row_max: NDArray[np.float32] = np.where(
+            np.isfinite(row_max) & (row_max > 0), row_max, np.float32(1.0),
+        )
+        normalized = np.clip(sorted_maps / safe_row_max, 0.0, 1.0)
         normalized = np.where(np.isfinite(normalized), normalized, 0.0)
-        n_total: int = sorted_maps.shape[0]
+
         last_image = axes.imshow(
             normalized, aspect="auto", origin="upper", cmap=cmap,
-            extent=[0, bin_count * bin_size_cm, n_total, 0], vmin=0.0, vmax=1.0,
+            extent=[0, bin_count * bin_size_cm, n_active, 0],
+            vmin=0.0, vmax=1.0,
             interpolation="nearest",
         )
-        # Overlays the start / end of the cue zone holding the trigger zone as cyan dotted verticals.
-        # The cue layout is constant per trial type, so the same data-derived boundary set is reused
-        # for every panel; per-session ``cue_offset_cm`` shifts the boundaries from runtime-trial-rel
-        # into canonical coordinates so the overlay matches realigned rate maps. The trigger zone
-        # center selects which canonical cue interval to bracket. Drawn before the trigger zone so
-        # the red dashed lines sit on top.
-        zone = trigger_zones.get(sess_idx)
-        if cue_boundaries_cm and zone is not None:
-            session_cue_boundaries = _shift_cue_boundaries_to_canonical(
-                cue_boundaries=cue_boundaries_cm,
-                cue_offset_cm=cue_offset_per_session.get(sess_idx, 0.0),
-                track_length_cm=track_length_cm,
-            )
-            cue_left, cue_right = _cue_zone_around_trigger(
-                cue_boundaries=session_cue_boundaries,
-                trigger_center=0.5 * (zone[0] + zone[1]),
-                track_length_cm=track_length_cm,
-            )
-            axes.axvline(cue_left, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
-            axes.axvline(cue_right, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
-        # Overlays the per-session trigger zone as red dashed verticals so the band's relationship to
-        # the reward landmark is visible. Drawn last so the lines sit on top of everything.
-        if zone is not None:
-            zone_start, zone_end = zone
-            axes.axvline(zone_start, color="red", linestyle="--", linewidth=1.0, alpha=0.85)
-            axes.axvline(zone_end, color="red", linestyle="--", linewidth=1.0, alpha=0.85)
+        _draw_cue_zone_overlay(
+            axes=axes,
+            cue_boundaries_cm=cue_boundaries_cm,
+            trigger_zone=trigger_zones.get(sess_idx),
+            track_length_cm=track_length_cm,
+        )
         axes.set_xlim(0, bin_count * bin_size_cm)
-        axes.set_title(f"Session {sess_idx + 1} (n={n_total})", fontsize=10)
+        day_offset = day_per_session.get(sess_idx)
+        if day_offset is not None:
+            panel_title = f"Session {sess_idx + 1} (Day {day_offset}, n={n_active})"
+        else:
+            panel_title = f"Session {sess_idx + 1} (n={n_active})"
+        axes.set_title(panel_title, fontsize=10)
         axes.set_xlabel("Position (cm)", fontsize=9)
-        # Drops concrete y-tick numbers everywhere; absolute cell counts vary across sessions and the
-        # per-panel ``(n=X)`` already documents that. The shared y-axis label still annotates the sort
-        # convention so the band shape stays interpretable.
+        # Drops y-axis ticks because cell counts differ across panels — absolute row indices carry no
+        # cross-panel meaning, and the per-panel ``n=N`` already documents the count.
         axes.set_yticks([])
         if column_position == 0:
-            axes.set_ylabel(f"{label.capitalize()} cell (per-day peak sort)", fontsize=9)
+            axes.set_ylabel(f"{classifier_label.capitalize()} cell (per-day peak sort)", fontsize=9)
 
     if last_image is not None:
-        # Shared horizontal colorbar at the bottom of the figure documents the row-normalized scale.
         color_bar = figure.colorbar(
             last_image,
             ax=axes_array.ravel().tolist(),
@@ -938,111 +1042,376 @@ def plot_per_day_sorted_rate_maps(
             aspect=40,
             pad=0.04,
         )
-        color_bar.set_label("Row-normalized rate (peak = 1)", fontsize=9)
+        color_bar.set_label("Row-normalized ΔF/F₀ (peak = 1)", fontsize=9)
         color_bar.ax.tick_params(labelsize=8)
 
     animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
-    trial_label: str = f" — trial type {resolved_trial_type!r}" if resolved_trial_type is not None else ""
+    suptitle_subject: str = f"{classifier_label} tunings sorted by track position"
     figure.suptitle(
-        f"{animal_prefix}per-day-sorted rate maps ({label} cells){trial_label}",
+        f"{animal_prefix}{suptitle_subject}".capitalize() if animal_id is None
+        else f"{animal_prefix}{suptitle_subject}",
         fontsize=12,
     )
     return figure
 
 
-def _derive_cue_boundaries_cm(
-    data_path: "Path",
+def plot_cue_pair_place_counts(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    trial_type: str | None = None,
+    display_sessions: tuple[int, ...] | None = None,
+    animal_id: str | None = None,
+    n_cue_pairs: int = 4,
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots strict-place cell counts per cue-gray pair, one panel per session.
+
+    Notes:
+        Assumes uniform-length cue-gray pairs: the trial geometry's track length is divided into
+        ``n_cue_pairs`` equal segments and each segment becomes one bar. There is no
+        ``data.feather`` walk — only the per-session tuning feather and the trial geometry data file
+        are read, which keeps the per-panel cost in the milliseconds. Bars are labelled
+        ``<pair_index>-0`` (e.g., ``1-0`` for cue 1 paired with the gray that follows it) and the
+        bar height is the count of strict-place cells whose rate-map peak position lands inside the
+        pair.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries to render.
+        trial_type: Trial type to evaluate; when ``None``, defaults to the first trial type present
+            in the first session's tuning feather. Applied uniformly across panels.
+        display_sessions: 1-indexed session numbers to render as panels. Defaults to every session
+            in the supplied tuple.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        n_cue_pairs: Number of uniform-length cue-gray pairs to partition the track into. Defaults
+            to ``4`` (matching ``cyclic_4_cue``); pass an explicit value when the trial type uses a
+            different cue count.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure.
+    """
+    session_count: int = len(sessions)
+    display_session_indices = _resolve_display_session_indices(
+        session_count=session_count, display_sessions=display_sessions,
+    )
+    n_panels: int = len(display_session_indices)
+    n_cols: int = max(n_panels, 1)
+
+    figure, axes_array = plt.subplots(
+        1, n_cols,
+        figsize=(2.6 * n_cols + 1.0, 4.0),
+        facecolor="white", dpi=figure_dpi, squeeze=False,
+        layout="constrained",
+        sharey=True,
+    )
+    if session_count == 0 or n_panels == 0:
+        axes_array[0, 0].text(0.5, 0.5, "No sessions supplied", ha="center", va="center",
+                              transform=axes_array[0, 0].transAxes)
+        for axes in axes_array.flat:
+            axes.set_axis_off()
+        return figure
+
+    day_per_session = _compute_day_offsets_per_session(
+        sessions=sessions, display_session_indices=display_session_indices,
+    )
+
+    # Per-panel render state: bars first, brackets in a second pass once the global y-headroom is
+    # known. Sharing the y-axis means the bracket stack on the busiest panel decides the figure's
+    # top, so the y-limit can only be set after every panel has reported its own bracket count.
+    panel_state: list[tuple[plt.Axes, NDArray[np.int64], dict[tuple[int, int], float]]] = []
+    max_bracket_count: int = 0
+    max_bar_height: int = 0
+
+    for column_position, sess_idx in enumerate(display_session_indices):
+        axes = axes_array[0, column_position]
+        session = sessions[sess_idx]
+        day_offset = day_per_session.get(sess_idx)
+        panel_label = (
+            f"Session {sess_idx + 1} (Day {day_offset})" if day_offset is not None
+            else f"Session {sess_idx + 1}"
+        )
+
+        result = _resolve_session_cue_pair_counts(
+            session=session, trial_type=trial_type, n_cue_pairs=n_cue_pairs,
+        )
+        if result is None:
+            axes.text(0.5, 0.5, "no cue pairs", ha="center", va="center", transform=axes.transAxes)
+            axes.set_title(panel_label, fontsize=10)
+            axes.set_axis_off()
+            continue
+
+        counts, pair_labels = result
+        x_positions = np.arange(counts.size, dtype=np.int64)
+        bars = axes.bar(
+            x_positions, counts,
+            color="#88abc1", edgecolor="black", linewidth=0.4,
+        )
+        for bar, count in zip(bars, counts.tolist(), strict=True):
+            axes.text(
+                bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                str(int(count)), ha="center", va="bottom", fontsize=8,
+            )
+
+        axes.set_title(panel_label, fontsize=10)
+        axes.set_xlabel("Cue-gray pair", fontsize=9)
+        axes.set_xticks(x_positions)
+        axes.set_xticklabels(pair_labels, fontsize=8)
+        if column_position == 0:
+            axes.set_ylabel("Strict-place cells", fontsize=9)
+
+        p_values = _compute_pairwise_pair_pvalues(counts=counts)
+        bracket_count = int(sum(1 for p in p_values.values() if p >= 0.05))
+        max_bracket_count = max(max_bracket_count, bracket_count)
+        max_bar_height = max(max_bar_height, int(counts.max()) if counts.size > 0 else 0)
+        panel_state.append((axes, counts, p_values))
+
+    if max_bar_height > 0:
+        bracket_spacing = max(max_bar_height * 0.10, 0.5)
+        # Headroom: one spacing for the gap above the tallest bar plus one slot per stacked bracket
+        # (with an extra half-slot of breathing room at the top so the ``ns`` glyph is not clipped).
+        y_top = max_bar_height + bracket_spacing * (max_bracket_count + 1.5)
+        axes_array[0, 0].set_ylim(top=y_top)
+        for axes, counts, p_values in panel_state:
+            _draw_nonsignificance_brackets(
+                axes=axes, counts=counts, p_values=p_values,
+                bar_max=max_bar_height, bracket_spacing=bracket_spacing,
+            )
+
+    animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
+    suptitle_subject: str = "strict-place cells per cue-gray pair"
+    figure.suptitle(
+        f"{animal_prefix}{suptitle_subject}".capitalize() if animal_id is None
+        else f"{animal_prefix}{suptitle_subject}",
+        fontsize=12,
+    )
+    return figure
+
+
+def _compute_pairwise_pair_pvalues(counts: NDArray[np.int64]) -> dict[tuple[int, int], float]:
+    """Returns the two-sided binomial p-value for every unordered pair of bar indices.
+
+    Notes:
+        Conditions on a strict-place cell having landed in pair ``i`` or pair ``j`` and tests the
+        null "the cell is equally likely to be in either" — ``counts[i] ~ Binomial(counts[i] +
+        counts[j], 0.5)``. Pairs with a zero combined count get ``p = 1.0`` since the test is
+        undefined there. No multiple-comparison correction is applied; the caller can apply
+        Bonferroni / Holm if required (with ``n = n_cue_pairs * (n_cue_pairs - 1) / 2``).
+    """
+    n_pairs = int(counts.size)
+    p_values: dict[tuple[int, int], float] = {}
+    for i in range(n_pairs):
+        for j in range(i + 1, n_pairs):
+            k_i = int(counts[i])
+            k_j = int(counts[j])
+            n_total = k_i + k_j
+            if n_total == 0:
+                p_values[(i, j)] = 1.0
+                continue
+            p_values[(i, j)] = float(
+                binomtest(k=k_i, n=n_total, p=0.5, alternative="two-sided").pvalue,
+            )
+    return p_values
+
+
+def _draw_nonsignificance_brackets(
+    axes: plt.Axes,
+    counts: NDArray[np.int64],
+    p_values: dict[tuple[int, int], float],
+    bar_max: int,
+    bracket_spacing: float,
+) -> None:
+    """Draws thin black ``ns`` brackets for every pairwise comparison that fails to reject p < 0.05.
+
+    Notes:
+        Inverts the usual significance overlay because in this dataset almost every pairwise
+        comparison clears p < 0.05 — flagging the *equivalent* pairs is the informative subset.
+        Brackets stack vertically above the tallest bar in the figure (``bar_max``) with constant
+        ``bracket_spacing`` between rows, sorted by span length so the shortest comparisons sit at
+        the bottom of the stack. ``clip_on=False`` keeps the brackets visible even when they
+        exceed the panel's data range.
+    """
+    nonsignificant: list[tuple[int, int]] = sorted(
+        (pair for pair, p in p_values.items() if p >= 0.05),
+        key=lambda item: (item[1] - item[0], item[0]),
+    )
+    if not nonsignificant:
+        return
+
+    base_y = float(bar_max) + bracket_spacing
+    tick_height = bracket_spacing * 0.35
+    for level, (left, right) in enumerate(nonsignificant):
+        y = base_y + level * bracket_spacing
+        axes.plot([left, right], [y, y], color="black", linewidth=0.7, clip_on=False)
+        axes.plot([left, left], [y, y - tick_height], color="black", linewidth=0.7, clip_on=False)
+        axes.plot([right, right], [y, y - tick_height], color="black", linewidth=0.7, clip_on=False)
+        axes.text(
+            (left + right) / 2.0, y + bracket_spacing * 0.05, "ns",
+            ha="center", va="bottom", fontsize=8, color="black", clip_on=False,
+        )
+
+
+def _resolve_session_cue_pair_counts(
+    session: DatasetSession,
+    trial_type: str | None,
+    n_cue_pairs: int,
+) -> tuple[NDArray[np.int64], list[str]] | None:
+    """Returns ``(per_pair_counts, pair_labels)`` for one session, or ``None``.
+
+    Notes:
+        Partitions the trial-geometry track length into ``n_cue_pairs`` equal-length pairs (no
+        ``data.feather`` walk) and bins each strict-place cell's rate-map peak position into the
+        pair containing it. Filtering the tuning frame to strict-place cells before materialising
+        the rate-map list column keeps the heavy ``to_list()`` deserialisation off the much larger
+        non-strict subset.
+    """
+    if not session.tuning_cells_path.exists() or not session.geometry_path.exists():
+        return None
+    if n_cue_pairs <= 0:
+        return None
+
+    frame = pl.read_ipc(source=session.tuning_cells_path, memory_map=True)
+    resolved_trial_type = trial_type
+    if resolved_trial_type is None and TuningColumn.TRIAL_TYPE.value in frame.columns:
+        unique_trial_types = frame[TuningColumn.TRIAL_TYPE.value].unique().to_list()
+        if not unique_trial_types:
+            return None
+        resolved_trial_type = str(unique_trial_types[0])
+    if resolved_trial_type is None:
+        return None
+    if TuningColumn.TRIAL_TYPE.value in frame.columns:
+        frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type)
+    if frame.height == 0 or TuningColumn.IS_STRICT_PLACE.value not in frame.columns:
+        return None
+
+    geometry = TrialGeometry.from_yaml(file_path=session.geometry_path)
+    geometry_entry = geometry.entries.get(resolved_trial_type)
+    if geometry_entry is None:
+        return None
+    track_length_cm = float(geometry_entry.trial_length_cm)
+    if track_length_cm <= 0:
+        return None
+
+    pair_length_cm = track_length_cm / n_cue_pairs
+    pair_bounds: list[tuple[float, float]] = [
+        (i * pair_length_cm, (i + 1) * pair_length_cm) for i in range(n_cue_pairs)
+    ]
+    pair_labels: list[str] = [f"{i + 1}-0" for i in range(n_cue_pairs)]
+
+    # Filter to strict-place cells before deserialising the rate-map list column. For a typical
+    # session ~75% of cells are dropped here, so the heavy ``to_list()`` cost shrinks proportionally.
+    strict_frame = frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value)).sort(TuningColumn.CELL_ID.value)
+    # noinspection PyTypeChecker
+    counts: NDArray[np.int64] = np.zeros(n_cue_pairs, dtype=np.int64)
+    if strict_frame.height == 0:
+        return counts, pair_labels
+
+    # noinspection PyTypeChecker
+    strict_rate_maps: NDArray[np.float32] = np.asarray(
+        strict_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    if strict_rate_maps.size == 0:
+        return counts, pair_labels
+    bin_count = int(strict_rate_maps.shape[1])
+    bin_size_cm = track_length_cm / bin_count if bin_count > 0 else 1.0
+
+    # Cells whose entire rate-map row is non-finite get the ``-1`` sentinel so the pair tests skip
+    # them rather than placing them at bin 0.
+    finite_for_argmax = np.where(np.isfinite(strict_rate_maps), strict_rate_maps, -np.inf)
+    # noinspection PyTypeChecker
+    peak_bins: NDArray[np.int64] = np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+    # noinspection PyTypeChecker
+    peak_cm: NDArray[np.float32] = (
+        (peak_bins.astype(np.float32) + np.float32(0.5)) * np.float32(bin_size_cm)
+    )
+    # noinspection PyTypeChecker
+    has_finite: NDArray[np.bool_] = np.any(np.isfinite(strict_rate_maps), axis=1)
+    peak_cm[~has_finite] = np.float32(-1.0)
+
+    for pair_index, (start_cm, end_cm) in enumerate(pair_bounds):
+        # noinspection PyTypeChecker
+        in_pair: NDArray[np.bool_] = (peak_cm >= start_cm) & (peak_cm < end_cm)
+        counts[pair_index] = int(np.sum(in_pair))
+    return counts, pair_labels
+
+
+def _draw_cue_zone_overlay(
+    axes: plt.Axes,
+    cue_boundaries_cm: tuple[float, ...],
+    trigger_zone: tuple[float, float] | None,
+    track_length_cm: float,
+) -> None:
+    """Draws cyan dotted verticals at the start and end of the cue zone holding the trigger zone.
+
+    Notes:
+        Shared by `plot_sorted_heatmap` and `plot_classified_heatmap`. ``cue_boundaries_cm`` arrives
+        already in canonical coordinates (produced by `_resolve_canonical_cue_boundaries`), so no
+        per-session shift is needed; the trigger zone center selects which canonical cue interval to
+        bracket. No-ops when either input is missing.
+
+    Args:
+        axes: The matplotlib axes to overlay.
+        cue_boundaries_cm: Canonical cue-identity transition positions for the trial type.
+        trigger_zone: ``(start_cm, end_cm)`` for the per-session trigger zone, or ``None``.
+        track_length_cm: Trial length used to extend the canonical boundary set with implicit
+            ``0`` and ``track_length_cm`` endpoints.
+    """
+    if not cue_boundaries_cm or trigger_zone is None:
+        return
+    cue_left, cue_right = _cue_zone_around_trigger(
+        cue_boundaries=cue_boundaries_cm,
+        trigger_center=0.5 * (trigger_zone[0] + trigger_zone[1]),
+        track_length_cm=track_length_cm,
+    )
+    axes.axvline(cue_left, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
+    axes.axvline(cue_right, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
+
+
+def _resolve_canonical_cue_boundaries(
+    session_path: Path,
     trial_type: str,
     track_length_cm: float,
 ) -> tuple[float, ...]:
-    """Returns trial-relative cm positions where the cue identity changes within a representative trial.
+    """Returns canonical cue-identity transition positions for the trial type.
 
     Notes:
-        Reads the session's ``data.feather`` and walks the first run-state trial of ``trial_type``,
-        treating each step where the ``cue`` column changes as a cue-zone boundary. The cue layout
-        is constant per trial type (each trial type owns a fixed cue sequence upstream), so a single
-        canonical-trial walk supplies boundary positions for every panel that shares that trial type.
-        Boundary positions are clipped to the open interval ``(0, track_length_cm)`` so the start /
-        end of the track are not redundantly drawn over the figure edges.
+        Routes through `assemble_run_session_data` so cue boundaries reuse the same realignment path
+        that produces the rate maps: trials get re-anchored to canonical zero via
+        `realign_trial_starts_to_first_cue`, the partial leading trial is dropped by the completeness
+        threshold in `compute_within_trial_position`, and the surviving samples already live in
+        canonical position coordinates. Walking ``np.diff`` on the post-realignment cue array then
+        captures every interior cue-identity transition in canonical coords directly — no
+        ``cue_offset_cm`` shift, no missing trial-start boundary, no track-wrap collision with the
+        implicit ``0`` / ``track_length`` endpoints.
 
     Args:
-        data_path: Path to the session's ``data.feather``.
-        trial_type: Trial type whose canonical cue layout to extract.
-        track_length_cm: Trial length used to clip boundaries to in-range positions.
+        session_path: Path to the forged session directory.
+        trial_type: Trial type to evaluate.
+        track_length_cm: Trial length used to clip boundaries to the open interval
+            ``(0, track_length_cm)`` so the implicit track endpoints are not duplicated.
 
     Returns:
-        A tuple of trial-relative cm positions of cue-identity transitions.
+        Sorted-unique tuple of canonical cm positions where cue identity changes inside the trial.
+        Empty when the session lacks data or the assembly fails.
     """
-    df = pl.read_ipc(
-        source=data_path,
-        columns=[
-            DatasetColumn.SYSTEM_STATE.value,
-            DatasetColumn.TRIAL.value,
-            DatasetColumn.TRIAL_TYPE.value,
-            DatasetColumn.DISTANCE_CM.value,
-            DatasetColumn.CUE.value,
-        ],
-        memory_map=True,
-    )
-    run = df.filter(
-        (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run")
-        & (pl.col(DatasetColumn.TRIAL.value) < 255)
-        & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type)
-    )
-    if run.height == 0:
+    try:
+        run_session = assemble_run_session_data(session_path=session_path, trial_type=trial_type)
+    except (KeyError, ValueError):
         return ()
-    first_trial_id = int(run[DatasetColumn.TRIAL.value][0])
-    first_trial = run.filter(pl.col(DatasetColumn.TRIAL.value) == first_trial_id)
-    if first_trial.height == 0:
+    if run_session.position.size < 2:
         return ()
+
+    cue = run_session.cue
+    position = run_session.position
     # noinspection PyTypeChecker
-    distance: NDArray[np.float32] = (
-        first_trial[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float32, copy=False)
-    )
-    # noinspection PyTypeChecker
-    cues: NDArray[np.int32] = (
-        first_trial[DatasetColumn.CUE.value].to_numpy().astype(np.int32, copy=False)
-    )
-    if distance.size == 0:
-        return ()
-    relative = distance - distance[0]
-    # noinspection PyTypeChecker
-    transitions: NDArray[np.int64] = np.where(np.diff(cues) != 0)[0] + 1
+    transitions: NDArray[np.int64] = np.where(np.diff(cue) != 0)[0] + 1
     if transitions.size == 0:
         return ()
-    boundaries = relative[transitions]
-    # Drops the trivial 0 / track_length boundaries; only interior cue transitions are useful overlays.
-    return tuple(
-        float(position)
-        for position in boundaries
-        if 0.0 < float(position) < track_length_cm
-    )
-
-
-def _shift_cue_boundaries_to_canonical(
-    cue_boundaries: tuple[float, ...],
-    cue_offset_cm: float,
-    track_length_cm: float,
-) -> tuple[float, ...]:
-    """Shifts runtime-trial-relative cue boundaries by ``+cue_offset_cm`` into canonical coordinates.
-
-    Notes:
-        The runtime starts each trial mid-first-cue (offset by ``cue_offset_cm`` into the canonical cue
-        sequence), so cue transitions sampled in ``data.feather`` lie at runtime-trial-rel positions.
-        Adding the offset shifts each transition into the canonical frame; boundaries that wrap past
-        the track end are folded back via modulo. Returns the input unchanged when ``cue_offset_cm``
-        is ``0`` (the canonical and runtime frames coincide).
-    """
-    if cue_offset_cm == 0.0 or not cue_boundaries:
-        return cue_boundaries
-    if track_length_cm <= 0.0:
-        return cue_boundaries
-    # Folds boundaries that cross the track wrap so every position stays in ``[0, track_length_cm)``,
-    # then sorts the result so consumers can walk them linearly.
-    shifted = sorted(
-        float((boundary + cue_offset_cm) % track_length_cm) for boundary in cue_boundaries
-    )
-    return tuple(shifted)
+    boundary_set: set[float] = set()
+    for sample_index in transitions:
+        value = float(position[sample_index])
+        if 0.0 < value < track_length_cm:
+            boundary_set.add(value)
+    return tuple(sorted(boundary_set))
 
 
 def _cue_zone_around_trigger(
@@ -1082,27 +1451,6 @@ def _stack_list_column(table: pl.DataFrame, column: TuningColumn, target_length:
         clipped_length = min(target_length, as_array.size)
         output[cell_index, :clipped_length] = as_array[:clipped_length]
     return output
-
-
-def _resolve_place_cell_order(table: pl.DataFrame) -> NDArray[np.int64]:
-    """Returns a length-cell_count permutation that sorts cells by their place-field center along the track,
-    placing cells without place fields after the sorted block.
-    """
-    cell_count = table.height
-    # noinspection PyTypeChecker
-    sort_keys: NDArray[np.float32] = np.full(cell_count, np.inf, dtype=np.float32)
-
-    pf_centers = table[TuningColumn.PF_CENTER_CM.value].to_list()
-    pf_intensities = table[TuningColumn.PF_MEAN_INTENSITY.value].to_list()
-    for cell_index in range(cell_count):
-        centers = pf_centers[cell_index]
-        intensities = pf_intensities[cell_index]
-        if not centers:
-            continue
-        intensity_array = np.asarray(intensities, dtype=np.float32)
-        sort_keys[cell_index] = float(centers[int(np.argmax(intensity_array))])
-    # noinspection PyTypeChecker
-    return np.argsort(sort_keys, kind="stable").astype(np.int64)
 
 
 def _bin_speed_by_position(
@@ -1156,127 +1504,3 @@ def _bin_speed_by_position(
     return mean_speed
 
 
-def _active_significance_columns(
-    *,
-    require_stable: bool,
-    require_peak_significant: bool,
-    table: pl.DataFrame,
-) -> list[tuple[str, TuningColumn]]:
-    """Returns the active p-value-bearing criteria as (display label, p-value column) pairs in canonical
-    order.
-    """
-    candidates: list[tuple[bool, str, TuningColumn]] = [
-        (require_stable, "Stable", TuningColumn.STABILITY_P_VALUE),
-        (require_peak_significant, "Peak", TuningColumn.PEAK_P_VALUE),
-    ]
-    return [(label, column) for active, label, column in candidates if active and column.value in table.columns]
-
-
-def _make_heatmap_figure(strip_count: int, figure_dpi: int) -> plt.Figure:
-    """Allocates a figure sized to leave room for the requested number of significance strips."""
-    base_width = 8.0
-    extra_width = 0.45 * strip_count
-    return plt.figure(figsize=(base_width + extra_width, 4), facecolor="white", dpi=figure_dpi)
-
-
-def _layout_heatmap_axes(
-    figure: plt.Figure,
-    strip_count: int,
-    *,
-    include_colorbar: bool,
-) -> tuple[list[plt.Axes], plt.Axes, plt.Axes | None]:
-    """Builds the gridspec layout for a heatmap with optional left-side significance strips and a right-side
-    colorbar.
-    """
-    width_ratios: list[float] = [_PLACE_STRIP_WIDTH_RATIO] * strip_count + [1.0]
-    if include_colorbar:
-        width_ratios.append(0.05)
-    grid = figure.add_gridspec(1, len(width_ratios), width_ratios=width_ratios, wspace=0.08)
-    strip_axes = [figure.add_subplot(grid[0, i]) for i in range(strip_count)]
-    main_axes = figure.add_subplot(grid[0, strip_count])
-    colorbar_axes = figure.add_subplot(grid[0, strip_count + 1]) if include_colorbar else None
-    return strip_axes, main_axes, colorbar_axes
-
-
-def _render_significance_strips(
-    figure: plt.Figure,
-    strip_axes: list[plt.Axes],
-    strip_columns: list[tuple[str, TuningColumn]],
-    table: pl.DataFrame,
-    ordered_indices: NDArray[np.int64],
-) -> None:
-    """Renders one ``-log10(p)`` strip per (label, column) entry in ``strip_columns`` alongside the main
-    heatmap.
-    """
-    if not strip_axes or not strip_columns:
-        return
-    floor = _PLACE_PVALUE_DISPLAY_FLOOR
-    vmax = float(-np.log10(floor))
-    cell_count = int(ordered_indices.size)
-    image = None
-    for axis, (label, column) in zip(strip_axes, strip_columns, strict=True):
-        # noinspection PyTypeChecker
-        p_values: NDArray[np.float32] = table[column.value].to_numpy().astype(np.float32, copy=False)
-        # noinspection PyTypeChecker
-        ordered_p: NDArray[np.float32] = np.empty(0, dtype=np.float32) if cell_count == 0 else p_values[ordered_indices]
-        # noinspection PyTypeChecker
-        clipped: NDArray[np.float32] = np.clip(ordered_p, floor, 1.0)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            # noinspection PyTypeChecker
-            neg_log_p: NDArray[np.float32] = (-np.log10(clipped)).astype(np.float32, copy=False)
-        # noinspection PyTypeChecker
-        cleaned: NDArray[np.float32] = np.where(np.isnan(ordered_p), 0.0, neg_log_p).astype(np.float32, copy=False)
-        column_data = cleaned.reshape(-1, 1) if cleaned.size > 0 else np.zeros((1, 1), dtype=np.float32)
-        image = axis.imshow(
-            column_data,
-            cmap="Reds",
-            extent=(0.0, 1.0, float(max(cell_count, 1)), 0.0),
-            vmin=0.0,
-            vmax=vmax,
-            interpolation="none",
-            origin="upper",
-            aspect="auto",
-        )
-        axis.set_xticks([])
-        axis.set_yticks([])
-        axis.set_xlabel(label, fontsize=7, rotation=0, labelpad=2)
-        for spine in axis.spines.values():
-            spine.set_linewidth(0.4)
-            spine.set_color("0.5")
-    strip_axes[0].set_ylabel("-log₁₀(p)", fontsize=7)
-    if image is not None:
-        anchor = strip_axes[0].get_position()
-        bar_height = 0.02
-        bar_axes = figure.add_axes(
-            (anchor.x0, anchor.y0 - bar_height - 0.04, anchor.width * len(strip_axes), bar_height)
-        )
-        color_bar = figure.colorbar(image, cax=bar_axes, orientation="horizontal")
-        landmark_p_values = [1.0, 0.05, 0.01, 0.001]
-        # noinspection PyTypeChecker
-        landmark_ticks: list[float] = [float(-np.log10(max(p, floor))) for p in landmark_p_values if p >= floor]
-        color_bar.set_ticks(landmark_ticks)
-        color_bar.set_ticklabels(
-            [f"{p:g}" for p in landmark_p_values if p >= floor],
-            fontsize=6,
-        )
-        color_bar.ax.tick_params(length=2, pad=1)
-        color_bar.set_label("p", fontsize=6, labelpad=2)
-
-
-def _compose_population_label(
-    *,
-    require_place: bool,
-    require_stable: bool,
-    require_peak_significant: bool,
-) -> str:
-    """Returns ``"Place ∩ Stable ∩ Peak"``-style labels from active criterion bools; ``"All cells"`` when all
-    False.
-    """
-    parts: list[str] = []
-    if require_place:
-        parts.append("Place")
-    if require_stable:
-        parts.append("Stable")
-    if require_peak_significant:
-        parts.append("Peak")
-    return " ∩ ".join(parts) if parts else "All cells"

@@ -22,7 +22,7 @@ from ...shared_assets import (
     TrialGeometry,
     TrialGeometryEntry,
 )
-from ..shared_utilities import realign_trial_starts_to_first_cue, trim_acquisition_warmup
+from ..shared_utilities import trim_acquisition_warmup, realign_trial_starts_to_first_cue
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,6 +49,9 @@ class RunSessionData:
     """Animal's speed in cm/s at each sample."""
     trial_ids: NDArray[np.int32]
     """Trial identifier at each sample."""
+    cue: NDArray[np.uint8]
+    """Active virtual-reality cue identifier at each sample, aligned with `position` in canonical
+    coordinates (the same realignment that produced `trial_ids` / `position` is applied)."""
     trial_type: str
     """The trial type the loaded samples belong to."""
     geometry: TrialGeometryEntry
@@ -120,14 +123,14 @@ def assemble_run_session_data(
     trial_ids: NDArray[np.int32] = df[DatasetColumn.TRIAL.value].to_numpy().astype(np.int32)
     # noinspection PyTypeChecker
     speed: NDArray[np.float32] = df[DatasetColumn.SPEED_CM_S.value].to_numpy().astype(np.float32)
+    # noinspection PyTypeChecker
+    cue: NDArray[np.uint8] = df[DatasetColumn.CUE.value].to_numpy().astype(np.uint8)
 
     # When the runtime starts trials mid-first-cue (cue_offset_cm > 0), re-anchor trial boundaries to
     # cue-aligned positions so the rate-map x-axis at position 0 corresponds to the canonical first-cue start.
     # The first / last realigned trials are typically incomplete and get dropped by the completeness mask in
     # ``compute_within_trial_position``.
     if geometry_entry.cue_offset_cm != 0.0:
-        # noinspection PyTypeChecker
-        cue: NDArray[np.uint8] = df[DatasetColumn.CUE.value].to_numpy().astype(np.uint8)
         trial_ids = realign_trial_starts_to_first_cue(cue=cue)
 
     position = compute_within_trial_position(
@@ -143,6 +146,7 @@ def assemble_run_session_data(
         position=position[valid],
         speed=speed[valid],
         trial_ids=trial_ids[valid],
+        cue=cue[valid],
         trial_type=trial_type,
         geometry=geometry_entry,
         sampling_rate_hz=sampling_rate_hz,
