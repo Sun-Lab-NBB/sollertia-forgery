@@ -9,6 +9,7 @@ trial geometry data file, so per-session compute is cheap enough to repeat on de
 
 from .plotting import plot_lick_scatter, plot_trial_outcomes
 from .lick_protocol import (
+    CueSpan,
     TrialBlock,
     LickContext,
     SessionLickData,
@@ -30,6 +31,7 @@ __all__ = [
     "OUTCOME_FAILURE",
     "OUTCOME_GUIDED",
     "OUTCOME_SUCCESS",
+    "CueSpan",
     "LickContext",
     "SessionLickData",
     "SessionTrialOutcomes",

@@ -8,6 +8,7 @@ from .plotting import (
     plot_cue_pair_place_counts,
     plot_speed_and_activity_by_position,
     plot_population_activity_by_position,
+    plot_place_cell_peak_distribution_around_shift,
 )
 from .tuning_report import (
     TuningColumn,
@@ -35,6 +36,7 @@ __all__ = [
     "plot_classified_heatmap",
     "plot_cue_pair_place_counts",
     "plot_per_trial_activity",
+    "plot_place_cell_peak_distribution_around_shift",
     "plot_population_activity_by_position",
     "plot_reward_com_histogram",
     "plot_sorted_heatmap",

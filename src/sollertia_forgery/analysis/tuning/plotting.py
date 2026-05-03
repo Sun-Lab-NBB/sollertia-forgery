@@ -1504,3 +1504,423 @@ def _bin_speed_by_position(
     return mean_speed
 
 
+_PEAK_DISTRIBUTION_COLOR_BEFORE: str = "#2ca02c"
+"""Line color for the 'before' group in the peak-distribution plot, matching the green Day-0 trace
+in Sun et al. 2022 Fig. 1h."""
+_PEAK_DISTRIBUTION_COLOR_AFTER: str = "#000000"
+"""Line color for the 'after' group, matching the black Day-1 trace in Sun et al. 2022 Fig. 1h."""
+
+
+def plot_place_cell_peak_distribution_around_shift(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    before_sessions: tuple[int, ...],
+    after_sessions: tuple[int, ...],
+    trial_type: str | None = None,
+    animal_id: str | None = None,
+    classifier: str = "place",
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots the cue-aligned distribution of place-cell peak positions before vs after a reward shift.
+
+    Notes:
+        Replicates the layout of Sun et al. 2022 (Nature) Fig. 1h: the track is partitioned into
+        cue-aligned bins (one cue wide, no two adjacent cues sharing a bin), the fraction of strict-
+        place cells whose rate-map peak falls inside each bin is computed per session, and the
+        per-bin fractions are averaged across the supplied "before" and "after" session groups. The
+        two averages render as line traces with SEM error bars over a shared x-axis. Vertical dashed
+        lines mark the trigger-zone center from each group's first session so a reward-zone shift
+        between groups reads off the figure directly.
+
+        Cue-aligned bins are derived via the same canonical-realignment path used by
+        ``plot_sorted_heatmap``: the first 'before' session contributes the cue boundary set, which
+        is extended with ``0`` and ``track_length_cm`` to close the bin sequence. For trial types
+        whose cue catalog is uniform (e.g., ``cyclic_4_cue``: A-Gray-B-Gray-C-Gray-D-Gray, 30 cm
+        each), every bin is exactly one cue wide and the reward-trailing gray remains separate from
+        the preceding named cue.
+
+    References:
+        Sun, C., Yang, W., Martin, J. & Tonegawa, S. Hippocampal neurons represent events as
+        transferable units of experience. Nature 612, 478-486 (2022). Figure 1h.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries for the animal.
+        before_sessions: 1-indexed session numbers averaged together as the 'before-shift' group.
+        after_sessions: 1-indexed session numbers averaged together as the 'after-shift' group.
+        trial_type: Trial type whose tuning frames drive the distribution. ``None`` resolves to the
+            first trial type in the first 'before' session's tuning feather.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        classifier: ``"place"`` (default) selects ``IS_STRICT_PLACE`` cells; ``"reward"`` selects
+            ``IS_REWARD_CELL`` cells.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure with one axes carrying the two line traces and the reward-shift markers.
+    """
+    figure, axes = plt.subplots(
+        1, 1, figsize=(7.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+    )
+    classifier_column = (
+        TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
+        else TuningColumn.IS_REWARD_CELL.value
+    )
+    classifier_label = "place cells" if classifier == "place" else "reward cells"
+
+    before_indices = _resolve_one_indexed_sessions(
+        session_count=len(sessions), one_indexed=before_sessions,
+    )
+    after_indices = _resolve_one_indexed_sessions(
+        session_count=len(sessions), one_indexed=after_sessions,
+    )
+    if not before_indices or not after_indices:
+        axes.text(
+            0.5, 0.5, "no sessions resolved for one or both groups",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
+        sessions=sessions, reference_session_index=before_indices[0], trial_type=trial_type,
+    )
+    if resolved_trial_type is None or bin_edges_cm.size < 2:
+        axes.text(
+            0.5, 0.5, "no cue-aligned bin layout available",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    before_fractions = _stack_group_fractions(
+        sessions=sessions, session_indices=before_indices,
+        trial_type=resolved_trial_type, classifier_column=classifier_column,
+        bin_edges_cm=bin_edges_cm,
+    )
+    after_fractions = _stack_group_fractions(
+        sessions=sessions, session_indices=after_indices,
+        trial_type=resolved_trial_type, classifier_column=classifier_column,
+        bin_edges_cm=bin_edges_cm,
+    )
+
+    bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
+    bin_count = bin_centers_cm.size
+
+    _draw_peak_distribution_line(
+        axes=axes, bin_centers_cm=bin_centers_cm, fractions=before_fractions,
+        color=_PEAK_DISTRIBUTION_COLOR_BEFORE,
+        label=f"Before shift (n={before_fractions.shape[0]} day(s))",
+    )
+    _draw_peak_distribution_line(
+        axes=axes, bin_centers_cm=bin_centers_cm, fractions=after_fractions,
+        color=_PEAK_DISTRIBUTION_COLOR_AFTER,
+        label=f"After shift (n={after_fractions.shape[0]} day(s))",
+    )
+
+    former_reward_cm = _resolve_trigger_zone_center(
+        session=sessions[before_indices[0]], trial_type=resolved_trial_type,
+    )
+    current_reward_cm = _resolve_trigger_zone_center(
+        session=sessions[after_indices[0]], trial_type=resolved_trial_type,
+    )
+    _annotate_reward_marker(
+        axes=axes, position_cm=former_reward_cm,
+        color=_PEAK_DISTRIBUTION_COLOR_BEFORE, label="former reward",
+        track_length_cm=float(track_length_cm),
+    )
+    if current_reward_cm is not None and current_reward_cm != former_reward_cm:
+        _annotate_reward_marker(
+            axes=axes, position_cm=current_reward_cm,
+            color=_PEAK_DISTRIBUTION_COLOR_AFTER, label="current reward",
+            track_length_cm=float(track_length_cm),
+        )
+
+    axes.set_xlim(0, float(track_length_cm))
+    axes.set_xticks(bin_centers_cm.tolist())
+    axes.set_xticklabels(
+        [
+            f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
+            for i in range(bin_count)
+        ],
+        fontsize=8, rotation=45, ha="right",
+    )
+    axes.set_xlabel("PF peak location (cm)", fontsize=10)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
+    axes.tick_params(axis="y", labelsize=8)
+    axes.set_ylim(bottom=0)
+    axes.legend(loc="upper left", frameon=False, fontsize=9)
+
+    title_subject = (
+        f"{classifier_label} peak distribution — before vs after reward shift, "
+        f"trial type {resolved_trial_type!r}"
+    )
+    figure.suptitle(
+        f"Animal {animal_id} {title_subject}" if animal_id is not None
+        else title_subject[:1].upper() + title_subject[1:],
+        fontsize=11,
+    )
+    return figure
+
+
+def _resolve_one_indexed_sessions(
+    session_count: int, one_indexed: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Maps a tuple of 1-indexed session numbers to deduplicated 0-indexed integers in chronological order."""
+    resolved: list[int] = []
+    for value in one_indexed:
+        idx = int(value) - 1
+        if 0 <= idx < session_count and idx not in resolved:
+            resolved.append(idx)
+    resolved.sort()
+    return tuple(resolved)
+
+
+def _resolve_peak_distribution_layout(
+    sessions: tuple[DatasetSession, ...],
+    reference_session_index: int,
+    trial_type: str | None,
+) -> tuple[str | None, float, NDArray[np.float64]]:
+    """Returns ``(trial_type, track_length_cm, bin_edges_cm)`` for the peak-distribution figure.
+
+    Notes:
+        Resolves the trial type from the reference session's tuning frame when not supplied. Walks
+        a single full canonical trial (post-realignment, skipping the leading partial trial whose
+        transitions are offset by ``cue_offset_cm``) to collect clean cue-aligned bin edges, then
+        prepends ``0`` and appends ``track_length_cm`` so the bin sequence closes the track.
+        Returns an empty edges array when the reference session is missing data.
+    """
+    reference_session = sessions[reference_session_index]
+    resolved_trial_type = trial_type
+    if resolved_trial_type is None and reference_session.tuning_cells_path.exists():
+        frame = pl.read_ipc(source=reference_session.tuning_cells_path, memory_map=True)
+        if TuningColumn.TRIAL_TYPE.value in frame.columns:
+            unique_trial_types = frame[TuningColumn.TRIAL_TYPE.value].unique().to_list()
+            if unique_trial_types:
+                resolved_trial_type = str(unique_trial_types[0])
+    if resolved_trial_type is None:
+        # noinspection PyTypeChecker
+        empty: NDArray[np.float64] = np.zeros(0, dtype=np.float64)
+        return None, 0.0, empty
+
+    if not reference_session.geometry_path.exists():
+        # noinspection PyTypeChecker
+        empty = np.zeros(0, dtype=np.float64)
+        return resolved_trial_type, 0.0, empty
+    geometry = TrialGeometry.from_yaml(file_path=reference_session.geometry_path)
+    geometry_entry = geometry.entries.get(resolved_trial_type)
+    if geometry_entry is None:
+        # noinspection PyTypeChecker
+        empty = np.zeros(0, dtype=np.float64)
+        return resolved_trial_type, 0.0, empty
+    track_length_cm = float(geometry_entry.trial_length_cm)
+    if track_length_cm <= 0:
+        # noinspection PyTypeChecker
+        empty = np.zeros(0, dtype=np.float64)
+        return resolved_trial_type, 0.0, empty
+
+    bin_edges_cm = _resolve_full_trial_bin_edges_cm(
+        session=reference_session,
+        trial_type=resolved_trial_type,
+        track_length_cm=track_length_cm,
+    )
+    return resolved_trial_type, track_length_cm, bin_edges_cm
+
+
+def _resolve_full_trial_bin_edges_cm(
+    session: DatasetSession,
+    trial_type: str,
+    track_length_cm: float,
+) -> NDArray[np.float64]:
+    """Walks one full canonical trial of the session to derive clean cue-aligned bin edges.
+
+    Notes:
+        ``assemble_run_session_data`` re-anchors trials to the canonical first-cue start when
+        ``cue_offset_cm > 0`` and drops trials that fall below the 90% completeness threshold. The
+        leading post-realignment trial typically begins mid-first-cue (the run-state subset
+        starts partway through a cycle), so its cue transitions are offset by ``cue_offset_cm``
+        relative to the canonical layout. Picking the first trial whose measured length is closest
+        to ``track_length_cm`` skips that partial leader and produces canonical 30-cm-aligned
+        edges for ``cyclic_4_cue``-style trials.
+    """
+    try:
+        run_session = assemble_run_session_data(session_path=session.session_path, trial_type=trial_type)
+    except (KeyError, ValueError):
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.float64)
+    if run_session.position.size < 2:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.float64)
+
+    trial_ids = run_session.trial_ids
+    position = run_session.position
+    cue = run_session.cue
+    unique_trials = np.unique(trial_ids)
+    if unique_trials.size == 0:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.float64)
+
+    # Picks the trial whose measured length is closest to the canonical track length. The first
+    # realigned trial is typically a leading partial whose measured length is smaller than the
+    # canonical cycle, so this selection naturally drops it.
+    best_trial_id = int(unique_trials[0])
+    best_length = -np.inf
+    for candidate in unique_trials.tolist():
+        # noinspection PyTypeChecker
+        mask: NDArray[np.bool_] = trial_ids == int(candidate)
+        if not mask.any():
+            continue
+        candidate_position = position[mask]
+        candidate_length = float(candidate_position[-1] - candidate_position[0])
+        if abs(candidate_length - track_length_cm) < abs(best_length - track_length_cm):
+            best_length = candidate_length
+            best_trial_id = int(candidate)
+
+    # noinspection PyTypeChecker
+    selected_mask: NDArray[np.bool_] = trial_ids == best_trial_id
+    target_cue = cue[selected_mask]
+    target_position = position[selected_mask]
+    if target_cue.size < 2:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.float64)
+
+    # noinspection PyTypeChecker
+    transitions: NDArray[np.int64] = np.flatnonzero(np.diff(target_cue.astype(np.int64))) + 1
+    boundary_values: list[float] = []
+    for sample_index in transitions.tolist():
+        value = float(target_position[sample_index])
+        if 0.0 < value < track_length_cm:
+            boundary_values.append(value)
+    boundary_values = sorted(set(boundary_values))
+    # noinspection PyTypeChecker
+    return np.array((0.0, *boundary_values, track_length_cm), dtype=np.float64)
+
+
+def _stack_group_fractions(
+    sessions: tuple[DatasetSession, ...],
+    session_indices: tuple[int, ...],
+    trial_type: str,
+    classifier_column: str,
+    bin_edges_cm: NDArray[np.float64],
+) -> NDArray[np.float64]:
+    """Returns the (n_sessions, n_bins) per-session fractions of classified cells in each cue bin.
+
+    Notes:
+        Sessions whose tuning feather is missing or carries zero classified cells contribute a row
+        of zeros so the SEM aggregator still sees the full group size. Peak positions are computed
+        from each cell's ``RATE_MAP`` argmax converted to centimeters via the rate map's bin
+        spacing; cells whose entire rate-map row is non-finite are dropped before binning.
+    """
+    bin_count = max(int(bin_edges_cm.size) - 1, 1)
+    rows: list[NDArray[np.float64]] = []
+    for sess_idx in session_indices:
+        session = sessions[sess_idx]
+        if not session.tuning_cells_path.exists():
+            # noinspection PyTypeChecker
+            rows.append(np.zeros(bin_count, dtype=np.float64))
+            continue
+        frame = pl.read_ipc(source=session.tuning_cells_path, memory_map=True)
+        if TuningColumn.TRIAL_TYPE.value in frame.columns:
+            frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == trial_type)
+        if frame.height == 0 or classifier_column not in frame.columns:
+            # noinspection PyTypeChecker
+            rows.append(np.zeros(bin_count, dtype=np.float64))
+            continue
+        classified_frame = frame.filter(pl.col(classifier_column))
+        total_classified = int(classified_frame.height)
+        if total_classified == 0:
+            # noinspection PyTypeChecker
+            rows.append(np.zeros(bin_count, dtype=np.float64))
+            continue
+        # noinspection PyTypeChecker
+        rate_maps: NDArray[np.float32] = np.asarray(
+            classified_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+        )
+        if rate_maps.size == 0:
+            # noinspection PyTypeChecker
+            rows.append(np.zeros(bin_count, dtype=np.float64))
+            continue
+        rate_map_bin_count = int(rate_maps.shape[1])
+        bin_size_cm = float(bin_edges_cm[-1]) / rate_map_bin_count if rate_map_bin_count > 0 else 1.0
+        finite_for_argmax = np.where(np.isfinite(rate_maps), rate_maps, -np.inf)
+        # noinspection PyTypeChecker
+        peak_bins: NDArray[np.int64] = np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+        # noinspection PyTypeChecker
+        peak_cm: NDArray[np.float64] = (
+            (peak_bins.astype(np.float64) + 0.5) * bin_size_cm
+        )
+        # noinspection PyTypeChecker
+        has_finite: NDArray[np.bool_] = np.any(np.isfinite(rate_maps), axis=1)
+        peak_cm = peak_cm[has_finite]
+        # noinspection PyTypeChecker
+        counts, _ = np.histogram(peak_cm, bins=bin_edges_cm)
+        # noinspection PyTypeChecker
+        fraction: NDArray[np.float64] = (
+            counts.astype(np.float64) / float(total_classified) * 100.0
+        )
+        rows.append(fraction)
+    if not rows:
+        # noinspection PyTypeChecker
+        return np.zeros((0, bin_count), dtype=np.float64)
+    return np.stack(rows, axis=0)
+
+
+def _draw_peak_distribution_line(
+    axes: plt.Axes,
+    bin_centers_cm: NDArray[np.float64],
+    fractions: NDArray[np.float64],
+    color: str,
+    label: str,
+) -> None:
+    """Draws one mean ± SEM line trace from a (n_sessions, n_bins) fraction stack."""
+    if fractions.shape[0] == 0:
+        return
+    # noinspection PyTypeChecker
+    mean_per_bin: NDArray[np.float64] = fractions.mean(axis=0)
+    if fractions.shape[0] > 1:
+        # noinspection PyTypeChecker
+        sem_per_bin: NDArray[np.float64] = fractions.std(axis=0, ddof=1) / np.sqrt(fractions.shape[0])
+    else:
+        # noinspection PyTypeChecker
+        sem_per_bin = np.zeros_like(mean_per_bin)
+    axes.errorbar(
+        bin_centers_cm, mean_per_bin, yerr=sem_per_bin,
+        color=color, marker="o", markersize=4, linewidth=1.4, capsize=3,
+        label=label,
+    )
+
+
+def _resolve_trigger_zone_center(
+    session: DatasetSession, trial_type: str,
+) -> float | None:
+    """Returns the trigger-zone center in centimeters for a session, or ``None`` when unavailable."""
+    if not session.geometry_path.exists():
+        return None
+    geometry = TrialGeometry.from_yaml(file_path=session.geometry_path)
+    entry = geometry.entries.get(trial_type)
+    if entry is None:
+        return None
+    return 0.5 * (
+        float(entry.stimulus_trigger_zone_start_cm) + float(entry.stimulus_trigger_zone_end_cm)
+    )
+
+
+def _annotate_reward_marker(
+    axes: plt.Axes, position_cm: float | None, color: str, label: str, track_length_cm: float,
+) -> None:
+    """Draws one dashed vertical line at ``position_cm`` and labels it at the top of the axes.
+
+    Notes:
+        Anchors the label to the left of the marker when the marker sits in the right third of the
+        track so the text fits inside the axes bounds, otherwise anchors to the right of the
+        marker.
+    """
+    if position_cm is None:
+        return
+    axes.axvline(position_cm, color=color, linestyle="--", linewidth=1.0, alpha=0.85)
+    on_right_edge = position_cm > 0.66 * track_length_cm
+    axes.annotate(
+        label, xy=(position_cm, 1.0), xycoords=("data", "axes fraction"),
+        xytext=(-2 if on_right_edge else 2, -2), textcoords="offset points",
+        ha="right" if on_right_edge else "left", va="top", fontsize=8, color=color,
+    )
+
+

@@ -19,6 +19,7 @@ from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_times
 from ...shared_assets import (
     DatasetFiles,
     DatasetColumn,
+    TrialGeometry,
 )
 
 if TYPE_CHECKING:
@@ -42,9 +43,12 @@ class TrialOutcome(StrEnum):
 
     Notes:
         Every run-state trial is classified as exactly one of these three values; the categories are
-        mutually exclusive by construction. Guided takes precedence over success because the system
-        delivers the reward under guidance regardless of the animal's behavior, so a guided trial is
-        a guided trial even if a reward sample is also present.
+        mutually exclusive by construction. A trial is `SUCCESS` whenever the animal triggered the
+        reward via licking inside the stimulus trigger zone (its position at the first rewarded
+        sample sits before ``stimulus_location_cm``) — this overrides the guided-trial flag because
+        the animal earned the reward before the auto-release fired. A trial is `GUIDED` when the
+        guidance flag is set but the animal did not initiate the reward in time; the system
+        delivered the reward under auto-release.
 
         The integer codes (``code`` property) are the storage representation in
         ``SessionTrialOutcomes.trial_outcomes``; the StrEnum members are the human-readable companion
@@ -54,10 +58,11 @@ class TrialOutcome(StrEnum):
     FAILURE = "failure"
     """Animal completed the trial without earning a reward and without guidance."""
     SUCCESS = "success"
-    """Animal earned the reward without guidance (any rewarded sample, no guidance flag)."""
+    """Animal initiated the reward via licking inside the stimulus trigger zone before the
+    automated release fired (or earned a reward on a non-guided trial)."""
     GUIDED = "guided"
-    """Trial ran under reinforcing or aversive guidance (any guided sample). Takes precedence over
-    `SUCCESS` because guided trials still receive the reward via system intervention."""
+    """Trial ran under reinforcing or aversive guidance and the animal did not initiate the reward
+    before the auto-release fired."""
 
     @property
     def code(self) -> int:
@@ -168,24 +173,31 @@ def extract_session_trial_outcomes(session_path: Path) -> SessionTrialOutcomes:
         outcome from the mutually exclusive set ``{TrialOutcome.FAILURE, TrialOutcome.SUCCESS,
         TrialOutcome.GUIDED}``:
 
-        * ``GUIDED`` when any sample has ``reinforcing_guided > 0`` or ``aversive_guided > 0``
-          (whichever columns exist in the feather). Wins precedence — a guided trial that also fired
-          a reward sample is still classified as guided because the reward came from system
-          intervention, not from the animal's behavior.
-        * ``SUCCESS`` when the trial is not guided and any sample's ``reward`` value is anything
-          other than ``"no"`` (the reward Enum's ``"yes"`` and ``"tone"`` both indicate a rewarded
-          window because the reward tone outlasts the water-pulse interval).
-        * ``FAILURE`` otherwise — the trial completed with neither guidance nor reward.
+        * ``SUCCESS`` when the animal initiated the reward via licking inside the stimulus trigger
+          zone before the auto-release fired. Detected by checking whether the trial-relative
+          position at the *first* rewarded sample sits below the trial type's
+          ``stimulus_location_cm`` boundary, which the animal must touch to trigger the auto-
+          release. Wins precedence — overrides the guided-trial flag because the animal earned
+          the reward before the system would have intervened. Also covers regular non-guided
+          rewarded trials (no guidance flag, any rewarded sample).
+        * ``GUIDED`` when the guidance flag is set on any sample and the trial does not qualify as
+          ``SUCCESS``. Captures both the auto-release case (reward fired at or past
+          ``stimulus_location_cm``) and the no-reward-but-guidance case.
+        * ``FAILURE`` otherwise — the trial completed with neither a lick-earned reward nor any
+          guidance event.
 
         Sessions whose feather lacks either guidance column simply skip that contribution to the
-        guided check.
+        guided check. Trials whose trial type is missing from the session's geometry layout fall
+        back to the original guidance-precedent logic (no position-based override is possible).
 
     Args:
-        session_path: Path to the forged session directory containing ``data.feather``.
+        session_path: Path to the forged session directory containing ``data.feather`` and the
+            trial geometry data file.
 
     Returns:
         A SessionTrialOutcomes with one entry per unique completed run-state trial.
     """
+    geometry = TrialGeometry.from_yaml(file_path=session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY))
     data_path = session_path.joinpath(DatasetFiles.DATA)
     available_columns = pl.scan_ipc(source=data_path).collect_schema().names()
     has_reinforcing = DatasetColumn.REINFORCING_GUIDED.value in available_columns
@@ -194,7 +206,9 @@ def extract_session_trial_outcomes(session_path: Path) -> SessionTrialOutcomes:
     columns = [
         DatasetColumn.SYSTEM_STATE.value,
         DatasetColumn.TRIAL.value,
+        DatasetColumn.TRIAL_TYPE.value,
         DatasetColumn.REWARD.value,
+        DatasetColumn.DISTANCE_CM.value,
     ]
     if has_reinforcing:
         columns.append(DatasetColumn.REINFORCING_GUIDED.value)
@@ -221,6 +235,11 @@ def extract_session_trial_outcomes(session_path: Path) -> SessionTrialOutcomes:
         (run[DatasetColumn.REWARD.value] != "no").to_numpy()
     )
     # noinspection PyTypeChecker
+    distance: NDArray[np.float64] = (
+        run[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float64)
+    )
+    trial_types_per_sample: list[str] = run[DatasetColumn.TRIAL_TYPE.value].to_list()
+    # noinspection PyTypeChecker
     sample_count: int = int(trials.size)
 
     # Builds a per-sample "is guided" mask combining whichever guidance columns are present. Missing
@@ -241,22 +260,25 @@ def extract_session_trial_outcomes(session_path: Path) -> SessionTrialOutcomes:
         sample_is_guided |= aversive_guided > 0
 
     # Assigns each sample a session-local trial slot by walking the trial column once. Samples within
-    # one trial share the same slot; switching trial id starts a new slot. This avoids relying on
-    # ``np.unique`` which would lose chronological order when trial ids are not strictly increasing
-    # within a session.
+    # one trial share the same slot; switching trial id starts a new slot. Tracks each slot's first-
+    # sample index and trial-type label so the lick-earned check below can compute the trial-relative
+    # position at first reward without re-walking the trial column.
     # noinspection PyTypeChecker
     sample_slots: NDArray[np.int64] = np.zeros(sample_count, dtype=np.int64)
+    slot_first_sample: list[int] = [0]
+    slot_trial_types: list[str] = [trial_types_per_sample[0]]
     current_trial = int(trials[0])
     slot_count = 1
     for sample_index in range(1, sample_count):
         if int(trials[sample_index]) != current_trial:
             current_trial = int(trials[sample_index])
             slot_count += 1
+            slot_first_sample.append(sample_index)
+            slot_trial_types.append(trial_types_per_sample[sample_index])
         sample_slots[sample_index] = slot_count - 1
 
     # Per-trial reductions: a trial is guided if ANY of its samples has the guidance flag set, and
-    # rewarded if ANY of its samples has the reward flag set. ``np.bincount`` would also work but
-    # ``np.maximum.reduceat`` is allocation-free and matches the per-trial OR semantics directly.
+    # rewarded if ANY of its samples has the reward flag set.
     # noinspection PyTypeChecker
     trial_guided: NDArray[np.bool_] = np.zeros(slot_count, dtype=np.bool_)
     # noinspection PyTypeChecker
@@ -264,10 +286,41 @@ def extract_session_trial_outcomes(session_path: Path) -> SessionTrialOutcomes:
     np.logical_or.at(trial_guided, sample_slots, sample_is_guided)
     np.logical_or.at(trial_rewarded, sample_slots, sample_rewarded)
 
+    # Per-trial lick-earned check: the trial-relative position at the first rewarded sample is
+    # below the trial type's ``stimulus_location_cm`` boundary, indicating the animal initiated the
+    # reward via licking inside the stimulus trigger zone before the auto-release fired. Trials
+    # whose trial type is missing from the geometry layout cannot resolve a boundary and stay False
+    # (the original guided-precedent logic still applies via ``trial_guided``).
+    # noinspection PyTypeChecker
+    trial_lick_earned: NDArray[np.bool_] = np.zeros(slot_count, dtype=np.bool_)
+    for slot_index in range(slot_count):
+        if not bool(trial_rewarded[slot_index]):
+            continue
+        slot_start = slot_first_sample[slot_index]
+        slot_end = (
+            slot_first_sample[slot_index + 1] if slot_index + 1 < slot_count else sample_count
+        )
+        # noinspection PyTypeChecker
+        slot_reward_window: NDArray[np.bool_] = sample_rewarded[slot_start:slot_end]
+        first_reward_offset = int(np.argmax(slot_reward_window))
+        position_at_reward = float(
+            distance[slot_start + first_reward_offset] - distance[slot_start]
+        )
+        entry = geometry.entries.get(slot_trial_types[slot_index])
+        if entry is None:
+            continue
+        if position_at_reward < float(entry.stimulus_location_cm):
+            trial_lick_earned[slot_index] = True
+
+    # Classification: lick-earned trials win unconditionally (the animal triggered the reward via
+    # licking before the auto-release fired). Otherwise, guided takes precedence over a "rewarded
+    # but not lick-earned" trial because the system delivered the reward via auto-release.
     # noinspection PyTypeChecker
     trial_outcomes: NDArray[np.uint8] = np.full(slot_count, OUTCOME_FAILURE, dtype=np.uint8)
-    trial_outcomes[trial_rewarded & ~trial_guided] = OUTCOME_SUCCESS
-    trial_outcomes[trial_guided] = OUTCOME_GUIDED
+    success_mask = trial_lick_earned | (trial_rewarded & ~trial_guided)
+    trial_outcomes[success_mask] = OUTCOME_SUCCESS
+    guided_mask = trial_guided & ~success_mask
+    trial_outcomes[guided_mask] = OUTCOME_GUIDED
 
     return SessionTrialOutcomes(trial_outcomes=trial_outcomes)
 

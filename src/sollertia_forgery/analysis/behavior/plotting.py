@@ -38,6 +38,31 @@ _COLOR_FAILURE: str = "#d62728"
 _COLOR_GUIDED: str = "#7f7f7f"
 """Stack-bar color for trials classified as ``OUTCOME_GUIDED`` (system delivered reward via guidance)."""
 
+_CUE_GRAY_CODE: int = 0
+"""Convention used by the project's experiment configurations: cue code 0 is the neutral 'Gray' filler
+between named cues, and the cue-block panel renders it in a low-saturation gray."""
+_COLOR_CUE_GRAY: str = "#dddddd"
+"""Fill color for the neutral 'Gray' cue (code 0) in the top reference panel."""
+_COLOR_CUE_PALETTE: tuple[str, ...] = (
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#bcbd22",
+)
+"""Distinct fill colors cycled for non-gray cue codes in the top reference panel. Indexed by
+``(code - 1) % len(palette)`` so cue codes 1, 2, 3, ... map to consecutive palette entries."""
+
+
+def _cue_color(code: int) -> str:
+    """Returns the fill color for a cue rectangle based on its uint8 code."""
+    if code == _CUE_GRAY_CODE:
+        return _COLOR_CUE_GRAY
+    return _COLOR_CUE_PALETTE[(code - 1) % len(_COLOR_CUE_PALETTE)]
+
 
 def plot_lick_scatter(
     context: LickContext,
@@ -93,12 +118,16 @@ def plot_lick_scatter(
     figure = plt.figure(
         figsize=(11, figure_height), facecolor="white", dpi=150, layout="constrained",
     )
-    grid = figure.add_gridspec(nrows=2, ncols=1, height_ratios=[1.6, 22], hspace=0.06)
+    rendered_trial_types = _ordered_rendered_trial_types(context=context)
+    cue_panel_weight = max(1.6 * max(len(rendered_trial_types), 1), 1.6)
+    grid = figure.add_gridspec(nrows=2, ncols=1, height_ratios=[cue_panel_weight, 22], hspace=0.06)
     ax_zones = figure.add_subplot(grid[0, 0])
     ax_main = figure.add_subplot(grid[1, 0], sharex=ax_zones)
 
     unique_zones = _collect_unique_reward_zones(context=context)
-    _draw_unique_zone_reference_bar(axis=ax_zones, context=context, unique_zones=unique_zones)
+    _draw_cue_blocks_panel(
+        axis=ax_zones, context=context, rendered_trial_types=rendered_trial_types,
+    )
     _draw_trial_blocks(axis=ax_main, context=context, unique_zones=unique_zones)
 
     ax_main.scatter(
@@ -152,12 +181,30 @@ def plot_lick_scatter(
             description=(
                 f"discrete lick events across {session_count} {session_label} — "
                 f"{context.total_trials} trials, {context.lick_count} rising-edge lick events, "
-                f"{len(unique_zones)} unique reward zone(s)"
+                f"{len(rendered_trial_types)} trial type(s)"
             ),
         ),
         fontsize=12,
     )
     return figure
+
+
+def _ordered_rendered_trial_types(context: LickContext) -> tuple[str, ...]:
+    """Returns the unique trial types rendered in chronological first-appearance order.
+
+    Notes:
+        Iterates ``context.trial_blocks`` (ordered chronologically across sessions) and records each
+        trial type the first time it appears, restricted to types whose cue layout is available so
+        the cue-block panel only allocates rows it can actually render.
+    """
+    seen: list[str] = []
+    for block in context.trial_blocks:
+        if block.trial_type in seen:
+            continue
+        if block.trial_type not in context.cue_layouts:
+            continue
+        seen.append(block.trial_type)
+    return tuple(seen)
 
 
 def _collect_unique_reward_zones(context: LickContext) -> dict[tuple[str, float, float], int]:
@@ -183,49 +230,65 @@ def _collect_unique_reward_zones(context: LickContext) -> dict[tuple[str, float,
     return unique_zones
 
 
-def _draw_unique_zone_reference_bar(
+def _draw_cue_blocks_panel(
     axis: plt.Axes,
     context: LickContext,
-    unique_zones: dict[tuple[str, float, float], int],
+    rendered_trial_types: tuple[str, ...],
 ) -> None:
-    """Renders the top reference bar listing every unique reward zone the animal saw.
+    """Renders the top reference panel as one row of cue rectangles per unique trial type.
+
+    Notes:
+        Each row reads as a horizontal sequence of colored rectangles spanning the full track length,
+        one per `CueSpan` in the trial type's layout. Cue codes drive the fill color so the same code
+        gets the same color across rows, with code 0 (the conventional 'Gray' filler) rendered as a
+        light gray. Each rectangle is labeled with its cue code so the operator can match the panel
+        to the per-sample cue column in the data feather.
 
     Args:
-        axis: The matplotlib axis on which to render the reference bar.
-        context: The per-animal lick aggregate whose track length sets the bar's x-range.
-        unique_zones: Mapping returned by `_collect_unique_reward_zones`.
+        axis: The matplotlib axis on which to render the cue rows.
+        context: The per-animal lick aggregate whose cue layouts and track length drive the panel.
+        rendered_trial_types: Trial types to allocate rows for, in display order.
     """
-    n_zones = max(len(unique_zones), 1)
-    bar_height = 1.0 / n_zones
+    n_rows = max(len(rendered_trial_types), 1)
+    row_height = 1.0 / n_rows
     axis.set_facecolor("#f8f8f8")
     axis.set_xlim(0, context.track_length_cm)
     axis.set_ylim(0, 1)
-    sorted_zone_keys = sorted(unique_zones.keys(), key=lambda k: (k[1], k[0]))
-    for index, key in enumerate(sorted_zone_keys):
-        trial_type_name, reward_lo, reward_hi = key
-        y_lo = 1.0 - (index + 1) * bar_height
-        y_hi = 1.0 - index * bar_height
-        axis.add_patch(
-            Rectangle(
-                (reward_lo, y_lo + 0.08 * bar_height),
-                reward_hi - reward_lo,
-                0.84 * bar_height,
-                facecolor=_COLOR_REWARDED,
-                edgecolor="black",
-                linewidth=0.7,
+    for row_index, trial_type_name in enumerate(rendered_trial_types):
+        layout = context.cue_layouts.get(trial_type_name, ())
+        y_lo = 1.0 - (row_index + 1) * row_height
+        y_hi = 1.0 - row_index * row_height
+        rect_y = y_lo + 0.12 * row_height
+        rect_height = 0.76 * row_height
+        for span in layout:
+            width = span.end_cm - span.start_cm
+            if width <= 0:
+                continue
+            axis.add_patch(
+                Rectangle(
+                    (span.start_cm, rect_y),
+                    width,
+                    rect_height,
+                    facecolor=_cue_color(code=span.code),
+                    edgecolor="black",
+                    linewidth=0.5,
+                )
             )
-        )
-        center = 0.5 * (reward_lo + reward_hi)
+            if width >= 0.04 * context.track_length_cm:
+                axis.text(
+                    0.5 * (span.start_cm + span.end_cm),
+                    0.5 * (y_lo + y_hi),
+                    str(span.code),
+                    ha="center", va="center", fontsize=8,
+                )
         axis.text(
-            center, 0.5 * (y_lo + y_hi),
-            f"{trial_type_name}\n{reward_lo:.0f}-{reward_hi:.0f} cm",
-            ha="center", va="center", fontsize=8,
+            -2, 0.5 * (y_lo + y_hi), trial_type_name,
+            ha="right", va="center", fontsize=8, fontweight="bold",
         )
     axis.set_yticks([])
     axis.tick_params(labelbottom=False)
     for spine in axis.spines.values():
         spine.set_visible(False)
-    axis.text(-2, 0.5, "Reward zones\nused", ha="right", va="center", fontsize=9, fontweight="bold")
 
 
 def _draw_trial_blocks(
@@ -355,6 +418,7 @@ def _filter_context_to_sessions(
             trial_blocks=(),
             session_boundaries=(0,),
             track_length_cm=context.track_length_cm,
+            cue_layouts={},
         )
 
     # Builds the new session_boundaries and the per-session offset used to renumber trials. The
@@ -410,12 +474,20 @@ def _filter_context_to_sessions(
         # noinspection PyTypeChecker
         new_lick_trials = np.zeros(0, dtype=np.int64)
 
+    retained_trial_types = {block.trial_type for block in new_blocks}
+    new_cue_layouts = {
+        trial_type: layout
+        for trial_type, layout in context.cue_layouts.items()
+        if trial_type in retained_trial_types
+    }
+
     return LickContext(
         lick_positions=new_lick_positions,
         lick_trials=new_lick_trials,
         trial_blocks=tuple(new_blocks),
         session_boundaries=tuple(new_boundaries),
         track_length_cm=context.track_length_cm,
+        cue_layouts=new_cue_layouts,
     )
 
 
@@ -431,9 +503,7 @@ def plot_trial_outcomes(
         Each bar represents one session, positioned along the x-axis at its day offset relative to the
         first session. The stack reads bottom-to-top as success → failure → guided, so the green band
         height directly visualizes the animal's earned-reward count and the total bar height equals
-        the trial count for that session. A success-rate line (success / (success + failure), guided
-        trials excluded) is overlaid on a secondary y-axis when at least one non-guided trial exists,
-        so the operator can read both absolute counts and rate progression in the same panel.
+        the trial count for that session.
 
         When ``display_sessions`` is supplied, only the requested sessions render; their day offsets
         keep the original spacing relative to the animal's first chronological session, matching the
@@ -451,7 +521,7 @@ def plot_trial_outcomes(
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
 
     Returns:
-        A matplotlib Figure showing the stacked counts and the overlaid success-rate trace.
+        A matplotlib Figure showing the stacked success / failure / guided counts.
     """
     if display_sessions is not None:
         context = _filter_outcome_context_to_sessions(
@@ -505,27 +575,10 @@ def plot_trial_outcomes(
     ax_counts.set_xticklabels([str(int(d)) for d in context.day_offsets], fontsize=8)
     ax_counts.tick_params(axis="y", labelsize=8)
 
-    # Overlays the success rate (success / (success + failure)) on a secondary axis so the absolute
-    # counts and the operator-facing performance metric share a single panel. Guided trials are
-    # excluded from the denominator since they would inflate or deflate the rate depending on the
-    # phase of training rather than the animal's behavior.
-    non_guided_total = success + failure
-    success_rate = np.where(non_guided_total > 0, success / np.maximum(non_guided_total, 1), np.nan)
-    ax_rate = ax_counts.twinx()
-    ax_rate.plot(
-        x_positions, success_rate * 100.0,
-        color="#1f77b4", marker="o", markersize=4, linewidth=1.3, label="Success rate",
-    )
-    ax_rate.set_ylabel("Success rate (%)", color="#1f77b4", fontsize=10)
-    ax_rate.tick_params(axis="y", labelcolor="#1f77b4", labelsize=8)
-    ax_rate.set_ylim(0, 100)
-
     legend_handles = [
         Patch(facecolor=_COLOR_SUCCESS, edgecolor="black", linewidth=0.4, label="Success"),
         Patch(facecolor=_COLOR_FAILURE, edgecolor="black", linewidth=0.4, label="Failure"),
         Patch(facecolor=_COLOR_GUIDED, edgecolor="black", linewidth=0.4, label="Guided"),
-        plt.Line2D([0], [0], color="#1f77b4", marker="o", markersize=5, linewidth=1.3,
-                   label="Success rate (excl. guided)"),
     ]
     ax_counts.legend(handles=legend_handles, loc="upper left", frameon=False, fontsize=8)
 
