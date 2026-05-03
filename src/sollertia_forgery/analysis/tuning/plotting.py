@@ -18,10 +18,12 @@ import matplotlib.pyplot as plt
 from ...forging import FluorescenceColumn
 from .utilities import assemble_run_session_data
 from .tuning_report import TuningColumn, TuningReport
-from ...shared_assets import DatasetColumn
+from ...shared_assets import DatasetColumn, TrialGeometry
 from ..shared_utilities import trim_acquisition_warmup
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from numpy.typing import NDArray
 
     from ...shared_assets import DatasetSession
@@ -453,6 +455,7 @@ def plot_speed_and_activity_by_position(
 
     binned_speed = _bin_speed_by_position(
         session=session,
+        trial_type=trial_type,
         track_length_cm=trial_summary.track_length_cm,
         bin_size_cm=trial_summary.bin_size_cm,
         bin_count=trial_summary.bin_count,
@@ -680,6 +683,390 @@ def plot_per_trial_activity(
     return figure
 
 
+def plot_per_day_sorted_rate_maps(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    trial_type: str | None = None,
+    display_sessions: tuple[int, ...] | None = None,
+    classifier: str = "place",
+    cmap: str = "magma",
+    show_cue_boundaries: bool = True,
+    animal_id: str | None = None,
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots row-normalized rate maps for each displayed session sorted independently by that session's peak.
+
+    Notes:
+        Each panel filters the session's persisted ``tuning_cells.feather`` to cells classified by the
+        requested classifier (``IS_PLACE`` / ``IS_REWARD_CELL`` / ``IS_STRICT_PLACE``) on that day,
+        sorts them by their rate-map peak position on the same day, and renders the row-normalized
+        rate maps. There is no across-session correspondence: each panel uses the within-session
+        classification only, so the figure shows the population's day-level tuning band rather than
+        per-cell drift. Cell counts are reported per panel because the active-cell set differs across
+        days. Pair with ``..drift.plotting.plot_reference_day_sorted_rate_maps`` for the per-cell
+        drift view.
+
+        Sessions are addressed by 1-indexed chronological session number (``1`` is the first session
+        in ``sessions``, ``2`` is the second, etc.). Out-of-range entries are silently skipped, and
+        duplicates that resolve to the same session are deduplicated.
+
+        ``trial_type`` is resolved once from the first available session's tuning feather when not
+        supplied by the caller, then applied uniformly to every panel.
+
+        Sessions render in a single chronological row at a tall-rectangular panel aspect ratio. A
+        shared horizontal colorbar at the bottom of the figure documents the 0..1 row-normalized
+        intensity scale that every panel shares.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries to render.
+        trial_type: Trial type to evaluate; when ``None``, defaults to the first trial type present in
+            the first session's tuning feather. Applied uniformly across panels.
+        display_sessions: 1-indexed session numbers to render as columns. Defaults to every session
+            in the supplied tuple — pass an explicit selection to render a subset.
+        classifier: Within-session classification used to pick cells (``"place"``, ``"reward"``,
+            ``"strict_place"``).
+        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"magma"`` is a
+            perceptually-uniform colormap with strong contrast on dark backgrounds.
+        show_cue_boundaries: When True, draw cyan dotted verticals on every panel at the start and
+            end of the cue zone that contains the trigger zone for that session. Cue layout is
+            derived once from the first available session's ``data.feather`` (using the ``cue`` and
+            ``distance_cm`` columns) and reused for every panel; the per-session trigger zone center
+            then selects which cue interval to highlight.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure.
+    """
+    session_count: int = len(sessions)
+
+    def _resolve_indices(requested: tuple[int, ...]) -> tuple[int, ...]:
+        """Maps each 1-indexed session number to a 0-indexed position; out-of-range entries are skipped."""
+        resolved: list[int] = []
+        for target in requested:
+            idx = int(target) - 1
+            if 0 <= idx < session_count and idx not in resolved:
+                resolved.append(idx)
+        return tuple(resolved)
+
+    if display_sessions is None:
+        # Renders every session by default; subsetting is opt-in through ``display_sessions``.
+        display_session_indices: tuple[int, ...] = tuple(range(session_count))
+    else:
+        display_session_indices = _resolve_indices(display_sessions)
+
+    n_panels: int = len(display_session_indices)
+    n_cols: int = max(n_panels, 1)
+
+    figure, axes_array = plt.subplots(
+        1, n_cols,
+        figsize=(2.0 * n_cols + 1.2, 4.5),
+        facecolor="white", dpi=figure_dpi, squeeze=False,
+        layout="constrained",
+    )
+    if session_count == 0 or n_panels == 0:
+        axes_array[0, 0].text(0.5, 0.5, "No sessions supplied", ha="center", va="center",
+                              transform=axes_array[0, 0].transAxes)
+        for axes in axes_array.flat:
+            axes.set_axis_off()
+        return figure
+
+    classifier_column = {
+        "place": TuningColumn.IS_PLACE.value,
+        "reward": TuningColumn.IS_REWARD_CELL.value,
+        "strict_place": TuningColumn.IS_STRICT_PLACE.value,
+    }.get(classifier, TuningColumn.IS_PLACE.value)
+    label = {"place": "place", "reward": "reward", "strict_place": "strict-place"}.get(classifier, classifier)
+
+    # Pre-loads each session's filtered tuning frame once so the trial-type / track-length resolution
+    # logic stays out of the per-panel render loop. The per-session trigger zone is also captured here
+    # so the render loop can overlay zone bounds without re-reading geometry on every panel. The
+    # per-session ``cue_offset_cm`` lets the cue overlay shift data-derived runtime-trial-rel boundaries
+    # back into canonical coordinates so rate maps and overlays share the same coord frame post-realign.
+    frames_per_session: dict[int, pl.DataFrame | None] = {}
+    trigger_zones: dict[int, tuple[float, float] | None] = {}
+    cue_offset_per_session: dict[int, float] = {}
+    bin_count_reference: int | None = None
+    track_length_reference: float | None = None
+    resolved_trial_type: str | None = trial_type
+    for sess_idx in display_session_indices:
+        path = sessions[sess_idx].tuning_cells_path
+        if not path.exists():
+            frames_per_session[sess_idx] = None
+            trigger_zones[sess_idx] = None
+            continue
+        frame = pl.read_ipc(source=path, memory_map=True)
+        # Resolves the trial type from the first available frame when the caller did not specify one.
+        if resolved_trial_type is None and TuningColumn.TRIAL_TYPE.value in frame.columns:
+            unique_trial_types = frame[TuningColumn.TRIAL_TYPE.value].unique().to_list()
+            if unique_trial_types:
+                resolved_trial_type = str(unique_trial_types[0])
+        if resolved_trial_type is not None and TuningColumn.TRIAL_TYPE.value in frame.columns:
+            frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type)
+        frame = frame.sort(TuningColumn.CELL_ID.value)
+        frames_per_session[sess_idx] = frame
+        if bin_count_reference is None and frame.height > 0:
+            # noinspection PyTypeChecker
+            first_rate_map = np.asarray(
+                frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+            )
+            if first_rate_map.size > 0:
+                bin_count_reference = int(first_rate_map.shape[1])
+        # Reads the per-session trigger zone (and the track-length reference, when not yet set) from
+        # the trial geometry. This runs every iteration because trigger zones can shift across
+        # sessions in protocols like the void reward shift.
+        geometry_path = sessions[sess_idx].geometry_path
+        if geometry_path.exists() and resolved_trial_type is not None:
+            geometry = TrialGeometry.from_yaml(file_path=geometry_path)
+            entry = geometry.entries.get(resolved_trial_type)
+            if entry is not None:
+                trigger_zones[sess_idx] = (
+                    float(entry.stimulus_trigger_zone_start_cm),
+                    float(entry.stimulus_trigger_zone_end_cm),
+                )
+                cue_offset_per_session[sess_idx] = float(entry.cue_offset_cm)
+                if track_length_reference is None:
+                    track_length_reference = float(entry.trial_length_cm)
+            else:
+                trigger_zones[sess_idx] = None
+                cue_offset_per_session[sess_idx] = 0.0
+        else:
+            trigger_zones[sess_idx] = None
+            cue_offset_per_session[sess_idx] = 0.0
+
+    bin_count: int = bin_count_reference if bin_count_reference is not None else 0
+    track_length_cm: float = (
+        track_length_reference if track_length_reference is not None else float(bin_count)
+    )
+    bin_size_cm: float = track_length_cm / bin_count if bin_count > 0 else 1.0
+
+    # Derives cue-zone boundaries once per call from the first available session's ``data.feather``.
+    # The cue layout is constant per trial type (each trial type owns a fixed Segment.cue_sequence
+    # upstream), so a single canonical-trial walk supplies the boundary positions for every panel.
+    cue_boundaries_cm: tuple[float, ...] = ()
+    if show_cue_boundaries and resolved_trial_type is not None and track_length_cm > 0:
+        for sess_idx in display_session_indices:
+            data_path = sessions[sess_idx].data_path
+            if not data_path.exists():
+                continue
+            cue_boundaries_cm = _derive_cue_boundaries_cm(
+                data_path=data_path,
+                trial_type=resolved_trial_type,
+                track_length_cm=track_length_cm,
+            )
+            if cue_boundaries_cm:
+                break
+
+    last_image = None
+    for column_position, sess_idx in enumerate(display_session_indices):
+        axes = axes_array[0, column_position]
+        frame = frames_per_session.get(sess_idx)
+        if frame is None or frame.height == 0 or classifier_column not in frame.columns:
+            axes.text(0.5, 0.5, "no data", ha="center", va="center", transform=axes.transAxes)
+            axes.set_xticks([])
+            axes.set_yticks([])
+            continue
+        # noinspection PyTypeChecker
+        active_mask: NDArray[np.bool_] = frame[classifier_column].to_numpy().astype(np.bool_, copy=False)
+        if not active_mask.any():
+            axes.text(0.5, 0.5, "no active cells", ha="center", va="center", transform=axes.transAxes)
+            axes.set_xticks([])
+            axes.set_yticks([])
+            continue
+        # noinspection PyTypeChecker
+        rate_maps: NDArray[np.float32] = np.asarray(
+            frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+        )
+        active_rate_maps = rate_maps[active_mask]
+        finite_for_argmax = np.where(np.isfinite(active_rate_maps), active_rate_maps, -np.inf)
+        peak_bins = np.argmax(finite_for_argmax, axis=1)
+        order = np.argsort(peak_bins)
+        sorted_maps = active_rate_maps[order]
+        row_max = np.nanmax(sorted_maps, axis=1, keepdims=True)
+        row_max = np.where(np.isfinite(row_max) & (row_max > 0), row_max, 1.0)
+        normalized = np.clip(sorted_maps / row_max, 0.0, 1.0)
+        normalized = np.where(np.isfinite(normalized), normalized, 0.0)
+        n_total: int = sorted_maps.shape[0]
+        last_image = axes.imshow(
+            normalized, aspect="auto", origin="upper", cmap=cmap,
+            extent=[0, bin_count * bin_size_cm, n_total, 0], vmin=0.0, vmax=1.0,
+            interpolation="nearest",
+        )
+        # Overlays the start / end of the cue zone holding the trigger zone as cyan dotted verticals.
+        # The cue layout is constant per trial type, so the same data-derived boundary set is reused
+        # for every panel; per-session ``cue_offset_cm`` shifts the boundaries from runtime-trial-rel
+        # into canonical coordinates so the overlay matches realigned rate maps. The trigger zone
+        # center selects which canonical cue interval to bracket. Drawn before the trigger zone so
+        # the red dashed lines sit on top.
+        zone = trigger_zones.get(sess_idx)
+        if cue_boundaries_cm and zone is not None:
+            session_cue_boundaries = _shift_cue_boundaries_to_canonical(
+                cue_boundaries=cue_boundaries_cm,
+                cue_offset_cm=cue_offset_per_session.get(sess_idx, 0.0),
+                track_length_cm=track_length_cm,
+            )
+            cue_left, cue_right = _cue_zone_around_trigger(
+                cue_boundaries=session_cue_boundaries,
+                trigger_center=0.5 * (zone[0] + zone[1]),
+                track_length_cm=track_length_cm,
+            )
+            axes.axvline(cue_left, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
+            axes.axvline(cue_right, color="cyan", linestyle=":", linewidth=1.4, alpha=0.9)
+        # Overlays the per-session trigger zone as red dashed verticals so the band's relationship to
+        # the reward landmark is visible. Drawn last so the lines sit on top of everything.
+        if zone is not None:
+            zone_start, zone_end = zone
+            axes.axvline(zone_start, color="red", linestyle="--", linewidth=1.0, alpha=0.85)
+            axes.axvline(zone_end, color="red", linestyle="--", linewidth=1.0, alpha=0.85)
+        axes.set_xlim(0, bin_count * bin_size_cm)
+        axes.set_title(f"Session {sess_idx + 1} (n={n_total})", fontsize=10)
+        axes.set_xlabel("Position (cm)", fontsize=9)
+        # Drops concrete y-tick numbers everywhere; absolute cell counts vary across sessions and the
+        # per-panel ``(n=X)`` already documents that. The shared y-axis label still annotates the sort
+        # convention so the band shape stays interpretable.
+        axes.set_yticks([])
+        if column_position == 0:
+            axes.set_ylabel(f"{label.capitalize()} cell (per-day peak sort)", fontsize=9)
+
+    if last_image is not None:
+        # Shared horizontal colorbar at the bottom of the figure documents the row-normalized scale.
+        color_bar = figure.colorbar(
+            last_image,
+            ax=axes_array.ravel().tolist(),
+            orientation="horizontal",
+            shrink=0.5,
+            aspect=40,
+            pad=0.04,
+        )
+        color_bar.set_label("Row-normalized rate (peak = 1)", fontsize=9)
+        color_bar.ax.tick_params(labelsize=8)
+
+    animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
+    trial_label: str = f" — trial type {resolved_trial_type!r}" if resolved_trial_type is not None else ""
+    figure.suptitle(
+        f"{animal_prefix}per-day-sorted rate maps ({label} cells){trial_label}",
+        fontsize=12,
+    )
+    return figure
+
+
+def _derive_cue_boundaries_cm(
+    data_path: "Path",
+    trial_type: str,
+    track_length_cm: float,
+) -> tuple[float, ...]:
+    """Returns trial-relative cm positions where the cue identity changes within a representative trial.
+
+    Notes:
+        Reads the session's ``data.feather`` and walks the first run-state trial of ``trial_type``,
+        treating each step where the ``cue`` column changes as a cue-zone boundary. The cue layout
+        is constant per trial type (each trial type owns a fixed cue sequence upstream), so a single
+        canonical-trial walk supplies boundary positions for every panel that shares that trial type.
+        Boundary positions are clipped to the open interval ``(0, track_length_cm)`` so the start /
+        end of the track are not redundantly drawn over the figure edges.
+
+    Args:
+        data_path: Path to the session's ``data.feather``.
+        trial_type: Trial type whose canonical cue layout to extract.
+        track_length_cm: Trial length used to clip boundaries to in-range positions.
+
+    Returns:
+        A tuple of trial-relative cm positions of cue-identity transitions.
+    """
+    df = pl.read_ipc(
+        source=data_path,
+        columns=[
+            DatasetColumn.SYSTEM_STATE.value,
+            DatasetColumn.TRIAL.value,
+            DatasetColumn.TRIAL_TYPE.value,
+            DatasetColumn.DISTANCE_CM.value,
+            DatasetColumn.CUE.value,
+        ],
+        memory_map=True,
+    )
+    run = df.filter(
+        (pl.col(DatasetColumn.SYSTEM_STATE.value) == "run")
+        & (pl.col(DatasetColumn.TRIAL.value) < 255)
+        & (pl.col(DatasetColumn.TRIAL_TYPE.value) == trial_type)
+    )
+    if run.height == 0:
+        return ()
+    first_trial_id = int(run[DatasetColumn.TRIAL.value][0])
+    first_trial = run.filter(pl.col(DatasetColumn.TRIAL.value) == first_trial_id)
+    if first_trial.height == 0:
+        return ()
+    # noinspection PyTypeChecker
+    distance: NDArray[np.float32] = (
+        first_trial[DatasetColumn.DISTANCE_CM.value].to_numpy().astype(np.float32, copy=False)
+    )
+    # noinspection PyTypeChecker
+    cues: NDArray[np.int32] = (
+        first_trial[DatasetColumn.CUE.value].to_numpy().astype(np.int32, copy=False)
+    )
+    if distance.size == 0:
+        return ()
+    relative = distance - distance[0]
+    # noinspection PyTypeChecker
+    transitions: NDArray[np.int64] = np.where(np.diff(cues) != 0)[0] + 1
+    if transitions.size == 0:
+        return ()
+    boundaries = relative[transitions]
+    # Drops the trivial 0 / track_length boundaries; only interior cue transitions are useful overlays.
+    return tuple(
+        float(position)
+        for position in boundaries
+        if 0.0 < float(position) < track_length_cm
+    )
+
+
+def _shift_cue_boundaries_to_canonical(
+    cue_boundaries: tuple[float, ...],
+    cue_offset_cm: float,
+    track_length_cm: float,
+) -> tuple[float, ...]:
+    """Shifts runtime-trial-relative cue boundaries by ``+cue_offset_cm`` into canonical coordinates.
+
+    Notes:
+        The runtime starts each trial mid-first-cue (offset by ``cue_offset_cm`` into the canonical cue
+        sequence), so cue transitions sampled in ``data.feather`` lie at runtime-trial-rel positions.
+        Adding the offset shifts each transition into the canonical frame; boundaries that wrap past
+        the track end are folded back via modulo. Returns the input unchanged when ``cue_offset_cm``
+        is ``0`` (the canonical and runtime frames coincide).
+    """
+    if cue_offset_cm == 0.0 or not cue_boundaries:
+        return cue_boundaries
+    if track_length_cm <= 0.0:
+        return cue_boundaries
+    # Folds boundaries that cross the track wrap so every position stays in ``[0, track_length_cm)``,
+    # then sorts the result so consumers can walk them linearly.
+    shifted = sorted(
+        float((boundary + cue_offset_cm) % track_length_cm) for boundary in cue_boundaries
+    )
+    return tuple(shifted)
+
+
+def _cue_zone_around_trigger(
+    cue_boundaries: tuple[float, ...],
+    trigger_center: float,
+    track_length_cm: float,
+) -> tuple[float, float]:
+    """Returns the (left, right) cm bounds of the cue zone containing ``trigger_center``.
+
+    Notes:
+        ``cue_boundaries`` carries the interior cue-transition positions only; this helper extends
+        them with the implicit endpoints ``0`` and ``track_length_cm`` so every position on the track
+        falls into exactly one cue zone. When ``trigger_center`` lies on a boundary, the zone to its
+        right is selected (consistent with ``boundaries[i] <= center < boundaries[i + 1]``).
+    """
+    full_boundaries: tuple[float, ...] = (0.0,) + cue_boundaries + (float(track_length_cm),)
+    for index in range(len(full_boundaries) - 1):
+        left = full_boundaries[index]
+        right = full_boundaries[index + 1]
+        if left <= trigger_center < right:
+            return left, right
+    return 0.0, float(track_length_cm)
+
+
 def _stack_list_column(table: pl.DataFrame, column: TuningColumn, target_length: int) -> NDArray[np.float32]:
     """Materializes a List(Float32) column into a (cell_count, target_length) numpy array, padding with NaN
     rows for nulls.
@@ -720,11 +1107,21 @@ def _resolve_place_cell_order(table: pl.DataFrame) -> NDArray[np.int64]:
 
 def _bin_speed_by_position(
     session: DatasetSession,
+    trial_type: str,
     track_length_cm: float,
     bin_size_cm: float,
     bin_count: int,
 ) -> NDArray[np.float32]:
-    """Returns the per-bin mean running speed for the session, computed off ``data.feather``."""
+    """Returns the per-bin mean running speed for the session, computed off ``data.feather``.
+
+    Notes:
+        Adds the trial type's ``cue_offset_cm`` to the cumulative distance before the modulo so the
+        x-axis matches the canonical cue layout used by the rate-map binning. With ``cue_offset_cm == 0``
+        the shift is a no-op and the result is identical to a plain ``distance % track_length_cm``.
+    """
+    geometry = TrialGeometry.from_yaml(file_path=session.geometry_path)
+    cue_offset_cm = float(geometry.entries[trial_type].cue_offset_cm)
+
     df = pl.read_ipc(
         source=session.data_path,
         columns=[DatasetColumn.TIME_US.value, DatasetColumn.DISTANCE_CM.value, DatasetColumn.SPEED_CM_S.value],
@@ -738,7 +1135,9 @@ def _bin_speed_by_position(
     speed: NDArray[np.float32] = df[DatasetColumn.SPEED_CM_S.value].to_numpy().astype(np.float32, copy=False)
 
     # noinspection PyTypeChecker
-    position: NDArray[np.float32] = (distance % np.float32(track_length_cm)).astype(np.float32, copy=False)
+    position: NDArray[np.float32] = (
+        (distance + np.float32(cue_offset_cm)) % np.float32(track_length_cm)
+    ).astype(np.float32, copy=False)
     # noinspection PyTypeChecker
     bin_edges: NDArray[np.float32] = np.arange(0.0, track_length_cm + bin_size_cm, bin_size_cm, dtype=np.float32)
     # noinspection PyTypeChecker

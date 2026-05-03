@@ -141,9 +141,10 @@ class BleachingReport:
             Covers all three protocol metrics — across-session baseline trend (chronic), within-session bleaching
             (acute), per-cell SNR change — with the configured thresholds and pass/fail status for each, plus a
             per-session detail table. Together with `.plotting.plot_baseline_trend`,
-            `.plotting.plot_within_session`, and `.plotting.plot_snr_distributions`, this is jointly
-            sufficient for scientific presentation, discussion, and publication of the animal's photobleaching
-            state. Designed to be human-readable and parseable by downstream agents.
+            `.plotting.plot_within_session`, `.plotting.plot_within_session_average`, and
+            `.plotting.plot_snr_distributions`, this is jointly sufficient for scientific presentation,
+            discussion, and publication of the animal's photobleaching state. Designed to be human-readable
+            and parseable by downstream agents.
 
         Returns:
             A multi-line string. Use ``print_summary`` for direct console output.

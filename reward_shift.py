@@ -1,15 +1,16 @@
-"""Per-animal reward-shift figures for the MaalstroomicFlow void cohort.
+"""Per-animal reward-shift figures for the void cohort.
 
-Loads each requested animal's saved drift report and writes the four Ziv-2013-style cross-session
+Loads each requested animal's saved drift report and writes the per-animal Ziv-2013-style cross-session
 panels under ``/home/data/Data/MF_Drift/``:
 
 * drift recurrence heatmap (place / reward) — ``plot_recurrence_heatmap``
 * sessions-active distribution + per-session activity-rate inset — ``plot_sessions_active_distribution``
 * active-cell vs place-field recurrence probability vs lag — ``plot_recurrence_probability_vs_lag``
 * reference-day-sorted rate-map heatmaps across every session — ``plot_reference_day_sorted_rate_maps``
+* per-cell drift profile category bar chart — ``plot_drift_profile_categories``
 
-Currently configured for the MaalstroomicFlow void dataset and animals 11 / 15. Adjust ``DATASET_PATH``
-or ``ANIMALS`` at the top of the file when extending to other animals or projects.
+Currently configured for the void dataset and animals 11 / 15 / 16. Adjust ``DATASET_PATH`` or
+``ANIMALS`` at the top of the file when extending to other animals or projects.
 """
 
 from __future__ import annotations
@@ -25,11 +26,7 @@ from sollertia_forgery.shared_assets import DatasetData
 from sollertia_forgery.analysis import (
     DriftReport,
     DriftDetectionConfiguration,
-    plot_cohort_drift_profile_categories,
-    plot_cohort_recurrence_probability_vs_lag,
-    plot_cohort_sessions_active_distribution,
     plot_drift_profile_categories,
-    plot_per_cell_stability_raster,
     plot_recurrence_heatmap,
     plot_recurrence_probability_vs_lag,
     plot_reference_day_sorted_rate_maps,
@@ -38,7 +35,7 @@ from sollertia_forgery.analysis import (
 from sollertia_forgery.analysis.drift import compute_drift_report
 
 
-DATASET_PATH = Path("/home/data/Data/MaalstroomicFlow/void")
+DATASET_PATH = Path("/home/data/Data/void")
 OUTPUT_DIR = Path("/home/data/Data/MF_Drift")
 ANIMALS: tuple[str, ...] = ("11", "15", "16")
 
@@ -47,9 +44,6 @@ def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     dataset = DatasetData.load(dataset_path=DATASET_PATH)
     config = DriftDetectionConfiguration(peak_shift_shuffle_count=200)
-
-    reports_by_animal: dict[str, DriftReport] = {}
-    sessions_by_animal: dict[str, tuple] = {}
 
     for animal_id in ANIMALS:
         print(f"\n=== animal {animal_id} ===")
@@ -93,28 +87,7 @@ def main() -> None:
         ).savefig(
             OUTPUT_DIR / f"{prefix}_drift_profile_categories.png", bbox_inches="tight",
         )
-        plot_per_cell_stability_raster(
-            report=report, sessions=sessions, animal_id=animal_id,
-        ).savefig(
-            OUTPUT_DIR / f"{prefix}_stability_raster.png", bbox_inches="tight",
-        )
-        reports_by_animal[animal_id] = report
-        sessions_by_animal[animal_id] = sessions
-        print(f"  wrote 6 figures for animal {animal_id} under {OUTPUT_DIR}")
-
-    if len(reports_by_animal) >= 2:
-        print(f"\n=== cohort ({len(reports_by_animal)} animals) ===")
-        cohort_prefix = "reward_shift_cohort"
-        plot_cohort_recurrence_probability_vs_lag(reports_by_animal).savefig(
-            OUTPUT_DIR / f"{cohort_prefix}_recurrence_vs_lag.png", bbox_inches="tight",
-        )
-        plot_cohort_sessions_active_distribution(reports_by_animal).savefig(
-            OUTPUT_DIR / f"{cohort_prefix}_sessions_active_distribution.png", bbox_inches="tight",
-        )
-        plot_cohort_drift_profile_categories(reports_by_animal, sessions_by_animal).savefig(
-            OUTPUT_DIR / f"{cohort_prefix}_drift_profile_categories.png", bbox_inches="tight",
-        )
-        print(f"  wrote 3 cohort figures under {OUTPUT_DIR}")
+        print(f"  wrote 5 figures for animal {animal_id} under {OUTPUT_DIR}")
     plt.close("all")
 
 

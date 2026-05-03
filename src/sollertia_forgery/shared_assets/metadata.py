@@ -161,6 +161,10 @@ class TrialGeometryEntry:
     """The trial-relative end of the stimulus trigger zone, in centimeters."""
     stimulus_location_cm: float
     """The trial-relative location of the stimulus boundary, in centimeters."""
+    cue_offset_cm: float = 0.0
+    """The offset between the runtime's trial start and the canonical start of the first cue in the cue sequence,
+    in centimeters. When non-zero, the runtime begins recording mid-cue, so analysis-side trial boundaries must be
+    re-aligned to the first-cue transition before cue zones (and the trigger zone) read at canonical positions."""
 
 
 @dataclass
@@ -207,6 +211,7 @@ class TrialGeometry(YamlConfig):
                 stimulus_trigger_zone_start_cm=trial.stimulus_trigger_zone_start_cm,
                 stimulus_trigger_zone_end_cm=trial.stimulus_trigger_zone_end_cm,
                 stimulus_location_cm=trial.stimulus_location_cm,
+                cue_offset_cm=experiment_configuration.cue_offset_cm,
             )
         return cls(entries=entries)
 

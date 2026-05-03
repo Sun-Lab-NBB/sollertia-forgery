@@ -2,6 +2,7 @@
 
 from .plotting import (
     plot_rate_map_heatmap,
+    plot_per_day_sorted_rate_maps,
     plot_per_trial_activity,
     plot_place_cell_heatmap,
     plot_reward_com_histogram,
@@ -31,6 +32,7 @@ __all__ = [
     "TuningReport",
     "TuningSummary",
     "TuningTrialSummary",
+    "plot_per_day_sorted_rate_maps",
     "plot_per_trial_activity",
     "plot_place_cell_heatmap",
     "plot_population_activity_by_position",

@@ -22,7 +22,7 @@ from ...shared_assets import (
     TrialGeometry,
     TrialGeometryEntry,
 )
-from ..shared_utilities import trim_acquisition_warmup
+from ..shared_utilities import realign_trial_starts_to_first_cue, trim_acquisition_warmup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -99,6 +99,7 @@ def assemble_run_session_data(
             DatasetColumn.DISTANCE_CM.value,
             DatasetColumn.SPEED_CM_S.value,
             DatasetColumn.TRIAL.value,
+            DatasetColumn.CUE.value,
         ],
     )
     df = trim_acquisition_warmup(dataframe=df)
@@ -119,6 +120,16 @@ def assemble_run_session_data(
     trial_ids: NDArray[np.int32] = df[DatasetColumn.TRIAL.value].to_numpy().astype(np.int32)
     # noinspection PyTypeChecker
     speed: NDArray[np.float32] = df[DatasetColumn.SPEED_CM_S.value].to_numpy().astype(np.float32)
+
+    # When the runtime starts trials mid-first-cue (cue_offset_cm > 0), re-anchor trial boundaries to
+    # cue-aligned positions so the rate-map x-axis at position 0 corresponds to the canonical first-cue start.
+    # The first / last realigned trials are typically incomplete and get dropped by the completeness mask in
+    # ``compute_within_trial_position``.
+    if geometry_entry.cue_offset_cm != 0.0:
+        # noinspection PyTypeChecker
+        cue: NDArray[np.uint8] = df[DatasetColumn.CUE.value].to_numpy().astype(np.uint8)
+        trial_ids = realign_trial_starts_to_first_cue(cue=cue)
+
     position = compute_within_trial_position(
         distance=distance,
         trial_ids=trial_ids,

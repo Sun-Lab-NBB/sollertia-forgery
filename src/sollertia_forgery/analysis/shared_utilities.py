@@ -32,6 +32,46 @@ place-field tuning). Trimming at load time guarantees every analyzer operates on
 needing to know the artifact exists."""
 
 
+def realign_trial_starts_to_first_cue(cue: NDArray[np.uint8]) -> NDArray[np.int32]:
+    """Re-anchors a per-sample trial index so each trial starts at the canonical first-cue transition.
+
+    Notes:
+        The runtime begins recording each trial when the animal is already mid-first-cue (offset by
+        ``cue_offset_cm`` into the canonical cue sequence), so runtime trial boundaries do not align with
+        cue boundaries. Analyses that need canonical cue-aligned trial boundaries — so the rate-map x-axis
+        at position 0 corresponds to the canonical first-cue start — re-bin samples here.
+
+        ``first_cue`` is the cue id present at the first sample of the supplied array (the first run-state
+        sample of the trial type). Each subsequent sample where ``cue == first_cue`` AND the previous
+        sample's ``cue != first_cue`` increments the trial index. The first realigned trial usually starts
+        mid-cycle (the run-state subset begins partway through the first cycle) and the last realigned
+        trial usually ends mid-cycle, so callers that need only complete cycles should drop incomplete
+        trials downstream — ``compute_within_trial_position``'s completeness mask handles this naturally.
+
+    Args:
+        cue: The per-sample cue id with length sample_count. Already filtered to a single trial type and
+            run-state samples.
+
+    Returns:
+        Per-sample re-anchored trial id with length sample_count, dtype np.int32.
+    """
+    if cue.size == 0:
+        # noinspection PyTypeChecker
+        return np.zeros(0, dtype=np.int32)
+    first_cue = cue[0]
+    # noinspection PyTypeChecker
+    is_first_cue: NDArray[np.bool_] = cue == first_cue
+    # noinspection PyTypeChecker
+    prev_not_first_cue: NDArray[np.bool_] = np.empty(cue.size, dtype=np.bool_)
+    prev_not_first_cue[0] = True
+    prev_not_first_cue[1:] = ~is_first_cue[:-1]
+    # noinspection PyTypeChecker
+    new_trial_start: NDArray[np.bool_] = is_first_cue & prev_not_first_cue
+    # noinspection PyTypeChecker
+    trial_id: NDArray[np.int32] = np.cumsum(new_trial_start.astype(np.int32)).astype(np.int32) - np.int32(1)
+    return trial_id
+
+
 def trim_acquisition_warmup(dataframe: pl.DataFrame) -> pl.DataFrame:
     """Drops the leading ``_ACQUISITION_WARMUP_SECONDS`` of samples from a session dataframe via ``time_us``.
 

@@ -90,6 +90,7 @@ Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 [project.scripts]
 sl-project = "sollertia_forgery.interfaces.project:project_cli"
 sl-process = "sollertia_forgery.interfaces.process:process_cli"
+sl-analyze = "sollertia_forgery.interfaces.analyze:analyze_cli"
 sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
 
 # Development dependencies (PEP 735). Not published to PyPI.
