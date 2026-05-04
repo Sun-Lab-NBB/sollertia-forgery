@@ -9,6 +9,7 @@ report's cells feather and the matching `TuningTrialSummary` entry.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from collections.abc import Mapping
 
 import numpy as np
 import polars as pl
@@ -1605,15 +1606,17 @@ def plot_place_cell_peak_distribution_around_shift(
     bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
     bin_count = bin_centers_cm.size
 
+    before_label_indices = ", ".join(str(i + 1) for i in before_indices)
+    after_label_indices = ", ".join(str(i + 1) for i in after_indices)
     _draw_peak_distribution_line(
         axes=axes, bin_centers_cm=bin_centers_cm, fractions=before_fractions,
         color=_PEAK_DISTRIBUTION_COLOR_BEFORE,
-        label=f"Before shift (n={before_fractions.shape[0]} day(s))",
+        label=f"Before shift (sessions {before_label_indices})",
     )
     _draw_peak_distribution_line(
         axes=axes, bin_centers_cm=bin_centers_cm, fractions=after_fractions,
         color=_PEAK_DISTRIBUTION_COLOR_AFTER,
-        label=f"After shift (n={after_fractions.shape[0]} day(s))",
+        label=f"After shift (sessions {after_label_indices})",
     )
 
     former_reward_cm = _resolve_trigger_zone_center(
@@ -1649,9 +1652,129 @@ def plot_place_cell_peak_distribution_around_shift(
     axes.set_ylim(bottom=0)
     axes.legend(loc="upper left", frameon=False, fontsize=9)
 
+    title_subject = f"{classifier_label} peak distribution before vs after reward shift"
+    figure.suptitle(
+        f"Animal {animal_id} {title_subject}" if animal_id is not None
+        else title_subject[:1].upper() + title_subject[1:],
+        fontsize=11,
+    )
+    return figure
+
+
+def plot_place_cell_peak_distribution_per_session(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    display_sessions: tuple[int, ...] | None = None,
+    trial_type: str | None = None,
+    animal_id: str | None = None,
+    classifier: str = "place",
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots the cue-aligned place-cell peak distribution as one trace per session, colored by day.
+
+    Notes:
+        Same cue-aligned binning as ``plot_place_cell_peak_distribution_around_shift`` but draws one
+        line per session instead of two SEM-banded group averages, so the operator can read the
+        per-day trajectory of the peak distribution directly. Sessions are colored along a viridis
+        gradient in chronological order (cool → warm) and labeled by their 1-indexed session number
+        in the legend. ``display_sessions`` selects which sessions to render and reuses the same
+        1-indexed convention as the rest of the per-session plots in the notebook; ``None`` renders
+        every session in ``sessions``.
+
+        Cue-aligned bin edges come from the first selected session via the same canonical-
+        realignment path used by ``plot_place_cell_peak_distribution_around_shift``, so the x-axis
+        ticks line up across both figures.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries for the animal.
+        display_sessions: 1-indexed session numbers to render. Out-of-range entries are silently
+            skipped, duplicates are deduplicated, order is normalized to chronological. ``None``
+            renders every session in ``sessions``.
+        trial_type: Trial type whose tuning frames drive the distribution. ``None`` resolves to the
+            first trial type in the first selected session's tuning feather.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        classifier: ``"place"`` (default) selects ``IS_STRICT_PLACE`` cells; ``"reward"`` selects
+            ``IS_REWARD_CELL`` cells.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure with one axes carrying one line per selected session.
+    """
+    figure, axes = plt.subplots(
+        1, 1, figsize=(8.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+    )
+    classifier_column = (
+        TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
+        else TuningColumn.IS_REWARD_CELL.value
+    )
+    classifier_label = "place cells" if classifier == "place" else "reward cells"
+
+    if display_sessions is None:
+        resolved_indices = tuple(range(len(sessions)))
+    else:
+        resolved_indices = _resolve_one_indexed_sessions(
+            session_count=len(sessions), one_indexed=display_sessions,
+        )
+    if not resolved_indices:
+        axes.text(
+            0.5, 0.5, "no sessions resolved",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
+        sessions=sessions, reference_session_index=resolved_indices[0], trial_type=trial_type,
+    )
+    if resolved_trial_type is None or bin_edges_cm.size < 2:
+        axes.text(
+            0.5, 0.5, "no cue-aligned bin layout available",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    fractions = _stack_group_fractions(
+        sessions=sessions, session_indices=resolved_indices,
+        trial_type=resolved_trial_type, classifier_column=classifier_column,
+        bin_edges_cm=bin_edges_cm,
+    )
+
+    bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
+    bin_count = bin_centers_cm.size
+
+    # Maps session ordinal to a viridis sample so the chronological order reads as cool → warm;
+    # the ``max(..., 1)`` divisor guards the single-session case.
+    colormap = plt.get_cmap("viridis")
+    n_sessions = len(resolved_indices)
+    for ordinal, sess_idx in enumerate(resolved_indices):
+        color = colormap(ordinal / max(n_sessions - 1, 1))
+        axes.plot(
+            bin_centers_cm, fractions[ordinal],
+            color=color, marker="o", markersize=4, linewidth=1.4,
+            label=f"Session {sess_idx + 1}",
+        )
+
+    axes.set_xlim(0, float(track_length_cm))
+    axes.set_xticks(bin_centers_cm.tolist())
+    axes.set_xticklabels(
+        [
+            f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
+            for i in range(bin_count)
+        ],
+        fontsize=8, rotation=45, ha="right",
+    )
+    axes.set_xlabel("PF peak location (cm)", fontsize=10)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
+    axes.tick_params(axis="y", labelsize=8)
+    axes.set_ylim(bottom=0)
+    axes.legend(
+        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=8,
+    )
+
+    session_label_indices = ", ".join(str(i + 1) for i in resolved_indices)
     title_subject = (
-        f"{classifier_label} peak distribution — before vs after reward shift, "
-        f"trial type {resolved_trial_type!r}"
+        f"{classifier_label} peak distribution over sessions {session_label_indices}"
     )
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
@@ -1659,6 +1782,766 @@ def plot_place_cell_peak_distribution_around_shift(
         fontsize=11,
     )
     return figure
+
+
+def plot_place_cell_peak_distribution_across_animals(
+    sessions_by_animal: Mapping[str, tuple[DatasetSession, ...]],
+    *,
+    display_sessions: tuple[int, ...],
+    trial_type: str | None = None,
+    classifier: str = "place",
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots one cue-aligned place-cell peak distribution per animal, averaged over the supplied sessions.
+
+    Notes:
+        For each animal in ``sessions_by_animal``, gathers one per-bin fraction row per session in
+        ``display_sessions`` (resolved against that animal's own chronological list), then draws a
+        single viridis-colored mean ± SEM line — so each line summarizes one animal's behavior over
+        the requested session range. Animals whose chronological list is shorter than the highest
+        requested index contribute only the rows that resolve, with the SEM aggregator counting the
+        actual number of contributing sessions.
+
+        Cue-aligned bin edges come from the first animal's first resolved session via the same
+        canonical-realignment path used by the other peak-distribution plots, so x-axis ticks line
+        up across this figure and the per-session / around-shift variants. The function assumes
+        every animal shares the same task / cue layout; mismatched cue catalogs are not detected.
+
+    Args:
+        sessions_by_animal: Mapping from animal id to that animal's chronologically-ordered
+            DatasetSession tuple. Iteration order of the mapping drives the viridis ordinal and
+            the legend order.
+        display_sessions: 1-indexed session numbers to average for each animal. Out-of-range
+            entries (relative to a given animal's chronological list) are dropped silently for
+            that animal; duplicates are deduplicated; order is normalized to chronological.
+        trial_type: Trial type whose tuning frames drive the distribution. ``None`` resolves to
+            the first trial type in the reference session's tuning feather.
+        classifier: ``"place"`` (default) selects ``IS_STRICT_PLACE`` cells; ``"reward"`` selects
+            ``IS_REWARD_CELL`` cells.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure with one mean ± SEM line per animal in ``sessions_by_animal``.
+    """
+    figure, axes = plt.subplots(
+        1, 1, figsize=(8.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+    )
+    classifier_column = (
+        TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
+        else TuningColumn.IS_REWARD_CELL.value
+    )
+    classifier_label = "place cells" if classifier == "place" else "reward cells"
+
+    if not sessions_by_animal:
+        axes.text(
+            0.5, 0.5, "no animals provided",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    animal_ids = tuple(sessions_by_animal.keys())
+    reference_sessions = sessions_by_animal[animal_ids[0]]
+    reference_indices = _resolve_one_indexed_sessions(
+        session_count=len(reference_sessions), one_indexed=display_sessions,
+    )
+    if not reference_indices:
+        axes.text(
+            0.5, 0.5, "no sessions resolved against the reference animal",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
+        sessions=reference_sessions, reference_session_index=reference_indices[0],
+        trial_type=trial_type,
+    )
+    if resolved_trial_type is None or bin_edges_cm.size < 2:
+        axes.text(
+            0.5, 0.5, "no cue-aligned bin layout available",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
+    bin_count = bin_centers_cm.size
+
+    # Maps animal ordinal to a viridis sample so the cohort reads as cool → warm; the ``max(...,
+    # 1)`` divisor guards the single-animal case.
+    colormap = plt.get_cmap("viridis")
+    n_animals = len(animal_ids)
+    for ordinal, animal_id in enumerate(animal_ids):
+        animal_sessions = sessions_by_animal[animal_id]
+        animal_indices = _resolve_one_indexed_sessions(
+            session_count=len(animal_sessions), one_indexed=display_sessions,
+        )
+        if not animal_indices:
+            continue
+        animal_fractions = _stack_group_fractions(
+            sessions=animal_sessions,
+            session_indices=animal_indices,
+            trial_type=resolved_trial_type,
+            classifier_column=classifier_column,
+            bin_edges_cm=bin_edges_cm,
+        )
+        if animal_fractions.shape[0] == 0:
+            continue
+        color = colormap(ordinal / max(n_animals - 1, 1))
+        _draw_peak_distribution_line(
+            axes=axes, bin_centers_cm=bin_centers_cm, fractions=animal_fractions,
+            color=color,
+            label=f"Animal {animal_id} (n={animal_fractions.shape[0]} sessions)",
+        )
+
+    axes.set_xlim(0, float(track_length_cm))
+    axes.set_xticks(bin_centers_cm.tolist())
+    axes.set_xticklabels(
+        [
+            f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
+            for i in range(bin_count)
+        ],
+        fontsize=8, rotation=45, ha="right",
+    )
+    axes.set_xlabel("PF peak location (cm)", fontsize=10)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
+    axes.tick_params(axis="y", labelsize=8)
+    axes.set_ylim(bottom=0)
+    axes.legend(
+        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=8,
+    )
+
+    session_label_indices = ", ".join(str(i + 1) for i in reference_indices)
+    title_subject = (
+        f"{classifier_label} peak distribution per animal averaged over sessions "
+        f"{session_label_indices}"
+    )
+    figure.suptitle(
+        title_subject[:1].upper() + title_subject[1:],
+        fontsize=11,
+    )
+    return figure
+
+
+def plot_post_shift_reward_zone_cells_in_session(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    pre_shift_session: int,
+    post_shift_session: int,
+    trial_type: str | None = None,
+    animal_id: str | None = None,
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots pre- and post-shift rate-map heatmaps with new-reward-zone cells' peaks in red.
+
+    Notes:
+        Renders two panels side by side, each showing one specific session — the pre-shift
+        ``pre_shift_session`` on the left and the post-shift ``post_shift_session`` on the right.
+        Cells included are the strict-place cells from the post-shift session that also have a
+        rate map in the pre-shift session, ordered by their post-shift peak so cells that move
+        into the new reward band cluster contiguously and align horizontally between panels.
+
+        Both panels are row-normalised (each row scaled to its own peak) so faint cells stay
+        legible alongside strong ones. On rows whose post-shift peak falls inside the new-reward-
+        zone window — the single cue (typically the gray cue at the reward) that contains the
+        post-shift trigger-zone center — only the major-peak band of the rate map is recoloured
+        in ``Reds``; the rest of the row, and every other row, stays in ``gray_r``. The pre-shift
+        panel therefore shows the red marks at each migrating cell's pre-shift peak (where they
+        were tuned before the shift), and the post-shift panel shows them inside the new reward
+        zone.
+
+        Each panel marks its own trigger zone with red-dashed verticals and the other panel's
+        trigger zone with gray-dotted verticals. Cell ids must be within-animal-stable across the
+        two sessions; multi-day cindra registration provides this guarantee inside an animal.
+
+    Args:
+        sessions: Chronologically ordered DatasetSession entries for the animal.
+        pre_shift_session: 1-indexed session whose rate maps render in the left panel.
+        post_shift_session: 1-indexed session whose rate maps render in the right panel and whose
+            per-cell peak positions drive the red/gray classification.
+        trial_type: Trial type whose tuning frames drive the analysis. ``None`` resolves to the
+            first trial type in the post-shift session's tuning feather.
+        animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
+        figure_dpi: Output figure DPI.
+
+    Returns:
+        A matplotlib Figure with two heatmap axes (pre-shift on the left, post-shift on the right).
+    """
+    figure, (axes_pre, axes_post) = plt.subplots(
+        1, 2, figsize=(11.0, 6.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        sharey=True,
+    )
+
+    pre_shift_index = int(pre_shift_session) - 1
+    if pre_shift_index < 0 or pre_shift_index >= len(sessions):
+        axes_pre.text(
+            0.5, 0.5, f"pre-shift session {pre_shift_session} out of range",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    post_shift_index = int(post_shift_session) - 1
+    if post_shift_index < 0 or post_shift_index >= len(sessions):
+        axes_pre.text(
+            0.5, 0.5, f"post-shift session {post_shift_session} out of range",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    # Anchors the bin layout and trigger zone on the post-shift session so the new-reward-zone
+    # window reflects the geometry of the session whose rate maps drive the red/gray decision.
+    resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
+        sessions=sessions, reference_session_index=post_shift_index, trial_type=trial_type,
+    )
+    if resolved_trial_type is None or bin_edges_cm.size < 2:
+        axes_pre.text(
+            0.5, 0.5, "no cue-aligned bin layout available",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    post_trigger_cm = _resolve_trigger_zone_center(
+        session=sessions[post_shift_index], trial_type=resolved_trial_type,
+    )
+    if post_trigger_cm is None:
+        axes_pre.text(
+            0.5, 0.5, "post-shift trigger-zone center unavailable",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    # ``np.searchsorted`` returns the insertion index, so subtracting 1 yields the bin whose
+    # ``[start, end)`` interval contains the post-shift trigger-zone center. The window is
+    # restricted to that single bin (the gray cue covering the reward delivery), not the preceding
+    # cue, so the red highlight only marks cells whose peak truly sits in the reward cue.
+    reward_bin_idx = int(np.searchsorted(bin_edges_cm, post_trigger_cm, side="right")) - 1
+    reward_bin_idx = max(min(reward_bin_idx, bin_edges_cm.size - 2), 0)
+    window_start_cm = float(bin_edges_cm[reward_bin_idx])
+    window_end_cm = float(bin_edges_cm[reward_bin_idx + 1])
+
+    pre_zone_bounds = _resolve_trigger_zone_bounds(
+        session=sessions[pre_shift_index], trial_type=resolved_trial_type,
+    )
+    post_zone_bounds = _resolve_trigger_zone_bounds(
+        session=sessions[post_shift_index], trial_type=resolved_trial_type,
+    )
+
+    # Pulls strict-place cells from the post-shift session — the right panel renders that
+    # session's rate maps verbatim, and the same session's per-cell peak position drives the
+    # red/gray decision.
+    post_session = sessions[post_shift_index]
+    if not post_session.tuning_cells_path.exists():
+        axes_pre.text(
+            0.5, 0.5, f"post-shift session {post_shift_session} has no tuning_cells.feather",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    post_frame = pl.read_ipc(source=post_session.tuning_cells_path, memory_map=True)
+    if TuningColumn.TRIAL_TYPE.value in post_frame.columns:
+        post_frame = post_frame.filter(
+            pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type
+        )
+    if TuningColumn.IS_STRICT_PLACE.value in post_frame.columns:
+        post_frame = post_frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value))
+    post_frame = post_frame.sort(TuningColumn.CELL_ID.value)
+    if post_frame.height == 0:
+        axes_pre.text(
+            0.5, 0.5, f"no strict-place cells in session {post_shift_session}",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    # noinspection PyTypeChecker
+    post_rate_maps: NDArray[np.float32] = np.asarray(
+        post_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    if post_rate_maps.size == 0:
+        axes_pre.text(
+            0.5, 0.5, f"session {post_shift_session} cells have empty rate maps",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    rate_map_bin_count = int(post_rate_maps.shape[1])
+    bin_size_cm = track_length_cm / rate_map_bin_count if rate_map_bin_count > 0 else 1.0
+    finite_for_argmax = np.where(np.isfinite(post_rate_maps), post_rate_maps, -np.inf)
+    # noinspection PyTypeChecker
+    post_peak_bins: NDArray[np.int64] = (
+        np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+    )
+    # noinspection PyTypeChecker
+    post_peak_cm: NDArray[np.float64] = (
+        (post_peak_bins.astype(np.float64) + 0.5) * bin_size_cm
+    )
+    # noinspection PyTypeChecker
+    post_cell_ids: NDArray[np.int64] = (
+        post_frame[TuningColumn.CELL_ID.value].to_numpy().astype(np.int64, copy=False)
+    )
+    cell_id_to_post_peak: dict[int, float] = {
+        int(cid): float(p) for cid, p in zip(post_cell_ids, post_peak_cm)
+    }
+    cell_id_to_post_rate_map: dict[int, NDArray[np.float32]] = {
+        int(cid): rm for cid, rm in zip(post_cell_ids, post_rate_maps)
+    }
+
+    pre_path = sessions[pre_shift_index].tuning_cells_path
+    if not pre_path.exists():
+        axes_pre.text(
+            0.5, 0.5, f"pre-shift session {pre_shift_session} has no tuning_cells.feather",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    pre_frame = pl.read_ipc(source=pre_path, memory_map=True)
+    if TuningColumn.TRIAL_TYPE.value in pre_frame.columns:
+        pre_frame = pre_frame.filter(
+            pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type
+        )
+    if TuningColumn.IS_STRICT_PLACE.value in pre_frame.columns:
+        pre_frame = pre_frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value))
+    pre_frame = pre_frame.filter(
+        pl.col(TuningColumn.CELL_ID.value).is_in(sorted(cell_id_to_post_peak.keys()))
+    )
+    pre_frame = pre_frame.sort(TuningColumn.CELL_ID.value)
+    if pre_frame.height == 0:
+        axes_pre.text(
+            0.5, 0.5,
+            f"no strict-place cells overlap sessions {pre_shift_session} and {post_shift_session}",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    # noinspection PyTypeChecker
+    pre_rate_maps: NDArray[np.float32] = np.asarray(
+        pre_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    # noinspection PyTypeChecker
+    pre_cell_ids: NDArray[np.int64] = (
+        pre_frame[TuningColumn.CELL_ID.value].to_numpy().astype(np.int64, copy=False)
+    )
+    # noinspection PyTypeChecker
+    cohort_post_peaks: NDArray[np.float64] = np.array(
+        [cell_id_to_post_peak[int(cid)] for cid in pre_cell_ids], dtype=np.float64,
+    )
+    # Builds the post-shift rate-map matrix in the same row order as the pre-shift matrix so the
+    # two panels render the same cells at the same y-positions after sorting.
+    # noinspection PyTypeChecker
+    cohort_post_rate_maps: NDArray[np.float32] = np.stack(
+        [cell_id_to_post_rate_map[int(cid)] for cid in pre_cell_ids], axis=0,
+    )
+
+    # Sorts both matrices by post-shift peak so cells that move into the new reward band cluster
+    # contiguously; ties broken stably keep cell-id order within a peak.
+    # noinspection PyTypeChecker
+    order: NDArray[np.int64] = np.argsort(cohort_post_peaks, kind="stable")
+    sorted_pre_maps = pre_rate_maps[order]
+    sorted_post_maps = cohort_post_rate_maps[order]
+    sorted_post_peaks = cohort_post_peaks[order]
+    in_window = (sorted_post_peaks >= window_start_cm) & (sorted_post_peaks < window_end_cm)
+
+    n_cells = int(sorted_pre_maps.shape[0])
+    extent = (0.0, float(track_length_cm), float(n_cells), 0.0)
+
+    _draw_red_gray_heatmap(
+        axes=axes_pre, rate_maps=sorted_pre_maps, in_window=in_window, extent=extent,
+        active_zone=pre_zone_bounds, inactive_zone=post_zone_bounds,
+    )
+    _draw_red_gray_heatmap(
+        axes=axes_post, rate_maps=sorted_post_maps, in_window=in_window, extent=extent,
+        active_zone=post_zone_bounds, inactive_zone=pre_zone_bounds,
+    )
+
+    axes_pre.set_xlim(0.0, float(track_length_cm))
+    axes_post.set_xlim(0.0, float(track_length_cm))
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_pre.set_ylabel(
+        "Strict-place cell (sorted by post-shift peak)", fontsize=10,
+    )
+    axes_pre.set_yticks([])
+    axes_post.set_yticks([])
+    axes_pre.set_title(f"Session {pre_shift_session} (pre-shift)", fontsize=10)
+    axes_post.set_title(f"Session {post_shift_session} (post-shift)", fontsize=10)
+
+    n_red = int(in_window.sum())
+    title_subject = (
+        f"strict-place cells — {n_red}/{n_cells} tuned to the new reward zone "
+        f"(red rows; window {int(round(window_start_cm))}-{int(round(window_end_cm))} cm)"
+    )
+    figure.suptitle(
+        f"Animal {animal_id} {title_subject}" if animal_id is not None
+        else title_subject[:1].upper() + title_subject[1:],
+        fontsize=11,
+    )
+    return figure
+
+
+def plot_pre_shift_reward_zone_cells_in_session(
+    sessions: tuple[DatasetSession, ...],
+    *,
+    pre_shift_session: int,
+    post_shift_session: int,
+    trial_type: str | None = None,
+    animal_id: str | None = None,
+    figure_dpi: int = 150,
+) -> plt.Figure:
+    """Plots pre- and post-shift rate-map heatmaps with old-reward-zone cells' peaks in red.
+
+    Notes:
+        Inverse of `plot_post_shift_reward_zone_cells_in_session`. Cells included are the strict-
+        place cells from the PRE-shift session that also have a rate map in the post-shift session,
+        ordered by their pre-shift peak. Rows whose pre-shift peak falls inside the OLD reward-zone
+        window (the single cue containing the pre-shift trigger-zone center) are recoloured in
+        ``Reds`` at their major-peak band, while every other row stays in ``gray_r``. The pre-shift
+        panel therefore shows the red marks anchored on the old reward zone, and the post-shift
+        panel shows where those same cells ended up after the shift, answering "where did the cells
+        that used to track the old reward zone migrate to?"
+    """
+    figure, (axes_pre, axes_post) = plt.subplots(
+        1, 2, figsize=(11.0, 6.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        sharey=True,
+    )
+
+    pre_shift_index = int(pre_shift_session) - 1
+    if pre_shift_index < 0 or pre_shift_index >= len(sessions):
+        axes_pre.text(
+            0.5, 0.5, f"pre-shift session {pre_shift_session} out of range",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    post_shift_index = int(post_shift_session) - 1
+    if post_shift_index < 0 or post_shift_index >= len(sessions):
+        axes_pre.text(
+            0.5, 0.5, f"post-shift session {post_shift_session} out of range",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    # Anchors the bin layout and trigger zone on the PRE-shift session so the old-reward-zone
+    # window reflects the geometry of the session whose rate maps drive the red/gray decision.
+    resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
+        sessions=sessions, reference_session_index=pre_shift_index, trial_type=trial_type,
+    )
+    if resolved_trial_type is None or bin_edges_cm.size < 2:
+        axes_pre.text(
+            0.5, 0.5, "no cue-aligned bin layout available",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    pre_trigger_cm = _resolve_trigger_zone_center(
+        session=sessions[pre_shift_index], trial_type=resolved_trial_type,
+    )
+    if pre_trigger_cm is None:
+        axes_pre.text(
+            0.5, 0.5, "pre-shift trigger-zone center unavailable",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    reward_bin_idx = int(np.searchsorted(bin_edges_cm, pre_trigger_cm, side="right")) - 1
+    reward_bin_idx = max(min(reward_bin_idx, bin_edges_cm.size - 2), 0)
+    window_start_cm = float(bin_edges_cm[reward_bin_idx])
+    window_end_cm = float(bin_edges_cm[reward_bin_idx + 1])
+
+    pre_zone_bounds = _resolve_trigger_zone_bounds(
+        session=sessions[pre_shift_index], trial_type=resolved_trial_type,
+    )
+    post_zone_bounds = _resolve_trigger_zone_bounds(
+        session=sessions[post_shift_index], trial_type=resolved_trial_type,
+    )
+
+    # Pulls strict-place cells from the pre-shift session — the left panel renders that session's
+    # rate maps verbatim, and the same session's per-cell peak position drives the red/gray
+    # decision (peak inside the OLD reward cue → red).
+    pre_session = sessions[pre_shift_index]
+    if not pre_session.tuning_cells_path.exists():
+        axes_pre.text(
+            0.5, 0.5, f"pre-shift session {pre_shift_session} has no tuning_cells.feather",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    pre_frame = pl.read_ipc(source=pre_session.tuning_cells_path, memory_map=True)
+    if TuningColumn.TRIAL_TYPE.value in pre_frame.columns:
+        pre_frame = pre_frame.filter(
+            pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type
+        )
+    if TuningColumn.IS_STRICT_PLACE.value in pre_frame.columns:
+        pre_frame = pre_frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value))
+    pre_frame = pre_frame.sort(TuningColumn.CELL_ID.value)
+    if pre_frame.height == 0:
+        axes_pre.text(
+            0.5, 0.5, f"no strict-place cells in session {pre_shift_session}",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    # noinspection PyTypeChecker
+    pre_rate_maps: NDArray[np.float32] = np.asarray(
+        pre_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    if pre_rate_maps.size == 0:
+        axes_pre.text(
+            0.5, 0.5, f"session {pre_shift_session} cells have empty rate maps",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    rate_map_bin_count = int(pre_rate_maps.shape[1])
+    bin_size_cm = track_length_cm / rate_map_bin_count if rate_map_bin_count > 0 else 1.0
+    finite_for_argmax = np.where(np.isfinite(pre_rate_maps), pre_rate_maps, -np.inf)
+    # noinspection PyTypeChecker
+    pre_peak_bins: NDArray[np.int64] = (
+        np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+    )
+    # noinspection PyTypeChecker
+    pre_peak_cm: NDArray[np.float64] = (
+        (pre_peak_bins.astype(np.float64) + 0.5) * bin_size_cm
+    )
+    # noinspection PyTypeChecker
+    pre_cell_ids: NDArray[np.int64] = (
+        pre_frame[TuningColumn.CELL_ID.value].to_numpy().astype(np.int64, copy=False)
+    )
+    cell_id_to_pre_peak: dict[int, float] = {
+        int(cid): float(p) for cid, p in zip(pre_cell_ids, pre_peak_cm)
+    }
+    cell_id_to_pre_rate_map: dict[int, NDArray[np.float32]] = {
+        int(cid): rm for cid, rm in zip(pre_cell_ids, pre_rate_maps)
+    }
+
+    post_path = sessions[post_shift_index].tuning_cells_path
+    if not post_path.exists():
+        axes_pre.text(
+            0.5, 0.5, f"post-shift session {post_shift_session} has no tuning_cells.feather",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+    post_frame = pl.read_ipc(source=post_path, memory_map=True)
+    if TuningColumn.TRIAL_TYPE.value in post_frame.columns:
+        post_frame = post_frame.filter(
+            pl.col(TuningColumn.TRIAL_TYPE.value) == resolved_trial_type
+        )
+    if TuningColumn.IS_STRICT_PLACE.value in post_frame.columns:
+        post_frame = post_frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value))
+    post_frame = post_frame.filter(
+        pl.col(TuningColumn.CELL_ID.value).is_in(sorted(cell_id_to_pre_peak.keys()))
+    )
+    post_frame = post_frame.sort(TuningColumn.CELL_ID.value)
+    if post_frame.height == 0:
+        axes_pre.text(
+            0.5, 0.5,
+            f"no strict-place cells overlap sessions {pre_shift_session} and {post_shift_session}",
+            ha="center", va="center", transform=axes_pre.transAxes,
+        )
+        for axes in (axes_pre, axes_post):
+            axes.set_axis_off()
+        return figure
+
+    # noinspection PyTypeChecker
+    post_rate_maps: NDArray[np.float32] = np.asarray(
+        post_frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    # noinspection PyTypeChecker
+    post_cell_ids: NDArray[np.int64] = (
+        post_frame[TuningColumn.CELL_ID.value].to_numpy().astype(np.int64, copy=False)
+    )
+    # noinspection PyTypeChecker
+    cohort_pre_peaks: NDArray[np.float64] = np.array(
+        [cell_id_to_pre_peak[int(cid)] for cid in post_cell_ids], dtype=np.float64,
+    )
+    # noinspection PyTypeChecker
+    cohort_pre_rate_maps: NDArray[np.float32] = np.stack(
+        [cell_id_to_pre_rate_map[int(cid)] for cid in post_cell_ids], axis=0,
+    )
+
+    # Sorts both matrices by pre-shift peak so cells that anchor on the old reward zone cluster
+    # contiguously; ties broken stably keep cell-id order within a peak.
+    # noinspection PyTypeChecker
+    order: NDArray[np.int64] = np.argsort(cohort_pre_peaks, kind="stable")
+    sorted_pre_maps = cohort_pre_rate_maps[order]
+    sorted_post_maps = post_rate_maps[order]
+    sorted_pre_peaks = cohort_pre_peaks[order]
+    in_window = (sorted_pre_peaks >= window_start_cm) & (sorted_pre_peaks < window_end_cm)
+
+    n_cells = int(sorted_pre_maps.shape[0])
+    extent = (0.0, float(track_length_cm), float(n_cells), 0.0)
+
+    _draw_red_gray_heatmap(
+        axes=axes_pre, rate_maps=sorted_pre_maps, in_window=in_window, extent=extent,
+        active_zone=pre_zone_bounds, inactive_zone=post_zone_bounds,
+    )
+    _draw_red_gray_heatmap(
+        axes=axes_post, rate_maps=sorted_post_maps, in_window=in_window, extent=extent,
+        active_zone=post_zone_bounds, inactive_zone=pre_zone_bounds,
+    )
+
+    axes_pre.set_xlim(0.0, float(track_length_cm))
+    axes_post.set_xlim(0.0, float(track_length_cm))
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_pre.set_ylabel(
+        "Strict-place cell (sorted by pre-shift peak)", fontsize=10,
+    )
+    axes_pre.set_yticks([])
+    axes_post.set_yticks([])
+    axes_pre.set_title(f"Session {pre_shift_session} (pre-shift)", fontsize=10)
+    axes_post.set_title(f"Session {post_shift_session} (post-shift)", fontsize=10)
+
+    n_red = int(in_window.sum())
+    title_subject = (
+        f"strict-place cells — {n_red}/{n_cells} tuned to the old reward zone "
+        f"(red rows; window {int(round(window_start_cm))}-{int(round(window_end_cm))} cm)"
+    )
+    figure.suptitle(
+        f"Animal {animal_id} {title_subject}" if animal_id is not None
+        else title_subject[:1].upper() + title_subject[1:],
+        fontsize=11,
+    )
+    return figure
+
+
+_PEAK_HIGHLIGHT_THRESHOLD: float = 0.5
+"""Row-normalized fluorescence value above which a bin is treated as part of a cell's major peak.
+A cell with a clean, smoothed place field has a roughly half-max-width band of bins above this
+cutoff, so it captures the peak region without bleeding into the tails."""
+
+
+def _draw_red_gray_heatmap(
+    axes: plt.Axes,
+    rate_maps: NDArray[np.float32],
+    in_window: NDArray[np.bool_],
+    extent: tuple[float, float, float, float],
+    active_zone: tuple[float, float] | None,
+    inactive_zone: tuple[float, float] | None,
+) -> None:
+    """Renders one row-normalized rate-map heatmap with peak bands colored red on flagged rows.
+
+    Notes:
+        Row-normalises each cell's rate map so peaks are uniformly bright across cells, then
+        renders every row in ``gray_r`` for the bulk of its tuning curve. On rows where
+        ``in_window`` is True, the bins above ``_PEAK_HIGHLIGHT_THRESHOLD`` (the half-max-width
+        band of the peak) are overwritten with the ``Reds`` sample at the same intensity, so the
+        red ink lands only on the cell's major peak rather than tinting the whole row. The full
+        rate map remains visible underneath in grayscale, including any secondary peaks. Active
+        and inactive trigger-zone bounds are drawn as red-dashed and gray-dotted vertical pairs,
+        omitted when ``None`` or when the two bounds coincide.
+    """
+    # noinspection PyTypeChecker
+    row_max: NDArray[np.float32] = np.nanmax(rate_maps, axis=1, keepdims=True)
+    safe_max = np.where(np.isfinite(row_max) & (row_max > 0), row_max, 1.0)
+    normalized = np.clip(rate_maps / safe_max, 0.0, 1.0)
+    normalized = np.where(np.isfinite(normalized), normalized, 0.0)
+
+    gray_cmap = plt.get_cmap("gray_r")
+    red_cmap = plt.get_cmap("Reds")
+    rgba = gray_cmap(normalized)
+    if in_window.any():
+        red_rgba = red_cmap(normalized)
+        # Broadcast ``in_window`` (one entry per row) against the bin axis to limit the red
+        # overwrite to flagged rows, and gate by ``normalized >= threshold`` so only the major
+        # peak survives. The combined boolean mask indexes the (n_cells, n_bins) RGBA array
+        # directly, swapping in red samples where both conditions hold.
+        peak_mask = normalized >= _PEAK_HIGHLIGHT_THRESHOLD
+        replace_mask = in_window[:, None] & peak_mask
+        rgba[replace_mask] = red_rgba[replace_mask]
+
+    axes.imshow(rgba, aspect="auto", origin="upper", extent=extent, interpolation="nearest")
+
+    if active_zone is not None:
+        axes.axvline(active_zone[0], color="red", linestyle="--", linewidth=1.0, zorder=2)
+        axes.axvline(active_zone[1], color="red", linestyle="--", linewidth=1.0, zorder=2)
+    if inactive_zone is not None and inactive_zone != active_zone:
+        axes.axvline(inactive_zone[0], color="gray", linestyle=":", linewidth=1.0, zorder=2)
+        axes.axvline(inactive_zone[1], color="gray", linestyle=":", linewidth=1.0, zorder=2)
+
+
+def _resolve_trigger_zone_bounds(
+    session: DatasetSession, trial_type: str,
+) -> tuple[float, float] | None:
+    """Returns the trigger-zone ``(start_cm, end_cm)`` for a session, or ``None`` when unavailable."""
+    if not session.geometry_path.exists():
+        return None
+    geometry = TrialGeometry.from_yaml(file_path=session.geometry_path)
+    entry = geometry.entries.get(trial_type)
+    if entry is None:
+        return None
+    return (
+        float(entry.stimulus_trigger_zone_start_cm),
+        float(entry.stimulus_trigger_zone_end_cm),
+    )
+
+
+def _collect_strict_place_peaks(
+    session: DatasetSession,
+    trial_type: str,
+    track_length_cm: float,
+) -> dict[int, float]:
+    """Returns ``{cell_id: peak_cm}`` for every strict-place cell in the session's tuning frame.
+
+    Notes:
+        Reads the session's ``tuning_cells.feather``, filters to ``IS_STRICT_PLACE`` rows for the
+        given trial type, and converts each surviving cell's ``RATE_MAP`` argmax to centimeters
+        via the rate-map bin spacing. Returns an empty mapping when the feather is missing,
+        empty, or has no strict-place cells.
+    """
+    if not session.tuning_cells_path.exists():
+        return {}
+    frame = pl.read_ipc(source=session.tuning_cells_path, memory_map=True)
+    if TuningColumn.TRIAL_TYPE.value in frame.columns:
+        frame = frame.filter(pl.col(TuningColumn.TRIAL_TYPE.value) == trial_type)
+    if TuningColumn.IS_STRICT_PLACE.value in frame.columns:
+        frame = frame.filter(pl.col(TuningColumn.IS_STRICT_PLACE.value))
+    if frame.height == 0:
+        return {}
+    # noinspection PyTypeChecker
+    rate_maps: NDArray[np.float32] = np.asarray(
+        frame[TuningColumn.RATE_MAP.value].to_list(), dtype=np.float32,
+    )
+    if rate_maps.size == 0:
+        return {}
+    rate_map_bin_count = int(rate_maps.shape[1])
+    bin_size_cm = track_length_cm / rate_map_bin_count if rate_map_bin_count > 0 else 1.0
+    finite_for_argmax = np.where(np.isfinite(rate_maps), rate_maps, -np.inf)
+    # noinspection PyTypeChecker
+    peak_bins: NDArray[np.int64] = np.argmax(finite_for_argmax, axis=1).astype(np.int64, copy=False)
+    # noinspection PyTypeChecker
+    peak_cm: NDArray[np.float64] = (peak_bins.astype(np.float64) + 0.5) * bin_size_cm
+    # noinspection PyTypeChecker
+    cell_ids: NDArray[np.int64] = (
+        frame[TuningColumn.CELL_ID.value].to_numpy().astype(np.int64, copy=False)
+    )
+    return {int(cid): float(p) for cid, p in zip(cell_ids, peak_cm)}
 
 
 def _resolve_one_indexed_sessions(

@@ -7,7 +7,7 @@ trial geometry data file, so per-session compute is cheap enough to repeat on de
 `aggregate_trial_outcomes` for the per-animal `TrialOutcomeContext` consumed by `plot_trial_outcomes`.
 """
 
-from .plotting import plot_lick_scatter, plot_trial_outcomes
+from .plotting import load_cue_textures, plot_lick_scatter, plot_trial_outcomes
 from .lick_protocol import (
     CueSpan,
     TrialBlock,
@@ -42,6 +42,7 @@ __all__ = [
     "aggregate_trial_outcomes",
     "extract_session_lick_events",
     "extract_session_trial_outcomes",
+    "load_cue_textures",
     "plot_lick_scatter",
     "plot_trial_outcomes",
 ]

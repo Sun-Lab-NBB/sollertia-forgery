@@ -7,11 +7,15 @@ subpackage keeps a single file responsible for matplotlib output.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.image import imread
 from matplotlib.patches import Patch, Rectangle
+from matplotlib.transforms import blended_transform_factory
 
 from .lick_protocol import TrialBlock, LickContext
 from .outcome_protocol import TrialOutcomeContext
@@ -41,8 +45,9 @@ _COLOR_GUIDED: str = "#7f7f7f"
 _CUE_GRAY_CODE: int = 0
 """Convention used by the project's experiment configurations: cue code 0 is the neutral 'Gray' filler
 between named cues, and the cue-block panel renders it in a low-saturation gray."""
-_COLOR_CUE_GRAY: str = "#dddddd"
-"""Fill color for the neutral 'Gray' cue (code 0) in the top reference panel."""
+_COLOR_CUE_GRAY: str = "#9e9e9e"
+"""Fill color for the neutral 'Gray' cue (code 0) in the top reference panel; chosen darker than the
+panel's facecolor so the gray cues read as a distinct fill rather than a transparent gap."""
 _COLOR_CUE_PALETTE: tuple[str, ...] = (
     "#1f77b4",
     "#ff7f0e",
@@ -69,6 +74,7 @@ def plot_lick_scatter(
     *,
     display_sessions: tuple[int, ...] | None = None,
     animal_id: str | None = None,
+    cue_textures: dict[int, NDArray] | None = None,
 ) -> plt.Figure:
     """Plots discrete lick events for one animal with per-trial reward zones.
 
@@ -93,6 +99,10 @@ def plot_lick_scatter(
             silently skipped, duplicates are deduplicated, and order is normalized to chronological.
             ``None`` renders every session in ``context``.
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
+        cue_textures: Optional mapping from cue uint8 code to an image array (HxW, HxWx3, or HxWx4)
+            used to fill that code's rectangles in the reference strip. Codes without an entry fall
+            back to the per-code solid color. ``load_cue_textures`` resolves the mapping from a
+            session's ``experiment_configuration.yaml`` and the Unity textures directory.
 
     Returns:
         A matplotlib Figure showing the lick scatter, the per-trial reward-zone overlay, and the
@@ -111,24 +121,30 @@ def plot_lick_scatter(
         return figure
 
     figure_height = max(8.0, 0.025 * context.total_trials + 4.0)
-    # Uses ``constrained_layout`` because the figure mixes a ``GridSpec`` with a per-axis legend
-    # anchored outside the axes; ``tight_layout`` warns and produces inconsistent margins for that
-    # combination, while ``constrained_layout`` reserves space for the legend, suptitle, and shared
-    # x-axis automatically.
+    # Uses ``constrained_layout`` because the figure pairs the main scatter with a legend anchored
+    # outside the axes; ``tight_layout`` warns and produces inconsistent margins for that
+    # combination, while ``constrained_layout`` reserves space for the legend, suptitle, and the
+    # cue strip drawn above the axis automatically.
     figure = plt.figure(
         figsize=(11, figure_height), facecolor="white", dpi=150, layout="constrained",
     )
+    ax_main = figure.add_subplot(1, 1, 1)
     rendered_trial_types = _ordered_rendered_trial_types(context=context)
-    cue_panel_weight = max(1.6 * max(len(rendered_trial_types), 1), 1.6)
-    grid = figure.add_gridspec(nrows=2, ncols=1, height_ratios=[cue_panel_weight, 22], hspace=0.06)
-    ax_zones = figure.add_subplot(grid[0, 0])
-    ax_main = figure.add_subplot(grid[1, 0], sharex=ax_zones)
 
     unique_zones = _collect_unique_reward_zones(context=context)
-    _draw_cue_blocks_panel(
-        axis=ax_zones, context=context, rendered_trial_types=rendered_trial_types,
-    )
     _draw_trial_blocks(axis=ax_main, context=context, unique_zones=unique_zones)
+    # Draws the cue reference strip directly onto the main axis using a blended transform with
+    # ``y`` in axes-fraction coordinates above 1.0 and ``clip_on=False``. A separate top-axis
+    # gridspec slot was tried first, but ``constrained_layout`` enforces a residual ~3.6%-of-figure
+    # gap between adjacent slots that no public knob (``hspace``, ``h_pad``, etc.) collapses to
+    # zero. Drawing the cue rectangles on the main axis itself makes them sit at exactly the data
+    # axis's top spine, which is what the user wants.
+    _draw_cue_blocks_panel(
+        axis=ax_main,
+        context=context,
+        rendered_trial_types=rendered_trial_types,
+        cue_textures=cue_textures,
+    )
 
     ax_main.scatter(
         context.lick_positions,
@@ -144,6 +160,10 @@ def plot_lick_scatter(
 
     ax_main.set_xlim(0, context.track_length_cm)
     ax_main.set_ylim(context.total_trials, 0)
+    # Hides the top spine and top tick marks so the cue rectangles drawn at axes-fraction y=1.0
+    # sit on a clean edge rather than on top of a black spine line and stray ticks.
+    ax_main.spines["top"].set_visible(False)
+    ax_main.tick_params(top=False)
     ax_main.set_xlabel("Position (cm)", fontsize=11)
     session_count = max(len(context.session_boundaries) - 1, 0)
     y_axis_label = (
@@ -175,16 +195,26 @@ def plot_lick_scatter(
         fontsize=9,
     )
     session_label = "session" if session_count == 1 else "sessions"
-    figure.suptitle(
+    # Uses ``ax_main.set_title`` rather than ``figure.suptitle`` so the title centers above the
+    # plot rectangle alone; ``suptitle`` centers across the full figure width, which includes the
+    # legend column anchored outside the axes and shifts the text off-center over the data.
+    # ``set_title``'s default ``pad`` is measured from the axis spine, which would land the title
+    # inside the cue strip drawn at ``y_axes > 1.0``; an explicit ``y`` just above the strip's top
+    # gives constrained_layout enough headroom to place the title at the same figure-coord
+    # position ``figure.suptitle`` used (window ≈ 0.97-0.99) without leaving extra whitespace
+    # between the strip and the title.
+    n_rows = max(len(rendered_trial_types), 1)
+    title_y_axes = 1.0 + n_rows * 0.025 + 0.01
+    ax_main.set_title(
         _title_with_animal_prefix(
             animal_id=animal_id,
             description=(
-                f"discrete lick events across {session_count} {session_label} — "
-                f"{context.total_trials} trials, {context.lick_count} rising-edge lick events, "
-                f"{len(rendered_trial_types)} trial type(s)"
+                f"discrete lick events across {session_label} "
+                f"{', '.join(str(i) for i in context.session_indices)}"
             ),
         ),
         fontsize=12,
+        y=title_y_axes,
     )
     return figure
 
@@ -234,61 +264,123 @@ def _draw_cue_blocks_panel(
     axis: plt.Axes,
     context: LickContext,
     rendered_trial_types: tuple[str, ...],
+    cue_textures: dict[int, NDArray] | None = None,
 ) -> None:
-    """Renders the top reference panel as one row of cue rectangles per unique trial type.
+    """Renders the cue reference strip directly above the main scatter axis.
 
     Notes:
-        Each row reads as a horizontal sequence of colored rectangles spanning the full track length,
-        one per `CueSpan` in the trial type's layout. Cue codes drive the fill color so the same code
-        gets the same color across rows, with code 0 (the conventional 'Gray' filler) rendered as a
-        light gray. Each rectangle is labeled with its cue code so the operator can match the panel
-        to the per-sample cue column in the data feather.
+        Each row reads as a horizontal sequence of rectangles spanning the full track length, one
+        per `CueSpan` in the trial type's layout. The strip is drawn on the main axis using a
+        blended transform (``x`` in data coordinates, ``y`` in axes-fraction coordinates) with
+        ``clip_on=False``, so the rectangles render just above the axis's top spine with no
+        inter-axis gap. The bottom-most row sits at axes-fraction ``y = 1.0`` (flush with the data
+        area's top); additional rows stack upward.
+
+        When ``cue_textures`` provides an entry for a span's ``code``, the matching image is
+        rendered (stretched to the rectangle extent via ``imshow`` with ``aspect='auto'``) as the
+        rectangle fill, so the strip mirrors the wall textures the animal actually saw. Codes
+        without a texture entry fall back to the per-code solid color. A black border is drawn on
+        top in either branch. ``constrained_layout`` reads the patches' tight bounding box (which
+        extends above ``y_axes = 1.0``), so it auto-reserves room between the suptitle and the
+        axis to fit the strip.
 
     Args:
-        axis: The matplotlib axis on which to render the cue rows.
-        context: The per-animal lick aggregate whose cue layouts and track length drive the panel.
+        axis: The main scatter axis the strip overlays.
+        context: The per-animal lick aggregate whose cue layouts and track length drive the strip.
         rendered_trial_types: Trial types to allocate rows for, in display order.
+        cue_textures: Optional mapping from cue code to image array. When provided, codes present
+            in the mapping render as textured rectangles; missing codes render as colored fills.
     """
     n_rows = max(len(rendered_trial_types), 1)
-    row_height = 1.0 / n_rows
-    axis.set_facecolor("#f8f8f8")
-    axis.set_xlim(0, context.track_length_cm)
-    axis.set_ylim(0, 1)
+    row_height_axes = 0.025
+    transform = blended_transform_factory(axis.transData, axis.transAxes)
     for row_index, trial_type_name in enumerate(rendered_trial_types):
         layout = context.cue_layouts.get(trial_type_name, ())
-        y_lo = 1.0 - (row_index + 1) * row_height
-        y_hi = 1.0 - row_index * row_height
-        rect_y = y_lo + 0.12 * row_height
-        rect_height = 0.76 * row_height
+        # Bottom-most row (last chronologically) sits at ``y_axes = 1.0`` so its bottom edge lines
+        # up with the axis's top spine; additional trial-type rows stack upward.
+        rect_y = 1.0 + (n_rows - 1 - row_index) * row_height_axes
+        rect_height = row_height_axes
         for span in layout:
             width = span.end_cm - span.start_cm
             if width <= 0:
                 continue
+            texture = cue_textures.get(span.code) if cue_textures is not None else None
+            if texture is not None:
+                # ``imshow`` honours ``transform`` so ``extent`` is interpreted in the blended
+                # (data x, axes y) frame just like the patches around it.
+                axis.imshow(
+                    texture,
+                    extent=(span.start_cm, span.end_cm, rect_y, rect_y + rect_height),
+                    transform=transform,
+                    aspect="auto",
+                    interpolation="nearest",
+                    clip_on=False,
+                    zorder=2,
+                )
+                fill = "none"
+            else:
+                fill = _cue_color(code=span.code)
             axis.add_patch(
                 Rectangle(
                     (span.start_cm, rect_y),
                     width,
                     rect_height,
-                    facecolor=_cue_color(code=span.code),
+                    facecolor=fill,
                     edgecolor="black",
                     linewidth=0.5,
+                    transform=transform,
+                    # Cue rectangles span the full track edge-to-edge and sit above the axis box,
+                    # so the default clip box would trim them. ``clip_on=False`` keeps the full
+                    # rectangle (and its border on every side) visible.
+                    clip_on=False,
+                    zorder=3,
                 )
             )
-            if width >= 0.04 * context.track_length_cm:
-                axis.text(
-                    0.5 * (span.start_cm + span.end_cm),
-                    0.5 * (y_lo + y_hi),
-                    str(span.code),
-                    ha="center", va="center", fontsize=8,
-                )
-        axis.text(
-            -2, 0.5 * (y_lo + y_hi), trial_type_name,
-            ha="right", va="center", fontsize=8, fontweight="bold",
-        )
-    axis.set_yticks([])
-    axis.tick_params(labelbottom=False)
-    for spine in axis.spines.values():
-        spine.set_visible(False)
+
+
+def load_cue_textures(
+    *,
+    experiment_config_path: Path,
+    textures_dir: Path,
+) -> dict[int, NDArray]:
+    """Builds the ``cue_textures`` mapping consumed by `plot_lick_scatter` from a session's
+    experiment configuration and the Unity textures directory.
+
+    Notes:
+        Reads the ``cues:`` block of the experiment configuration YAML produced by the upstream
+        Mesoscope-VR pipeline (one file per session, written under ``<session>/raw_data/`` before
+        forging strips raw data). Each cue carries a uint8 ``code`` and a ``texture`` filename; the
+        loader resolves each filename against ``textures_dir`` (typically the
+        ``Assets/InfiniteCorridorTask/Textures`` directory of ``sollertia-unity-tasks``) and
+        ``matplotlib.image.imread``s the PNG into a numpy array. Cues whose ``texture`` is empty
+        (legacy templates predating the field) or whose file is missing are skipped silently so
+        the caller can pass partial mappings to `plot_lick_scatter`.
+
+        Cue codes are template-level, so one mapping covers every session in a context whose
+        sessions share the same experiment configuration. When animals span configurations, build
+        one mapping per group and pass the matching one to each ``plot_lick_scatter`` call.
+
+    Args:
+        experiment_config_path: Path to a session's ``experiment_configuration.yaml``.
+        textures_dir: Directory containing the Unity texture PNGs referenced by the configuration.
+
+    Returns:
+        Mapping from cue uint8 code to an image array as returned by ``matplotlib.image.imread``
+        (HxW for grayscale, HxWx3 for RGB, HxWx4 for RGBA).
+    """
+    with experiment_config_path.open("r") as handle:
+        configuration = yaml.safe_load(handle)
+    textures: dict[int, NDArray] = {}
+    for cue_entry in configuration.get("cues", ()):
+        code = int(cue_entry["code"])
+        filename = cue_entry.get("texture", "")
+        if not filename:
+            continue
+        texture_path = textures_dir / filename
+        if not texture_path.exists():
+            continue
+        textures[code] = imread(str(texture_path))
+    return textures
 
 
 def _draw_trial_blocks(
@@ -419,6 +511,7 @@ def _filter_context_to_sessions(
             session_boundaries=(0,),
             track_length_cm=context.track_length_cm,
             cue_layouts={},
+            session_indices=(),
         )
 
     # Builds the new session_boundaries and the per-session offset used to renumber trials. The
@@ -488,6 +581,7 @@ def _filter_context_to_sessions(
         session_boundaries=tuple(new_boundaries),
         track_length_cm=context.track_length_cm,
         cue_layouts=new_cue_layouts,
+        session_indices=tuple(context.session_indices[i] for i in resolved_old_indices),
     )
 
 

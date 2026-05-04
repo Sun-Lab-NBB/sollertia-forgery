@@ -170,6 +170,13 @@ class LickContext:
     """Per-trial-type cue layout, merged across every session contributing trials of that type.
     Mapping each trial type to the ordered sequence of cue spans the animal traversed within one
     trial of that type. The plotting layer uses these to render the cue-block reference panel."""
+    session_indices: tuple[int, ...]
+    """One-based session indices in the original chronological ordering used to build the context,
+    aligned with ``session_boundaries`` so ``session_indices[i]`` is the original 1-based number of
+    the session whose trials lie in the ``[session_boundaries[i], session_boundaries[i + 1])``
+    cumulative range. Filtering through ``_filter_context_to_sessions`` preserves the original
+    indices, so a context built from sessions ``1..10`` and filtered to ``(2, 5, 7)`` keeps the
+    indices ``(2, 5, 7)``. The plotting layer surfaces these in the figure title."""
 
     @property
     def total_trials(self) -> int:
@@ -599,4 +606,5 @@ def aggregate_lick_events(sessions: tuple[DatasetSession, ...]) -> LickContext:
         session_boundaries=tuple(boundaries),
         track_length_cm=track_length_max if track_length_max > 0 else _DEFAULT_TRACK_LENGTH_CM,
         cue_layouts=cue_layouts,
+        session_indices=tuple(range(1, len(sessions) + 1)),
     )
