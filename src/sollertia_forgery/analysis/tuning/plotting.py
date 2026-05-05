@@ -13,6 +13,7 @@ from collections.abc import Mapping
 
 import numpy as np
 import polars as pl
+import cmocean  # noqa: F401  # Importing cmocean registers the ``cmo.*`` colormap names with matplotlib.
 from scipy.stats import binomtest
 from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp
 from scipy.ndimage import gaussian_filter1d
@@ -596,7 +597,7 @@ def plot_sorted_heatmap(
     *,
     trial_type: str | None = None,
     display_sessions: tuple[int, ...] | None = None,
-    cmap: str = "magma",
+    cmap: str = "cmo.thermal",
     show_cue_boundaries: bool = True,
     minimum_percentile: float = 0.0,
     maximum_percentile: float = 0.95,
@@ -636,8 +637,11 @@ def plot_sorted_heatmap(
             the first session's tuning feather. Applied uniformly across panels.
         display_sessions: 1-indexed session numbers to render as columns. Defaults to every session
             in the supplied tuple — pass an explicit selection to render a subset.
-        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"magma"`` is a
-            perceptually-uniform colormap with strong contrast on dark backgrounds.
+        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"cmo.thermal"`` is
+            a perceptually-uniform colormap from the cmocean package (registered with matplotlib at
+            import time) that ramps from near-black through deep red to pale yellow, giving strong
+            contrast on dark backgrounds while keeping the low end visually quiet so empty rate-map
+            bins read as background rather than signal.
         show_cue_boundaries: When True, draw cyan dotted verticals on every panel at the start and
             end of the cue zone that contains the trigger zone for that session.
         minimum_percentile: Quantile (in ``[0, 1]``) of the pooled rate-map values used as the shared
@@ -839,7 +843,7 @@ def plot_classified_heatmap(
     classifier: str = "place",
     trial_type: str | None = None,
     display_sessions: tuple[int, ...] | None = None,
-    cmap: str = "magma",
+    cmap: str = "cmo.thermal",
     show_cue_boundaries: bool = True,
     animal_id: str | None = None,
     figure_dpi: int = 150,
@@ -877,8 +881,11 @@ def plot_classified_heatmap(
             the first session's tuning feather. Applied uniformly across panels.
         display_sessions: 1-indexed session numbers to render as columns. Defaults to every session
             in the supplied tuple — pass an explicit selection to render a subset.
-        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"magma"`` is a
-            perceptually-uniform colormap with strong contrast on dark backgrounds.
+        cmap: Matplotlib colormap name for the rate-map intensities. Default ``"cmo.thermal"`` is
+            a perceptually-uniform colormap from the cmocean package (registered with matplotlib at
+            import time) that ramps from near-black through deep red to pale yellow, giving strong
+            contrast on dark backgrounds while keeping the low end visually quiet so empty rate-map
+            bins read as background rather than signal.
         show_cue_boundaries: When True, draw cyan dotted verticals on every panel at the start and
             end of the cue zone that contains the trigger zone for that session.
         animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.

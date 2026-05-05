@@ -55,6 +55,7 @@ dependencies = [
 
     # Visualization
     "matplotlib>=3,<4",
+    "cmocean>=4,<5",  # Perceptually uniform colormaps; importing it registers the cmo.* names with matplotlib
     "PySide6>=6,<7",  # Qt backend for matplotlib interactive plots
     "plotly>=6,<7",
 
