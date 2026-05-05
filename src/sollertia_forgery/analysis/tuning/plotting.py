@@ -1606,17 +1606,19 @@ def plot_place_cell_peak_distribution_around_shift(
     bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
     bin_count = bin_centers_cm.size
 
-    before_label_indices = ", ".join(str(i + 1) for i in before_indices)
-    after_label_indices = ", ".join(str(i + 1) for i in after_indices)
+    # Per-session enumeration is dropped from the legend; only the surviving session count is
+    # surfaced via the ``(n=N sessions)`` suffix so the reader can gauge SEM stability without
+    # the legend bloating with the explicit session list (the notebook selection cell and
+    # suptitle already document which sessions back each group).
     _draw_peak_distribution_line(
         axes=axes, bin_centers_cm=bin_centers_cm, fractions=before_fractions,
         color=_PEAK_DISTRIBUTION_COLOR_BEFORE,
-        label=f"Before shift (sessions {before_label_indices})",
+        label=f"Before shift (n={before_fractions.shape[0]} sessions)",
     )
     _draw_peak_distribution_line(
         axes=axes, bin_centers_cm=bin_centers_cm, fractions=after_fractions,
         color=_PEAK_DISTRIBUTION_COLOR_AFTER,
-        label=f"After shift (sessions {after_label_indices})",
+        label=f"After shift (n={after_fractions.shape[0]} sessions)",
     )
 
     former_reward_cm = _resolve_trigger_zone_center(
@@ -1646,9 +1648,9 @@ def plot_place_cell_peak_distribution_around_shift(
         ],
         fontsize=8, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=10)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
-    axes.tick_params(axis="y", labelsize=8)
+    axes.set_xlabel("PF peak location (cm)", fontsize=9)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
+    axes.tick_params(axis="y", labelsize=9)
     axes.set_ylim(bottom=0)
     axes.legend(loc="upper left", frameon=False, fontsize=9)
 
@@ -1656,7 +1658,7 @@ def plot_place_cell_peak_distribution_around_shift(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=11,
+        fontsize=12,
     )
     return figure
 
@@ -1764,12 +1766,12 @@ def plot_place_cell_peak_distribution_per_session(
         ],
         fontsize=8, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=10)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
-    axes.tick_params(axis="y", labelsize=8)
+    axes.set_xlabel("PF peak location (cm)", fontsize=9)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
+    axes.tick_params(axis="y", labelsize=9)
     axes.set_ylim(bottom=0)
     axes.legend(
-        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=8,
+        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=9,
     )
 
     session_label_indices = ", ".join(str(i + 1) for i in resolved_indices)
@@ -1779,58 +1781,91 @@ def plot_place_cell_peak_distribution_per_session(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=11,
+        fontsize=12,
     )
     return figure
+
+
+_REWARD_ZONE_TOLERANCE_CM: float = 0.5
+"""Tolerance for cross-session trigger-zone equality used by
+`plot_place_cell_peak_distribution_across_animals`. Picked larger than typical floating-point
+rounding but smaller than the cohort's smallest plausible reward-shift step so accidental
+mismatches still surface."""
 
 
 def plot_place_cell_peak_distribution_across_animals(
     sessions_by_animal: Mapping[str, tuple[DatasetSession, ...]],
     *,
-    display_sessions: tuple[int, ...],
+    session_a: int,
+    session_b: int,
     trial_type: str | None = None,
+    animal_id: str | None = None,
     classifier: str = "place",
     figure_dpi: int = 150,
 ) -> plt.Figure:
-    """Plots one cue-aligned place-cell peak distribution per animal, averaged over the supplied sessions.
+    """Plots the cue-aligned peak distribution for two specific sessions, averaged across animals.
 
     Notes:
-        For each animal in ``sessions_by_animal``, gathers one per-bin fraction row per session in
-        ``display_sessions`` (resolved against that animal's own chronological list), then draws a
-        single viridis-colored mean ± SEM line — so each line summarizes one animal's behavior over
-        the requested session range. Animals whose chronological list is shorter than the highest
-        requested index contribute only the rows that resolve, with the SEM aggregator counting the
-        actual number of contributing sessions.
+        Two-session cohort comparison: each animal contributes one per-bin fraction row for
+        ``session_a`` and one for ``session_b`` (resolved against that animal's chronological
+        list), and the rendered line traces are the cohort mean ± SEM across animals. The two
+        sessions are treated symmetrically — this function does not encode "before vs after"
+        semantics; for figures spanning a reward-zone shift use
+        `plot_place_cell_peak_distribution_around_shift` which renders the former and current
+        anchors explicitly.
 
-        Cue-aligned bin edges come from the first animal's first resolved session via the same
-        canonical-realignment path used by the other peak-distribution plots, so x-axis ticks line
-        up across this figure and the per-session / around-shift variants. The function assumes
-        every animal shares the same task / cue layout; mismatched cue catalogs are not detected.
+        **Reward-zone consistency is enforced.** ``session_a`` and ``session_b`` must report the
+        same trigger-zone center (within ``_REWARD_ZONE_TOLERANCE_CM``) across every contributing
+        animal. The function raises ``ValueError`` on the first detected mismatch so the cohort
+        cannot silently mix sessions from different reward-zone eras into a single comparison. A
+        single dashed vertical line marks the shared reward midpoint.
+
+        Cue-aligned bin edges come from the first animal's ``session_a`` via the same
+        canonical-realignment path used by the other peak-distribution plots; the function assumes
+        every animal shares the same task / cue layout. Animals whose chronological list cannot
+        resolve both session indices are silently dropped from the cohort; the suptitle reports
+        the surviving animal count.
+
+    References:
+        Sun, C., Yang, W., Martin, J. & Tonegawa, S. Hippocampal neurons represent events as
+        transferable units of experience. Nature 612, 478-486 (2022). Figure 1h.
 
     Args:
         sessions_by_animal: Mapping from animal id to that animal's chronologically-ordered
-            DatasetSession tuple. Iteration order of the mapping drives the viridis ordinal and
-            the legend order.
-        display_sessions: 1-indexed session numbers to average for each animal. Out-of-range
-            entries (relative to a given animal's chronological list) are dropped silently for
-            that animal; duplicates are deduplicated; order is normalized to chronological.
+            DatasetSession tuple. The first entry serves as the reference animal for the cue-bin
+            layout and the trigger-zone marker.
+        session_a: 1-indexed session number for group A. Resolved against each animal's own
+            chronological list; animals whose list is shorter than ``session_a`` are dropped from
+            the cohort.
+        session_b: 1-indexed session number for group B. Same convention as ``session_a``.
         trial_type: Trial type whose tuning frames drive the distribution. ``None`` resolves to
-            the first trial type in the reference session's tuning feather.
+            the first trial type in the reference animal's ``session_a`` feather.
+        animal_id: Optional cohort label embedded in the figure title; omitted when ``None``. The
+            per-animal aggregate has no single animal id, but a caller can pass e.g. a project
+            name through this slot to identify the cohort.
         classifier: ``"place"`` (default) selects ``IS_STRICT_PLACE`` cells; ``"reward"`` selects
             ``IS_REWARD_CELL`` cells.
         figure_dpi: Output figure DPI.
 
     Returns:
-        A matplotlib Figure with one mean ± SEM line per animal in ``sessions_by_animal``.
+        A matplotlib Figure carrying the two cohort-mean ± SEM lines and the shared reward marker.
+
+    Raises:
+        ValueError: When the trigger-zone center of ``session_b`` differs from ``session_a``
+            (beyond ``_REWARD_ZONE_TOLERANCE_CM``) for any contributing animal. Comparing sessions
+            from different reward-zone eras belongs in
+            `plot_place_cell_peak_distribution_around_shift`.
     """
     figure, axes = plt.subplots(
-        1, 1, figsize=(8.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 1, figsize=(7.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     classifier_column = (
         TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
         else TuningColumn.IS_REWARD_CELL.value
     )
     classifier_label = "place cells" if classifier == "place" else "reward cells"
+    label_a = f"Session {int(session_a)}"
+    label_b = f"Session {int(session_b)}"
 
     if not sessions_by_animal:
         axes.text(
@@ -1842,19 +1877,18 @@ def plot_place_cell_peak_distribution_across_animals(
 
     animal_ids = tuple(sessions_by_animal.keys())
     reference_sessions = sessions_by_animal[animal_ids[0]]
-    reference_indices = _resolve_one_indexed_sessions(
-        session_count=len(reference_sessions), one_indexed=display_sessions,
-    )
-    if not reference_indices:
+    reference_a_index = int(session_a) - 1
+    if not 0 <= reference_a_index < len(reference_sessions):
         axes.text(
-            0.5, 0.5, "no sessions resolved against the reference animal",
+            0.5, 0.5,
+            f"session {int(session_a)} out of range for the reference animal",
             ha="center", va="center", transform=axes.transAxes,
         )
         axes.set_axis_off()
         return figure
 
     resolved_trial_type, track_length_cm, bin_edges_cm = _resolve_peak_distribution_layout(
-        sessions=reference_sessions, reference_session_index=reference_indices[0],
+        sessions=reference_sessions, reference_session_index=reference_a_index,
         trial_type=trial_type,
     )
     if resolved_trial_type is None or bin_edges_cm.size < 2:
@@ -1868,31 +1902,101 @@ def plot_place_cell_peak_distribution_across_animals(
     bin_centers_cm: NDArray[np.float64] = 0.5 * (bin_edges_cm[:-1] + bin_edges_cm[1:])
     bin_count = bin_centers_cm.size
 
-    # Maps animal ordinal to a viridis sample so the cohort reads as cool → warm; the ``max(...,
-    # 1)`` divisor guards the single-animal case.
-    colormap = plt.get_cmap("viridis")
-    n_animals = len(animal_ids)
-    for ordinal, animal_id in enumerate(animal_ids):
-        animal_sessions = sessions_by_animal[animal_id]
-        animal_indices = _resolve_one_indexed_sessions(
-            session_count=len(animal_sessions), one_indexed=display_sessions,
-        )
-        if not animal_indices:
+    # Each animal contributes one per-bin row per session: the per-bin classifier-cell fraction
+    # for that exact session. Animals whose chronological list does not contain both indices are
+    # skipped so the cohort SEM only counts animals with paired data. The reward-zone consistency
+    # check runs in lockstep; the first mismatch raises so the cohort cannot mix sessions from
+    # different reward-zone eras.
+    a_per_animal: list[NDArray[np.float64]] = []
+    b_per_animal: list[NDArray[np.float64]] = []
+    contributing_animals: list[str] = []
+    expected_reward_cm: float | None = None
+    expected_source: tuple[str, str] | None = None
+    a_idx = int(session_a) - 1
+    b_idx = int(session_b) - 1
+    for cohort_animal_id in animal_ids:
+        animal_sessions = sessions_by_animal[cohort_animal_id]
+        if not (0 <= a_idx < len(animal_sessions)) or not (0 <= b_idx < len(animal_sessions)):
             continue
-        animal_fractions = _stack_group_fractions(
-            sessions=animal_sessions,
-            session_indices=animal_indices,
-            trial_type=resolved_trial_type,
-            classifier_column=classifier_column,
+
+        # Validate reward-zone consistency for this animal's two sessions before running the
+        # heavy fraction aggregation; bailing early surfaces the mismatch with a clear locator
+        # instead of producing a silently misleading figure.
+        for session_idx_label, session_idx in (("A", a_idx), ("B", b_idx)):
+            session = animal_sessions[session_idx]
+            reward_cm = _resolve_trigger_zone_center(
+                session=session, trial_type=resolved_trial_type,
+            )
+            if reward_cm is None:
+                continue
+            if expected_reward_cm is None:
+                expected_reward_cm = float(reward_cm)
+                expected_source = (cohort_animal_id, session.session)
+            elif abs(reward_cm - expected_reward_cm) > _REWARD_ZONE_TOLERANCE_CM:
+                plt.close(figure)
+                expected_animal, expected_session = expected_source or ("?", "?")
+                message = (
+                    f"plot_place_cell_peak_distribution_across_animals expects sessions A and B "
+                    f"to share the same trigger-zone center, but animal {cohort_animal_id!r} "
+                    f"session {session.session!r} (slot {session_idx_label}) reports "
+                    f"{reward_cm:.2f} cm while animal {expected_animal!r} session "
+                    f"{expected_session!r} reports {expected_reward_cm:.2f} cm "
+                    f"(tolerance {_REWARD_ZONE_TOLERANCE_CM:.2f} cm). Use "
+                    f"plot_place_cell_peak_distribution_around_shift for figures that span a "
+                    f"reward-zone shift."
+                )
+                raise ValueError(message)
+
+        animal_a_fractions = _stack_group_fractions(
+            sessions=animal_sessions, session_indices=(a_idx,),
+            trial_type=resolved_trial_type, classifier_column=classifier_column,
             bin_edges_cm=bin_edges_cm,
         )
-        if animal_fractions.shape[0] == 0:
+        animal_b_fractions = _stack_group_fractions(
+            sessions=animal_sessions, session_indices=(b_idx,),
+            trial_type=resolved_trial_type, classifier_column=classifier_column,
+            bin_edges_cm=bin_edges_cm,
+        )
+        if animal_a_fractions.shape[0] == 0 or animal_b_fractions.shape[0] == 0:
             continue
-        color = colormap(ordinal / max(n_animals - 1, 1))
-        _draw_peak_distribution_line(
-            axes=axes, bin_centers_cm=bin_centers_cm, fractions=animal_fractions,
-            color=color,
-            label=f"Animal {animal_id} (n={animal_fractions.shape[0]} sessions)",
+        a_per_animal.append(animal_a_fractions[0])
+        b_per_animal.append(animal_b_fractions[0])
+        contributing_animals.append(cohort_animal_id)
+
+    if not contributing_animals:
+        axes.text(
+            0.5, 0.5,
+            "no animal supplied both session indices",
+            ha="center", va="center", transform=axes.transAxes,
+        )
+        axes.set_axis_off()
+        return figure
+
+    # noinspection PyTypeChecker
+    a_stack: NDArray[np.float64] = np.stack(a_per_animal, axis=0)
+    # noinspection PyTypeChecker
+    b_stack: NDArray[np.float64] = np.stack(b_per_animal, axis=0)
+    n_animals_used = a_stack.shape[0]
+
+    # Cohort size lives in the suptitle (``cohort n=N animals``) so the legend stays terse.
+    _draw_peak_distribution_line(
+        axes=axes, bin_centers_cm=bin_centers_cm, fractions=a_stack,
+        color=_PEAK_DISTRIBUTION_COLOR_BEFORE,
+        label=label_a,
+    )
+    _draw_peak_distribution_line(
+        axes=axes, bin_centers_cm=bin_centers_cm, fractions=b_stack,
+        color=_PEAK_DISTRIBUTION_COLOR_AFTER,
+        label=label_b,
+    )
+
+    # Single reward marker — the consistency check above guarantees one shared trigger-zone
+    # center, so a per-session marker would be redundant.
+    if expected_reward_cm is not None:
+        _annotate_reward_marker(
+            axes=axes, position_cm=expected_reward_cm,
+            color="#d62728", label="reward",
+            track_length_cm=float(track_length_cm),
         )
 
     axes.set_xlim(0, float(track_length_cm))
@@ -1904,22 +2008,20 @@ def plot_place_cell_peak_distribution_across_animals(
         ],
         fontsize=8, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=10)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=10)
-    axes.tick_params(axis="y", labelsize=8)
+    axes.set_xlabel("PF peak location (cm)", fontsize=9)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
+    axes.tick_params(axis="y", labelsize=9)
     axes.set_ylim(bottom=0)
-    axes.legend(
-        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=8,
-    )
+    axes.legend(loc="upper left", frameon=False, fontsize=9)
 
-    session_label_indices = ", ".join(str(i + 1) for i in reference_indices)
     title_subject = (
-        f"{classifier_label} peak distribution per animal averaged over sessions "
-        f"{session_label_indices}"
+        f"{classifier_label} peak distribution: {label_a} vs {label_b} "
+        f"(cohort n={n_animals_used} animals)"
     )
     figure.suptitle(
-        title_subject[:1].upper() + title_subject[1:],
-        fontsize=11,
+        f"{animal_id} {title_subject}" if animal_id is not None
+        else title_subject[:1].upper() + title_subject[1:],
+        fontsize=12,
     )
     return figure
 
@@ -2169,10 +2271,10 @@ def plot_post_shift_reward_zone_cells_in_session(
 
     axes_pre.set_xlim(0.0, float(track_length_cm))
     axes_post.set_xlim(0.0, float(track_length_cm))
-    axes_pre.set_xlabel("Track Position (cm)", fontsize=10)
-    axes_post.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=9)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=9)
     axes_pre.set_ylabel(
-        "Strict-place cell (sorted by post-shift peak)", fontsize=10,
+        "Strict-place cell (sorted by post-shift peak)", fontsize=9,
     )
     axes_pre.set_yticks([])
     axes_post.set_yticks([])
@@ -2187,7 +2289,7 @@ def plot_post_shift_reward_zone_cells_in_session(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=11,
+        fontsize=12,
     )
     return figure
 
@@ -2408,10 +2510,10 @@ def plot_pre_shift_reward_zone_cells_in_session(
 
     axes_pre.set_xlim(0.0, float(track_length_cm))
     axes_post.set_xlim(0.0, float(track_length_cm))
-    axes_pre.set_xlabel("Track Position (cm)", fontsize=10)
-    axes_post.set_xlabel("Track Position (cm)", fontsize=10)
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=9)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=9)
     axes_pre.set_ylabel(
-        "Strict-place cell (sorted by pre-shift peak)", fontsize=10,
+        "Strict-place cell (sorted by pre-shift peak)", fontsize=9,
     )
     axes_pre.set_yticks([])
     axes_post.set_yticks([])
@@ -2426,7 +2528,7 @@ def plot_pre_shift_reward_zone_cells_in_session(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=11,
+        fontsize=12,
     )
     return figure
 

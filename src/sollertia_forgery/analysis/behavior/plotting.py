@@ -75,6 +75,9 @@ def plot_lick_scatter(
     display_sessions: tuple[int, ...] | None = None,
     animal_id: str | None = None,
     cue_textures: dict[int, NDArray] | None = None,
+    max_trials_per_session: int | None = 50,
+    trial_origin_session: int | None = None,
+    figure_dpi: int = 150,
 ) -> plt.Figure:
     """Plots discrete lick events for one animal with per-trial reward zones.
 
@@ -86,11 +89,28 @@ def plot_lick_scatter(
         reward zone present across the rendered sessions, and a hatched mask covers the absent track
         section for blocks whose ``trial_length_cm`` is shorter than the animal's max.
 
-        When ``display_sessions`` is supplied, only the requested sessions render; trial blocks and
-        lick events from omitted sessions are dropped, the y-axis renumbers retained trials into a
-        contiguous ``0..N`` range in chronological order, and per-block ``session_index`` values are
-        re-mapped to the contiguous filtered space. Mirrors the convention used by
-        ``..tuning.plotting.plot_sorted_heatmap``.
+        Three transformations are composed before rendering, in this order:
+
+        1. **Per-session cap.** When ``max_trials_per_session`` is set, only the first
+           ``max_trials_per_session`` trials of each session are kept; later trials and their lick
+           events are dropped. The default of ``50`` matches the typical chronic-imaging session
+           length where the first sweep has the cleanest licking; pass ``None`` to disable.
+        2. **Display filter.** When ``display_sessions`` is supplied, only the requested sessions
+           render and the y-axis renumbers retained trials into a contiguous ``0..N`` range in
+           chronological order.
+        3. **Origin anchor.** When ``trial_origin_session`` is set, the trial axis is shifted so the
+           first trial of that session sits at index 0. Trials of earlier retained sessions become
+           negative; trials of later retained sessions remain non-negative. When the origin session
+           is not in the retained set, the shift puts the boundary between before-origin and
+           at-or-after-origin sessions at 0 so the sign convention still holds.
+
+        A secondary y-axis on the right edge labels each retained session block at its trial-axis
+        midpoint as ``Session X (Day Y)``, where ``X`` is the original 1-indexed session number and
+        ``Y`` is the integer day offset relative to the animal's first session. The day component is
+        omitted for sessions whose timestamp could not be parsed at aggregation time.
+
+        The legend's ``Absent track section`` entry is suppressed when every retained block's
+        ``trial_length_cm`` matches the animal's maximum (i.e., no hatched mask was actually drawn).
 
     Args:
         context: The per-animal lick aggregate whose trial blocks and lick events drive the plot.
@@ -103,17 +123,45 @@ def plot_lick_scatter(
             used to fill that code's rectangles in the reference strip. Codes without an entry fall
             back to the per-code solid color. ``load_cue_textures`` resolves the mapping from a
             session's ``experiment_configuration.yaml`` and the Unity textures directory.
+        max_trials_per_session: Maximum number of trials retained per session. Trials beyond this
+            cap (and their lick events) are dropped before rendering. Default ``50``; pass ``None``
+            to disable the cap, ``0`` to drop every trial.
+        trial_origin_session: 1-indexed session number whose first trial becomes trial-axis index
+            ``0``. Earlier retained sessions render with negative trial numbers; later retained
+            sessions render with non-negative trial numbers. ``None`` keeps the default
+            ``0..N`` numbering anchored at the first retained session.
+        figure_dpi: Output figure DPI. Threaded through to ``matplotlib.figure.Figure`` and reused
+            for the placeholder figure rendered when the context contains no trials.
 
     Returns:
         A matplotlib Figure showing the lick scatter, the per-trial reward-zone overlay, and the
         unique-reward-zone reference bar.
     """
+    # Resolves the origin's true cumulative trial count BEFORE the display filter; ``filter``
+    # drops non-displayed sessions, but the user's origin (e.g., ``trial_origin_session=1`` while
+    # displaying sessions 5/10/15) might be one of those dropped sessions. Capturing it from the
+    # full pre-filter context lets the anchor honor the true gap between origin and the first
+    # retained session even when origin itself isn't rendered.
+    origin_true_position = (
+        _resolve_origin_true_position(context=context, trial_origin_session=trial_origin_session)
+        if trial_origin_session is not None else None
+    )
+    if max_trials_per_session is not None:
+        context = _cap_lick_context_trials(
+            context=context, max_trials_per_session=max_trials_per_session,
+        )
     if display_sessions is not None:
         context = _filter_context_to_sessions(context=context, display_sessions=display_sessions)
+    if trial_origin_session is not None:
+        context = _anchor_lick_context_trials(
+            context=context,
+            trial_origin_session=trial_origin_session,
+            true_origin_position=origin_true_position,
+        )
 
     if context.total_trials == 0:
         figure, axis = plt.subplots(
-            1, 1, figsize=(7, 4), facecolor="white", dpi=150, layout="constrained",
+            1, 1, figsize=(7, 4), facecolor="white", dpi=figure_dpi, layout="constrained",
         )
         axis.text(0.5, 0.5, "no run-state trials", ha="center", va="center", transform=axis.transAxes)
         axis.set_axis_off()
@@ -121,12 +169,37 @@ def plot_lick_scatter(
         return figure
 
     figure_height = max(8.0, 0.025 * context.total_trials + 4.0)
+    # Scales the in-figure text proportionally to ``figure_height``. Matplotlib renders text in
+    # absolute points, but Jupyter rescales the inline figure to fit the cell width — so a taller
+    # figure ends up scaled down more, and fixed-point text appears proportionally smaller next to
+    # the data. Anchoring the scale to the 8" floor (the smallest ``figure_height`` ever produced)
+    # keeps the shortest figure at the historical fontsizes while taller figures grow their text
+    # so the visual size stays stable across session counts. Every fontsize and the lick scatter's
+    # marker size below derive from this single ``font_scale`` so a future tweak only needs to
+    # adjust the baseline rather than chase fontsizes through every helper.
+    font_scale = figure_height / 8.0
+    # Baseline font sizes pinned to the convention used by ``..tuning.plotting.plot_sorted_heatmap``
+    # (suptitle 12 / xlabel 9 / ylabel 9 / tick 9) so the lick and tuning panels in the same notebook
+    # render with consistent text. The previous 11pt axis labels were oversized relative to the
+    # rest of the analysis package; aligning to 9 keeps the lick scatter visually compatible with
+    # the tuning heatmaps stacked beneath it.
+    title_fontsize = 12.0 * font_scale
+    axis_label_fontsize = 9.0 * font_scale
+    tick_fontsize = 9.0 * font_scale
+    legend_fontsize = 9.0 * font_scale
+    legend_marker_size = 7.0 * font_scale
+    lick_marker_area = 3.0 * (font_scale ** 2)
+
     # Uses ``constrained_layout`` because the figure pairs the main scatter with a legend anchored
     # outside the axes; ``tight_layout`` warns and produces inconsistent margins for that
     # combination, while ``constrained_layout`` reserves space for the legend, suptitle, and the
-    # cue strip drawn above the axis automatically.
+    # cue strip drawn above the axis automatically. The 9-inch width gives the track-position
+    # axis enough breathing room (the legend column sits directly above the secondary y-axis
+    # labels rather than competing for horizontal space, so widening only inflates the data area).
+    # ``font_scale`` is a function of ``figure_height`` alone, so widening here leaves the lick
+    # marker size and every fontsize untouched.
     figure = plt.figure(
-        figsize=(11, figure_height), facecolor="white", dpi=150, layout="constrained",
+        figsize=(9, figure_height), facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     ax_main = figure.add_subplot(1, 1, 1)
     rendered_trial_types = _ordered_rendered_trial_types(context=context)
@@ -149,7 +222,7 @@ def plot_lick_scatter(
     ax_main.scatter(
         context.lick_positions,
         context.lick_trials,
-        s=3,
+        s=lick_marker_area,
         color=_COLOR_LICK,
         alpha=0.55,
         edgecolor="none",
@@ -159,40 +232,91 @@ def plot_lick_scatter(
         ax_main.axhline(boundary, color="gray", linestyle="--", linewidth=0.6, zorder=1)
 
     ax_main.set_xlim(0, context.track_length_cm)
-    ax_main.set_ylim(context.total_trials, 0)
+    # Inverts the y-axis so the smallest trial index (most negative when anchored, otherwise zero)
+    # sits at the top of the plot and the largest sits at the bottom. Pre-anchoring this collapses
+    # to ``set_ylim(total_trials, 0)`` because ``session_boundaries[0] == 0``.
+    ax_main.set_ylim(context.session_boundaries[-1], context.session_boundaries[0])
     # Hides the top spine and top tick marks so the cue rectangles drawn at axes-fraction y=1.0
     # sit on a clean edge rather than on top of a black spine line and stray ticks.
     ax_main.spines["top"].set_visible(False)
     ax_main.tick_params(top=False)
-    ax_main.set_xlabel("Position (cm)", fontsize=11)
+    ax_main.set_xlabel("Position (cm)", fontsize=axis_label_fontsize)
     session_count = max(len(context.session_boundaries) - 1, 0)
-    y_axis_label = (
-        "Trial number (chronological across all sessions)" if session_count > 1
-        else "Trial number"
-    )
-    ax_main.set_ylabel(y_axis_label, fontsize=11)
+    if trial_origin_session is not None:
+        # Surfaces the origin in the y-axis label rather than the title so the negative-vs-positive
+        # trial axis explains itself; the title stays free of per-figure parameters and the secondary
+        # y-axis ``Session X (Day Y)`` ticks already document the per-session identities.
+        y_axis_label = f"Trial number (since session {int(trial_origin_session)} onset)"
+    elif session_count > 1:
+        y_axis_label = "Trial number (chronological across all sessions)"
+    else:
+        y_axis_label = "Trial number"
+    ax_main.set_ylabel(y_axis_label, fontsize=axis_label_fontsize)
+    ax_main.tick_params(axis="x", labelsize=tick_fontsize)
 
-    legend_handles = [
+    # Re-labels the trial-axis ticks at every session boundary so the displayed numbers reflect the
+    # *uncapped* cumulative trial count even when ``max_trials_per_session`` clipped the rendered
+    # band. The tick positions live on the compact display axis (``session_boundaries``) but the
+    # labels come from ``true_session_boundaries``, so the figure stays free of cap-induced
+    # white-space stripes while still telling the reader where each session sits in true count
+    # space (e.g., session 17's first trial labeled with the full count of session 16, not the
+    # 30-trial clip).
+    _draw_true_count_yticks(ax_main=ax_main, context=context, fontsize=tick_fontsize)
+
+    # Renders the per-session ``Session X (Day Y)`` labels on a secondary y-axis pinned to each
+    # session's trial-midpoint. ``constrained_layout`` accounts for the secondary axis's tick-label
+    # width; the main legend below is anchored further right so it does not collide.
+    _draw_session_side_labels(ax_main=ax_main, context=context, fontsize=tick_fontsize)
+
+    has_absent_track = any(
+        block.trial_length_cm < context.track_length_cm
+        for block in context.trial_blocks
+    )
+    legend_handles: list = [
         plt.Line2D(
             [0], [0],
             marker="o", color="none", markerfacecolor=_COLOR_LICK,
-            markersize=7, label="Lick events",
+            markersize=legend_marker_size, label="Lick events",
         ),
         Patch(facecolor=_COLOR_REWARDED, edgecolor="black", linewidth=0.6, label="Rewarded location"),
         Patch(facecolor=_COLOR_NON_REWARDED, edgecolor="black", linewidth=0.6, label="Non-rewarded location"),
-        Patch(
-            facecolor=_COLOR_ABSENT_TRACK, edgecolor="#888888", linewidth=0.6, hatch="///",
-            label="Absent track section",
-        ),
-        plt.Line2D([0], [0], color="gray", linestyle="--", linewidth=0.7, label="Session separator"),
     ]
+    # Only advertises the absent-track patch when at least one block actually triggers the hatched
+    # mask in `_draw_trial_blocks`; otherwise the legend documents an artifact the figure does not show.
+    if has_absent_track:
+        legend_handles.append(
+            Patch(
+                facecolor=_COLOR_ABSENT_TRACK, edgecolor="#888888", linewidth=0.6, hatch="///",
+                label="Absent track section",
+            )
+        )
+    legend_handles.append(
+        plt.Line2D([0], [0], color="gray", linestyle="--", linewidth=0.7, label="Session separator")
+    )
+    # Anchors the legend to the right outer edge of the plot, just above the topmost secondary-axis
+    # tick label. The first retained session occupies ``[boundaries[0], boundaries[1]]`` in
+    # trial-axis data coords; its midpoint is where the topmost ``Session X (Day Y)`` label hangs.
+    # Converting that midpoint to axes-fraction (the ylim is inverted, so the smallest data-y maps
+    # to ``axes_fraction_y == 1``) gives the y-coordinate the legend's bottom edge should sit just
+    # above; ``loc="lower left"`` plus ``bbox_to_anchor=(1.0, ...)`` makes the legend hug the right
+    # outer spine and grow upward into the figure margin without overlapping the data area.
+    boundaries = context.session_boundaries
+    if session_count > 0 and boundaries[-1] != boundaries[0]:
+        topmost_label_data_y = 0.5 * (boundaries[0] + boundaries[1])
+        topmost_label_axes_y = (
+            (boundaries[-1] - topmost_label_data_y) / (boundaries[-1] - boundaries[0])
+        )
+        legend_anchor_y = min(topmost_label_axes_y + 0.04, 1.0)
+    else:
+        legend_anchor_y = 1.0
+
     ax_main.legend(
         handles=legend_handles,
-        loc="upper left",
-        bbox_to_anchor=(1.02, 1.0),
+        loc="lower left",
+        bbox_to_anchor=(1.0, legend_anchor_y),
         borderaxespad=0.0,
         frameon=False,
-        fontsize=9,
+        fontsize=legend_fontsize,
     )
     session_label = "session" if session_count == 1 else "sessions"
     # Uses ``ax_main.set_title`` rather than ``figure.suptitle`` so the title centers above the
@@ -205,15 +329,15 @@ def plot_lick_scatter(
     # between the strip and the title.
     n_rows = max(len(rendered_trial_types), 1)
     title_y_axes = 1.0 + n_rows * 0.025 + 0.01
+    # The origin reference now lives in the y-axis label (``Trial number (since session X
+    # onset)``) so the title stays clean and consistent across origin / no-origin variants.
+    title_description = f"lick events across {session_label}"
     ax_main.set_title(
         _title_with_animal_prefix(
             animal_id=animal_id,
-            description=(
-                f"discrete lick events across {session_label} "
-                f"{', '.join(str(i) for i in context.session_indices)}"
-            ),
+            description=title_description,
         ),
-        fontsize=12,
+        fontsize=title_fontsize,
         y=title_y_axes,
     )
     return figure
@@ -468,6 +592,393 @@ def _title_with_animal_prefix(*, animal_id: str | None, description: str) -> str
     return description[:1].upper() + description[1:]
 
 
+def _cap_lick_context_trials(
+    context: LickContext,
+    max_trials_per_session: int,
+) -> LickContext:
+    """Returns a new `LickContext` where each session is downsampled into at most
+    ``max_trials_per_session`` compact display rows, with every source trial mapped into one of
+    those rows so its lick events still render.
+
+    Notes:
+        Two boundary tuples diverge here. ``session_boundaries`` is renumbered into a contiguous
+        ``0..N`` display range so the rendered figure stays compact (no white-space stripes between
+        the kept band and the next session's start). ``true_session_boundaries`` passes through
+        unchanged so the rendering layer can still annotate the y-axis with each session's true
+        cumulative trial count — i.e., the next session's tick label reflects the actual trial
+        count of the previous session even though the cap collapses its band visually.
+
+        Mapping is binning, not subsampling: a session of ``N`` source trials is uniformly mapped
+        into ``kept_count = min(N, max_trials_per_session)`` compact rows by ``floor(i * kept /
+        N)`` for each source trial ``i`` (0-based within the session). Every source trial's lick
+        events are routed into one of the kept rows, so no data is dropped and no row is empty
+        purely because the cap "skipped over" it. Sessions shorter than ``max_trials_per_session``
+        degenerate to a one-source-trial-per-row identity mapping (no compression).
+
+        Trial blocks remain contiguous in the compact display axis because the binning preserves
+        chronological order; each block's clipped extent is the min/max of its source trials' new
+        compact bin indices. ``session_indices`` and ``day_offsets`` pass through verbatim because
+        the session set is unchanged.
+
+    Args:
+        context: The lick context to cap.
+        max_trials_per_session: Maximum number of compact rows per session. Values <= 0 collapse
+            the context to an empty result; the caller is responsible for filtering ``None`` out
+            before delegating to this helper.
+
+    Returns:
+        A LickContext with the per-session cap applied: ``session_boundaries`` renumbered into a
+        compact axis, ``true_session_boundaries`` left at the uncapped cumulative counts.
+    """
+    if max_trials_per_session <= 0:
+        return _empty_filtered_lick_context(context=context)
+
+    boundaries = context.session_boundaries
+    n_sessions = max(len(boundaries) - 1, 0)
+    if n_sessions == 0:
+        return context
+
+    total_old = boundaries[-1] if boundaries else 0
+    new_boundaries: list[int] = [0]
+    # Maps each old trial index to its compact bin in the new contiguous display axis. Unlike a
+    # subsampling cap (which leaves most entries at -1), every source trial gets a valid bin so
+    # its lick events render rather than being dropped purely because the cap "skipped over" them.
+    # noinspection PyTypeChecker
+    old_to_new_trial: NDArray[np.int64] = np.full(total_old, -1, dtype=np.int64)
+    for old_idx in range(n_sessions):
+        old_start = boundaries[old_idx]
+        old_end = boundaries[old_idx + 1]
+        original_count = old_end - old_start
+        kept_count = min(original_count, max_trials_per_session)
+        new_offset = new_boundaries[-1]
+        new_boundaries.append(new_offset + kept_count)
+        if kept_count > 0:
+            # Bin every source trial uniformly into ``kept_count`` slots. ``within_session_idx`` is
+            # the trial's 0-based offset within the session; integer division with truncation maps
+            # consecutive source trials into the same bin until the bin advances. The clip guards
+            # against the edge case ``i == original_count`` for tiny sessions where rounding could
+            # otherwise overshoot ``kept_count - 1``.
+            # noinspection PyTypeChecker
+            within_session_idx: NDArray[np.int64] = np.arange(original_count, dtype=np.int64)
+            # noinspection PyTypeChecker
+            bin_idx: NDArray[np.int64] = (within_session_idx * kept_count) // original_count
+            # noinspection PyTypeChecker
+            bin_idx = np.clip(bin_idx, 0, kept_count - 1)
+            old_to_new_trial[old_start:old_end] = bin_idx + new_offset
+
+    new_blocks: list[TrialBlock] = []
+    for block in context.trial_blocks:
+        # noinspection PyTypeChecker
+        retained: NDArray[np.int64] = old_to_new_trial[block.cum_trial_start:block.cum_trial_end]
+        # noinspection PyTypeChecker
+        valid: NDArray[np.int64] = retained[retained >= 0]
+        if valid.size == 0:
+            continue
+        new_blocks.append(
+            TrialBlock(
+                cum_trial_start=int(valid[0]),
+                cum_trial_end=int(valid[-1]) + 1,
+                session_index=block.session_index,
+                trial_type=block.trial_type,
+                trial_length_cm=block.trial_length_cm,
+                reward_lo=block.reward_lo,
+                reward_hi=block.reward_hi,
+            )
+        )
+
+    if context.lick_trials.size > 0:
+        # noinspection PyTypeChecker
+        new_indices_per_lick: NDArray[np.int64] = old_to_new_trial[context.lick_trials]
+        # noinspection PyTypeChecker
+        retained_mask: NDArray[np.bool_] = new_indices_per_lick >= 0
+        new_lick_positions = context.lick_positions[retained_mask]
+        new_lick_trials = new_indices_per_lick[retained_mask]
+    else:
+        # noinspection PyTypeChecker
+        new_lick_positions = np.zeros(0, dtype=np.float32)
+        # noinspection PyTypeChecker
+        new_lick_trials = np.zeros(0, dtype=np.int64)
+
+    return LickContext(
+        lick_positions=new_lick_positions,
+        lick_trials=new_lick_trials,
+        trial_blocks=tuple(new_blocks),
+        session_boundaries=tuple(new_boundaries),
+        true_session_boundaries=context.true_session_boundaries,
+        track_length_cm=context.track_length_cm,
+        cue_layouts=context.cue_layouts,
+        session_indices=context.session_indices,
+        day_offsets=context.day_offsets,
+    )
+
+
+def _anchor_lick_context_trials(
+    context: LickContext,
+    trial_origin_session: int,
+    *,
+    true_origin_position: int | None = None,
+) -> LickContext:
+    """Returns a new `LickContext` shifted so the first trial of ``trial_origin_session`` is at
+    trial-axis index ``0``.
+
+    Notes:
+        ``trial_origin_session`` is 1-indexed against the original animal-level chronological
+        ordering — the same convention as ``LickContext.session_indices`` and ``display_sessions``.
+        Two axes are anchored independently:
+
+        * **Display axis** (``session_boundaries``): shifted so the first trial of origin (or the
+          boundary that stands in for origin when it was filtered out) sits at compact y == 0.
+          Trials of earlier retained sessions render with negative compact y; later retained
+          sessions render with non-negative compact y.
+        * **True axis** (``true_session_boundaries``): shifted by ``-true_origin_position`` so the
+          tick label "0" lands at the start of origin in the animal's full cumulative trial space.
+          When the caller supplies ``true_origin_position`` (typically resolved from the pre-filter
+          context via `_resolve_origin_true_position`), the labels respect inter-session gaps even
+          when origin itself isn't displayed — a critical case when the user displays sessions
+          (5, 10, 15) referenced to session 1 and expects the tick labels to grow with the four
+          unrendered sessions between every retained pair.
+
+        The fallback path (``true_origin_position is None``) recovers the old retained-only
+        behavior and is retained for symmetry with the display computation; it is exercised when
+        the caller doesn't have access to the full pre-filter context and accepts a relative
+        labeling that hides skipped sessions.
+
+    Args:
+        context: The lick context to anchor. Typically already filtered via
+            `_filter_context_to_sessions`.
+        trial_origin_session: 1-indexed session number whose first trial becomes index ``0``.
+        true_origin_position: Origin's TRUE cumulative trial count resolved against the
+            pre-filter (full-animal) context, or ``None`` to fall back to retained-only
+            cumulation. Pass the result of `_resolve_origin_true_position` to honor inter-session
+            gaps.
+
+    Returns:
+        A new LickContext with shifted trial indices. Returns the input unchanged when both shifts
+        evaluate to zero.
+    """
+    boundaries = context.session_boundaries
+    true_boundaries = context.true_session_boundaries
+    if not boundaries:
+        return context
+
+    # Walk retained sessions in chronological order; ``display_cum_before`` tracks the running
+    # cumulative-trial index up to (but not including) the first retained session whose original
+    # session number is >= origin. The display anchor uses retained cumulative because the display
+    # axis only spans rendered sessions; the cap-induced compact axis would inflate by skipped
+    # sessions otherwise.
+    display_cum_before = 0
+    for i, session_number in enumerate(context.session_indices):
+        if session_number < trial_origin_session:
+            display_cum_before = boundaries[i + 1]
+        else:
+            break
+
+    display_shift = -display_cum_before
+    if true_origin_position is not None:
+        true_shift = -int(true_origin_position)
+    else:
+        # Fallback: retained-only cumulation. Equivalent to the pre-bugfix behavior; emits labels
+        # that hide the inter-session gap when origin sits outside the retained set.
+        retained_true_cum_before = 0
+        for i, session_number in enumerate(context.session_indices):
+            if session_number < trial_origin_session:
+                if true_boundaries:
+                    retained_true_cum_before = true_boundaries[i + 1]
+            else:
+                break
+        true_shift = -retained_true_cum_before
+
+    if display_shift == 0 and true_shift == 0:
+        return context
+
+    new_boundaries = tuple(b + display_shift for b in boundaries)
+    new_true_boundaries = (
+        tuple(b + true_shift for b in true_boundaries) if true_boundaries else true_boundaries
+    )
+    new_blocks = tuple(
+        TrialBlock(
+            cum_trial_start=block.cum_trial_start + display_shift,
+            cum_trial_end=block.cum_trial_end + display_shift,
+            session_index=block.session_index,
+            trial_type=block.trial_type,
+            trial_length_cm=block.trial_length_cm,
+            reward_lo=block.reward_lo,
+            reward_hi=block.reward_hi,
+        )
+        for block in context.trial_blocks
+    )
+    if context.lick_trials.size > 0:
+        # noinspection PyTypeChecker
+        new_lick_trials: NDArray[np.int64] = context.lick_trials + display_shift
+    else:
+        new_lick_trials = context.lick_trials
+
+    return LickContext(
+        lick_positions=context.lick_positions,
+        lick_trials=new_lick_trials,
+        trial_blocks=new_blocks,
+        session_boundaries=new_boundaries,
+        true_session_boundaries=new_true_boundaries,
+        track_length_cm=context.track_length_cm,
+        cue_layouts=context.cue_layouts,
+        session_indices=context.session_indices,
+        day_offsets=context.day_offsets,
+    )
+
+
+def _resolve_origin_true_position(
+    context: LickContext, trial_origin_session: int,
+) -> int | None:
+    """Returns the true cumulative trial count at the start of ``trial_origin_session``.
+
+    Notes:
+        Resolved against the **full** pre-filter context so the anchor can honor inter-session
+        gaps even when the user filters out the origin session itself. The full animal context
+        produced by `..lick_protocol.aggregate_lick_events` always lists every session in
+        ``session_indices``, so the lookup is exact when the caller supplies the unfiltered
+        context here. Returns ``None`` when ``true_session_boundaries`` is empty, signaling the
+        anchor helper to fall back to its retained-only cumulation path. When origin sits outside
+        the context's session range, the helper picks the conceptual position (start of next
+        session, or end of last session) so the label still reads coherently.
+
+    Args:
+        context: The lick context whose ``true_session_boundaries`` are queried. Must be the
+            pre-filter (full-animal) context for accurate gap accounting.
+        trial_origin_session: 1-indexed session number whose true start is being resolved.
+
+    Returns:
+        The true cumulative trial count at origin's start, or ``None`` when the context lacks
+        ``true_session_boundaries``.
+    """
+    true_boundaries = context.true_session_boundaries
+    if not true_boundaries:
+        return None
+    if trial_origin_session in context.session_indices:
+        idx = context.session_indices.index(trial_origin_session)
+        return int(true_boundaries[idx])
+    # Origin not enumerated in this context (unusual; aggregate_lick_events normally covers every
+    # animal session). Fall back to the conceptual position: the start of the first retained
+    # session whose number exceeds origin, or the end of the last retained session if origin lies
+    # past the entire context.
+    for i, session_number in enumerate(context.session_indices):
+        if session_number > trial_origin_session:
+            return int(true_boundaries[i])
+    return int(true_boundaries[-1])
+
+
+def _empty_filtered_lick_context(context: LickContext) -> LickContext:
+    """Returns an empty `LickContext` preserving ``context.track_length_cm``."""
+    # noinspection PyTypeChecker
+    empty_positions: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
+    # noinspection PyTypeChecker
+    empty_trials: NDArray[np.int64] = np.zeros(0, dtype=np.int64)
+    # noinspection PyTypeChecker
+    empty_days: NDArray[np.int32] = np.zeros(0, dtype=np.int32)
+    return LickContext(
+        lick_positions=empty_positions,
+        lick_trials=empty_trials,
+        trial_blocks=(),
+        session_boundaries=(0,),
+        true_session_boundaries=(0,),
+        track_length_cm=context.track_length_cm,
+        cue_layouts={},
+        session_indices=(),
+        day_offsets=empty_days,
+    )
+
+
+def _draw_true_count_yticks(
+    ax_main: plt.Axes, context: LickContext, *, fontsize: float = 9.0,
+) -> None:
+    """Re-bins the trial-axis ticks to label every session boundary with its uncapped cumulative
+    trial count.
+
+    Notes:
+        The cap collapses each session's empty tail into a compact display axis to keep the figure
+        free of white-space stripes; ``true_session_boundaries`` carries the uncapped cumulative
+        counts so we can still surface them as the trial-number labels. Ticks are placed at
+        ``session_boundaries[i]`` (display positions) while labels read ``true_session_boundaries[i]``,
+        so the y-axis reads as "trial number" with discontinuities at session boundaries (a session
+        labeled e.g. 100 → 130 visually but 0 → 100 in true cumulative terms when capped at 30).
+
+        Falls back to default matplotlib ticking when ``true_session_boundaries`` is empty (legacy
+        contexts built before this field existed) so the figure still renders without crashing.
+
+    Args:
+        ax_main: The trial-axis axes whose ticks are being relabeled.
+        context: The lick context whose dual boundary tuples drive the tick positions and labels.
+        fontsize: Tick-label size in points. Pinned by the caller to ``font_scale`` so labels
+            stay legible across figure heights — Jupyter rescales taller figures down to fit the
+            cell width, so a height-proportional fontsize keeps the rendered text size constant
+            relative to the data area.
+    """
+    boundaries = context.session_boundaries
+    true_boundaries = context.true_session_boundaries
+    if not boundaries or len(boundaries) != len(true_boundaries):
+        return
+    ax_main.set_yticks(list(boundaries))
+    ax_main.set_yticklabels([str(int(value)) for value in true_boundaries], fontsize=fontsize)
+
+
+def _draw_session_side_labels(
+    ax_main: plt.Axes, context: LickContext, *, fontsize: float = 9.0,
+) -> None:
+    """Draws ``Session X (Day Y)`` labels on a secondary y-axis pinned to each session's midpoint.
+
+    Notes:
+        The secondary axis (``twinx``) shares the data y-range with ``ax_main`` so the labels track
+        the trial axis even when an origin anchor or a per-session cap shifts the boundaries. Tick
+        marks and spines on the secondary axis are hidden so only the text floats next to each
+        session's trial band. The day suffix is omitted for sessions whose timestamp could not be
+        parsed at aggregation time (``day_offsets`` falls back to chronological index in that case;
+        the suffix still renders, just with the index value, which is the same convention used by
+        `..outcome_protocol.aggregate_trial_outcomes`).
+
+    Args:
+        ax_main: The trial-axis axes whose secondary y-axis carries the labels.
+        context: The lick context whose ``session_boundaries`` drive the midpoint positions and
+            ``session_indices`` / ``day_offsets`` drive the per-session label text.
+        fontsize: Side-label size in points. Pinned by the caller to ``font_scale`` so labels
+            stay legible across figure heights — Jupyter rescales taller figures down to fit the
+            cell width, so a height-proportional fontsize keeps the rendered text size constant
+            relative to the data area.
+    """
+    boundaries = context.session_boundaries
+    session_count = max(len(boundaries) - 1, 0)
+    if session_count == 0:
+        return
+    midpoints: list[float] = [
+        0.5 * (boundaries[i] + boundaries[i + 1]) for i in range(session_count)
+    ]
+    has_day_offsets = (
+        context.day_offsets.size == session_count and context.day_offsets.size > 0
+    )
+    labels: list[str] = []
+    for i in range(session_count):
+        session_number = (
+            int(context.session_indices[i]) if i < len(context.session_indices)
+            else (i + 1)
+        )
+        if has_day_offsets:
+            labels.append(f"Session {session_number} (Day {int(context.day_offsets[i])})")
+        else:
+            labels.append(f"Session {session_number}")
+
+    ax_right = ax_main.twinx()
+    ax_right.set_ylim(ax_main.get_ylim())
+    ax_right.set_yticks(midpoints)
+    ax_right.set_yticklabels(labels, fontsize=fontsize)
+    # Hide every spine and the tick marks so only the labels float next to each session block.
+    for spine_name in ("top", "right", "bottom", "left"):
+        ax_right.spines[spine_name].set_visible(False)
+    ax_right.tick_params(
+        axis="y", which="both", left=False, right=False, length=0, pad=4,
+    )
+    # Match the main axis's top-tick suppression so a stray tick from the shared x-axis doesn't
+    # poke above the cue strip.
+    ax_right.tick_params(top=False)
+
+
 def _filter_context_to_sessions(
     context: LickContext,
     display_sessions: tuple[int, ...],
@@ -479,7 +990,9 @@ def _filter_context_to_sessions(
         ``len(sessions) + 1`` entries with a leading zero), drops out-of-range and duplicate entries,
         and renumbers retained trials into a contiguous ``0..N`` range in chronological order. Per-block
         ``session_index`` values are re-mapped to the contiguous filtered space so the rendering layer
-        can keep its session-boundary logic unchanged.
+        can keep its session-boundary logic unchanged. ``session_indices`` and ``day_offsets`` are
+        sliced in lockstep so each retained session keeps its original 1-based number and absolute
+        day offset rather than being renumbered against the filter's first entry.
 
     Args:
         context: The original per-animal lick aggregate.
@@ -500,19 +1013,7 @@ def _filter_context_to_sessions(
     resolved_old_indices.sort()
 
     if not resolved_old_indices:
-        # noinspection PyTypeChecker
-        empty_positions: NDArray[np.float32] = np.zeros(0, dtype=np.float32)
-        # noinspection PyTypeChecker
-        empty_trials: NDArray[np.int64] = np.zeros(0, dtype=np.int64)
-        return LickContext(
-            lick_positions=empty_positions,
-            lick_trials=empty_trials,
-            trial_blocks=(),
-            session_boundaries=(0,),
-            track_length_cm=context.track_length_cm,
-            cue_layouts={},
-            session_indices=(),
-        )
+        return _empty_filtered_lick_context(context=context)
 
     # Builds the new session_boundaries and the per-session offset used to renumber trials. The
     # ``old_to_new_trial`` lookup maps every retained old trial index to its new contiguous trial
@@ -574,14 +1075,44 @@ def _filter_context_to_sessions(
         if trial_type in retained_trial_types
     }
 
+    if context.day_offsets.size == len(context.session_indices):
+        # noinspection PyTypeChecker
+        new_day_offsets: NDArray[np.int32] = context.day_offsets[
+            np.asarray(resolved_old_indices, dtype=np.int64)
+        ]
+    else:
+        # noinspection PyTypeChecker
+        new_day_offsets = np.zeros(0, dtype=np.int32)
+
+    # Preserves the absolute true cumulative positions of every retained session so the post-filter
+    # tick labels can show the gap to non-retained sessions faithfully. ``new_true_boundaries[i]``
+    # for ``i in [0, n_retained)`` carries the true cumulative trial count at the *start* of the
+    # i-th retained session in the animal's full chronological sequence; the trailing entry holds
+    # the true end of the last retained session. With contiguous retained sessions this collapses
+    # to the same shape as ``session_boundaries`` (each pair touches); with non-contiguous retained
+    # sessions, neighbouring entries differ by the sum of skipped sessions' trial counts plus the
+    # rendered session's own count, so the rendered tick labels reveal the inter-session gap.
+    if context.true_session_boundaries and len(context.true_session_boundaries) - 1 == len(context.session_indices):
+        new_true_boundaries: list[int] = [
+            int(context.true_session_boundaries[old_idx]) for old_idx in resolved_old_indices
+        ]
+        new_true_boundaries.append(
+            int(context.true_session_boundaries[resolved_old_indices[-1] + 1]),
+        )
+        new_true_boundaries_tuple: tuple[int, ...] = tuple(new_true_boundaries)
+    else:
+        new_true_boundaries_tuple = ()
+
     return LickContext(
         lick_positions=new_lick_positions,
         lick_trials=new_lick_trials,
         trial_blocks=tuple(new_blocks),
         session_boundaries=tuple(new_boundaries),
+        true_session_boundaries=new_true_boundaries_tuple,
         track_length_cm=context.track_length_cm,
         cue_layouts=new_cue_layouts,
         session_indices=tuple(context.session_indices[i] for i in resolved_old_indices),
+        day_offsets=new_day_offsets,
     )
 
 
@@ -590,6 +1121,7 @@ def plot_trial_outcomes(
     *,
     display_sessions: tuple[int, ...] | None = None,
     animal_id: str | None = None,
+    figure_dpi: int = 150,
 ) -> plt.Figure:
     """Plots a per-session stacked bar chart of success / failure / guided trial counts.
 
@@ -613,6 +1145,8 @@ def plot_trial_outcomes(
             silently skipped, duplicates are deduplicated, and order is normalized to chronological.
             ``None`` renders every session in ``context``.
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
+        figure_dpi: Output figure DPI. Threaded through to ``matplotlib.figure.Figure`` and reused
+            for the placeholder figure rendered when the context contains no sessions.
 
     Returns:
         A matplotlib Figure showing the stacked success / failure / guided counts.
@@ -623,7 +1157,7 @@ def plot_trial_outcomes(
         )
     if context.n_sessions == 0:
         figure, axis = plt.subplots(
-            1, 1, figsize=(7, 4), facecolor="white", dpi=150, layout="constrained",
+            1, 1, figsize=(7, 4), facecolor="white", dpi=figure_dpi, layout="constrained",
         )
         axis.text(0.5, 0.5, "no sessions", ha="center", va="center", transform=axis.transAxes)
         axis.set_axis_off()
@@ -632,7 +1166,7 @@ def plot_trial_outcomes(
 
     figure, ax_counts = plt.subplots(
         1, 1, figsize=(max(7.0, 0.5 * context.n_sessions + 4.0), 4.0),
-        facecolor="white", dpi=150, layout="constrained",
+        facecolor="white", dpi=figure_dpi, layout="constrained",
     )
 
     x_positions = context.day_offsets.astype(np.float64)

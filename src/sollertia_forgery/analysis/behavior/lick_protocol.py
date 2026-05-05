@@ -12,10 +12,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import warnings
 from itertools import groupby
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
 import numpy as np
 import polars as pl
+from ataraxis_time import TimeUnits, TimestampFormats, convert_time, parse_timestamp
 
 from ...shared_assets import (
     DatasetFiles,
@@ -39,6 +40,10 @@ samples before any per-trial reduction."""
 _DEFAULT_TRACK_LENGTH_CM: float = 240.0
 """Fallback track length used when a session's trial type is missing from its geometry layout. Matches the
 acquisition default so the lick scatter still renders for sessions whose geometry data file is incomplete."""
+
+_SESSION_TIMESTAMP_FORMAT: str = "%Y-%m-%d-%H-%M-%S-%f"
+"""``strptime`` format string for the canonical ``YYYY-MM-DD-HH-MM-SS-microseconds`` session-directory
+name. Matches the format used by `..outcome_protocol._resolve_day_offsets`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,11 +182,39 @@ class LickContext:
     cumulative range. Filtering through ``_filter_context_to_sessions`` preserves the original
     indices, so a context built from sessions ``1..10`` and filtered to ``(2, 5, 7)`` keeps the
     indices ``(2, 5, 7)``. The plotting layer surfaces these in the figure title."""
+    true_session_boundaries: tuple[int, ...] = ()
+    """Per-session cumulative trial counts using each session's *uncapped* trial total, parallel
+    to ``session_boundaries`` and with the same length (``n_sessions + 1``). Aggregated alongside
+    ``session_boundaries`` so the rendering layer can keep the trial-axis tick labels referenced
+    to the true cumulative count even when ``_cap_lick_context_trials`` clips the rendered set
+    into a compact ``0..N`` axis. Filtering and origin-anchoring transformations propagate the
+    same shifts that ``session_boundaries`` undergoes (plus the gap collapse the cap intentionally
+    hides), so the two boundary tuples stay in lockstep on session count and direction. Defaults
+    to an empty tuple when the context was constructed before this field existed; the plotting
+    layer treats that as "fall back to ``session_boundaries`` for labels"."""
+    day_offsets: NDArray[np.int32] = field(
+        default_factory=lambda: np.zeros(0, dtype=np.int32),
+    )
+    """Per-session integer day offsets relative to the first chronologically ordered session,
+    parallel to ``session_indices``. Sessions whose timestamp fails to parse fall back to their
+    chronological index, mirroring `..outcome_protocol._resolve_day_offsets`. Filtering through
+    ``_filter_context_to_sessions`` slices this in lockstep with ``session_indices`` so each
+    retained session keeps its absolute day offset rather than being renumbered against the
+    filter's first entry."""
 
     @property
     def total_trials(self) -> int:
-        """Returns the total number of trials across every session in the aggregate."""
-        return int(self.session_boundaries[-1]) if self.session_boundaries else 0
+        """Returns the total number of trials across every session in the aggregate.
+
+        Notes:
+            Computes the difference between the leftmost and rightmost boundary so an anchored
+            context (where ``session_boundaries[0]`` may be negative) reports a positive count.
+            Unanchored contexts have ``session_boundaries[0] == 0`` and the result coincides with
+            the cumulative end of the last session, matching the pre-anchoring semantics.
+        """
+        if not self.session_boundaries:
+            return 0
+        return int(self.session_boundaries[-1] - self.session_boundaries[0])
 
     @property
     def lick_count(self) -> int:
@@ -599,12 +632,72 @@ def aggregate_lick_events(sessions: tuple[DatasetSession, ...]) -> LickContext:
         # noinspection PyTypeChecker
         lick_trials = np.zeros(0, dtype=np.int64)
 
+    session_names = tuple(session.session for session in sessions)
+    day_offsets = _resolve_session_day_offsets(session_names=session_names)
+
     return LickContext(
         lick_positions=lick_positions,
         lick_trials=lick_trials,
         trial_blocks=tuple(blocks),
         session_boundaries=tuple(boundaries),
+        # Pre-cap the true and display boundaries match exactly. Downstream cap / filter / anchor
+        # transformations diverge them: the display axis collapses cap-induced gaps so the figure
+        # stays compact, while the true tuple keeps each session's uncapped extent so labels can
+        # still surface the actual cumulative trial counts.
+        true_session_boundaries=tuple(boundaries),
         track_length_cm=track_length_max if track_length_max > 0 else _DEFAULT_TRACK_LENGTH_CM,
         cue_layouts=cue_layouts,
         session_indices=tuple(range(1, len(sessions) + 1)),
+        day_offsets=day_offsets,
     )
+
+
+def _resolve_session_day_offsets(session_names: tuple[str, ...]) -> NDArray[np.int32]:
+    """Returns integer day offsets relative to the first parseable session timestamp.
+
+    Notes:
+        Mirrors `..outcome_protocol._resolve_day_offsets`: sessions whose name fails to parse fall
+        back to their chronological index so consumers can place every session on a continuous day
+        axis without gaps. Hoisted into ``lick_protocol`` so the lick aggregate can carry the same
+        per-session day annotation as ``TrialOutcomeContext`` without taking a cross-module
+        private-helper dependency.
+
+    Args:
+        session_names: Chronologically ordered session directory names.
+
+    Returns:
+        Per-session integer day offsets aligned with ``session_names``.
+    """
+    n_sessions = len(session_names)
+    # noinspection PyTypeChecker
+    day_offsets: NDArray[np.int32] = np.zeros(n_sessions, dtype=np.int32)
+    if n_sessions == 0:
+        return day_offsets
+    try:
+        first_us = int(parse_timestamp(
+            date_string=session_names[0],
+            format_string=_SESSION_TIMESTAMP_FORMAT,
+            output_format=TimestampFormats.INTEGER,
+        ))
+    except ValueError:
+        first_us = None
+    for session_index, name in enumerate(session_names):
+        if first_us is None:
+            day_offsets[session_index] = np.int32(session_index)
+            continue
+        try:
+            session_us = int(parse_timestamp(
+                date_string=name,
+                format_string=_SESSION_TIMESTAMP_FORMAT,
+                output_format=TimestampFormats.INTEGER,
+            ))
+        except ValueError:
+            day_offsets[session_index] = np.int32(session_index)
+            continue
+        day_offsets[session_index] = np.int32(round(float(convert_time(
+            time=session_us - first_us,
+            from_units=TimeUnits.MICROSECOND,
+            to_units=TimeUnits.DAY,
+            as_float=True,
+        ))))
+    return day_offsets

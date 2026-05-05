@@ -19,7 +19,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
-def plot_baseline_trend(report: BleachingReport, *, animal_id: str | None = None) -> plt.Figure:
+def plot_baseline_trend(
+    report: BleachingReport, *, animal_id: str | None = None, figure_dpi: int = 150,
+) -> plt.Figure:
     """Plots the across-session baseline fluorescence trend with per-cell distributions.
 
     Renders per-session per-cell baseline distributions as boxplots and overlays the population-median
@@ -29,6 +31,7 @@ def plot_baseline_trend(report: BleachingReport, *, animal_id: str | None = None
     Args:
         report: The cross-session bleaching report whose table drives the plot.
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
+        figure_dpi: Output figure DPI.
 
     Returns:
         A matplotlib Figure showing the across-session baseline fluorescence trend.
@@ -64,7 +67,7 @@ def plot_baseline_trend(report: BleachingReport, *, animal_id: str | None = None
     minimum_tick_step: float = float(np.diff(ticks).min()) if len(ticks) > 1 else 1.0
     box_width: float = 0.4 * minimum_tick_step
 
-    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=figure_dpi)
 
     # Renders per-session per-cell distributions as boxplots; fliers are hidden because the long upper
     # tail otherwise dominates the y-axis and crushes the body of the distribution.
@@ -100,7 +103,9 @@ def plot_baseline_trend(report: BleachingReport, *, animal_id: str | None = None
     return figure
 
 
-def plot_within_session(report: BleachingReport, *, animal_id: str | None = None) -> plt.Figure:
+def plot_within_session(
+    report: BleachingReport, *, animal_id: str | None = None, figure_dpi: int = 150,
+) -> plt.Figure:
     """Plots the within-session FOV-mean baseline trace for each session as overlaid curves.
 
     Sessions are colored chronologically with viridis so the cool->warm gradient reads as time
@@ -111,6 +116,7 @@ def plot_within_session(report: BleachingReport, *, animal_id: str | None = None
         report: The cross-session bleaching report whose per-session within-session traces drive the
             plot.
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
+        figure_dpi: Output figure DPI.
 
     Returns:
         A matplotlib Figure showing within-session bleaching.
@@ -147,7 +153,7 @@ def plot_within_session(report: BleachingReport, *, animal_id: str | None = None
 
     # Wider canvas reserves room for the per-session legend that is anchored outside the right of the
     # axes so it does not occlude the traces.
-    figure, axes = plt.subplots(1, 1, figsize=(9, 4), facecolor="white", dpi=150)
+    figure, axes = plt.subplots(1, 1, figsize=(9, 4), facecolor="white", dpi=figure_dpi)
 
     # Colors sessions with viridis so the chronological ordering reads as a cool->warm gradient. The
     # max(..., 1) divisor guards the single-session case from a zero-division error.
@@ -191,6 +197,7 @@ def plot_within_session_average(
     *,
     animal_id: str | None = None,
     sessions_to_highlight: tuple[int, ...] | None = None,
+    figure_dpi: int = 150,
 ) -> plt.Figure:
     """Plots the across-session mean of the within-session FOV-mean baseline trace, or selected sessions.
 
@@ -211,6 +218,7 @@ def plot_within_session_average(
         sessions_to_highlight: Optional tuple of 0-based session indices that select which sessions
             to highlight in color over the gray bundle. When ``None``, the across-session mean trace
             is overlaid instead.
+        figure_dpi: Output figure DPI.
 
     Returns:
         A matplotlib Figure showing the within-session bleaching bundle plus the selected overlay.
@@ -235,7 +243,7 @@ def plot_within_session_average(
     unit, ticks = resolve_display_units(days_since_first=days)
     unit_capitalized: str = unit.capitalize()
 
-    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=figure_dpi)
 
     # Draws each per-session trace as a translucent gray curve first so any bold overlay sits on top
     # of the bundle.
@@ -331,12 +339,15 @@ def plot_within_session_average(
     return figure
 
 
-def plot_snr_distributions(report: BleachingReport, *, animal_id: str | None = None) -> plt.Figure:
+def plot_snr_distributions(
+    report: BleachingReport, *, animal_id: str | None = None, figure_dpi: int = 150,
+) -> plt.Figure:
     """Plots per-session per-cell SNR distributions as violins with the population-median trend overlaid.
 
     Args:
         report: The cross-session bleaching report whose per-cell SNR arrays drive the plot.
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
+        figure_dpi: Output figure DPI.
 
     Returns:
         A matplotlib Figure showing the SNR-vs-session distribution.
@@ -362,7 +373,7 @@ def plot_snr_distributions(report: BleachingReport, *, animal_id: str | None = N
     # Resolves display ticks so the SNR violins line up on the same x-axis as the baseline boxplots.
     unit, ticks = resolve_display_units(days_since_first=days)
 
-    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=150)
+    figure, axes = plt.subplots(1, 1, figsize=(7, 4), facecolor="white", dpi=figure_dpi)
 
     # Renders per-session per-cell SNR violins with median bars; preferred over boxplots here because
     # the bimodal-ish SNR distribution is easier to read as a density.
