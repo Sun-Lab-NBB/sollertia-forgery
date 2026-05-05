@@ -2,13 +2,16 @@
 
 Currently exposes the acquisition-warmup trimming helper (every pipeline drops the same leading window), the
 session-day display-unit resolver (cross-session aggregates label x-axes the same way regardless of which
-modality they aggregate), and the (animal, session) selection resolver consumed by the per-modality
-orchestrators. Pipeline-specific helpers live in their per-package ``utilities`` modules.
+modality they aggregate), the (animal, session) selection resolver consumed by the per-modality
+orchestrators, and the cross-package figure-style preset (print vs presentation) every plotting helper
+honors so a notebook can set legibility once and have every panel render at consistent text sizes.
+Pipeline-specific helpers live in their per-package ``utilities`` modules.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 import numpy as np
 from ataraxis_time import TimeUnits, convert_time
@@ -21,6 +24,129 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from ..shared_assets import DatasetData, DatasetSession
+
+
+@dataclass(frozen=True, slots=True)
+class FigureStyle:
+    """Per-element font sizes shared across every analysis-package plotter.
+
+    Notes:
+        The fields enumerate the canonical roles every plotter needs (figure title / panel title /
+        axis labels / tick labels / legend / in-figure annotations). Plotters resolve this via
+        `resolve_figure_style` based on a string preset name and apply the fields to their
+        ``set_title`` / ``set_xlabel`` / ``set_ylabel`` / ``tick_params`` / ``legend`` / inline
+        ``axes.text`` calls. The lick scatter additionally multiplies these baseline sizes by its
+        height-proportional ``font_scale`` so taller figures remain legible after Jupyter rescales
+        them; other figures use the values verbatim.
+
+        The print preset matches the historical sizes (12 / 10 / 9 / 9 / 9 / 8) used by
+        `..tuning.plotting.plot_sorted_heatmap` and the lick scatter. The presentation preset is
+        sized so the figure stays legible from the back of a typical conference room
+        (>=18 pt floor); a doubling of the print baseline is a reasonable default.
+    """
+
+    suptitle_fontsize: float
+    """Figure-level title size (``figure.suptitle`` / ``axes.set_title`` when used as the only
+    text above the plot)."""
+    panel_title_fontsize: float
+    """Per-panel title size for multi-panel figures (each subplot's ``axes.set_title``)."""
+    axis_label_fontsize: float
+    """X- and y-axis label size (``axes.set_xlabel`` / ``axes.set_ylabel``)."""
+    tick_label_fontsize: float
+    """Default tick-label size for both axes (``tick_params(labelsize=)``,
+    ``set_xticklabels`` / ``set_yticklabels``)."""
+    legend_fontsize: float
+    """Legend entry size (``axes.legend(fontsize=)``)."""
+    annotation_fontsize: float
+    """Size for in-figure annotations and inline labels (rotated bin labels, ``axes.text``,
+    bracket / ``ns`` glyphs)."""
+
+
+_PRINT_FIGURE_STYLE: FigureStyle = FigureStyle(
+    suptitle_fontsize=12.0,
+    panel_title_fontsize=10.0,
+    axis_label_fontsize=9.0,
+    tick_label_fontsize=9.0,
+    legend_fontsize=9.0,
+    annotation_fontsize=8.0,
+)
+"""Default print preset. Matches the sizes used by ``plot_sorted_heatmap`` and the historical
+behavior of every other analysis plotter; safe for figures embedded in publications."""
+
+_PRESENTATION_FIGURE_STYLE: FigureStyle = FigureStyle(
+    suptitle_fontsize=18.0,
+    panel_title_fontsize=16.0,
+    axis_label_fontsize=16.0,
+    tick_label_fontsize=14.0,
+    legend_fontsize=14.0,
+    annotation_fontsize=12.0,
+)
+"""Conference-talk preset, sized to the practical floor for slide-projected figures: the smallest
+in-figure text sits at 12 pt, body decorations (ticks / legend) at 14 pt, axis labels and panel
+titles at 16 pt, and the figure title at 18 pt. This is the minimum legible-from-the-back set
+rather than a comfortable one — bump the values via a custom `FigureStyle` if a venue is larger
+than typical or if the audience density is high."""
+
+
+def resolve_figure_style(preset: str = "print") -> FigureStyle:
+    """Returns the `FigureStyle` for the requested preset.
+
+    Notes:
+        Two presets are supported out of the box: ``"print"`` (12 / 10 / 9 / 9 / 9 / 8 pt) and
+        ``"presentation"`` (18 / 16 / 16 / 14 / 14 / 12 pt). Plotters in the analysis package
+        accept ``figure_preset: str`` and call this resolver to pick consistent sizes; users who
+        need custom values can construct a `FigureStyle` directly and bypass the resolver via the
+        plotter's lower-level fontsize arguments.
+
+    Args:
+        preset: ``"print"`` (default) or ``"presentation"``. Other values raise ``ValueError``
+            so a typo surfaces immediately rather than silently falling back.
+
+    Returns:
+        The `FigureStyle` instance carrying the per-role font sizes for the requested preset.
+
+    Raises:
+        ValueError: When ``preset`` is not one of the recognized names.
+    """
+    if preset == "presentation":
+        return _PRESENTATION_FIGURE_STYLE
+    if preset == "print":
+        return _PRINT_FIGURE_STYLE
+    message = (
+        f"Unknown figure preset {preset!r}. Expected 'print' or 'presentation'; pass a custom "
+        f"FigureStyle via the plotter's lower-level fontsize arguments if other sizes are needed."
+    )
+    console.error(message=message, error=ValueError)
+    # Unreachable; ``console.error`` is NoReturn but ruff cannot trace it through method calls.
+    # noinspection PyUnreachableCode
+    raise ValueError(message)  # pragma: no cover
+
+
+def resolve_figure_width_scale(style: FigureStyle) -> float:
+    """Returns the figure-width multiplier matching the requested style's tick-label size.
+
+    Notes:
+        Bigger fonts in the presentation preset push every text-heavy margin (y-axis ticks,
+        secondary axis labels, legend column, x-axis tick labels) wider, and ``constrained_layout``
+        compensates by shrinking the data axes. Multiplying the print-baseline figure width by
+        this scale at construction time gives ``constrained_layout`` enough headroom to keep the
+        data axes at roughly its print-preset width regardless of how big the labels became.
+
+        The factor interpolates halfway between 1.0 and the tick-label ratio (``tick_size /
+        print_tick_size``) so a presentation tick of 14 pt vs a print tick of 9 pt yields
+        ~1.28× width — bumped enough that the data area recovers, but not so much that the
+        figure overflows a slide. ``1.0`` is returned exactly for the print preset so existing
+        figure dimensions are unchanged.
+
+    Args:
+        style: The resolved `FigureStyle` whose tick-label size drives the scaling.
+
+    Returns:
+        Width multiplier in ``[1.0, ...)``; multiply your ``figsize`` width by this value when
+        constructing the figure to keep the data axes from compressing under preset-bumped labels.
+    """
+    print_baseline_tick = _PRINT_FIGURE_STYLE.tick_label_fontsize
+    return 1.0 + 0.5 * (style.tick_label_fontsize / print_baseline_tick - 1.0)
 
 
 _ACQUISITION_WARMUP_SECONDS: float = 60.0

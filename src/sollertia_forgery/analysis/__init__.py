@@ -88,7 +88,13 @@ from .bleaching import (
     run_bleaching_analysis,
     plot_within_session_average,
 )
-from .shared_utilities import resolve_display_units, resolve_session_selection
+from .shared_utilities import (
+    FigureStyle,
+    resolve_display_units,
+    resolve_figure_style,
+    resolve_figure_width_scale,
+    resolve_session_selection,
+)
 
 __all__ = [
     "OUTCOME_FAILURE",
@@ -101,6 +107,7 @@ __all__ = [
     "BleachingSummary",
     "CellDriftMetrics",
     "CueSpan",
+    "FigureStyle",
     "DriftCellColumn",
     "DriftDetectionConfiguration",
     "DriftPairColumn",
@@ -166,6 +173,8 @@ __all__ = [
     "plot_within_session",
     "plot_within_session_average",
     "resolve_display_units",
+    "resolve_figure_style",
+    "resolve_figure_width_scale",
     "resolve_session_selection",
     "run_bleaching_analysis",
     "run_drift_analysis",

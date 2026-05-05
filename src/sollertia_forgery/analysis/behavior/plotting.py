@@ -19,6 +19,7 @@ from matplotlib.transforms import blended_transform_factory
 
 from .lick_protocol import TrialBlock, LickContext
 from .outcome_protocol import TrialOutcomeContext
+from ..shared_utilities import resolve_figure_style, resolve_figure_width_scale
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -78,6 +79,7 @@ def plot_lick_scatter(
     max_trials_per_session: int | None = 50,
     trial_origin_session: int | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots discrete lick events for one animal with per-trial reward zones.
 
@@ -132,11 +134,16 @@ def plot_lick_scatter(
             ``0..N`` numbering anchored at the first retained session.
         figure_dpi: Output figure DPI. Threaded through to ``matplotlib.figure.Figure`` and reused
             for the placeholder figure rendered when the context contains no trials.
+        figure_preset: ``"print"`` (default) or ``"presentation"``. Resolves the per-element font
+            sizes through `..shared_utilities.resolve_figure_style`; the height-proportional
+            ``font_scale`` then multiplies these baseline sizes so the lick scatter remains
+            consistent with other analysis plotters at either preset.
 
     Returns:
         A matplotlib Figure showing the lick scatter, the per-trial reward-zone overlay, and the
         unique-reward-zone reference bar.
     """
+    style = resolve_figure_style(preset=figure_preset)
     # Resolves the origin's true cumulative trial count BEFORE the display filter; ``filter``
     # drops non-displayed sessions, but the user's origin (e.g., ``trial_origin_session=1`` while
     # displaying sessions 5/10/15) might be one of those dropped sessions. Capturing it from the
@@ -178,28 +185,38 @@ def plot_lick_scatter(
     # marker size below derive from this single ``font_scale`` so a future tweak only needs to
     # adjust the baseline rather than chase fontsizes through every helper.
     font_scale = figure_height / 8.0
-    # Baseline font sizes pinned to the convention used by ``..tuning.plotting.plot_sorted_heatmap``
-    # (suptitle 12 / xlabel 9 / ylabel 9 / tick 9) so the lick and tuning panels in the same notebook
-    # render with consistent text. The previous 11pt axis labels were oversized relative to the
-    # rest of the analysis package; aligning to 9 keeps the lick scatter visually compatible with
-    # the tuning heatmaps stacked beneath it.
-    title_fontsize = 12.0 * font_scale
-    axis_label_fontsize = 9.0 * font_scale
-    tick_fontsize = 9.0 * font_scale
-    legend_fontsize = 9.0 * font_scale
-    legend_marker_size = 7.0 * font_scale
-    lick_marker_area = 3.0 * (font_scale ** 2)
+    # Baseline font sizes come from the ``figure_preset`` resolver — either the print preset
+    # (suptitle 12 / xlabel 9 / ylabel 9 / tick 9 / legend 9) which matches
+    # ``..tuning.plotting.plot_sorted_heatmap``, or the presentation preset (suptitle 18 /
+    # xlabel 16 / ylabel 16 / tick 14 / legend 14) sized to the slide-projector floor.
+    # ``font_scale`` then multiplies the baseline so taller figures still render at consistent
+    # visual size after Jupyter rescales them.
+    title_fontsize = style.suptitle_fontsize * font_scale
+    axis_label_fontsize = style.axis_label_fontsize * font_scale
+    tick_fontsize = style.tick_label_fontsize * font_scale
+    legend_fontsize = style.legend_fontsize * font_scale
+    # Markers grow with the preset, but at half the rate of the tick labels — the full
+    # tick-label ratio (14/9 ≈ 1.56× diameter on the presentation preset) drowns the lick events
+    # against the reward-zone fills, so the diameter is interpolated halfway between the print
+    # baseline and the preset ratio. ``font_scale`` (height-proportional) still multiplies on
+    # top so taller figures keep their height-driven boost regardless of preset; the scatter
+    # ``s`` parameter is an area, hence the square.
+    marker_scale = 1.0 + 0.5 * (style.tick_label_fontsize / 9.0 - 1.0)
+    legend_marker_size = 7.0 * font_scale * marker_scale
+    lick_marker_area = 3.0 * (font_scale * marker_scale) ** 2
 
     # Uses ``constrained_layout`` because the figure pairs the main scatter with a legend anchored
     # outside the axes; ``tight_layout`` warns and produces inconsistent margins for that
     # combination, while ``constrained_layout`` reserves space for the legend, suptitle, and the
-    # cue strip drawn above the axis automatically. The 9-inch width gives the track-position
-    # axis enough breathing room (the legend column sits directly above the secondary y-axis
-    # labels rather than competing for horizontal space, so widening only inflates the data area).
-    # ``font_scale`` is a function of ``figure_height`` alone, so widening here leaves the lick
-    # marker size and every fontsize untouched.
+    # cue strip drawn above the axis automatically. The 9-inch print baseline gives the
+    # track-position axis enough breathing room; ``resolve_figure_width_scale`` widens the figure
+    # for presentation so the bumped-up labels do not compress the data area when
+    # ``constrained_layout`` reserves their margin space. ``font_scale`` is a function of
+    # ``figure_height`` alone, so widening leaves the lick marker size and every fontsize untouched.
+    width_scale = resolve_figure_width_scale(style=style)
     figure = plt.figure(
-        figsize=(9, figure_height), facecolor="white", dpi=figure_dpi, layout="constrained",
+        figsize=(9 * width_scale, figure_height),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     ax_main = figure.add_subplot(1, 1, 1)
     rendered_trial_types = _ordered_rendered_trial_types(context=context)
@@ -1122,6 +1139,7 @@ def plot_trial_outcomes(
     display_sessions: tuple[int, ...] | None = None,
     animal_id: str | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots a per-session stacked bar chart of success / failure / guided trial counts.
 
@@ -1147,10 +1165,14 @@ def plot_trial_outcomes(
         animal_id: Optional animal id embedded in the figure title; omitted when ``None``.
         figure_dpi: Output figure DPI. Threaded through to ``matplotlib.figure.Figure`` and reused
             for the placeholder figure rendered when the context contains no sessions.
+        figure_preset: ``"print"`` (default) or ``"presentation"``. Resolves the per-element font
+            sizes through `..shared_utilities.resolve_figure_style` so this figure stays
+            consistent with every other plotter in the analysis package.
 
     Returns:
         A matplotlib Figure showing the stacked success / failure / guided counts.
     """
+    style = resolve_figure_style(preset=figure_preset)
     if display_sessions is not None:
         context = _filter_outcome_context_to_sessions(
             context=context, display_sessions=display_sessions,
@@ -1164,8 +1186,10 @@ def plot_trial_outcomes(
         figure.suptitle(_title_with_animal_prefix(animal_id=animal_id, description="trial outcomes"))
         return figure
 
+    width_scale = resolve_figure_width_scale(style=style)
     figure, ax_counts = plt.subplots(
-        1, 1, figsize=(max(7.0, 0.5 * context.n_sessions + 4.0), 4.0),
+        1, 1,
+        figsize=(max(7.0, 0.5 * context.n_sessions + 4.0) * width_scale, 4.0),
         facecolor="white", dpi=figure_dpi, layout="constrained",
     )
 
@@ -1197,18 +1221,22 @@ def plot_trial_outcomes(
         color=_COLOR_GUIDED, edgecolor="black", linewidth=0.4, label="Guided",
     )
 
-    ax_counts.set_xlabel("Days since first session", fontsize=10)
-    ax_counts.set_ylabel("Trial count", fontsize=10)
+    ax_counts.set_xlabel("Days since first session", fontsize=style.axis_label_fontsize)
+    ax_counts.set_ylabel("Trial count", fontsize=style.axis_label_fontsize)
     ax_counts.set_xticks(x_positions)
-    ax_counts.set_xticklabels([str(int(d)) for d in context.day_offsets], fontsize=8)
-    ax_counts.tick_params(axis="y", labelsize=8)
+    ax_counts.set_xticklabels(
+        [str(int(d)) for d in context.day_offsets], fontsize=style.tick_label_fontsize,
+    )
+    ax_counts.tick_params(axis="y", labelsize=style.tick_label_fontsize)
 
     legend_handles = [
         Patch(facecolor=_COLOR_SUCCESS, edgecolor="black", linewidth=0.4, label="Success"),
         Patch(facecolor=_COLOR_FAILURE, edgecolor="black", linewidth=0.4, label="Failure"),
         Patch(facecolor=_COLOR_GUIDED, edgecolor="black", linewidth=0.4, label="Guided"),
     ]
-    ax_counts.legend(handles=legend_handles, loc="upper left", frameon=False, fontsize=8)
+    ax_counts.legend(
+        handles=legend_handles, loc="upper left", frameon=False, fontsize=style.legend_fontsize,
+    )
 
     total_trials = int(success.sum() + failure.sum() + guided.sum())
     figure.suptitle(
@@ -1220,7 +1248,7 @@ def plot_trial_outcomes(
                 f"{int(guided.sum())} guided ({total_trials} trials total)"
             ),
         ),
-        fontsize=11,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 

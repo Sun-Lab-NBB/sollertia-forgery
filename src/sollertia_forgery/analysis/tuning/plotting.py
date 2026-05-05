@@ -22,7 +22,11 @@ from ...forging import FluorescenceColumn
 from .utilities import assemble_run_session_data
 from .tuning_report import TuningColumn, TuningReport
 from ...shared_assets import DatasetColumn, TrialGeometry
-from ..shared_utilities import trim_acquisition_warmup
+from ..shared_utilities import (
+    resolve_figure_style,
+    resolve_figure_width_scale,
+    trim_acquisition_warmup,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -598,6 +602,7 @@ def plot_sorted_heatmap(
     maximum_percentile: float = 0.95,
     animal_id: str | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots raw ΔF/F₀ rate maps for every registered cell, sorted independently by each session's peak.
 
@@ -643,10 +648,15 @@ def plot_sorted_heatmap(
             outlier-bright bumps don't saturate the panel.
         animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
         figure_dpi: Output figure DPI.
+        figure_preset: ``"print"`` (default) or ``"presentation"``. Resolves the per-element font
+            sizes through `..shared_utilities.resolve_figure_style` so this figure stays
+            consistent with every other plotter in the analysis package.
 
     Returns:
         A matplotlib Figure.
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     session_count: int = len(sessions)
     display_session_indices = _resolve_display_session_indices(
         session_count=session_count, display_sessions=display_sessions,
@@ -656,7 +666,7 @@ def plot_sorted_heatmap(
 
     figure, axes_array = plt.subplots(
         1, n_cols,
-        figsize=(2.0 * n_cols + 1.2, 4.5),
+        figsize=((2.0 * n_cols + 1.2) * width_scale, 4.5),
         facecolor="white", dpi=figure_dpi, squeeze=False,
         layout="constrained",
         sharey=True,
@@ -794,10 +804,11 @@ def plot_sorted_heatmap(
             f"Session {sess_idx + 1} (Day {day_offset})" if day_offset is not None
             else f"Session {sess_idx + 1}"
         )
-        axes.set_title(panel_title, fontsize=10)
-        axes.set_xlabel("Position (cm)", fontsize=9)
+        axes.set_title(panel_title, fontsize=style.panel_title_fontsize)
+        axes.set_xlabel("Position (cm)", fontsize=style.axis_label_fontsize)
+        axes.tick_params(axis="both", labelsize=style.tick_label_fontsize)
         if column_position == 0:
-            axes.set_ylabel("Cell #", fontsize=9)
+            axes.set_ylabel("Cell #", fontsize=style.axis_label_fontsize)
 
     if last_image is not None:
         # Shared horizontal colorbar at the bottom of the figure documents the absolute ΔF/F₀ scale.
@@ -809,15 +820,15 @@ def plot_sorted_heatmap(
             aspect=40,
             pad=0.04,
         )
-        color_bar.set_label("ΔF/F₀", fontsize=9)
-        color_bar.ax.tick_params(labelsize=8)
+        color_bar.set_label("ΔF/F₀", fontsize=style.axis_label_fontsize)
+        color_bar.ax.tick_params(labelsize=style.annotation_fontsize)
 
     animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
     suptitle_subject: str = "tunings sorted by track position"
     figure.suptitle(
         f"{animal_prefix}{suptitle_subject}".capitalize() if animal_id is None
         else f"{animal_prefix}{suptitle_subject}",
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -832,6 +843,7 @@ def plot_classified_heatmap(
     show_cue_boundaries: bool = True,
     animal_id: str | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots row-normalized rate maps of classified cells per session, sorted by each session's peak.
 
@@ -871,10 +883,15 @@ def plot_classified_heatmap(
             end of the cue zone that contains the trigger zone for that session.
         animal_id: Optional animal id embedded in the figure suptitle; omitted when ``None``.
         figure_dpi: Output figure DPI.
+        figure_preset: ``"print"`` (default) or ``"presentation"``. Resolves the per-element font
+            sizes through `..shared_utilities.resolve_figure_style` so this figure stays
+            consistent with every other plotter in the analysis package.
 
     Returns:
         A matplotlib Figure.
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     if classifier not in ("place", "reward"):
         message = (
             f"Unable to plot per-day classified rate maps. ``classifier`` must be 'place' or 'reward', "
@@ -897,7 +914,7 @@ def plot_classified_heatmap(
 
     figure, axes_array = plt.subplots(
         1, n_cols,
-        figsize=(2.0 * n_cols + 1.2, 4.5),
+        figsize=((2.0 * n_cols + 1.2) * width_scale, 4.5),
         facecolor="white", dpi=figure_dpi, squeeze=False,
         layout="constrained",
     )
@@ -1026,13 +1043,17 @@ def plot_classified_heatmap(
             panel_title = f"Session {sess_idx + 1} (Day {day_offset}, n={n_active})"
         else:
             panel_title = f"Session {sess_idx + 1} (n={n_active})"
-        axes.set_title(panel_title, fontsize=10)
-        axes.set_xlabel("Position (cm)", fontsize=9)
+        axes.set_title(panel_title, fontsize=style.panel_title_fontsize)
+        axes.set_xlabel("Position (cm)", fontsize=style.axis_label_fontsize)
+        axes.tick_params(axis="x", labelsize=style.tick_label_fontsize)
         # Drops y-axis ticks because cell counts differ across panels — absolute row indices carry no
         # cross-panel meaning, and the per-panel ``n=N`` already documents the count.
         axes.set_yticks([])
         if column_position == 0:
-            axes.set_ylabel(f"{classifier_label.capitalize()} cell (per-day peak sort)", fontsize=9)
+            axes.set_ylabel(
+                f"{classifier_label.capitalize()} cell (per-day peak sort)",
+                fontsize=style.axis_label_fontsize,
+            )
 
     if last_image is not None:
         color_bar = figure.colorbar(
@@ -1043,15 +1064,15 @@ def plot_classified_heatmap(
             aspect=40,
             pad=0.04,
         )
-        color_bar.set_label("Row-normalized ΔF/F₀ (peak = 1)", fontsize=9)
-        color_bar.ax.tick_params(labelsize=8)
+        color_bar.set_label("Row-normalized ΔF/F₀ (peak = 1)", fontsize=style.axis_label_fontsize)
+        color_bar.ax.tick_params(labelsize=style.annotation_fontsize)
 
     animal_prefix: str = f"Animal {animal_id} " if animal_id is not None else ""
     suptitle_subject: str = f"{classifier_label} tunings sorted by track position"
     figure.suptitle(
         f"{animal_prefix}{suptitle_subject}".capitalize() if animal_id is None
         else f"{animal_prefix}{suptitle_subject}",
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -1521,6 +1542,7 @@ def plot_place_cell_peak_distribution_around_shift(
     animal_id: str | None = None,
     classifier: str = "place",
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots the cue-aligned distribution of place-cell peak positions before vs after a reward shift.
 
@@ -1558,8 +1580,11 @@ def plot_place_cell_peak_distribution_around_shift(
     Returns:
         A matplotlib Figure with one axes carrying the two line traces and the reward-shift markers.
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     figure, axes = plt.subplots(
-        1, 1, figsize=(7.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 1, figsize=(7.0 * width_scale, 4.0),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     classifier_column = (
         TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
@@ -1646,19 +1671,19 @@ def plot_place_cell_peak_distribution_around_shift(
             f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
             for i in range(bin_count)
         ],
-        fontsize=8, rotation=45, ha="right",
+        fontsize=style.annotation_fontsize, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=9)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
-    axes.tick_params(axis="y", labelsize=9)
+    axes.set_xlabel("PF peak location (cm)", fontsize=style.axis_label_fontsize)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=style.axis_label_fontsize)
+    axes.tick_params(axis="y", labelsize=style.tick_label_fontsize)
     axes.set_ylim(bottom=0)
-    axes.legend(loc="upper left", frameon=False, fontsize=9)
+    axes.legend(loc="upper left", frameon=False, fontsize=style.legend_fontsize)
 
     title_subject = f"{classifier_label} peak distribution before vs after reward shift"
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -1671,6 +1696,7 @@ def plot_place_cell_peak_distribution_per_session(
     animal_id: str | None = None,
     classifier: str = "place",
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots the cue-aligned place-cell peak distribution as one trace per session, colored by day.
 
@@ -1702,8 +1728,11 @@ def plot_place_cell_peak_distribution_per_session(
     Returns:
         A matplotlib Figure with one axes carrying one line per selected session.
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     figure, axes = plt.subplots(
-        1, 1, figsize=(8.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 1, figsize=(8.0 * width_scale, 4.0),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     classifier_column = (
         TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
@@ -1764,14 +1793,15 @@ def plot_place_cell_peak_distribution_per_session(
             f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
             for i in range(bin_count)
         ],
-        fontsize=8, rotation=45, ha="right",
+        fontsize=style.annotation_fontsize, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=9)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
-    axes.tick_params(axis="y", labelsize=9)
+    axes.set_xlabel("PF peak location (cm)", fontsize=style.axis_label_fontsize)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=style.axis_label_fontsize)
+    axes.tick_params(axis="y", labelsize=style.tick_label_fontsize)
     axes.set_ylim(bottom=0)
     axes.legend(
-        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False, fontsize=9,
+        loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0, frameon=False,
+        fontsize=style.legend_fontsize,
     )
 
     session_label_indices = ", ".join(str(i + 1) for i in resolved_indices)
@@ -1781,7 +1811,7 @@ def plot_place_cell_peak_distribution_per_session(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -1802,6 +1832,7 @@ def plot_place_cell_peak_distribution_across_animals(
     animal_id: str | None = None,
     classifier: str = "place",
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots the cue-aligned peak distribution for two specific sessions, averaged across animals.
 
@@ -1856,8 +1887,11 @@ def plot_place_cell_peak_distribution_across_animals(
             from different reward-zone eras belongs in
             `plot_place_cell_peak_distribution_around_shift`.
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     figure, axes = plt.subplots(
-        1, 1, figsize=(7.0, 4.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 1, figsize=(7.0 * width_scale, 4.0),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
     )
     classifier_column = (
         TuningColumn.IS_STRICT_PLACE.value if classifier == "place"
@@ -2006,13 +2040,13 @@ def plot_place_cell_peak_distribution_across_animals(
             f"{int(round(bin_edges_cm[i]))}-{int(round(bin_edges_cm[i + 1]))}"
             for i in range(bin_count)
         ],
-        fontsize=8, rotation=45, ha="right",
+        fontsize=style.annotation_fontsize, rotation=45, ha="right",
     )
-    axes.set_xlabel("PF peak location (cm)", fontsize=9)
-    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=9)
-    axes.tick_params(axis="y", labelsize=9)
+    axes.set_xlabel("PF peak location (cm)", fontsize=style.axis_label_fontsize)
+    axes.set_ylabel(f"Fraction of {classifier_label} (%)", fontsize=style.axis_label_fontsize)
+    axes.tick_params(axis="y", labelsize=style.tick_label_fontsize)
     axes.set_ylim(bottom=0)
-    axes.legend(loc="upper left", frameon=False, fontsize=9)
+    axes.legend(loc="upper left", frameon=False, fontsize=style.legend_fontsize)
 
     title_subject = (
         f"{classifier_label} peak distribution: {label_a} vs {label_b} "
@@ -2021,7 +2055,7 @@ def plot_place_cell_peak_distribution_across_animals(
     figure.suptitle(
         f"{animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -2034,6 +2068,7 @@ def plot_post_shift_reward_zone_cells_in_session(
     trial_type: str | None = None,
     animal_id: str | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots pre- and post-shift rate-map heatmaps with new-reward-zone cells' peaks in red.
 
@@ -2070,8 +2105,11 @@ def plot_post_shift_reward_zone_cells_in_session(
     Returns:
         A matplotlib Figure with two heatmap axes (pre-shift on the left, post-shift on the right).
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     figure, (axes_pre, axes_post) = plt.subplots(
-        1, 2, figsize=(11.0, 6.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 2, figsize=(11.0 * width_scale, 6.0),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
         sharey=True,
     )
 
@@ -2271,25 +2309,27 @@ def plot_post_shift_reward_zone_cells_in_session(
 
     axes_pre.set_xlim(0.0, float(track_length_cm))
     axes_post.set_xlim(0.0, float(track_length_cm))
-    axes_pre.set_xlabel("Track Position (cm)", fontsize=9)
-    axes_post.set_xlabel("Track Position (cm)", fontsize=9)
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=style.axis_label_fontsize)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=style.axis_label_fontsize)
     axes_pre.set_ylabel(
-        "Strict-place cell (sorted by post-shift peak)", fontsize=9,
+        "Strict-place cell (sorted by post-shift peak)", fontsize=style.axis_label_fontsize,
     )
     axes_pre.set_yticks([])
     axes_post.set_yticks([])
-    axes_pre.set_title(f"Session {pre_shift_session} (pre-shift)", fontsize=10)
-    axes_post.set_title(f"Session {post_shift_session} (post-shift)", fontsize=10)
-
-    n_red = int(in_window.sum())
-    title_subject = (
-        f"strict-place cells — {n_red}/{n_cells} tuned to the new reward zone "
-        f"(red rows; window {int(round(window_start_cm))}-{int(round(window_end_cm))} cm)"
+    axes_pre.tick_params(axis="x", labelsize=style.tick_label_fontsize)
+    axes_post.tick_params(axis="x", labelsize=style.tick_label_fontsize)
+    axes_pre.set_title(
+        f"Session {pre_shift_session} (pre-shift)", fontsize=style.panel_title_fontsize,
     )
+    axes_post.set_title(
+        f"Session {post_shift_session} (post-shift)", fontsize=style.panel_title_fontsize,
+    )
+
+    title_subject = "pre-shift place cells tuned to the new reward zone post-shift (red rows)"
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
@@ -2302,6 +2342,7 @@ def plot_pre_shift_reward_zone_cells_in_session(
     trial_type: str | None = None,
     animal_id: str | None = None,
     figure_dpi: int = 150,
+    figure_preset: str = "print",
 ) -> plt.Figure:
     """Plots pre- and post-shift rate-map heatmaps with old-reward-zone cells' peaks in red.
 
@@ -2315,8 +2356,11 @@ def plot_pre_shift_reward_zone_cells_in_session(
         panel shows where those same cells ended up after the shift, answering "where did the cells
         that used to track the old reward zone migrate to?"
     """
+    style = resolve_figure_style(preset=figure_preset)
+    width_scale = resolve_figure_width_scale(style=style)
     figure, (axes_pre, axes_post) = plt.subplots(
-        1, 2, figsize=(11.0, 6.0), facecolor="white", dpi=figure_dpi, layout="constrained",
+        1, 2, figsize=(11.0 * width_scale, 6.0),
+        facecolor="white", dpi=figure_dpi, layout="constrained",
         sharey=True,
     )
 
@@ -2510,15 +2554,21 @@ def plot_pre_shift_reward_zone_cells_in_session(
 
     axes_pre.set_xlim(0.0, float(track_length_cm))
     axes_post.set_xlim(0.0, float(track_length_cm))
-    axes_pre.set_xlabel("Track Position (cm)", fontsize=9)
-    axes_post.set_xlabel("Track Position (cm)", fontsize=9)
+    axes_pre.set_xlabel("Track Position (cm)", fontsize=style.axis_label_fontsize)
+    axes_post.set_xlabel("Track Position (cm)", fontsize=style.axis_label_fontsize)
     axes_pre.set_ylabel(
-        "Strict-place cell (sorted by pre-shift peak)", fontsize=9,
+        "Strict-place cell (sorted by pre-shift peak)", fontsize=style.axis_label_fontsize,
     )
     axes_pre.set_yticks([])
     axes_post.set_yticks([])
-    axes_pre.set_title(f"Session {pre_shift_session} (pre-shift)", fontsize=10)
-    axes_post.set_title(f"Session {post_shift_session} (post-shift)", fontsize=10)
+    axes_pre.tick_params(axis="x", labelsize=style.tick_label_fontsize)
+    axes_post.tick_params(axis="x", labelsize=style.tick_label_fontsize)
+    axes_pre.set_title(
+        f"Session {pre_shift_session} (pre-shift)", fontsize=style.panel_title_fontsize,
+    )
+    axes_post.set_title(
+        f"Session {post_shift_session} (post-shift)", fontsize=style.panel_title_fontsize,
+    )
 
     n_red = int(in_window.sum())
     title_subject = (
@@ -2528,7 +2578,7 @@ def plot_pre_shift_reward_zone_cells_in_session(
     figure.suptitle(
         f"Animal {animal_id} {title_subject}" if animal_id is not None
         else title_subject[:1].upper() + title_subject[1:],
-        fontsize=12,
+        fontsize=style.suptitle_fontsize,
     )
     return figure
 
