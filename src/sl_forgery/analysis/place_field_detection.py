@@ -88,27 +88,27 @@ class PlaceFields1d:
         binF: Binned fluorescence data, shape (n_cells, n_bins).
         centers: Weighted centroids of fields, shape (n_fields, 2).
             Each row is [cell_idx, position_cm].
-        bin_size: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm.
     """
 # TODO change the bin size to match the metadata
     def __init__(
         self,
         label_im: np.ndarray,
         binF: np.ndarray,
-        bin_size: float,
+        bin_size_cm: float,
         centers: np.ndarray | None = None,
     ):
-        self.bin_size = bin_size
+        self.bin_size_cm = bin_size_cm
         self.label_im = label_im.astype(int)
         self.binF = binF.astype(float)
 
         if centers is not None and len(centers) > 0:
-            self.centers = centers * np.array([1, bin_size])
+            self.centers = centers * np.array([1, bin_size_cm])
         else:
             props = regionprops(self.label_im, self.binF, cache=False)
             if props:
                 self.centers = np.array(
-                    [prop["weighted_centroid"] * np.array([1, bin_size]) for prop in props]
+                    [prop["weighted_centroid"] * np.array([1, bin_size_cm]) for prop in props]
                 )
             else:
                 self.centers = np.empty((0, 2))
@@ -284,7 +284,7 @@ class PlaceFields1d:
             vmax = np.nanquantile(data, 0.9)
 
         # Auto figure size with caps
-        track_len_cm = self.bin_size * data.shape[1]
+        track_len_cm = self.bin_size_cm * data.shape[1]
         # n_bins = data.shape[1]
         # n_cells_plot = data.shape[0]
         # width_inches = max(6, min(12, n_bins / 6))
@@ -498,7 +498,7 @@ def circular_connected_placefields(
         return PlaceFields1d(
             np.zeros(thres_im.shape, dtype=np.uint32), binF,
             centers=np.empty((0, 2)),
-            bin_size = bin_size_cm,
+            bin_size_cm = bin_size_cm,
         )
 
     # Step 2: merge wrap-around fields per cell
@@ -557,7 +557,7 @@ def circular_connected_placefields(
         counter += 1
 
     centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
-    return PlaceFields1d(result_label, binF, centers=centers_out, bin_size=bin_size_cm)
+    return PlaceFields1d(result_label, binF, centers=centers_out, bin_size_cm=bin_size_cm)
 
 
 def outside_field_threshold(
@@ -605,7 +605,7 @@ def _detect_on_tuning_curves(
         binF: Binned fluorescence, shape (n_cells, n_bins).
         params: Detection parameters.
         signal_type: Either 'spikes' or 'dff', inferred from signal_col.
-        bin_size: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm.
 
     Returns:
         PlaceFields1d with detected fields.
@@ -817,7 +817,7 @@ def validate_place_fields(
 
             # Re-bin and detect
             shuffled_binF = _bin_signals(shuffled_signals, mask, n_bins)
-            shuf_pf = _detect_on_tuning_curves(shuffled_binF, params, signal_type, bin_size=bin_size_cm)
+            shuf_pf = _detect_on_tuning_curves(shuffled_binF, params, signal_type, bin_size_cm=bin_size_cm)
             shuffle_counts += shuf_pf.has_place_field.astype(int)
 
             if (i + 1) % 100 == 0:
@@ -1324,9 +1324,8 @@ if __name__ == '__main__':
           f"mean={flat.mean():.2f}, 95th={np.percentile(flat, 95):.2f}, max={flat.max():.2f}")
 
     params = DetectionParams(smooth_sigma=0, signal_threshold=.3)      #modify for testing
-    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes',
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_dff',
                                  bin_size_cm=meta['bin_size_cm'], params=params)
-    print(result.summary())
 
 
 # sanity check; plot the PF distribution
@@ -1355,21 +1354,6 @@ if __name__ == '__main__':
 
 
 
-    # Sorted heatmap per trial type
-    for tt, pf in result.fields.items():
-        pf.plot(
-            title=f'{tt} Place Fields',
-            sort=True,
-            config=exp_config,
-            trial_type=tt,
-            animal_id=session_data.get('animal_id'),
-            date=date,
-            show_cue_boundaries=True,
-        )
-        plt.show()
-
-    # All place cells, sorted by ABC field position
-    plot_combined_heatmap(result, exp_config, session_data)
 
 
 
