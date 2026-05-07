@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import Directories
+from sollertia_shared_assets import MesoscopeDirectories
 
 from ..shared_assets import BehaviorDataFiles
 
@@ -272,7 +272,7 @@ def _align_pulses_to_scanimage(
         ValueError: If the ScanImage metadata archive is missing, if its frame count does not match the cindra
             frame count, or if the produced alignment does not contain exactly ``expected_frame_count`` rows.
     """
-    metadata_path = raw_data_path.joinpath(Directories.MESOSCOPE_DATA, _FRAME_VARIANT_METADATA_FILENAME)
+    metadata_path = raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA, _FRAME_VARIANT_METADATA_FILENAME)
     if not metadata_path.is_file():
         message = (
             f"Unable to apply the ScanImage-based fallback alignment for the cindra dataset assembly. The "

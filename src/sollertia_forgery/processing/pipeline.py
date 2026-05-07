@@ -130,7 +130,7 @@ def run_behavior_processing_pipeline(
     # or foreign tracker entries consistently trigger a reset rather than silently persisting across runs. The
     # ``behavior_data/`` subdirectory is always placed under the session's ``processed_data_path``, co-located
     # with the upstream ``camera_timestamps/`` and ``microcontroller_data/`` produced by axvs and axci.
-    data_path = session.behavior_data_path
+    data_path = session.processed_data.behavior_data_path
     data_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=data_path / ProcessingTrackers.BEHAVIOR)
     jobs = list(job_paths.keys())
@@ -236,7 +236,7 @@ def _load_hardware_state(session: SessionData) -> MesoscopeHardwareState:
     Raises:
         FileNotFoundError: If no hardware state YAML file is found at the session's canonical location.
     """
-    hardware_state_path = session.hardware_state_path
+    hardware_state_path = session.raw_data.hardware_state_path
 
     if not hardware_state_path.is_file():
         message = (
@@ -261,7 +261,7 @@ def _load_experiment_configuration(session: SessionData) -> MesoscopeExperimentC
     if session.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
         return None
 
-    experiment_configuration_path = session.experiment_configuration_path
+    experiment_configuration_path = session.raw_data.experiment_configuration_path
 
     if not experiment_configuration_path.is_file():
         message = (
@@ -296,7 +296,7 @@ def _discover_jobs(
 
     # Discovers the single runtime processing job, if a runtime log archive is present. The Mesoscope-VR
     # runtime DataLogger always writes to a fixed source ID, so there is at most one archive per session.
-    archive_path = find_log_archive(data_directory=session.raw_behavior_data_path)
+    archive_path = find_log_archive(data_directory=session.raw_data.behavior_data_path)
     if archive_path is not None:
         job_paths[(BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)] = archive_path
 
@@ -304,13 +304,13 @@ def _discover_jobs(
     job_paths.update(
         {
             (BehaviorJobNames.CAMERA, str(extract_camera_source_id(feather_path=feather_path))): feather_path
-            for feather_path in find_camera_feathers(data_directory=session.camera_timestamps_path)
+            for feather_path in find_camera_feathers(data_directory=session.processed_data.camera_timestamps_path)
         }
     )
 
     # Discovers microcontroller processing jobs from pre-extracted module feather files, filtering out modules
     # whose hardware parameters are not configured.
-    for feather_path in find_module_feathers(data_directory=session.microcontroller_data_path):
+    for feather_path in find_module_feathers(data_directory=session.processed_data.microcontroller_data_path):
         controller_id, module_type, module_id = parse_module_feather_name(feather_path=feather_path)
         if not is_module_eligible(module_type=module_type, module_id=module_id, hardware_state=hardware_state):
             continue

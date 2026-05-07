@@ -129,9 +129,9 @@ def prepare_behavior_processing_batch_tool(
         # session's ``processed_data_path``, co-located with the upstream ``camera_timestamps/`` and
         # ``microcontroller_data/`` produced by axvs and axci. The caller does not choose where behavior
         # outputs go.
-        data_path = session.behavior_data_path
+        data_path = session.processed_data.behavior_data_path
         data_path.mkdir(parents=True, exist_ok=True)
-        tracker_path = session.behavior_tracker_path
+        tracker_path = session.processed_data.behavior_tracker_path
 
         if tracker_path.exists():
             # Idempotent path: returns existing tracker state without rebuilding the job registry.
@@ -656,11 +656,11 @@ def get_batch_status_overview_tool(root_directory: str) -> dict[str, Any]:
     aggregate_scheduled = 0
 
     for session in iterate_sessions(root_path=root_path):
-        tracker_path = session.behavior_tracker_path
+        tracker_path = session.processed_data.behavior_tracker_path
         if not tracker_path.is_file():
             continue
 
-        data_path = session.behavior_data_path
+        data_path = session.processed_data.behavior_data_path
         session_root = session.raw_data_path.parent
         try:
             status = read_tracker_status(tracker_path=tracker_path)
@@ -734,7 +734,7 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
     except Exception as error:
         return {"error": f"Unable to load session: {error}"}
 
-    data_path = session.behavior_data_path
+    data_path = session.processed_data.behavior_data_path
 
     if not data_path.exists():
         return {
@@ -768,7 +768,7 @@ def verify_behavior_processing_output_tool(session_path: str) -> dict[str, Any]:
         entry["row_count"] = summary.get("total_rows", 0)
         file_results.append(entry)
 
-    tracker_path = session.behavior_tracker_path
+    tracker_path = session.processed_data.behavior_tracker_path
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:

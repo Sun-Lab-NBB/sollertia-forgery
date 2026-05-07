@@ -54,7 +54,7 @@ def find_log_archive(data_directory: Path) -> Path | None:
     DataLogger always writes to a fixed source ID, so at most one archive is expected per session.
 
     Args:
-        data_directory: The path to the session's raw behavior data directory (``session.raw_behavior_data_path``).
+        data_directory: The path to the session's raw behavior data directory (``session.raw_data.behavior_data_path``).
 
     Returns:
         The path to the runtime log archive, or None if the directory does not exist or no archive is present.

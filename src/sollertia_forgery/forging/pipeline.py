@@ -383,7 +383,7 @@ def _copy_animal_surgery_files(
         latest_session_path = next(path for path in animal_sessions if path.name == latest_session_name)
         session_data = SessionData.load(session_path=latest_session_path)
 
-        source_surgery_path = session_data.surgery_metadata_path
+        source_surgery_path = session_data.raw_data.surgery_metadata_path
         if not source_surgery_path.is_file():
             message = (
                 f"Unable to define dataset '{dataset_name}'. The latest session '{latest_session_name}' for "
@@ -419,17 +419,17 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
     session = SessionData.load(session_path=session_data_path)
 
     # Validates that the canonical behavior and cindra output directories exist under processed_data.
-    if not session.behavior_data_path.is_dir():
+    if not session.processed_data.behavior_data_path.is_dir():
         message = (
             f"Unable to resolve the behavior data directory for session '{session_data_path.name}'. "
-            f"Expected '{session.behavior_data_path}' to exist and contain "
+            f"Expected '{session.processed_data.behavior_data_path}' to exist and contain "
             f"'{ProcessingTrackers.BEHAVIOR}'."
         )
         console.error(message=message, error=FileNotFoundError)
-    if not session.cindra_data_path.is_dir():
+    if not session.processed_data.cindra_data_path.is_dir():
         message = (
             f"Unable to resolve the cindra data directory for session '{session_data_path.name}'. "
-            f"Expected '{session.cindra_data_path}' to exist and contain "
+            f"Expected '{session.processed_data.cindra_data_path}' to exist and contain "
             f"'{ProcessingTrackers.CINDRA_SINGLE_RECORDING}'."
         )
         console.error(message=message, error=FileNotFoundError)
@@ -437,12 +437,12 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
     # Derives the cindra multi-recording output path. Cindra writes the dataset directory as
     # ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple animals under a single
     # analysis name, so the animal identifier is prepended here.
-    multiday_data_path = session.cindra_multi_recording_path.joinpath(f"{session.animal_id}_{dataset_name}")
+    multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(f"{session.animal_id}_{dataset_name}")
 
     return _SessionPaths(
-        behavior_data_path=session.behavior_data_path,
+        behavior_data_path=session.processed_data.behavior_data_path,
         raw_data_path=session.raw_data_path,
-        cindra_data_path=session.cindra_data_path,
+        cindra_data_path=session.processed_data.cindra_data_path,
         multiday_data_path=multiday_data_path,
     )
 

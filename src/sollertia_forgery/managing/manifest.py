@@ -132,7 +132,7 @@ def generate_project_manifest(project_directory: Path) -> None:
             # completion status for datasets discovered on non-main sessions.
             multi_recording_registry: dict[str, bool] = {}
             for session_data in sessions:
-                multi_recording_root = session_data.cindra_multi_recording_path
+                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
                 if not multi_recording_root.is_dir():
                     continue
                 for dataset_dir in multi_recording_root.iterdir():
@@ -182,7 +182,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 # Loads the session descriptor to extract experimenter notes and completeness status. Window
                 # Checking sessions acquired before sollertia-experiment 3.0.0 lack descriptors, so a missing
                 # file is handled gracefully for that session type only.
-                descriptor_path = session_data.session_descriptor_path
+                descriptor_path = session_data.raw_data.session_descriptor_path
                 descriptor_class = _DESCRIPTOR_CLASSES.get(session_data.session_type)
                 if descriptor_class is None:
                     message = (
@@ -206,7 +206,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 manifest["complete"].append(is_complete)
 
                 # Resolves data integrity verification status from the canonical checksum tracker path.
-                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.checksum_tracker_path)
+                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.raw_data.checksum_tracker_path)
                 is_verified = checksum_tracker.complete if checksum_tracker is not None else False
                 manifest["integrity"].append(is_verified)
 
@@ -222,19 +222,19 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
                 # canonical tracker paths exposed by SessionData.
-                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.cindra_single_recording_tracker_path)
+                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.cindra_single_recording_tracker_path)
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
-                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.behavior_tracker_path)
+                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.behavior_tracker_path)
                 manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
-                video_tracker = _load_tracker_if_exists(tracker_path=session_data.video_tracker_path)
+                video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)
                 manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
 
                 # Resolves multi-recording dataset membership by enumerating the session's
                 # ``cindra/multi_recording`` subdirectories, then looks up each dataset's completion status
                 # from the project-wide registry built above.
-                multi_recording_root = session_data.cindra_multi_recording_path
+                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
                 session_datasets: list[str] = []
                 session_dataset_complete: list[bool] = []
                 if multi_recording_root.is_dir():
