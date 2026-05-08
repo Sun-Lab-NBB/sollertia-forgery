@@ -25,13 +25,12 @@ Dependencies: numpy, scipy, polars, scikit-image (regionprops). No vr2p or dask.
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import matplotlib.pyplot as plt
-from scipy.signal import convolve2d
 from scipy.ndimage import label, gaussian_filter1d
 from skimage.measure import regionprops
 
@@ -62,10 +61,10 @@ class DetectionParams:
         n_shuffles: Number of shuffle iterations for validation.
         n_chunks: Number of chunks for temporal shuffle.
     """
-    smooth_sigma: float = 1.0
+    smooth_sigma: float = 1.5
     base_quantile: float = 0.25
-    signal_threshold: float = 0.25
-    min_bins: int = 3
+    signal_threshold: float = 0.20
+    min_bins: int = 2
     outside_threshold: float = 3.0
     min_peak: float | None = None
     min_speed_cm_s: float | None = 2.0
@@ -447,12 +446,14 @@ def _quantile_threshold(
     Returns:
         Binary array, shape (n_cells, n_bins). 1 = above threshold.
     """
-    peak = np.nanmax(binF, axis=1, keepdims=True)
-
     if signal_type == 'spikes':
+        peak = np.nanmax(binF, axis=1, keepdims=True)
         threshold = signal_threshold * peak
 
     else:
+        # Robust peak (99th percentile) so a single extreme bin doesn't lift the
+        # threshold above legitimate secondary fields.
+        peak = np.nanpercentile(binF, 99, axis=1, keepdims=True)
         quantile_values = np.nanquantile(binF, base_quantile, axis=1, keepdims=True)
         # Mean of bins at or below the quantile — lower and more accurate than using
         # the quantile value itself as the baseline.
@@ -563,15 +564,45 @@ def circular_connected_placefields(
 def outside_field_threshold(
     pf: PlaceFields1d,
     threshold_factor: float = 3.0,
+    base_quantile: float = 0.25,
 ) -> PlaceFields1d:
-    """Remove fields where in-field activity is not sufficiently above baseline.
+    """Remove fields whose in-field activity isn't sufficiently above the cell's quiescent state.
 
-    For each cell, computes mean activity outside all its fields. A field is removed
-    if its mean intensity < threshold_factor × outside mean.
+    The quiescent reference for each cell is computed two ways and the more
+    permissive (lower) of the two is used as the denominator:
+
+      1. **Quiescent baseline** — mean of bins at or below the `base_quantile`
+         quantile of the cell's tuning curve. This estimates the cell's true
+         resting state and is independent of how many fields the cell has or
+         how broad they are. It's the same baseline used by
+         `_quantile_threshold` for the initial detection step.
+
+      2. **Outside-field median** — median (NOT mean) of all bins not assigned
+         to any detected field. The median is robust to "field shoulder" bins
+         that fell just below the candidate threshold but are still elevated
+         from the smoothing kernel; the original `mean` was inflated by those
+         shoulders, which made multi-peak cells unfairly fail the test
+         (the more peaks a cell had, the higher the outside mean climbed,
+         even after excluding the detected field bins themselves).
+
+    Using `min(baseline, outside_median)` means we trust whichever estimate is
+    closer to the noise floor. In practice the two are very close for cells
+    with one tight field; they diverge (and median wins) when smoothed peaks
+    have wide flanks, or when a cell has multiple fields elevating much of the
+    track.
+
+    A field is removed if `mean(in-field) < threshold_factor × reference`.
 
     Args:
         pf: PlaceFields1d with detected fields.
-        threshold_factor: Required ratio of in-field to outside-field activity.
+        threshold_factor: Required ratio of in-field mean to the quiescent
+            reference. With the new (median-or-baseline) reference, the
+            denominator is more conservative than the old outside-mean
+            denominator, so this factor can stay at the original 3.0 without
+            being too strict in practice.
+        base_quantile: Quantile cutoff for the quiescent baseline calculation.
+            Bins at or below this quantile are averaged to estimate quiet state.
+            0.25 matches the default used for thresholding in _quantile_threshold.
 
     Returns:
         Filtered PlaceFields1d.
@@ -579,12 +610,27 @@ def outside_field_threshold(
     if pf.n_fields == 0:
         return pf
 
-    outside_im = pf.binF.copy()
+    # Reference 1: quiescent baseline = mean of the bottom-`base_quantile` bins.
+    # Robust to multiplicity of fields — adding more fields doesn't change the
+    # bottom of the distribution.
+    quantile_values = np.nanquantile(pf.binF, base_quantile, axis=1, keepdims=True)
+    sub_threshold_mask = pf.binF <= quantile_values
+    masked_low = np.where(sub_threshold_mask, pf.binF, np.nan)
+    baseline = np.nanmean(masked_low, axis=1)  # shape (n_cells,)
+
+    # Reference 2: median of bins outside all detected fields. Median is
+    # robust to elevated flanks/shoulders that the original mean-based test
+    # was sensitive to.
+    outside_im = pf.binF.copy().astype(float)
     outside_im[pf.label_im != 0] = np.nan
-    outside_values = np.nanmean(outside_im, axis=1)
+    outside_median = np.nanmedian(outside_im, axis=1)  # shape (n_cells,)
+
+    # Take the lower of the two references — both estimate quiet state, and we
+    # trust the smaller (closer to true baseline). np.fmin ignores NaNs.
+    reference = np.fmin(baseline, outside_median)
 
     cell_ids = pf.cell_id
-    threshold_values = outside_values[cell_ids] * threshold_factor
+    threshold_values = reference[cell_ids] * threshold_factor
     invalid = np.where(pf.mean_intensity < threshold_values)[0]
 
     return pf.remove_fields(invalid)
@@ -610,20 +656,11 @@ def _detect_on_tuning_curves(
     Returns:
         PlaceFields1d with detected fields.
     """
-    # Smooth
-    # if params.smooth_sigma > 0:
-    #     smoothed = np.apply_along_axis(
-    #         gaussian_filter1d, axis=1, arr=binF, sigma=params.smooth_sigma,
-    #         mode='nearest',
-    #     )
-    # else:
-    #     smoothed = binF
-
-    # Smooth with moving average (matches Tank protocol)
+    # Gaussian smoothing along the position axis. Wraps for circular tracks.
     if params.smooth_sigma > 0:
-        kernel_size = int(params.smooth_sigma)
-        kernel = np.ones((1, kernel_size)) / kernel_size
-        smoothed = convolve2d(binF, kernel, mode='same', boundary='wrap')
+        smoothed = gaussian_filter1d(
+            binF, sigma=params.smooth_sigma, axis=1, mode='wrap',
+        )
     else:
         smoothed = binF
 
@@ -1138,56 +1175,33 @@ class MultidayPlaceFieldResult:
         return '\n'.join(lines)
 
 
-def detect_multiday_place_fields(
-    sessions: dict[str, dict],
-    signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
-    params: DetectionParams | None = None,
-    min_days: int = 1,
+def _combine_per_day_results(
+    per_day: dict[str, PlaceFieldResult],
+    dates: list[str],
+    params: DetectionParams,
+    min_days: int,
 ) -> MultidayPlaceFieldResult:
-    """Detect place fields independently per session, then combine across days.
+    """Combine per-session detection results into a MultidayPlaceFieldResult.
 
-    Runs detect_place_fields() on each session. Builds a presence matrix showing
-    which cells have fields on which days, and a union of all place cell indices.
-    No day is privileged — a cell appearing on only the last day is included.
+    Builds presence/centers matrices and computes union_indices. Used by both
+    detect_multiday_place_fields (sessions already loaded) and
+    detect_multiday_place_fields_cached (loads on demand).
 
     Args:
-        sessions: From load_multiday_sessions(). Each value has keys:
-            'data', 'config', 'session_data', 'metadata'.
-        signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
-        params: Detection parameters. Uses defaults if None.
-        min_days: Minimum number of days a cell must have a field to be
-            included in union_indices. Default 1 (any day).
+        per_day: Mapping date -> PlaceFieldResult.
+        dates: Sorted list of dates.
+        params: Detection parameters used.
+        min_days: Minimum days for inclusion in union_indices.
 
     Returns:
-        MultidayPlaceFieldResult with per-day results and cross-day summaries.
+        MultidayPlaceFieldResult.
     """
-    if params is None:
-        params = DetectionParams()
-
-    dates = sorted(sessions.keys())
     n_days = len(dates)
-
-    # Detect per day
-    per_day = {}
-    for date in dates:
-        s = sessions[date]
-        print(f"\n--- {date} ---")
-        per_day[date] = detect_place_fields(
-            s['data'], s['config'],
-            signal_col=signal_col,
-            bin_size_cm=bin_size_cm,
-            params=params,
-        )
-
-    # Get n_cells and trial types from first day (registered cells = same count)
     n_cells = per_day[dates[0]].n_cells
     all_trial_types = sorted(set(
         tt for r in per_day.values() for tt in r.fields
     ))
 
-    # Build presence matrix and center trajectories per trial type
     presence = {}
     centers_mat = {}
 
@@ -1223,7 +1237,7 @@ def detect_multiday_place_fields(
         any_type_days = np.maximum(any_type_days, presence[tt].sum(axis=1))
     union_idx = np.where(any_type_days >= min_days)[0]
 
-    multiday_result = MultidayPlaceFieldResult(
+    return MultidayPlaceFieldResult(
         per_day=per_day,
         dates=dates,
         trial_types=all_trial_types,
@@ -1234,6 +1248,337 @@ def detect_multiday_place_fields(
         params=params,
     )
 
+
+def detect_multiday_place_fields(
+    sessions: dict[str, dict],
+    signal_col: str = 'multi_day_dff',
+    bin_size_cm: int = 5,
+    params: DetectionParams | None = None,
+    min_days: int = 1,
+) -> MultidayPlaceFieldResult:
+    """Detect place fields independently per session, then combine across days.
+
+    Runs detect_place_fields() on each session. Builds a presence matrix showing
+    which cells have fields on which days, and a union of all place cell indices.
+    No day is privileged — a cell appearing on only the last day is included.
+
+    NOTE: This function takes sessions ALREADY LOADED in memory. For 8+ sessions
+    this can OOM. Use detect_multiday_place_fields_cached() instead — it loads
+    sessions one at a time and caches results to disk.
+
+    Args:
+        sessions: From load_multiday_sessions(). Each value has keys:
+            'data', 'config', 'session_data', 'metadata'.
+        signal_col: Column containing neural signals.
+        bin_size_cm: Spatial bin size in cm.
+        params: Detection parameters. Uses defaults if None.
+        min_days: Minimum number of days a cell must have a field to be
+            included in union_indices. Default 1 (any day).
+
+    Returns:
+        MultidayPlaceFieldResult with per-day results and cross-day summaries.
+    """
+    if params is None:
+        params = DetectionParams()
+
+    dates = sorted(sessions.keys())
+
+    # Detect per day
+    per_day = {}
+    for date in dates:
+        s = sessions[date]
+        print(f"\n--- {date} ---")
+        per_day[date] = detect_place_fields(
+            s['data'], s['config'],
+            signal_col=signal_col,
+            bin_size_cm=bin_size_cm,
+            params=params,
+        )
+
+    multiday_result = _combine_per_day_results(per_day, dates, params, min_days)
+    print(f"\n{multiday_result.summary()}")
+    return multiday_result
+
+
+# CACHING / MEMORY-BOUNDED MULTIDAY DETECTION
+
+def _params_hash(
+    params: DetectionParams,
+    signal_col: str,
+    bin_size_cm: int,
+) -> str:
+    """8-char sha1 of detection params + signal_col + bin_size_cm.
+
+    Used to disambiguate cache files so different param sets coexist instead of
+    silently overwriting each other.
+    """
+    import hashlib
+    import json
+    payload = {**asdict(params), 'signal_col': signal_col, 'bin_size_cm': int(bin_size_cm)}
+    blob = json.dumps(payload, sort_keys=True, default=str).encode()
+    return hashlib.sha1(blob).hexdigest()[:8]
+
+
+def _get_pf_cache_path(
+    session_dir: Path,
+    animal_id: str,
+    date: str,
+    signal_col: str,
+    params: DetectionParams,
+    bin_size_cm: int,
+) -> Path:
+    """Standard path for a per-session cached PlaceFieldResult.
+
+    Filename includes an 8-char params hash so caches built under different
+    DetectionParams (or different bin_size_cm) coexist on disk and never
+    silently shadow each other.
+    """
+    h = _params_hash(params, signal_col, bin_size_cm)
+    return Path(session_dir) / f'{animal_id}_{date}_place_fields_{signal_col}_{h}.pkl'
+
+
+def save_place_field_result(result: PlaceFieldResult, path: Path):
+    """Pickle a PlaceFieldResult to disk."""
+    import pickle
+    path = Path(path)
+    with open(path, 'wb') as f:
+        pickle.dump(result, f)
+
+
+def load_place_field_result(path: Path) -> PlaceFieldResult:
+    """Load a pickled PlaceFieldResult from disk."""
+    import pickle
+    path = Path(path)
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
+
+def _load_and_verify_cache(
+    cache_path: Path,
+    expected_params: DetectionParams,
+) -> PlaceFieldResult | None:
+    """Load a cached PlaceFieldResult and verify its params match.
+
+    The pkl contents are the source of truth — even though the filename hash
+    *should* guarantee a match, we still open the file and compare the stored
+    DetectionParams field-by-field. This catches:
+      - Hash collisions (vanishingly rare with sha1, but cheap to defend against).
+      - Pickles from before this hashing scheme existed (params=None inside).
+      - Manually moved/renamed cache files whose filename no longer reflects
+        their contents.
+      - Future param-schema changes where new fields are added: a freshly
+        constructed DetectionParams will have the new defaults, but an old pkl
+        won't, and equality will (correctly) fail → forces a recompute.
+
+    Returns:
+        The loaded PlaceFieldResult if its params equal `expected_params`,
+        otherwise None (caller should treat as a cache miss and recompute).
+    """
+    result = load_place_field_result(cache_path)
+
+    # Defensive: very old caches predate `params` being stored on the result.
+    if result.params is None:
+        print(f"  Cache {cache_path.name} has no params recorded — treating as stale.")
+        return None
+
+    # DetectionParams is a plain dataclass, so `==` compares all fields.
+    if result.params != expected_params:
+        # Should be unreachable when filename hash is correct, but report so we
+        # notice if it ever happens (e.g. user copied a pkl across param sets).
+        print(f"  Cache {cache_path.name} params do not match current — recomputing.")
+        return None
+
+    return result
+
+
+def detect_place_fields_for_session(
+    session_dir: Path,
+    signal_col: str = 'multi_day_dff',
+    bin_size_cm: int = 5,
+    params: DetectionParams | None = None,
+    force_recompute: bool = False,
+) -> PlaceFieldResult:
+    """Run detect_place_fields with on-disk auto-caching.
+
+    On cache hit: returns the saved PlaceFieldResult without loading the
+    session df.
+    On cache miss: loads the session, runs detection, pickles the result, returns.
+
+    The heavy frame-level df is local to this function and gets garbage collected
+    when the function returns. This is the building block for memory-bounded
+    multiday detection — never holds more than one session in memory at a time.
+
+    Cache file: {session_dir}/{animal_id}_{date}_place_fields_{signal_col}_{hash}.pkl
+
+    The 8-char {hash} encodes DetectionParams + signal_col + bin_size_cm, so
+    different param configurations get distinct cache files. Changing params
+    automatically misses the old cache and writes a new pickle alongside it
+    (old caches accumulate — clean them up periodically if disk matters).
+
+    Cache validity is enforced at TWO levels:
+      1. Filename: the params hash gives O(1) cache lookup without opening any
+         pickles. Different params -> different filename -> miss -> recompute.
+      2. Pickle contents: after loading, we compare the stored DetectionParams
+         to the current params and only return the cached result if they match
+         exactly. The pickle is the source of truth; the filename hash is just
+         a fast index into it. See _load_and_verify_cache() for details.
+
+    Args:
+        session_dir: Path to the session directory.
+        signal_col: Column for which to detect place fields.
+        bin_size_cm: Spatial bin size in cm. Read from session metadata if available.
+        params: DetectionParams. Defaults if None.
+        force_recompute: If True, ignore the cache and rerun detection.
+
+    Returns:
+        PlaceFieldResult.
+    """
+    # Local import to avoid a circular dependency at module load time
+    from df_processing import load_session_context, get_session_paths, load_processed_session
+
+    if params is None:
+        params = DetectionParams()
+
+    session_dir = Path(session_dir)
+    session_data, exp_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+    animal_id = session_data['animal_id']
+    date = session_data['session_name'][:10]
+
+    # First try the cache using the caller's bin_size_cm. If session metadata
+    # ends up overriding it (handled on miss below), we'll re-key with the
+    # effective bin_size_cm before writing.
+    cache_path = _get_pf_cache_path(
+        session_dir, animal_id, date, signal_col, params, bin_size_cm,
+    )
+
+    # Fast path: filename matches -> open it and verify the stored params still
+    # equal what we'd run with now. Verification protects against pickles that
+    # somehow ended up with the right name but the wrong contents (see
+    # _load_and_verify_cache for the failure modes covered).
+    if cache_path.exists() and not force_recompute:
+        print(f"  Loading cached place fields: {cache_path.name}")
+        cached = _load_and_verify_cache(cache_path, params)
+        if cached is not None:
+            return cached
+        # Verification failed — fall through to recompute. Don't delete the
+        # mismatched pkl: it might be valid for a different config the user
+        # cares about. The new result will be written under its correct hash.
+
+    # Cache miss — load the session df and run detection. df is local to this
+    # function; it falls out of scope (and is freed) when we return.
+    print(f"  Running place field detection for {animal_id} {date} ({signal_col})...")
+    data, metadata = load_processed_session(paths['parquet'])
+    bin_size = (metadata or {}).get('bin_size_cm', bin_size_cm)
+
+    # The cache key includes bin_size_cm. Session metadata can override the
+    # caller's default, in which case the path we built above used the wrong
+    # bin_size and we need to re-key. Try the corrected path before giving up.
+    if bin_size != bin_size_cm:
+        cache_path = _get_pf_cache_path(
+            session_dir, animal_id, date, signal_col, params, bin_size,
+        )
+        if cache_path.exists() and not force_recompute:
+            print(f"  Loading cached place fields (metadata bin_size): {cache_path.name}")
+            cached = _load_and_verify_cache(cache_path, params)
+            if cached is not None:
+                return cached
+
+    result = detect_place_fields(
+        data, exp_config, signal_col=signal_col, bin_size_cm=bin_size, params=params,
+    )
+    save_place_field_result(result, cache_path)
+    print(f"  Saved cache: {cache_path.name}")
+    return result
+
+
+def detect_multiday_place_fields_cached(
+    mouse_dir: Path,
+    dates: list[str] | None = None,
+    date_range: tuple[str, str] | None = None,
+    signal_col: str = 'multi_day_dff',
+    bin_size_cm: int = 5,
+    params: DetectionParams | None = None,
+    min_days: int = 1,
+    force_recompute: bool = False,
+) -> MultidayPlaceFieldResult:
+    """Memory-bounded multiday place field detection with on-disk caching.
+
+    Loops sessions one at a time, calling detect_place_fields_for_session() (which
+    auto-caches per-session results). Each session's heavy df is loaded only on
+    cache miss and freed before the next session is processed. Per-day results
+    are combined into a MultidayPlaceFieldResult exactly as in
+    detect_multiday_place_fields().
+
+    Use this instead of detect_multiday_place_fields when:
+    - You have many sessions and load_multiday_sessions() OOMs
+    - You want detection results cached for fast reuse
+
+    Workflow:
+        # Detection — memory-bounded, cached
+        multiday = detect_multiday_place_fields_cached(
+            mouse_dir, dates=[...], signal_col='multi_day_dff'
+        )
+        # Now load only place cells for plotting
+        sessions = load_multiday_sessions(
+            mouse_dir, dates=[...], cell_indices=multiday.union_indices.tolist()
+        )
+
+    Args:
+        mouse_dir: Mouse-level directory (e.g., datasets/26/).
+        dates: Explicit session dates. Mutually exclusive with date_range.
+        date_range: Inclusive (start, end) range; auto-discovers sessions.
+        signal_col: Column for which to detect place fields.
+        bin_size_cm: Spatial bin size in cm.
+        params: DetectionParams. Defaults if None.
+        min_days: Minimum days for inclusion in union_indices.
+        force_recompute: If True, ignore caches and rerun all detections.
+
+    Returns:
+        MultidayPlaceFieldResult.
+    """
+    from df_processing import find_session_dir
+
+    mouse_dir = Path(mouse_dir)
+
+    if dates is not None and date_range is not None:
+        raise ValueError("Provide either dates or date_range, not both.")
+
+    if date_range is not None:
+        start, end = date_range
+        dates = sorted(set(
+            d.name[:10]
+            for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and start <= d.name[:10] <= end
+        ))
+        print(f"Found {len(dates)} sessions in range {start} to {end}: {dates}")
+
+    if not dates:
+        raise ValueError("No dates provided or discovered.")
+
+    if params is None:
+        params = DetectionParams()
+
+    per_day = {}
+    for date in sorted(dates):
+        print(f"\n--- {date} ---")
+        try:
+            session_dir = find_session_dir(mouse_dir, date)
+            per_day[date] = detect_place_fields_for_session(
+                session_dir,
+                signal_col=signal_col,
+                bin_size_cm=bin_size_cm,
+                params=params,
+                force_recompute=force_recompute,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  WARNING: skipping {date}: {e}")
+
+    if not per_day:
+        raise ValueError("No sessions could be processed.")
+
+    sorted_dates = sorted(per_day.keys())
+    multiday_result = _combine_per_day_results(per_day, sorted_dates, params, min_days)
     print(f"\n{multiday_result.summary()}")
     return multiday_result
 
@@ -1324,8 +1669,100 @@ if __name__ == '__main__':
           f"mean={flat.mean():.2f}, 95th={np.percentile(flat, 95):.2f}, max={flat.max():.2f}")
 
     params = DetectionParams(smooth_sigma=0, signal_threshold=.3)      #modify for testing
-    result = detect_place_fields(data, exp_config, signal_col='multi_day_dff',
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_spikes',
                                  bin_size_cm=meta['bin_size_cm'], params=params)
+    print(result.summary())
+
+    # ── Compare dff vs spikes detection ──
+    result_spikes = result  # already computed above with multi_day_spikes
+    result_dff = detect_place_fields(data, exp_config, signal_col='multi_day_dff',
+                                     bin_size_cm=meta['bin_size_cm'], params=params)
+
+
+    def get_sort_keys(pf, n_cells, bin_size):
+        """Return primary-field center per cell (NaN if no field)."""
+        keys = np.full(n_cells, np.nan)
+        best = np.full(n_cells, -np.inf)
+        for p in regionprops(pf.label_im, pf.binF, cache=False):
+            ci = p['coords'][0, 0]
+            if p['mean_intensity'] > best[ci]:
+                best[ci] = p['mean_intensity']
+                keys[ci] = p['weighted_centroid'][1] * bin_size
+        return keys
+
+
+    def plot_side_by_side(result_dff, result_spikes, trial_type, sort_by,
+                          cells=None, suptitle_suffix=''):
+        """Plot dff and spike heatmaps side by side, both sorted by `sort_by` order.
+
+        Args:
+            sort_by: 'dff' or 'spikes' — which signal's order to use for both panels.
+            cells: Optional indices to restrict plot to (e.g. union of place cells).
+        """
+        pf_dff = result_dff.fields[trial_type]
+        pf_spk = result_spikes.fields[trial_type]
+        order = pf_dff.order if sort_by == 'dff' else pf_spk.order
+        if cells is not None:
+            order = order[np.isin(order, cells)]
+
+        fig, axes = plt.subplots(1, 2, figsize=(11, 7), dpi=150)
+        for ax, pf, label, cbar_label in [
+            (axes[0], pf_dff, 'dF/F', 'ΔF/F'),
+            (axes[1], pf_spk, 'Spikes', 'spikes'),
+        ]:
+            data = pf.binF[order, :]
+            track_len = pf.bin_size_cm * data.shape[1]
+            vmin = np.nanquantile(data, 0.5)
+            vmax = np.nanquantile(data, 0.9)
+            im = ax.imshow(data, cmap='magma', aspect='auto',
+                           extent=[0, track_len, data.shape[0], 0],
+                           vmin=vmin, vmax=vmax, interpolation='none')
+            ax.set_xlabel('Position (cm)')
+            ax.set_ylabel('Cell #')
+            ax.set_title(label)
+            plt.colorbar(im, ax=ax, label=cbar_label, shrink=0.8)
+        fig.suptitle(f'{trial_type} — sorted by {sort_by}{suptitle_suffix}',
+                     fontweight='bold')
+        plt.tight_layout()
+        plt.show()
+        return fig
+
+
+    # Build place-cell union mask for ABC
+    pf_dff = result_dff.fields['ABC']
+    pf_spk = result_spikes.fields['ABC']
+    n_cells = pf_dff.binF.shape[0]
+    keys_dff = get_sort_keys(pf_dff, n_cells, meta['bin_size_cm'])
+    keys_spk = get_sort_keys(pf_spk, n_cells, meta['bin_size_cm'])
+    has_dff = ~np.isnan(keys_dff)
+    has_spk = ~np.isnan(keys_spk)
+
+    print(f"\nPlace cell breakdown (ABC):")
+    print(f"  dff only: {(has_dff & ~has_spk).sum()}")
+    print(f"  spk only: {(~has_dff & has_spk).sum()}")
+    print(f"  both:     {(has_dff & has_spk).sum()}")
+    print(f"  neither:  {(~has_dff & ~has_spk).sum()}")
+
+    # Rank correlation across all cells
+    from scipy.stats import spearmanr
+
+    order_dff = pf_dff.order
+    order_spk = pf_spk.order
+    rank_dff = np.empty_like(order_dff);
+    rank_dff[order_dff] = np.arange(n_cells)
+    rank_spk = np.empty_like(order_spk);
+    rank_spk[order_spk] = np.arange(n_cells)
+    rho, _ = spearmanr(rank_dff, rank_spk)
+    print(f"\nSort-order Spearman ρ (all cells):  {rho:.3f}")
+    rho_pc, _ = spearmanr(rank_dff[has_dff | has_spk], rank_spk[has_dff | has_spk])
+    print(f"Sort-order Spearman ρ (place cells only): {rho_pc:.3f}")
+
+    # Plot: union of place cells, sorted by each signal
+    union_cells = np.where(has_dff | has_spk)[0]
+    plot_side_by_side(result_dff, result_spikes, 'ABC', sort_by='dff',
+                      cells=union_cells, suptitle_suffix=' (place cells, union)')
+    plot_side_by_side(result_dff, result_spikes, 'ABC', sort_by='spikes',
+                      cells=union_cells, suptitle_suffix=' (place cells, union)')
 
 
 # sanity check; plot the PF distribution
