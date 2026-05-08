@@ -34,6 +34,7 @@ def plot_place_fields(
     animal_id: str | None = None,
     date: str | None = None,
     show_cue_boundaries: bool = True,
+    normalize_rows: bool = True,
 ) -> plt.Figure:
     """Plot place field activity as a sorted heatmap.
 
@@ -42,14 +43,16 @@ def plot_place_fields(
         title: Plot title description. Passed to build_title if config provided.
         sort: Sort cells by field position.
         cells: Boolean mask or indices of cells to include.
-        vmin: Min color scale value (default: 50th percentile).
-        vmax: Max color scale value (default: 90th percentile).
+        vmin: Min color scale value (default: 0 if normalize_rows else 10th percentile).
+        vmax: Max color scale value (default: 1 if normalize_rows else 99th percentile).
         dpi: Figure resolution.
         config: Experiment config dict. Required for cue bar and build_title.
         trial_type: Trial type string. Required for cue bar.
         animal_id: Animal ID for title. Used only if config provided.
         date: Session date string for title. Used only if config provided.
         show_cue_boundaries: If True, draws dashed vertical lines at cue boundaries.
+        normalize_rows: If True, scale each cell's tuning curve to [0, 1] before plotting
+            so every cell's peak is at the colorbar maximum.
 
     Returns:
         Matplotlib Figure.
@@ -68,10 +71,18 @@ def plot_place_fields(
 
     data = data[order, :]
 
-    if vmin is None:
-        vmin = np.nanquantile(data, 0.5)
-    if vmax is None:
-        vmax = np.nanquantile(data, 0.9)
+    if normalize_rows:
+        row_max = np.nanmax(data, axis=1, keepdims=True)
+        data = data / np.where(row_max > 0, row_max, 1.0)
+        if vmin is None:
+            vmin = 0.0
+        if vmax is None:
+            vmax = 1.0
+    else:
+        if vmin is None:
+            vmin = np.nanquantile(data, 0.1)
+        if vmax is None:
+            vmax = np.nanquantile(data, 0.99)
 
     track_len_cm = pf.bin_size_cm * data.shape[1]
     figsize = (4.8, 6.5)
@@ -94,7 +105,7 @@ def plot_place_fields(
     ax.set_xlabel('Position (cm)')
     ax.set_ylabel('Cell #')
     ax.set_xlim(0, track_len_cm)
-    fig.colorbar(im, cax=ax_cb, label='ΔF/F')
+    fig.colorbar(im, cax=ax_cb, label='Normalized ΔF/F' if normalize_rows else 'ΔF/F')
 
     cue_colors = pfmt.get_cue_colors(config)
     cue_labels_map = pfmt.get_cue_labels(config)
@@ -156,6 +167,8 @@ def plot_combined_heatmap(
     dpi: int = 150,
     show_cue_boundaries: bool = True,
     show: bool = True,
+    normalize_rows: bool = True,
+    drop_unsorted: bool = True,
 ) -> plt.Figure:
     """Plot heatmap with trial types concatenated horizontally.
 
@@ -171,12 +184,15 @@ def plot_combined_heatmap(
         cells: Cell indices or boolean mask to include. Default: all place cells.
         sort_by: Trial type to sort cells by field position. Default: first trial type.
         bin_size_cm: Spatial bin size in cm.
-        vmin: Min color scale (default: 50th percentile).
-        vmax: Max color scale (default: 90th percentile).
+        vmin: Min color scale (default: 0 if normalize_rows else 10th percentile).
+        vmax: Max color scale (default: 1 if normalize_rows else 99th percentile).
         figsize: Figure size. Auto-scaled if None.
         dpi: Figure resolution.
         show_cue_boundaries: If false, suppresses dashed lines at cue boundaries within each trial type.
         show: Call plt.show().
+        normalize_rows: If True, scale each cell's tuning curve to [0, 1] before plotting.
+        drop_unsorted: If True, drop cells with no detected field in sort_by so they don't
+            appear as an unsorted noise band at the bottom.
 
     Returns:
         Matplotlib Figure.
@@ -217,16 +233,26 @@ def plot_combined_heatmap(
                     best_intensity[cell_idx] = mean_int
                     sort_key[cell_idx] = prop['weighted_centroid'][1]
 
+    if drop_unsorted:
+        cells = cells[np.isfinite(sort_key[cells])]
     order = cells[np.argsort(sort_key[cells])]
     data = combined[order, :]
 
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial']
 
-    if vmin is None:
-        vmin = np.nanquantile(data, 0.5)
-    if vmax is None:
-        vmax = np.nanquantile(data, 0.9)
+    if normalize_rows:
+        row_max = np.nanmax(data, axis=1, keepdims=True)
+        data = data / np.where(row_max > 0, row_max, 1.0)
+        if vmin is None:
+            vmin = 0.0
+        if vmax is None:
+            vmax = 1.0
+    else:
+        if vmin is None:
+            vmin = np.nanquantile(data, 0.1)
+        if vmax is None:
+            vmax = np.nanquantile(data, 0.99)
 
     total_cm = sum(get_track_length(config, tt) for tt in trial_types)
     n_cells_plot = len(order)
@@ -249,7 +275,7 @@ def plot_combined_heatmap(
     ax.set_ylabel('Neuron #')
 
     ax_cb = ax.inset_axes([1.02, 0.0, 0.02, 1.0])
-    plt.colorbar(im, cax=ax_cb, label='ΔF/F')
+    plt.colorbar(im, cax=ax_cb, label='Normalized ΔF/F' if normalize_rows else 'ΔF/F')
 
     for b in boundaries[1:-1]:
         x = b * bin_size_cm
@@ -336,26 +362,68 @@ def plot_combined_heatmap(
 
 
 if __name__ == "__main__":
-    from df_processing import find_session_dir, get_session_paths, load_session_context, load_processed_session
-    from place_field_detection import detect_place_fields, DetectionParams
-
-    mouse_id = "14"
-    mouse_dir = Path("/Users/cs963/Desktop/sun_lab_projects/datasets", mouse_id)
-    date = "2025-09-05"
-
-    session_dir = find_session_dir(mouse_dir, date)
-    session_data, exp_config = load_session_context(session_dir)
-    paths = get_session_paths(session_dir, session_data)
-    data, meta = load_processed_session(paths["parquet"])
-
-    params = DetectionParams(smooth_sigma=0, signal_threshold=0.3)
-    result = detect_place_fields(
-        data, exp_config, signal_col="multi_day_dff",
-        bin_size_cm=meta["bin_size_cm"], params=params,
+    from df_processing import find_session_dir, load_session_context
+    from place_field_detection import DetectionParams
+    from experiment_place_cells import (
+        detect_place_fields_for_session,
+        compute_experiment_place_cells,
+        load_experiment_place_cells,
+        CACHE_FILENAME,
     )
 
-    plot_place_fields(result.fields["ABDC"], config=exp_config, trial_type="ABDC",
-                      animal_id=mouse_id, date=date)
-    plt.show()
+    mouse_id = "26"
+    mouse_dir = Path("/Users/cs963/Desktop/sun_lab_projects/datasets", mouse_id)
+    date = "2025-09-16"
 
-    plot_combined_heatmap(result, exp_config, session_data, sort_by="ABC")
+    # Toggle to rebuild caches from scratch.
+    force_recompute = True
+
+    params=None
+    #params = DetectionParams(smooth_sigma=1, signal_threshold=0.2)
+    signal_col = "multi_day_dff"
+
+    # Per-session detection — loads from {session_dir}/*_place_fields_*.pkl if present.
+    session_dir = find_session_dir(mouse_dir, date)
+    session_data, exp_config = load_session_context(session_dir)
+
+    result = detect_place_fields_for_session(
+        session_dir, signal_col=signal_col, params=params,
+        force_recompute=force_recompute,
+    )
+
+    # Experiment-wide PCs across all sessions — auto-loads from
+    # {mouse_dir}/experiment_place_cells.npz if present and params match.
+    exp_cache = mouse_dir / CACHE_FILENAME
+    if exp_cache.exists() and not force_recompute:
+        try:
+            exp_pcs = load_experiment_place_cells(mouse_dir)
+            print(f"Loaded experiment PCs cache: {exp_cache.name}")
+        except Exception as e:
+            print(f"Cache load failed ({e}); recomputing.")
+            exp_pcs = compute_experiment_place_cells(
+                mouse_dir, signal_col=signal_col, params=params, force=True,
+            )
+    else:
+        exp_pcs = compute_experiment_place_cells(
+            mouse_dir, signal_col=signal_col, params=params,
+            force=force_recompute,
+        )
+
+    union_cells = exp_pcs.place_cells_in_any_trial_type(min_days=2)
+    print(f"Plotting {len(union_cells)} cross-day place cells (≥2 days, any trial type)")
+
+    # Per-trial-type heatmap restricted to cross-day PCs
+    for tt in result.fields:
+        plot_place_fields(
+            result.fields[tt], config=exp_config, trial_type=tt,
+            cells=union_cells, animal_id=mouse_id, date=date,
+        )
+        plt.show()
+
+    # Combined heatmap, cross-day PCs only, sorted each way
+    for sort_by in ('ABC', 'ABDC'):
+        if sort_by in result.fields:
+            plot_combined_heatmap(
+                result, exp_config, session_data,
+                cells=union_cells, sort_by=sort_by,
+            )
