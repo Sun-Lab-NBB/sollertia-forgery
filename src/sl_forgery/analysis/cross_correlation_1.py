@@ -2057,6 +2057,144 @@ def plot_multiday_pv_heatmap_grid_cross(
     return fig
 
 
+def plot_multiday_pv_heatmap_grid_a_vs_b(
+    sessions: dict[str, dict],
+    type_a: str,
+    type_b: str,
+    signal_col: str = 'multi_day_spikes',
+    animal_id: str | None = None,
+    figsize_per_cell: tuple = (4, 3.5),
+    show: bool = True,
+) -> Figure:
+    """Rectangular grid of bin×bin PV correlation heatmaps comparing type_a (x) vs type_b (y).
+
+    Columns span every day that has type_a data; rows span every day that has type_b data.
+    When type_b is not run on every day (e.g. ABDC introduced mid-experiment), the grid is
+    rectangular rather than square — empty rows are dropped instead of left blank. Each cell
+    (i, j) is the bin×bin PV correlation between type_a at the column date and type_b at the
+    row date.
+
+    No split-half is shown — same-day cells compare the two trial types on that day (the
+    cross-condition counterpart of the single-day PV matrix figure).
+
+    Args:
+        sessions: From load_multiday_sessions().
+        type_a: Trial type plotted on the x-axis (columns).
+        type_b: Trial type plotted on the y-axis (rows).
+        signal_col: Column containing neural signals.
+        animal_id: Animal identifier for the super-title.
+        figsize_per_cell: Width and height per subplot cell.
+        show: Determines whether to call plt.show().
+
+    Returns:
+        Matplotlib Figure containing the full N×N grid.
+    """
+    all_dates = sorted(sessions.keys())
+    tc_a = multiday_tuning_curves(sessions, type_a, signal_col=signal_col)
+    tc_b = multiday_tuning_curves(sessions, type_b, signal_col=signal_col)
+
+    dates_x = [d for d in all_dates if d in tc_a]
+    dates_y = [d for d in all_dates if d in tc_b]
+    n_x = len(dates_x)
+    n_y = len(dates_y)
+    if n_x == 0 or n_y == 0:
+        raise ValueError(f'No sessions with both {type_a} and {type_b} tuning curves.')
+
+    x_labels = [d[5:] for d in dates_x]
+    y_labels = [d[5:] for d in dates_y]
+
+    fig, axes = plt.subplots(
+        n_y, n_x,
+        figsize=(figsize_per_cell[0] * n_x, figsize_per_cell[1] * n_y),
+        squeeze=False,
+    )
+    last_im = None
+
+    for i in range(n_y):
+        for j in range(n_x):
+            ax = axes[i][j]
+            day_col = dates_x[j]  # type_a (x-axis)
+            day_row = dates_y[i]  # type_b (y-axis)
+
+            tc_x = tc_a.get(day_col)
+            tc_y = tc_b.get(day_row)
+            if tc_x is None or tc_y is None:
+                ax.text(
+                    0.5, 0.5, 'No data', ha='center', va='center',
+                    transform=ax.transAxes,
+                )
+                _clear_no_data_axes(ax)
+                continue
+
+            matrix = pv_correlation_matrix(tc_x, tc_y)
+            config_x = sessions[day_col]['config']
+            config_y = sessions[day_row]['config']
+            bin_size_cm = get_bin_size(sessions[day_col]['metadata'])
+
+            len_x = matrix.shape[0] * bin_size_cm
+            len_y = matrix.shape[1] * bin_size_cm
+
+            last_im = ax.imshow(
+                matrix.T, origin='lower', aspect='auto',
+                cmap='RdBu_r', vmin=-0.3, vmax=1.0,
+                extent=[0, len_x, 0, len_y],
+            )
+
+            max_len = min(len_x, len_y)
+            ax.plot(
+                [0, max_len], [0, max_len], color='white', linewidth=0.8,
+                linestyle='--', alpha=0.5,
+            )
+
+            diverge, _ = get_shared_bins(config_y, type_a, type_b, sessions[day_row]['metadata'])
+            if diverge is not None:
+                ax.axvline(diverge, color='red', linestyle='--', linewidth=0.8, alpha=0.6)
+                ax.axhline(diverge, color='red', linestyle='--', linewidth=0.8, alpha=0.6)
+
+            pfmt.add_cue_boundary_lines(ax, config_x, type_a, axis='x')
+            pfmt.add_cue_boundary_lines(ax, config_y, type_b, axis='y')
+            pfmt.add_cue_bar(ax, config_x, type_a, axis='x', bar_width=0.02)
+            pfmt.add_cue_bar(ax, config_y, type_b, axis='y', bar_width=0.02)
+
+            x_boundaries = pfmt.get_cue_boundaries(config_x, type_a, max_cm=len_x)
+            y_boundaries = pfmt.get_cue_boundaries(config_y, type_b, max_cm=len_y)
+            ax.set_xticks(x_boundaries)
+            ax.set_yticks(y_boundaries)
+
+            if i == n_y - 1:
+                ax.set_xticklabels([f'{t:.0f}' for t in x_boundaries], fontsize=6)
+            else:
+                ax.set_xticklabels([])
+            if j == 0:
+                ax.set_yticklabels([f'{t:.0f}' for t in y_boundaries], fontsize=6)
+            else:
+                ax.set_yticklabels([])
+
+            ax.tick_params(length=0, pad=8, labelsize=6)
+
+    # Column headers (type_a dates) and row headers (type_b dates)
+    for j in range(n_x):
+        label = f'{type_a}\n{x_labels[j]}' if j == 0 else x_labels[j]
+        axes[0][j].set_title(label, fontsize=10, fontweight='bold')
+    for i in range(n_y):
+        label = f'{type_b}\n{y_labels[i]}' if i == 0 else y_labels[i]
+        axes[i][0].set_ylabel(label, fontsize=10, fontweight='bold')
+
+    cbar_ax = fig.add_axes([0.92, 0.15, 0.015, 0.7])
+    if last_im is not None:
+        fig.colorbar(last_im, cax=cbar_ax, label='PV Correlation (r)')
+
+    suptitle = f'PV Heatmap Grid — {type_a} (x) vs {type_b} (y)'
+    if animal_id:
+        suptitle = f'{animal_id} — {suptitle}'
+    fig.suptitle(suptitle, fontsize=14, fontweight='bold', y=0.98)
+    fig.subplots_adjust(right=0.9, hspace=0.3, wspace=0.3)
+
+    if show:
+        plt.show()
+    return fig
+
+
 def plot_multiday_pv_position_grid_cross(
     sessions: dict[str, dict],
     type_a: str,
@@ -2821,7 +2959,7 @@ if __name__ == "__main__":
     from df_processing import (find_session_dir, load_session_context,
                                get_session_paths, load_processed_session, load_multiday_sessions)
 
-    mouse_id = '14'
+    mouse_id = '26'
     date = '2025-09-03'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
@@ -2841,24 +2979,32 @@ if __name__ == "__main__":
     #     )
     #     fig = plot_within_session_learning_curve(result, animal_id=mouse_id, date=date)
     #
-    # figs = run_within_session_analysis(data, exp_config, meta, signal_col='multi_day_spikes', animal_id=mouse_id,
+    # figs = run_within_session_analysis(data, exp_config, meta,
+    # signal_col='multi_day_spikes', animal_id=mouse_id,
     #                                  date=date, show=True)
 
 
 #     # ── Multiday analysis ──
-    # b3, b5, e1, e4, e7
+    # b3, b5, e1, e4, e7 --> 14
     # sessions = load_multiday_sessions(
-    #     mouse_dir, dates=('2025-08-18', '2025-08-20', '2025-08-22',
-    #                       '2025-08-27', '2025-09-03', '2025-09-05' ),
+    #     mouse_dir, dates=['2025-08-18', '2025-08-20', '2025-08-22',
+    #                       '2025-08-27', '2025-09-03', '2025-09-05' ],
     #     auto_process=True,
     #     signal_cols=['multi_day_spikes'],
     # )
 
     sessions = load_multiday_sessions(
-        mouse_dir, dates=('2025-08-18', '2025-08-20'),
+        mouse_dir, dates=['2025-08-25', '2025-08-30', '2025-09-03',
+                          '2025-09-08', '2025-09-12', '2025-09-16'],
         auto_process=True,
         signal_cols=['multi_day_spikes'],
     )
+
+    # sessions = load_multiday_sessions(
+    #     mouse_dir, dates=('2025-08-18', '2025-08-20'),
+    #     auto_process=True,
+    #     signal_cols=['multi_day_spikes'],
+    # )
 
     # All pairs + autocorrelation for ABC
     #figs = run_multiday_analysis(sessions, trial_type='ABC', signal_col='multi_day_spikes', show=True)
@@ -2900,5 +3046,7 @@ if __name__ == "__main__":
     # fig = plot_multiday_histogram_grid_cross(
     #     sessions, type_a='ABC', type_b='ABDC', animal_id=mouse_id,
     # )
+
+    fig = plot_multiday_pv_heatmap_grid_a_vs_b(sessions, type_a='ABC', type_b='ABDC', animal_id=mouse_id)
 
     fig = plot_multiday_combined_grid(sessions, trial_type='ABC', animal_id=mouse_id)

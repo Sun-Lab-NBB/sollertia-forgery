@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import hashlib
 import pickle
+import yaml
 from dataclasses import dataclass, asdict, field, field as dc_field
 from pathlib import Path
 
@@ -132,11 +133,14 @@ def _load_and_verify_cache(
 def detect_place_fields_for_session(
     session_dir: Path,
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     params: DetectionParams | None = None,
     force_recompute: bool = False,
 ) -> PlaceFieldResult:
     """Run detect_place_fields with on-disk auto-caching.
+
+    Bin size is always read from the session's metadata yaml — there is no
+    fallback default. If the metadata is missing or doesn't carry a
+    ``bin_size_cm`` field, this function raises.
 
     On cache hit: returns the saved PlaceFieldResult without loading the
     session df.
@@ -152,7 +156,6 @@ def detect_place_fields_for_session(
     Args:
         session_dir: Path to the session directory.
         signal_col: Column for which to detect place fields.
-        bin_size_cm: Spatial bin size in cm. Read from session metadata if available.
         params: DetectionParams. Defaults if None.
         force_recompute: If True, ignore the cache and rerun detection.
 
@@ -168,6 +171,21 @@ def detect_place_fields_for_session(
     animal_id = session_data['animal_id']
     date = session_data['session_name'][:10]
 
+    # Read bin_size_cm from the processed-session metadata yaml (cheap — no parquet).
+    meta_path = Path(paths['parquet']).with_suffix('.yaml')
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Processed metadata yaml not found at {meta_path}. "
+            f"Re-run processing or supply bin_size_cm explicitly upstream."
+        )
+    with open(meta_path, 'r') as f:
+        meta_yaml = yaml.safe_load(f) or {}
+    if 'bin_size_cm' not in meta_yaml:
+        raise ValueError(
+            f"{meta_path.name} has no bin_size_cm — re-run processing to write it."
+        )
+    bin_size_cm = int(meta_yaml['bin_size_cm'])
+
     cache_path = _get_pf_cache_path(
         session_dir, animal_id, date, signal_col, params, bin_size_cm,
     )
@@ -180,21 +198,9 @@ def detect_place_fields_for_session(
 
     print(f"  Running place field detection for {animal_id} {date} ({signal_col})...")
     data, metadata = load_processed_session(paths['parquet'])
-    bin_size = (metadata or {}).get('bin_size_cm', bin_size_cm)
-
-    # Re-key the cache path if session metadata overrode the bin_size.
-    if bin_size != bin_size_cm:
-        cache_path = _get_pf_cache_path(
-            session_dir, animal_id, date, signal_col, params, bin_size,
-        )
-        if cache_path.exists() and not force_recompute:
-            print(f"  Loading cached place fields (metadata bin_size): {cache_path.name}")
-            cached = _load_and_verify_cache(cache_path, params)
-            if cached is not None:
-                return cached
-
     result = detect_place_fields(
-        data, exp_config, signal_col=signal_col, bin_size_cm=bin_size, params=params,
+        data, exp_config, signal_col=signal_col,
+        bin_size_cm=bin_size_cm, params=params, metadata=metadata,
     )
     save_place_field_result(result, cache_path)
     print(f"  Saved cache: {cache_path.name}")
@@ -606,7 +612,6 @@ def _combine_per_day_results(
 def detect_multiday_place_fields(
     sessions: dict[str, dict],
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     params: DetectionParams | None = None,
     min_days: int = 1,
 ) -> MultidayPlaceFieldResult:
@@ -616,11 +621,13 @@ def detect_multiday_place_fields(
     Use detect_multiday_place_fields_cached() instead — it loads sessions one
     at a time and caches results to disk.
 
+    Bin size is taken from each session's metadata; sessions without
+    ``bin_size_cm`` in their metadata are skipped with a warning.
+
     Args:
         sessions: From load_multiday_sessions(). Each value has keys:
             'data', 'config', 'session_data', 'metadata'.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
         params: Detection parameters. Uses defaults if None.
         min_days: Minimum number of days a cell must have a field to be
             included in union_indices. Default 1 (any day).
@@ -633,12 +640,17 @@ def detect_multiday_place_fields(
     per_day = {}
     for date in dates:
         s = sessions[date]
+        meta = s.get('metadata') or {}
+        if 'bin_size_cm' not in meta:
+            print(f"  WARNING: {date} metadata lacks bin_size_cm — skipping.")
+            continue
         print(f"\n--- {date} ---")
         per_day[date] = detect_place_fields(
             s['data'], s['config'],
             signal_col=signal_col,
-            bin_size_cm=bin_size_cm,
+            bin_size_cm=int(meta['bin_size_cm']),
             params=params,
+            metadata=meta,
         )
 
     multiday_result = _combine_per_day_results(per_day, dates, params, min_days)
@@ -651,7 +663,6 @@ def detect_multiday_place_fields_cached(
     dates: list[str] | None = None,
     date_range: tuple[str, str] | None = None,
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
     params: DetectionParams | None = None,
     min_days: int = 1,
     force_recompute: bool = False,
@@ -660,7 +671,8 @@ def detect_multiday_place_fields_cached(
 
     Loops sessions one at a time, calling detect_place_fields_for_session() (which
     auto-caches per-session results). Each session's df is loaded only on cache
-    miss and freed before the next session is processed.
+    miss and freed before the next session is processed. Bin size is always
+    pulled from per-session metadata yamls.
     """
     mouse_dir = Path(mouse_dir)
 
@@ -690,7 +702,6 @@ def detect_multiday_place_fields_cached(
             per_day[date] = detect_place_fields_for_session(
                 session_dir,
                 signal_col=signal_col,
-                bin_size_cm=bin_size_cm,
                 params=params,
                 force_recompute=force_recompute,
             )

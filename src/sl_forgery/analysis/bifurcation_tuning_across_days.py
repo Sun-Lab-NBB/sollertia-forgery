@@ -6,15 +6,14 @@ The main question here is do cells in the "bifurcation zone" change their tuning
 i.e. once the bifurcation exists.  Until the extension there is no bifurcation; then it switches to a  probabilistic
 state transition
 
-Standalone module for testing. Can be integrated into
-multiday_place_field_comparison.py later.
+Standalone module for testing. Can be integrated into multiday_place_field_comparison.py later.
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from df_processing import get_cue_regions, load_multiday_sessions
+from df_processing import get_cue_regions, load_multiday_sessions, get_bin_size
 from place_field_detection import PlaceFieldResult, PlaceFields1d, DetectionParams
 from cross_correlation_1 import get_mean_tuning_curves
 import plot_utils as pfmt
@@ -59,7 +58,8 @@ def _get_primary_field_centers(
 def get_bifurcation_bin_range(
     config: dict,
     trial_type: str = 'ABC',
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
+    metadata: dict | None = None,
 ) -> tuple[int, int]:
     """Get bin range spanning cue B through the end of gap 0b.
 
@@ -70,11 +70,14 @@ def get_bifurcation_bin_range(
     Args:
         config: Experiment configuration dict.
         trial_type: Trial type for cue layout lookup.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         (start_bin, end_bin) inclusive/exclusive.
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata)
     regions = get_cue_regions(config, trial_type)
     cue_sequence = config['trial_structures'][trial_type]['cue_sequence']
     cue_widths = config.get('cue_map', {})
@@ -109,13 +112,14 @@ def plot_bifurcation_tuning_across_days(
     pf_results: dict[str, PlaceFieldResult],
     trial_type: str = 'ABC',
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     cell_selection: str = 'overlap',
     sort_by_day: str | None = None,
     introduction_day: str | None = None,
     animal_id: str | None = None,
     figsize_per_day: tuple[float, float] = (2.5, 6),
     show: bool = True,
+    metadata: dict | None = None,
 ) -> Figure:
     """Heatmap of spatial tuning at the bifurcation zone (B–0b) across days.
 
@@ -127,7 +131,7 @@ def plot_bifurcation_tuning_across_days(
         pf_results: From detect_fields_multiday().
         trial_type: Trial type to extract tuning curves from.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         cell_selection: How to select cells:
             'center' — primary field center within B–0b on any day.
             'overlap' — any field boundary overlapping B–0b on any day.
@@ -136,10 +140,15 @@ def plot_bifurcation_tuning_across_days(
         animal_id: Animal identifier for title.
         figsize_per_day: (width, height) per day panel.
         show: Call plt.show().
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         Matplotlib Figure.
     """
+    if bin_size_cm is None:
+        if metadata is None and sessions:
+            metadata = next(iter(sessions.values())).get('metadata')
+        bin_size_cm = get_bin_size(metadata)
     dates = sorted(
         d for d in sessions
         if d in pf_results and trial_type in pf_results[d].fields

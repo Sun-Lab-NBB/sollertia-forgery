@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from df_processing import get_track_length, get_cue_regions
+from df_processing import get_track_length, get_cue_regions, get_bin_size
 import plot_utils as pfmt
 
 
@@ -589,7 +589,8 @@ def _compute_speed_by_position(
     df: pl.DataFrame,
     config: dict,
     trial_type: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     """Computes mean and SEM of running speed at each spatial bin for one trial type.
 
@@ -603,12 +604,15 @@ def _compute_speed_by_position(
             'trial', 'trial_type' columns.
         config: Experiment configuration dict.
         trial_type: Trial type to compute for.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         Dict with 'bin_centers', 'mean_speed', 'sem_speed', 'per_trial_speed',
         'n_trials' keys. per_trial_speed is shape (n_trials, n_bins).
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
     track_length = get_track_length(config, trial_type)
     n_bins = int(track_length / bin_size_cm)
 
@@ -648,9 +652,10 @@ def plot_speed_profile(
     config: dict,
     animal_id: str,
     date: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     figsize: tuple[float, float] = (10, 4),
     show: bool = True,
+    metadata: dict | None = None,
 ) -> Figure:
     """Plots mean running speed vs position for each trial type, overlaid on one axes.
 
@@ -666,13 +671,16 @@ def plot_speed_profile(
         config: Experiment configuration dict.
         animal_id: Animal identifier for plot title.
         date: Session date for plot title.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         figsize: Figure size.
         show: Call plt.show().
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         Matplotlib Figure.
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
     trial_types = sorted(df['trial_type'].unique().to_list())
     trial_type_colors, _ = pfmt.get_trial_type_colors(config)
 
@@ -760,7 +768,7 @@ def plot_speed_raster(
     df: pl.DataFrame,
     config: dict,
     trial_type: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     ax: Axes | None = None,
     label: str | None = None,
     vmin: float = 0.0,
@@ -771,6 +779,7 @@ def plot_speed_raster(
     show_xlabel: bool = True,
     show_ylabel: bool = True,
     font_scale: float = 1.0,
+    metadata: dict | None = None,
 ) -> tuple[Figure, Axes]:
     """Plots a trial-by-position heatmap of running speed.
 
@@ -786,7 +795,7 @@ def plot_speed_raster(
         df: Processed frame-level DataFrame.
         config: Experiment configuration dict.
         trial_type: Trial type to plot.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         ax: Matplotlib Axes. Created if None.
         label: Subplot title string.
         vmin: Colorbar minimum speed.
@@ -797,10 +806,13 @@ def plot_speed_raster(
         show_xlabel: Show x-axis label.
         show_ylabel: Show y-axis label.
         font_scale: Scale factor for all font sizes.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         Tuple of (Figure, Axes).
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
     if ax is None:
         fig, ax = plt.subplots(figsize=(5, 6))
     else:
@@ -861,10 +873,11 @@ def plot_session_speed_raster(
     config: dict,
     animal_id: str,
     date: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     label: str | None = None,
     figsize_per_panel: tuple[float, float] = (5, 6),
     font_scale: float = 1.0,
+    metadata: dict | None = None,
     **kwargs,
 ) -> tuple[Figure, list[Axes]]:
     """Plots speed rasters for all trial types in a session, side by side.
@@ -880,15 +893,18 @@ def plot_session_speed_raster(
         config: Experiment configuration dict.
         animal_id: Animal identifier for figure suptitle.
         date: Session date for figure suptitle.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         label: Base title for the figure.
         figsize_per_panel: (width, height) per subplot panel.
         font_scale: Scale factor for all font sizes.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
         **kwargs: Additional keyword arguments passed to plot_speed_raster.
 
     Returns:
         Tuple of (Figure, list of Axes).
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
     trial_types = sorted(df['trial_type'].unique().to_list())
     n_panels = len(trial_types)
 
@@ -921,12 +937,13 @@ def plot_session_speed_raster(
 def plot_multiday_speed_profile(
     sessions: dict[str, dict],
     animal_id: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     labels: list[str] | None = None,
     label_format: str = 'day_number',
     figsize_per_panel: tuple[float, float] = (3.5, 3.0),
     font_scale: float = 1.0,
     show: bool = True,
+    metadata: dict | None = None,
 ) -> Figure:
     """Plots speed profiles across sessions, one column per day, one row per trial type.
 
@@ -941,16 +958,21 @@ def plot_multiday_speed_profile(
     Args:
         sessions: Dict from load_multiday_sessions().
         animal_id: Animal identifier for suptitle.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         labels: Manual column labels. Overrides label_format.
         label_format: 'day_number' or 'date'.
         figsize_per_panel: (width, height) per panel.
         font_scale: Scale factor for all font sizes.
         show: Call plt.show().
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         Matplotlib Figure.
     """
+    if bin_size_cm is None:
+        if metadata is None and sessions:
+            metadata = next(iter(sessions.values())).get('metadata')
+        bin_size_cm = get_bin_size(metadata)
     sorted_dates = sorted(sessions.keys())
     n_cols = len(sorted_dates)
 
@@ -1678,7 +1700,7 @@ if __name__ == '__main__':
                                load_session_context, load_multiday_sessions)
 
     mouse_id = '26'
-    date = '2025-09-10'
+    date = '2025-09-16'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
