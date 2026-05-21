@@ -21,12 +21,17 @@ Specialized plots (kept separate):
 """
 
 
+import hashlib
+import json
+
 import numpy as np
 import polars as pl
 import umap
+import yaml
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, LinearSegmentedColormap
 from matplotlib.cm import ScalarMappable
+from sklearn.decomposition import PCA
 from typing import Literal, Any
 from enum import Enum
 from pathlib import Path
@@ -117,7 +122,20 @@ def prepare_umap_data(
         stride = len(filtered) // max_frames
         filtered = filtered.gather_every(stride)
 
-    neural_data = np.vstack(filtered[signal_column].to_list())
+    # Memory-efficient stack: pre-allocate float32 and fill row-by-row to avoid
+    # the float64 vstack peak (list-of-arrays + 2x sized output copy).
+    col = filtered[signal_column]
+    n_frames = len(col)
+    first = np.asarray(col[0], dtype=np.float32)
+    n_cells = first.shape[0]
+    print(f"  Allocating neural_data: {n_frames} × {n_cells} float32 "
+          f"(~{n_frames * n_cells * 4 / 1e9:.2f} GB)...")
+    neural_data = np.empty((n_frames, n_cells), dtype=np.float32)
+    neural_data[0] = first
+    for i in range(1, n_frames):
+        neural_data[i] = col[i]
+    print(f"  Stack OK: shape={neural_data.shape}, dtype={neural_data.dtype}, "
+          f"size={neural_data.nbytes / 1e9:.2f} GB")
 
     # Add 'position' if not present (normalized within-trial distance)
     if 'position' not in filtered.columns:
@@ -132,6 +150,36 @@ def prepare_umap_data(
             (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
             .max().over('trial').alias('nominal_track_length')
         )
+
+    # Within-(day-or-session) normalized progress [0, 1]. For single-day data
+    # this is equivalent to normalizing the 'trial' column directly; for
+    # multiday it makes trials comparable across sessions of different lengths.
+    group_col = 'session_date' if 'session_date' in filtered.columns else None
+    if group_col is not None:
+        filtered = filtered.with_columns(
+            ((pl.col('trial') - pl.col('trial').min().over(group_col))
+             / (pl.col('trial').max().over(group_col) - pl.col('trial').min().over(group_col)).clip(lower_bound=1))
+            .alias('session_progress')
+        )
+    else:
+        t_min = filtered['trial'].min()
+        t_max = filtered['trial'].max()
+        denom = max(1, t_max - t_min)
+        filtered = filtered.with_columns(
+            ((pl.col('trial') - t_min) / denom).alias('session_progress')
+        )
+
+    # Across-day normalized progress [0, 1]: dense-rank over (session_date, trial)
+    # so day-1 trial-1 = 0, last day's last trial = 1. For single-day data this
+    # equals session_progress.
+    if group_col is not None:
+        rank_expr = pl.struct([group_col, 'trial']).rank('dense').cast(pl.Float64)
+    else:
+        rank_expr = pl.col('trial').rank('dense').cast(pl.Float64)
+    filtered = filtered.with_columns(
+        ((rank_expr - 1) / (rank_expr.max() - 1).clip(lower_bound=1))
+        .alias('experiment_progress')
+    )
 
     # Drop signal columns — neural_data already extracted as numpy array
     signal_cols = [c for c in filtered.columns if c.startswith(('single_day_', 'multi_day_'))]
@@ -149,6 +197,163 @@ def prepare_umap_data(
     return neural_data, filtered_df
 
 
+"""
+Patch for umap_plotting.py — adds position-binned PV preparation.
+
+Paste `prepare_umap_data_position_binned` into umap_plotting.py
+(e.g. right after `prepare_umap_data`), and update the `__main__`
+block with the example at the bottom.
+"""
+
+import numpy as np
+import polars as pl
+from typing import Any
+
+
+def prepare_umap_data_position_binned(
+        df: pl.DataFrame,
+        signal_column: str = "multi_day_dff",
+        bin_width_cm: float = 5.0,
+        min_speed: float | None = 2.0,
+        max_speed: float | None = None,
+        cues_to_include: list[int] | None = None,
+        cues_to_exclude: list[int] | None = None,
+        trial_types_to_include: list[str] | None = None,
+        state_filters: dict[str, Any] | None = None,
+) -> tuple[np.ndarray, pl.DataFrame]:
+    """Prepare position-binned PVs for UMAP.
+
+    One row per (trial, position_bin): neural activity averaged across frames
+    in that spatial bin. Removes within-bin temporal context so any UMAP
+    separation must come from instantaneous PV differences rather than
+    trajectory/temporal dynamics.
+
+    Frame-level filters (speed, cue, trial_type, state) are applied BEFORE
+    binning. After filtering, frames are grouped by (trial, position_bin)
+    and the signal is averaged element-wise across frames within each group.
+
+    Args:
+        df: Frame-level DataFrame (after process_session or fix_cue_offset).
+        signal_column: Column containing per-frame neural activity arrays.
+        bin_width_cm: Position bin width in cm.
+        min_speed: Min speed threshold (frame-level, applied before binning).
+        max_speed: Max speed threshold (frame-level).
+        cues_to_include: Frame-level cue filter — keep only these cue zones.
+        cues_to_exclude: Frame-level cue filter — drop these cue zones.
+        trial_types_to_include: Frame-level trial type filter.
+        state_filters: {col: val} for extra frame-level filtering.
+
+    Returns:
+        neural_data: Array of shape (n_bins_total, n_cells). One row per
+            (trial, position_bin), neural activity averaged across frames.
+        binned_df: One row per bin, frame-aligned with neural_data. Columns:
+            trial, trial_type, position_bin (int), position (mean cm in bin),
+            cue (modal), speed_cm_s (mean), nominal_track_length,
+            n_frames_in_bin.
+    """
+    filtered = df
+
+    # ── frame-level filters (same as prepare_umap_data) ──
+    if min_speed is not None:
+        filtered = filtered.filter(pl.col('speed_cm_s') >= min_speed)
+    if max_speed is not None:
+        filtered = filtered.filter(pl.col('speed_cm_s') <= max_speed)
+    if cues_to_include is not None:
+        filtered = filtered.filter(pl.col('cue').is_in(cues_to_include))
+    if cues_to_exclude is not None:
+        filtered = filtered.filter(~pl.col('cue').is_in(cues_to_exclude))
+    if trial_types_to_include is not None:
+        filtered = filtered.filter(pl.col('trial_type').is_in(trial_types_to_include))
+    if state_filters:
+        for col, value in state_filters.items():
+            if col in filtered.columns:
+                filtered = filtered.filter(pl.col(col) == value)
+
+    # ── ensure position / nominal_track_length columns exist ──
+    if 'position' not in filtered.columns:
+        filtered = filtered.with_columns(
+            (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
+            .alias('position')
+        )
+    if 'nominal_track_length' not in filtered.columns:
+        filtered = filtered.with_columns(
+            (pl.col('distance_cm') - pl.col('distance_cm').min().over('trial'))
+            .max().over('trial').alias('nominal_track_length')
+        )
+
+    # ── assign position bin per frame ──
+    filtered = filtered.with_columns(
+        (pl.col('position') // bin_width_cm).cast(pl.Int32).alias('position_bin')
+    )
+
+    # ── aggregate neural signal per (trial, position_bin) ──
+    # Extract frame-level neural as numpy, then average using groupby indices.
+    # Doing the aggregation in numpy is cleaner than dealing with polars
+    # element-wise list-column means.
+    frame_neural = np.vstack(filtered[signal_column].to_list())  # (n_frames, n_cells)
+
+    groups = np.stack(
+        [filtered['trial'].to_numpy(), filtered['position_bin'].to_numpy()],
+        axis=1,
+    )
+    unique_groups, inverse, counts = np.unique(
+        groups, axis=0, return_inverse=True, return_counts=True
+    )
+    n_bins, n_cells = len(unique_groups), frame_neural.shape[1]
+
+    binned_neural = np.zeros((n_bins, n_cells), dtype=np.float64)
+    np.add.at(binned_neural, inverse, frame_neural)
+    binned_neural /= counts[:, None]
+    binned_neural = binned_neural.astype(frame_neural.dtype)
+
+    # ── metadata aggregation per bin ──
+    binned_df = (
+        filtered
+        .group_by(['trial', 'position_bin'], maintain_order=False)
+        .agg([
+            pl.col('trial_type').first(),
+            pl.col('position').mean().alias('position'),
+            pl.col('cue').mode().first().alias('cue'),
+            pl.col('speed_cm_s').mean().alias('speed_cm_s'),
+            pl.col('nominal_track_length').first(),
+            pl.len().alias('n_frames_in_bin'),
+        ])
+        .sort(['trial', 'position_bin'])
+    )
+
+    # ── align neural_data rows with binned_df row order ──
+    # `unique_groups` is lex-sorted by (trial, position_bin); `binned_df` is
+    # also sorted the same way, so the alignment is row-for-row. Double-check
+    # to fail loudly if that ever drifts.
+    md_pairs = np.stack(
+        [binned_df['trial'].to_numpy(), binned_df['position_bin'].to_numpy()],
+        axis=1,
+    )
+    assert np.array_equal(md_pairs, unique_groups), \
+        "Row order mismatch between numpy unique_groups and binned_df"
+
+    # ── add cue_id if present in original df (preserves coloring support) ──
+    if 'cue_id' in df.columns:
+        cue_id_lookup = (
+            filtered
+            .group_by(['trial', 'position_bin'], maintain_order=False)
+            .agg(pl.col('cue_id').mode().first().alias('cue_id'))
+            .sort(['trial', 'position_bin'])
+        )
+        binned_df = binned_df.join(cue_id_lookup, on=['trial', 'position_bin'])
+
+    print(f"Position-binned: {binned_neural.shape[0]} bins × {binned_neural.shape[1]} cells")
+    print(f"  Bin width: {bin_width_cm} cm")
+    print(f"  Frames per bin: mean={counts.mean():.1f}, min={counts.min()}, max={counts.max()}")
+
+    cues = binned_df['cue'].to_numpy()
+    for cue_val in sorted(set(cues), key=str):
+        print(type(cue_val), cue_val, (cues == cue_val).sum())
+
+    return binned_neural, binned_df
+
+
+
 # UMAP COMPUTATION
 
 def compute_umap(
@@ -158,6 +363,7 @@ def compute_umap(
         min_dist: float = 0.1,
         metric: str = 'correlation',
         random_state: int = 42,
+        n_pca_components: int | None = None,
 ) -> np.ndarray:
     """Compute UMAP embedding. Check API for more param options.
         https://umap-learn.readthedocs.io/en/latest/api.html
@@ -169,11 +375,26 @@ def compute_umap(
         min_dist: UMAP minimum distance between embedded points
         metric: Distance metric for UMAP. Best options: 'correlation', 'euclidean', 'cosine'.
         random_state: Random seed for reproducibility.
+        n_pca_components: If set, pre-reduce neural_data with PCA to this many components
+            before running UMAP. Recommended for high cell counts (e.g., >3000) to cut
+            memory/runtime. 50–100 typically preserves structure. None disables PCA.
 
     Returns:
         embedding: array of shape (n_frames, n_components).
         umap_params: Dict of hyperparameters used for reproducibility/saving.
     """
+    # Cast to float32 to halve memory; UMAP upcasts internally anyway.
+    neural_data = np.asarray(neural_data, dtype=np.float32)
+
+    pca_explained_variance = None
+    if n_pca_components is not None:
+        n_pcs = min(n_pca_components, *neural_data.shape)
+        print(f"PCA pre-reduction: {neural_data.shape[1]} cells → {n_pcs} PCs...")
+        pca = PCA(n_components=n_pcs, random_state=random_state)
+        neural_data = pca.fit_transform(neural_data).astype(np.float32)
+        pca_explained_variance = float(pca.explained_variance_ratio_.sum())
+        print(f"  PCA explained variance: {pca_explained_variance:.3f}")
+
     print(f"Computing {n_components}D UMAP (n_neighbors={n_neighbors}, min_dist={min_dist})...")
 
     reducer = umap.UMAP(
@@ -193,12 +414,101 @@ def compute_umap(
         'min_dist': min_dist,
         'metric': metric,
         'random_state': random_state,
+        'n_pca_components': n_pca_components,
+        'pca_explained_variance': pca_explained_variance,
         'n_frames': neural_data.shape[0],
-        'n_cells': neural_data.shape[1],
+        'n_cells_or_pcs_in': neural_data.shape[1],
     }
 
     print(f"Done! Embedding shape: {embedding.shape}")
     return embedding, umap_params
+
+
+def load_or_compute_umap(
+        neural_data: np.ndarray,
+        cache_dir: Path,
+        cache_name: str,
+        filtered_df: pl.DataFrame | None = None,
+        n_components: int = 3,
+        n_neighbors: int = 50,
+        min_dist: float = 0.1,
+        metric: str = 'correlation',
+        random_state: int = 42,
+        n_pca_components: int | None = None,
+        force_recompute: bool = False,
+) -> tuple[np.ndarray, pl.DataFrame | None, dict]:
+    """Compute UMAP with disk caching, or load a previously cached embedding.
+
+    Cache layout (all in cache_dir):
+        {cache_name}_{hash}.npy      - embedding
+        {cache_name}_{hash}.yaml     - umap_params (human-readable)
+        {cache_name}_{hash}.parquet  - filtered_df (only if provided at save time)
+
+    The hash digest covers UMAP params (and PCA setting), so changing any of them
+    yields a new cache file. cache_name should encode dataset identity (animal,
+    days, signal_column, frame filters) since that is NOT hashed — pick a name
+    that uniquely identifies the input neural_data.
+
+    Args:
+        neural_data: Array of shape (n_frames, n_cells). Only used on cache miss.
+        cache_dir: Directory for cached embeddings (created if missing).
+        cache_name: Dataset-identifying name (e.g. 'M26_2025-09-10_to_12_multidff').
+        filtered_df: Optional frame-aligned DataFrame to save alongside the embedding
+            so downstream plotting can re-load without re-running prepare_umap_data.
+        n_components, n_neighbors, min_dist, metric, random_state, n_pca_components:
+            Forwarded to compute_umap.
+        force_recompute: If True, ignore any existing cache and recompute + overwrite.
+
+    Returns:
+        embedding: Array of shape (n_frames, n_components).
+        filtered_df: The cached parquet (if found) or the one passed in, else None.
+        umap_params: Hyperparameters dict.
+    """
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    params_for_hash = {
+        'n_components': n_components,
+        'n_neighbors': n_neighbors,
+        'min_dist': min_dist,
+        'metric': metric,
+        'random_state': random_state,
+        'n_pca_components': n_pca_components,
+    }
+    digest = hashlib.md5(json.dumps(params_for_hash, sort_keys=True).encode()).hexdigest()[:8]
+    base = cache_dir / f'{cache_name}_{digest}'
+    npy_path = base.with_suffix('.npy')
+    yaml_path = base.with_suffix('.yaml')
+    parquet_path = base.with_suffix('.parquet')
+
+    if not force_recompute and npy_path.exists() and yaml_path.exists():
+        embedding = np.load(npy_path)
+        with open(yaml_path, 'r') as f:
+            umap_params = yaml.safe_load(f)
+        df_out = pl.read_parquet(parquet_path) if parquet_path.exists() else filtered_df
+        print(f"Loaded cached UMAP: {npy_path.name} (shape {embedding.shape})")
+        return embedding, df_out, umap_params
+
+    embedding, umap_params = compute_umap(
+        neural_data,
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=random_state,
+        n_pca_components=n_pca_components,
+    )
+
+    np.save(npy_path, embedding)
+    with open(yaml_path, 'w') as f:
+        yaml.dump(umap_params, f, default_flow_style=False)
+    if filtered_df is not None:
+        filtered_df.write_parquet(parquet_path)
+        print(f"Saved: {npy_path.name}, {yaml_path.name}, {parquet_path.name}")
+    else:
+        print(f"Saved: {npy_path.name}, {yaml_path.name}")
+
+    return embedding, filtered_df, umap_params
 
 
 # MATPLOTLIB HELPERS
