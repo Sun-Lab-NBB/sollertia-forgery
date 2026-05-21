@@ -392,7 +392,8 @@ def fix_cue_offset(
 def add_position_and_bins(
     df: pl.DataFrame,
     config: dict = None,
-    bin_size_cm: int = 5
+    bin_size_cm: int | None = None,
+    metadata: dict | None = None,
 ) -> pl.DataFrame:
     """
     Add within-trial position and spatial bin index.
@@ -405,11 +406,15 @@ def add_position_and_bins(
     Args:
         df: Frame-based dataframe after fix_cue_offset (must have 'trial', 'trial_type', 'distance_cm')
         config: Experiment config with trial structures and track lengths (for consistent bin counts)
-        bin_size_cm: Spatial bin size in cm
-    
+        bin_size_cm: Spatial bin size in cm. If None, resolved from metadata.
+        metadata: Session metadata dict carrying ``bin_size_cm`` — required if
+            ``bin_size_cm`` not given.
+
     Returns:
         df: Input df with position, distance_bin, and nominal_track_length columns added
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
     # Within-trial position: distance relative to first frame in each trial. Takes first distance_cm value for each
     # trial and subtracts it from all the other frames to normalize to nominal track length
     df = df.with_columns(
@@ -528,8 +533,9 @@ def compute_session_averages(
         df: pl.DataFrame,
         signal_col: str,
         config: dict,
-        bin_size_cm: int,
+        bin_size_cm: int | None = None,
         by_trial_type: bool = True,
+        metadata: dict | None = None,
 ) -> dict:
     """
     Compute session-level spatial averages from frame-level data. For each cell at each spatial bin, averages across trials.
@@ -552,6 +558,9 @@ def compute_session_averages(
              'n_trials': int}
     """
     from scipy import stats
+
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
 
     all_signals = np.vstack(df[signal_col].to_list())  # (n_frames, n_cells)
     n_cells = all_signals.shape[1]
@@ -806,6 +815,181 @@ def load_multiday_sessions(
 
     print(f"Loaded {len(sessions)}/{len(dates)} sessions.")
     return sessions
+
+
+# RE-BINNING (change the bin size of an already-processed session)
+
+def rebin_processed_session(
+    session_dir: Path,
+    new_bin_size_cm: int,
+    cleanup_pf_caches: bool = False,
+    dry_run: bool = False,
+) -> Path:
+    """Re-bin a single already-processed session at a new spatial bin size.
+
+    Practically: loads the existing ``*_processed.parquet`` + ``*_processed.yaml``,
+    recomputes the ``position`` and ``distance_bin`` columns at ``new_bin_size_cm``,
+    updates the metadata yaml's ``bin_size_cm`` field, and writes both files back
+    in place. Nothing else about the processed parquet changes — cue offset, signal
+    columns, speed, and trial assignments are preserved exactly.
+
+    Why this is safe to do as a post-hoc step: ``distance_bin`` is a deterministic
+    projection of ``distance_cm`` (which the parquet already carries). Re-binning
+    is just `floor(position / new_bin_size)`. So we can update bin resolution
+    without touching the upstream pipeline (Suite2p outputs, cue-offset correction,
+    signal computation, etc.).
+
+    After this runs:
+        * Downstream code that reads ``metadata['bin_size_cm']`` automatically
+          picks up the new value (the refactor making bin_size_cm metadata-driven
+          everywhere is what makes this possible).
+        * Place-field detection caches keyed under the OLD bin size become
+          orphans — they're harmless (next run produces a fresh cache under the
+          new hash) but waste disk. Pass ``cleanup_pf_caches=True`` to delete
+          them.
+
+    Args:
+        session_dir: Path to the session directory (parent of ``source_data/``).
+        new_bin_size_cm: Target spatial bin size in cm.
+        cleanup_pf_caches: If True, delete pre-existing
+            ``*_place_fields_*.pkl`` cache files in the session directory so
+            they don't accumulate. Caches under the new hash are NOT touched.
+        dry_run: If True, prints what would change and returns the parquet path
+            without writing anything. Use this first to confirm the session list
+            looks right.
+
+    Returns:
+        Path to the (potentially rewritten) processed parquet.
+
+    Raises:
+        FileNotFoundError: If the processed parquet/yaml don't exist for this
+            session — there's nothing to re-bin (run processing first).
+    """
+    session_dir = Path(session_dir)
+
+    # Locate the existing processed files via the established naming convention.
+    session_data, exp_config = load_session_context(session_dir)
+    paths = get_session_paths(session_dir, session_data)
+    parquet_path = Path(paths['parquet'])
+    if parquet_path.suffix != '.parquet':
+        parquet_path = parquet_path.with_suffix('.parquet')
+    yaml_path = parquet_path.with_suffix('.yaml')
+
+    if not parquet_path.exists() or not yaml_path.exists():
+        raise FileNotFoundError(
+            f"Processed files not found for {session_dir.name}: "
+            f"expected {parquet_path.name} and {yaml_path.name}. "
+            f"Run process_session() first."
+        )
+
+    # Load existing processed df + metadata. Keep all signal columns — we only
+    # want to recompute the spatial columns, not drop anything.
+    df, metadata = load_processed_session(parquet_path)
+    metadata = metadata or {}
+    old_bin = metadata.get('bin_size_cm')
+
+    if old_bin == new_bin_size_cm:
+        print(f"  {session_dir.name}: already at {new_bin_size_cm} cm, skipping.")
+        return parquet_path
+
+    # add_position_and_bins is the one and only definer of these columns; reusing
+    # it keeps the re-binning logic identical to the original processing path.
+    # `with_columns` overwrites the existing position / distance_bin columns.
+    rebinned = add_position_and_bins(df, exp_config, bin_size_cm=new_bin_size_cm)
+
+    # Update metadata in place. Keep everything else (n_frames, trial_types,
+    # cue_offset_cm, system_state, columns) so the yaml stays consistent with
+    # what process_session would have written for this bin size.
+    metadata['bin_size_cm'] = new_bin_size_cm
+    metadata['columns'] = rebinned.columns
+
+    print(
+        f"  {session_dir.name}: bin_size_cm {old_bin} -> {new_bin_size_cm}"
+        + (" [dry-run]" if dry_run else "")
+    )
+    if dry_run:
+        return parquet_path
+
+    # Atomic-ish rewrite: write parquet first, then yaml. Polars write_parquet
+    # is not transactional, but writing the parquet successfully before the yaml
+    # means a partial failure leaves a usable parquet (just with stale yaml,
+    # which we can re-detect by reading bin_size_cm).
+    rebinned.write_parquet(parquet_path)
+    with open(yaml_path, 'w') as f:
+        yaml.dump(metadata, f, default_flow_style=False)
+
+    # Optional housekeeping: remove orphan place-field caches keyed under the
+    # old bin size. Cache naming convention is fixed in experiment_place_cells.
+    if cleanup_pf_caches:
+        for stale in session_dir.glob('*_place_fields_*.pkl'):
+            print(f"    removed stale cache: {stale.name}")
+            stale.unlink()
+
+    return parquet_path
+
+
+def rebin_sessions(
+    mouse_dir: Path,
+    new_bin_size_cm: int,
+    dates: list[str] | None = None,
+    date_range: tuple[str, str] | None = None,
+    cleanup_pf_caches: bool = False,
+    dry_run: bool = False,
+) -> list[Path]:
+    """Re-bin many processed sessions for one mouse at a new bin size.
+
+    Thin wrapper around ``rebin_processed_session`` that resolves a list of
+    dates (explicit or via date range) and applies the re-bin to each. Sessions
+    missing processed files or failing the rebin are reported but do not stop
+    the batch.
+
+    Args:
+        mouse_dir: Mouse-level directory containing per-session folders.
+        new_bin_size_cm: Target spatial bin size in cm.
+        dates: Explicit list of session dates (YYYY-MM-DD). Mutually exclusive
+            with ``date_range``.
+        date_range: (start, end) inclusive range; auto-discovers session
+            folders whose name starts with a date in [start, end].
+        cleanup_pf_caches: Forwarded to ``rebin_processed_session``. Delete
+            old place-field cache pickles per session.
+        dry_run: If True, no files are written. Useful for confirming the
+            session list before committing.
+
+    Returns:
+        List of parquet paths that were (or would be, if dry_run) rewritten.
+    """
+    mouse_dir = Path(mouse_dir)
+
+    # Mirror the dates/date_range resolution used elsewhere so behavior is
+    # consistent with load_multiday_sessions, plot_multiday_*, etc.
+    if dates is not None and date_range is not None:
+        raise ValueError("Provide either dates or date_range, not both.")
+    if date_range is not None:
+        start, end = date_range
+        dates = sorted({
+            d.name[:10] for d in mouse_dir.iterdir()
+            if d.is_dir() and len(d.name) >= 10 and start <= d.name[:10] <= end
+        })
+    if not dates:
+        raise ValueError("No session dates resolved for re-binning.")
+
+    print(f"Re-binning {len(dates)} session(s) to {new_bin_size_cm} cm "
+          f"(dry_run={dry_run}, cleanup_pf_caches={cleanup_pf_caches})")
+
+    rewritten: list[Path] = []
+    for date in sorted(dates):
+        try:
+            session_dir = find_session_dir(mouse_dir, date)
+            path = rebin_processed_session(
+                session_dir, new_bin_size_cm,
+                cleanup_pf_caches=cleanup_pf_caches, dry_run=dry_run,
+            )
+            rewritten.append(path)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"  WARNING: skipping {date}: {e}")
+
+    print(f"Done. {len(rewritten)}/{len(dates)} sessions touched.")
+    return rewritten
 
 
 if __name__ == "__main__":
