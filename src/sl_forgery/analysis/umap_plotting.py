@@ -55,11 +55,38 @@ class ColoringStrategy(Enum):
     POSITION = "position"
     TRIAL_TYPE = "trial_type"
     SPEED = "speed"
-    SESSION_PROGRESS = "session_progress"
+    SESSION_PROGRESS = "session_progress"  # Within-day normalized [0,1]
+    EXPERIMENT_PROGRESS = "experiment_progress"  # Across-day normalized [0,1]
+    DAY = "day"  # Multi-day: requires 'session_date' column in filtered_df
 
 
 # Shared Plotly axis settings (clean, no grid)
 _PLOTLY_AXIS = dict(visible=False, showbackground=False, showgrid=False, zeroline=False)
+
+
+def _truncated_cmap(name: str, lo: float = 0.25, hi: float = 1.0, n: int = 256):
+    """Return a matplotlib cmap restricted to [lo, hi] of the original range.
+
+    Used for sequential maps like YlOrBr whose lightest end is invisible on
+    a white background.
+    """
+    base = plt.cm.get_cmap(name)
+    return LinearSegmentedColormap.from_list(f'{name}_trunc', base(np.linspace(lo, hi, n)))
+
+
+def _cmap_to_plotly_colorscale(cmap, n: int = 11) -> list:
+    """Sample a matplotlib cmap into a Plotly colorscale [(stop, 'rgb(...)'), ...]."""
+    stops = np.linspace(0, 1, n)
+    out = []
+    for s in stops:
+        r, g, b, _ = cmap(s)
+        out.append([float(s), f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'])
+    return out
+
+
+# Cached truncated YlOrBr for progress strategies
+_YLORBR_TRUNC = _truncated_cmap('YlOrBr', lo=0.25, hi=1.0)
+_YLORBR_TRUNC_PLOTLY = _cmap_to_plotly_colorscale(_YLORBR_TRUNC)
 
 
 # DATA PREPARATION
@@ -574,10 +601,45 @@ def get_colors_for_strategy(
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Speed (cm/s)'}
 
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
-        cmap = plt.cm.get_cmap('YlOrBr')
-        norm = Normalize(vmin=filtered_df['trial'].to_numpy().min(), vmax=filtered_df['trial'].to_numpy().max())
-        colors = cmap(norm(filtered_df['trial'].to_numpy()))
+        col = 'session_progress' if 'session_progress' in filtered_df.columns else 'trial'
+        vals = filtered_df[col].to_numpy()
+        cmap = _YLORBR_TRUNC
+        norm = Normalize(vmin=vals.min(), vmax=vals.max())
+        colors = cmap(norm(vals))
         color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Session Progress'}
+
+    elif strategy == ColoringStrategy.EXPERIMENT_PROGRESS:
+        col = 'experiment_progress' if 'experiment_progress' in filtered_df.columns else 'trial'
+        vals = filtered_df[col].to_numpy()
+        cmap = _YLORBR_TRUNC
+        norm = Normalize(vmin=vals.min(), vmax=vals.max())
+        colors = cmap(norm(vals))
+        color_info = {'type': 'continuous', 'cmap': cmap, 'norm': norm, 'label': 'Experiment Progress'}
+
+    elif strategy == ColoringStrategy.DAY:
+        if 'session_date' not in filtered_df.columns:
+            raise ValueError(
+                "DAY strategy requires 'session_date' column. "
+                "Build a multi-day df via umap_multiday.load_multiday_data()."
+            )
+        dates = filtered_df['session_date'].to_numpy()
+        unique_dates = sorted(set(dates))
+        n = max(1, len(unique_dates) - 1)
+        cmap = plt.cm.get_cmap('cividis', max(2, len(unique_dates)))
+        legend = {}
+        for i, d in enumerate(unique_dates):
+            rgba = cmap(i / n if n > 0 else 0.5)
+            hex_color = '#{:02x}{:02x}{:02x}'.format(
+                int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255)
+            )
+            legend[d] = hex_color
+        colors = np.array([legend[d] for d in dates])
+        color_info = {
+            'type': 'categorical',
+            'legend': legend,
+            'label': 'Session Date',
+            'column': 'session_date',
+        }
 
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
@@ -594,6 +656,8 @@ def _scatter_categorical(ax, embedding, filtered_df, color_info, strategy, alpha
             mask = np.isin(filtered_df['cue'].to_numpy(), raw_ids)
         elif strategy == ColoringStrategy.CUE_ID:
             mask = filtered_df['cue_id'].to_numpy() == label
+        elif strategy == ColoringStrategy.DAY:
+            mask = filtered_df['session_date'].to_numpy() == label
         else:
             mask = filtered_df['trial_type'].to_numpy() == label
 
@@ -770,7 +834,7 @@ def _build_position_traces(embedding, filtered_df, point_size, opacity):
                               x=cb_x, y=cb_y),
             ),
             text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
-            customdata=filtered_df['trial'][tt_mask],
+            customdata=filtered_df['trial'].to_numpy()[tt_mask],
             hovertemplate=(
                 f'{trial_type}<br>'
                 'Pos: %{marker.color:.1f} cm<br>'
@@ -816,7 +880,12 @@ def _build_continuous_traces(embedding, filtered_df, strategy, point_size, opaci
         values, cscale, label = filtered_df['speed_cm_s'].to_numpy(), 'Plasma', 'Speed (cm/s)'
         cmin, cmax = values.min(), values.max()
     elif strategy == ColoringStrategy.SESSION_PROGRESS:
-        values, cscale, label = filtered_df['trial'].to_numpy(), 'YlOrBr', 'Session Progress'
+        col = 'session_progress' if 'session_progress' in filtered_df.columns else 'trial'
+        values, cscale, label = filtered_df[col].to_numpy(), _YLORBR_TRUNC_PLOTLY, 'Session Progress'
+        cmin, cmax = values.min(), values.max()
+    elif strategy == ColoringStrategy.EXPERIMENT_PROGRESS:
+        col = 'experiment_progress' if 'experiment_progress' in filtered_df.columns else 'trial'
+        values, cscale, label = filtered_df[col].to_numpy(), _YLORBR_TRUNC_PLOTLY, 'Experiment Progress'
         cmin, cmax = values.min(), values.max()
     else:
         raise ValueError(f"No continuous builder for {strategy}")
@@ -846,6 +915,60 @@ def _build_continuous_traces(embedding, filtered_df, strategy, point_size, opaci
     return [trace]
 
 
+def _build_day_traces(embedding, filtered_df, point_size, opacity):
+    """Build per-session-date traces with sequential cividis colors.
+
+    One trace per day with clickable legend. Colors are ordered (early→late),
+    so visual ordering matches temporal ordering.
+    """
+    if 'session_date' not in filtered_df.columns:
+        raise ValueError(
+            "DAY strategy requires 'session_date' column. "
+            "Build a multi-day df via umap_multiday.load_multiday_data()."
+        )
+    traces = []
+    dates_arr = filtered_df['session_date'].to_numpy()
+    unique_dates = sorted(set(dates_arr))
+    n = max(1, len(unique_dates) - 1)
+    cmap = plt.cm.get_cmap('cividis', max(2, len(unique_dates)))
+    cue_labels = pfmt.get_cue_labels()
+
+    for i, date in enumerate(unique_dates):
+        mask = dates_arr == date
+        if not mask.any():
+            continue
+        rgba = cmap(i / n if n > 0 else 0.5)
+        color = '#{:02x}{:02x}{:02x}'.format(
+            int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255)
+        )
+        positions = filtered_df['position'].to_numpy()[mask]
+        cues = filtered_df['cue'].to_numpy()[mask]
+        trial_types = filtered_df['trial_type'].to_numpy()[mask]
+
+        traces.append(go.Scatter3d(
+            x=embedding[mask, 0], y=embedding[mask, 1], z=embedding[mask, 2],
+            mode='markers', name=str(date),
+            marker=dict(size=point_size, opacity=opacity, color=color),
+            legendgroup='days',
+            legendgrouptitle_text='Session Date',
+            customdata=np.column_stack([
+                positions,
+                filtered_df['trial'].to_numpy()[mask],
+                trial_types,
+            ]),
+            text=[cue_labels.get(int(c), f'Cue {c}') for c in cues],
+            hovertemplate=(
+                f'{date}<br>'
+                'Trial type: %{customdata[2]}<br>'
+                'Pos: %{customdata[0]:.1f} cm<br>'
+                'Cue: %{text}<br>'
+                'Trial: %{customdata[1]:.0f}'
+                '<extra></extra>'
+            ),
+        ))
+    return traces
+
+
 def _get_trace_builder(strategy: ColoringStrategy):
     """Return the appropriate trace builder for a strategy.
         - emb: embedding
@@ -862,7 +985,10 @@ def _get_trace_builder(strategy: ColoringStrategy):
         return _build_position_traces
     elif strategy == ColoringStrategy.TRIAL_TYPE:
         return _build_trial_type_traces
-    elif strategy in (ColoringStrategy.SPEED, ColoringStrategy.SESSION_PROGRESS):
+    elif strategy == ColoringStrategy.DAY:
+        return _build_day_traces
+    elif strategy in (ColoringStrategy.SPEED, ColoringStrategy.SESSION_PROGRESS,
+                      ColoringStrategy.EXPERIMENT_PROGRESS):
         return lambda emb, df, ps, op: _build_continuous_traces(emb, df, strategy, ps, op)
     else:
         raise ValueError(f"Unknown strategy: {strategy}")
@@ -965,7 +1091,6 @@ def plot_umap(
 
         # Build visibility arrays for each dropdown button
         buttons = []
-        offset = 0
         group_sizes = [len(traces) for _, traces in trace_groups]
         total_traces = sum(group_sizes)
 
@@ -1341,7 +1466,7 @@ if __name__ == '__main__':
                                load_session_context, load_processed_session, save_processed_session)
 
     mouse_id = '26'
-    date = '2025-09-10'
+    date = '2025-09-16'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1372,3 +1497,24 @@ if __name__ == '__main__':
     fig1= plot_umap_3d_single_trial_trajectory(embedding, filtered_df, n_trials_per_type=10) # individual rtial plot
 
     #fig2D = plot_umap_2d_density(embedding, filtered_df) # 2D with KDE, needs a 2D embedding
+   # Position-binned PVs (one point per trial × spatial bin)
+    neural_binned, binned_df = prepare_umap_data_position_binned(
+        data,
+        signal_column='multi_day_dff',
+        bin_width_cm=5.0,
+    )
+
+    # n_neighbors must be < n_points; with ~hundreds of bins, scale it down
+    n_neighbors_binned = min(30, max(5, neural_binned.shape[0] // 20))
+    embedding_binned, _ = compute_umap(
+        neural_binned,
+        n_components=3,
+        n_neighbors=n_neighbors_binned,
+    )
+
+    fig_binned, _ = plot_umap(
+        embedding_binned,
+        binned_df,
+        strategy=['trial_type', 'cue', 'position'],
+        title='UMAP — position-binned PVs (ABC vs ABDC)',
+    )
