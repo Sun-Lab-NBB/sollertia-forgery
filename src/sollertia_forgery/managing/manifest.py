@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 import polars as pl
 from filelock import FileLock
@@ -102,7 +101,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "animal": [],
                 # Session names.
                 "session": [],
-                # Session names stored as timezone-aware date-time objects in EST.
+                # Session names stored as timezone-aware date-time objects in the host machine's local time.
                 "date": [],
                 # Session types (e.g., mesoscope experiment, run training, etc.).
                 "type": [],
@@ -149,9 +148,6 @@ def generate_project_manifest(project_directory: Path) -> None:
                     )
                     multi_recording_registry[dataset_name] = ProcessingTracker(file_path=tracker_path).complete
 
-            # Pre-creates the Eastern timezone object for UTC-to-EST/EDT conversion.
-            eastern = ZoneInfo("America/New_York")
-
             # Loops over each session of every animal in the project and extracts session ID information and
             # information about which processing steps have been successfully applied to the session.
             for session_data in sessions:
@@ -165,7 +161,8 @@ def generate_project_manifest(project_directory: Path) -> None:
                 manifest["type"].append(session_data.session_type)
                 manifest["system"].append(session_data.acquisition_system)
 
-                # Parses session name into a timezone-aware datetime in Eastern time.
+                # Parses the session name (a UTC timestamp) into a timezone-aware datetime in the host machine's
+                # local time.
                 date_time_components = session_data.session_name.split("-")
                 date_time = datetime(
                     year=int(date_time_components[0]),
@@ -176,7 +173,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                     second=int(date_time_components[5]),
                     microsecond=int(date_time_components[6]),
                     tzinfo=UTC,
-                ).astimezone(eastern)
+                ).astimezone()
                 manifest["date"].append(date_time)
 
                 # Loads the session descriptor to extract experimenter notes and completeness status. Window
