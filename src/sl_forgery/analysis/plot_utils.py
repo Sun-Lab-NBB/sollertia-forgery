@@ -13,6 +13,8 @@ from matplotlib.axes import Axes
 import numpy as np
 import colorsys
 
+from df_processing import get_bin_size
+
 
 # FONT CONFIGURATION
 
@@ -482,11 +484,12 @@ def plot_pv_heatmap(
     y_type: str,
     x_label: str,
     y_label: str,
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     diverge_cm: float | None = None,
     vmin: float = -0.3,
     vmax: float = 1.0,
     cmap: str = 'RdBu_r',
+    metadata: dict | None = None,
 ):
     """Render a bin×bin PV correlation heatmap with cue bars and boundary lines.
 
@@ -503,15 +506,18 @@ def plot_pv_heatmap(
         y_type: Trial type for y-axis cue bar.
         x_label: X-axis label string.
         y_label: Y-axis label string.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         diverge_cm: If provided, draw divergence lines at this position.
         vmin: Colorbar minimum.
         vmax: Colorbar maximum.
         cmap: Colormap name.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if ``bin_size_cm`` is not supplied.
 
     Returns:
         AxesImage from imshow (for external colorbar customization if needed).
     """
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata)
     len_x = matrix.shape[0] * bin_size_cm
     len_y = matrix.shape[1] * bin_size_cm
 
