@@ -27,6 +27,31 @@ import plot_utils as pfmt  #pfmt == "plot formatting", better than putil (or pu)
 
 #Helper function for plotting
 
+def _resolve_cell_idx(cell_idx: int, metadata: dict | None) -> int | None:
+    """Translate an original (identity) cell index into its local position via
+    metadata's 'cell_index_map'.
+
+    Background: load_processed_session() supports a `cell_indices` arg that loads
+    only a subset of cells to bound memory. After subsetting, cells live at new
+    local positions 0..N-1 within the loaded arrays, but we want the user-facing
+    API to keep using original indices (which are cell IDENTITY — what the cell
+    is in the imaging dataset). The map handles the translation.
+
+    Returns:
+        - cell_idx unchanged if no map (no subsetting was done — original==local).
+        - The local index if cell_idx is in the map.
+        - None if a map exists but cell_idx is not in it (cell wasn't loaded for
+          this session). Callers should handle None by skipping or showing a
+          'not loaded' placeholder.
+    """
+    if metadata is None:
+        return cell_idx
+    cmap = metadata.get('cell_index_map')
+    if cmap is None:
+        return cell_idx
+    return cmap.get(cell_idx)
+
+
 def shared_params(
         ax: Axes,
         trial_type: str,
@@ -181,6 +206,7 @@ def _plot_tuning_on_axis(
     show_cues: bool = True,
     font_scale: float = 1.0,
     place_fields: dict | None = None,
+    pf_cell_idx: int | None = None,
 ):
     """Plot avg ± SEM (and optional trial traces) for one cell/trial type on an axis.
     This function removes redundant code blocks
@@ -189,7 +215,9 @@ def _plot_tuning_on_axis(
     Args:
         ax: matplotlib axis to plot on.
         session_stats: from compute_session_averages().
-        cell_idx: cell index.
+        cell_idx: cell index used to slice into session_stats and data. When the
+            data has been subsetted via load_processed_session(cell_indices=...),
+            this is the LOCAL index. Otherwise it's the same as the original.
         trial_type: trial type string.
         config: experiment config.
         metadata: experiment metadata (needed for bin size)
@@ -201,15 +229,22 @@ def _plot_tuning_on_axis(
         show_cues: show cue region shading.
         font_scale: font size scaling to accommodate multiple subplots
         place_fields: dict mapping trial_type -> PlaceFields1d. If provided and
-            trial_type is present, shades detected field regions for cell_idx.
+            trial_type is present, shades detected field regions for the cell.
+        pf_cell_idx: index used to slice into place_fields' label_im. Place field
+            detection is run on FULL data and cached, so its label_im is indexed
+            by ORIGINAL cell index. When data has been subsetted, pf_cell_idx
+            differs from cell_idx. Defaults to cell_idx (correct when no subsetting).
 
     """
+    if pf_cell_idx is None:
+        pf_cell_idx = cell_idx
+
     tt_colors, tt_colors_dark = pfmt.get_trial_type_colors(config) if config else ({}, {})
     shared_params(ax, trial_type, config, show_cues, font_scale=font_scale)
 
-    # Place field shading
+    # Place field shading uses the original cell index against the full-data cache.
     if place_fields is not None and trial_type in place_fields:
-        _shade_place_fields(ax, place_fields[trial_type], metadata, cell_idx)
+        _shade_place_fields(ax, place_fields[trial_type], metadata, pf_cell_idx)
 
     # Individual trial traces
     if show_trials and data is not None:
@@ -260,7 +295,10 @@ def plot_single_cell(
 
     Args:
         data: frame-level df from process_session().
-        cell_idx: cell index to plot.
+        cell_idx: cell index to plot. ALWAYS in original (identity) terms — the same
+            ID used in your imaging dataset. If `data` was loaded with cell subsetting
+            (metadata has 'cell_index_map'), this is translated to the local position
+            internally.
          metadata: session metadata dict (from load_processed_session).
         trial_type: specific trial type, or None for all types stacked.
         signal_col: neural signal column name.
@@ -275,9 +313,17 @@ def plot_single_cell(
         show: call plt.show().
 
     Returns:
-        Matplotlib Figure.
+        Matplotlib Figure, or None if cell_idx wasn't loaded for this session.
 
     """
+
+    # Translate original cell_idx -> local idx for indexing into the loaded data.
+    # If data was loaded without subsetting, local_idx == cell_idx.
+    local_idx = _resolve_cell_idx(cell_idx, metadata)
+    if local_idx is None:
+        print(f"Cell {cell_idx} was not loaded for this session "
+              f"(not in cell_indices). Skipping plot.")
+        return None
 
     if trial_type is not None:
         trial_types = [trial_type]
@@ -303,8 +349,8 @@ def plot_single_cell(
         all_maxes = []
         for tt in trial_types:
             if tt in session_stats:
-                avg = session_stats[tt]['session_avg'][:, cell_idx]
-                sem = session_stats[tt]['session_sem'][:, cell_idx]
+                avg = session_stats[tt]['session_avg'][:, local_idx]
+                sem = session_stats[tt]['session_sem'][:, local_idx]
                 if smooth_sigma > 0:
                     avg = gaussian_filter1d(avg, sigma=smooth_sigma)
                     sem = gaussian_filter1d(sem, sigma=smooth_sigma)
@@ -322,11 +368,12 @@ def plot_single_cell(
 
     for ax, tt in zip(axes, trial_types):
         _plot_tuning_on_axis(
-            ax, session_stats, cell_idx, tt, config, metadata, signal_col,
+            ax, session_stats, local_idx, tt, config, metadata, signal_col,
             data=data if show_trials else None,
             smooth_sigma=smooth_sigma,
             show_trials=show_trials, alpha_trials=alpha_trials,
             show_cues=show_cues, place_fields=place_fields,
+            pf_cell_idx=cell_idx,
         )
         n_trials = session_stats[tt]['n_trials'] if tt in session_stats else 0
         n_cells = session_stats[tt]['session_avg'].shape[1] if tt in session_stats else 0
@@ -498,7 +545,11 @@ def plot_multiday_comparison(
 
     Args:
         sessions: dict[str, dict], from load_multiday_sessions().
-        cell_idx: int, cell index (consistent across days).
+        cell_idx: int, ORIGINAL cell index (cell identity — same as in your
+            imaging dataset, consistent across days). If sessions were loaded
+            with cell_indices subsetting, this is translated per-session via
+            each session's cell_index_map. Sessions where the cell wasn't
+            loaded show 'cell not loaded' subplots.
         signal_col: str, neural signal column name.
         smooth_sigma: float, Gaussian smoothing on binned avg w/ small kernel (Dombeck et al 2010).
         global_ylim: bool, have all plots share the same y-axis limits; If false, each trial type has their own ylims
@@ -524,6 +575,16 @@ def plot_multiday_comparison(
 
     animal_id = sessions[dates[0]]['session_data'].get('animal_id', '??')
 
+    # Per-session cell_idx translation (original -> local). None if not loaded
+    # for that session — that subplot will show a 'cell not loaded' message.
+    local_idx_per_date = {
+        date: _resolve_cell_idx(cell_idx, s.get('metadata'))
+        for date, s in sessions.items()
+    }
+    if all(v is None for v in local_idx_per_date.values()):
+        print(f"Cell {cell_idx} was not loaded for any session.")
+        return None
+
     # Pre-compute session averages
     precomputed = {}
     for date, s in sessions.items():
@@ -534,14 +595,17 @@ def plot_multiday_comparison(
             config=s['config'], bin_size_cm=bin_size_cm,
         )
 
-    # Ylims from avg + SEM across all days
+    # Ylims from avg + SEM across days where the cell is loaded
     ylims = {}
     for tt in all_trial_types:
         all_maxes = []
         for date in dates:
+            local_idx = local_idx_per_date[date]
+            if local_idx is None:
+                continue
             if tt in precomputed[date]:
-                avg = precomputed[date][tt]['session_avg'][:, cell_idx]
-                sem = precomputed[date][tt]['session_sem'][:, cell_idx]
+                avg = precomputed[date][tt]['session_avg'][:, local_idx]
+                sem = precomputed[date][tt]['session_sem'][:, local_idx]
                 if smooth_sigma > 0:
                     avg = gaussian_filter1d(avg, sigma=smooth_sigma)
                     sem = gaussian_filter1d(sem, sigma=smooth_sigma)
@@ -597,6 +661,7 @@ def plot_multiday_comparison(
         session_stats = precomputed[date]
         day_trial_types = sorted(data['trial_type'].unique().to_list())
         day_fields = place_fields.get(date) if place_fields else None
+        local_idx = local_idx_per_date[date]
 
         for row, tt in enumerate(all_trial_types):
             ax = axes[row, col]
@@ -611,6 +676,22 @@ def plot_multiday_comparison(
             else:
                 ax.set_title(f'{tt}', fontsize=8 * fscale,
                              fontweight='bold', loc='left')
+
+            # Cell wasn't loaded for this session — show placeholder.
+            if local_idx is None:
+                ax.text(
+                    0.5, 0.5, 'cell not loaded',
+                    ha='center', va='center',
+                    fontsize=10 * fscale, color='#999999', fontstyle='italic',
+                    transform=ax.transAxes,
+                )
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.set_ylim(ylims[tt])
+                if col == 0:
+                    ax.set_ylabel(y_label, fontsize=9 * fscale)
+                ax.tick_params(labelsize=7 * fscale)
+                continue
 
             if tt not in day_trial_types:
                 ax.text(
@@ -630,11 +711,12 @@ def plot_multiday_comparison(
             day_fields = place_fields.get(date) if place_fields else None
 
             _plot_tuning_on_axis(
-                ax, session_stats, cell_idx, tt, config, s['metadata'],
+                ax, session_stats, local_idx, tt, config, s['metadata'],
                 signal_col,
                 smooth_sigma=smooth_sigma,
                 show_trials=False, show_cues=show_cues,
                 font_scale=fscale, place_fields=day_fields,
+                pf_cell_idx=cell_idx,
             )
 
             ax.set_ylim(ylims[tt])
@@ -671,65 +753,79 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 
 
 if __name__ == "__main__":
-    from place_field_detection import detect_place_fields, get_place_cell_indices, detect_multiday_place_fields
+    from place_field_detection import detect_place_fields, get_place_cell_indices
+    from experiment_place_cells import detect_multiday_place_fields
     from df_processing import (
         find_session_dir, load_session_context, get_session_paths,
         load_processed_session, load_multiday_sessions
     )
-    from place_field_detection import detect_place_fields
+    from place_field_plotting import plot_combined_heatmap
 
     mouse_id = '26'
-    date = '2025-09-15'
+    date = '2025-09-16'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
-
-    # #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
-    sessions = load_multiday_sessions(mouse_dir, date_range=('2025-08-01', '2025-09-20'), auto_process=False)
-
-    sessions = load_multiday_sessions(mouse_dir, dates=['2025-08-20', '2025-08-25',  # pre ext
-                                                        '2025-09-02', '2025-09-03'  # pre ext
-                                                        '2025-09-08', '2025-09-09',  # add ext
-                                                        '2025-09-11',
-                                                        '2025-09-15', '2025-09-16'],  # last 2 days
-                                      auto_process=False)
-    #
-    # #filter for place cells
-    multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
-    #
-    #
-    # # Build the place_fields dict from per-day results
-    pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
-    #
-    #
-    plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
-    #
-    #
-    for i in multiday.union_indices[:5]:
-        plot_multiday_comparison(
-            sessions, cell_idx=i+5, signal_col='multi_day_spikes',
-            global_ylim=True, place_fields=None,
-        )
-
-#______________________________
-
-    # plot single day activity for a single cell
-    # Load processed df (run epoch only) + raw feather (all epochs)
+    # Single-day ABC | ABDC heatmap, cells sorted by ABC field position.
     session_dir = find_session_dir(mouse_dir, date)
     session_data, exp_config = load_session_context(session_dir)
     paths = get_session_paths(session_dir, session_data)
     data, meta = load_processed_session(paths['parquet'])
 
+    result = detect_place_fields(data, exp_config, signal_col='multi_day_dff')
+
+    plot_combined_heatmap(
+        result, exp_config, session_data,
+        trial_types=['ABC', 'ABDC'],
+        sort_by='ABDC',
+    )
+
+    # # #plot multiple sessions for a single cell;  Date range — auto-discovers all sessions between these dates
+    # sessions = load_multiday_sessions(mouse_dir, date_range=('2025-08-01', '2025-09-20'), auto_process=False)
+
+    # sessions = load_multiday_sessions(mouse_dir, dates=['2025-08-20', '2025-08-25',  # pre ext
+    #                                                     '2025-09-02', '2025-09-03'  # pre ext
+    #                                                     '2025-09-08', '2025-09-09',  # add ext
+    #                                                     '2025-09-11',
+    #                                                     '2025-09-15', '2025-09-16'],  # last 2 days
+    #                                   auto_process=False)
+    # #
+    # # #filter for place cells
+    # multiday = detect_multiday_place_fields(sessions, signal_col='multi_day_dff')
+    # #
+    # #
+    # # # Build the place_fields dict from per-day results
+    # pf_by_date = {date: r.fields for date, r in multiday.per_day.items()}
+    # #
+    # #
+    # plot_multiday_comparison(sessions, cell_idx=5, signal_col='multi_day_dff', global_ylim=True)
+    # #
+    # #
+    # for i in multiday.union_indices[:5]:
+    #     plot_multiday_comparison(
+    #         sessions, cell_idx=i+5, signal_col='multi_day_spikes',
+    #         global_ylim=True, place_fields=None,
+    #     )
+
+#______________________________
+
+    # plot single day activity for a single cell
+    # Load processed df (run epoch only) + raw feather (all epochs)
+    # session_dir = find_session_dir(mouse_dir, date)
+    # session_data, exp_config = load_session_context(session_dir)
+    # paths = get_session_paths(session_dir, session_data)
+    # data, meta = load_processed_session(paths['parquet'])
+
 
     #filter place cells
     # 1. Run detection (once)
-    result = detect_place_fields(data, exp_config, signal_col='multi_day_dff')
+    # result = detect_place_fields(data, exp_config, signal_col='multi_day_dff')
 
     # 2. Get place cell indices
-    pc_indices = get_place_cell_indices(result)  # any trial type
+    # pc_indices = get_place_cell_indices(result)  # any trial type
     # or: trial_type='ABC'
     # or: require_all=True --> gives both types
 
-    for i in pc_indices:
-        plot_single_cell(data, cell_idx=i, metadata=meta, signal_col='multi_day_dff',
-                         show_trials=False, config=exp_config)
+    # for i in pc_indices:
+    #     plot_single_cell(data, cell_idx=i, metadata=meta, signal_col='multi_day_dff',
+    #                      show_trials=False, config=exp_config)
 
