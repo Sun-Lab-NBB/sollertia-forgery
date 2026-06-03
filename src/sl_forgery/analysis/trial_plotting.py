@@ -113,46 +113,46 @@ def shared_params(
 
 # PLACE FIELD PLOTS
 
-def _shade_place_fields(
+def _mark_place_fields(
     ax: Axes,
     pf,
     metadata,
     cell_idx: int,
-    color: str = '#b8b69d',
-    alpha: float = 0.6,
+    avg_trace: np.ndarray,
+    color: str = 'k',
+    offset_points: float = 14.0,
 ):
-    """Shade detected place field regions for one cell on an axis.
+    """Mark detected place field peaks for one cell with an asterisk above each peak.
 
     Args:
         ax: matplotlib axis.
         pf: PlaceFields1d object.
-        emtadata: from processed df, has bin size
+        metadata: from processed df, has bin size.
         cell_idx: cell index.
-        color: shading color.
-        alpha: shading transparency.
+        avg_trace: 1D session-averaged trace for this cell, length n_bins.
+        color: asterisk color.
+        offset_points: vertical offset of asterisk above peak, in display points.
 
     """
-    field_mask = pf.label_im[cell_idx] > 0  # bool array, length n_bins
-    if not field_mask.any():
+    labels = pf.label_im[cell_idx]  # int array, length n_bins; 0 = no field
+    if not (labels > 0).any():
         return
 
-    # Find contiguous field spans
-    changes = np.diff(field_mask.astype(int))
-    starts = np.where(changes == 1)[0] + 1
-    ends = np.where(changes == -1)[0] + 1
-
-    # Handle field starting at bin 0 or ending at last bin
-    if field_mask[0]:
-        starts = np.concatenate([[0], starts])
-    if field_mask[-1]:
-        ends = np.concatenate([ends, [len(field_mask)]])
     bin_size_cm = get_bin_size(metadata)
+    field_ids = np.unique(labels[labels > 0])
 
-    for s, e in zip(starts, ends):
-        x0 = s * bin_size_cm
-        x1 = e * bin_size_cm
-        ax.axvspan(x0, x1, color=color, alpha=alpha, zorder=0,
-                   label='place field' if s == starts[0] else None)
+    for fid in field_ids:
+        bins_in_field = np.where(labels == fid)[0]
+        # Peak within the field, evaluated on the (smoothed) average trace
+        peak_local = bins_in_field[np.argmax(avg_trace[bins_in_field])]
+        peak_x = peak_local * bin_size_cm + (bin_size_cm / 2)
+        peak_y = avg_trace[peak_local]
+        ax.annotate(
+            '*', xy=(peak_x, peak_y),
+            xytext=(0, offset_points), textcoords='offset points',
+            ha='center', va='bottom', color=color,
+            fontsize=14, fontweight='bold', zorder=5,
+        )
 
 
 def _get_trial_traces(
@@ -242,10 +242,6 @@ def _plot_tuning_on_axis(
     tt_colors, tt_colors_dark = pfmt.get_trial_type_colors(config) if config else ({}, {})
     shared_params(ax, trial_type, config, show_cues, font_scale=font_scale)
 
-    # Place field shading uses the original cell index against the full-data cache.
-    if place_fields is not None and trial_type in place_fields:
-        _shade_place_fields(ax, place_fields[trial_type], metadata, pf_cell_idx)
-
     # Individual trial traces
     if show_trials and data is not None:
         trial_color = tt_colors.get(trial_type, '#2E86AB')
@@ -256,6 +252,7 @@ def _plot_tuning_on_axis(
     bin_size_cm = get_bin_size(metadata, data)
 
     # Session average ± SEM, with smoothing
+    avg = None
     if trial_type in session_stats:
         avg = session_stats[trial_type]['session_avg'][:, cell_idx]
         sem = session_stats[trial_type]['session_sem'][:, cell_idx]
@@ -270,6 +267,10 @@ def _plot_tuning_on_axis(
                 label=f'Avg', zorder=4)
         ax.fill_between(x_avg, avg - sem, avg + sem,
                         color=avg_color, alpha=0.3, zorder=3)
+
+    # Mark detected place field peaks with an asterisk (uses pf_cell_idx — original index)
+    if place_fields is not None and trial_type in place_fields and avg is not None:
+        _mark_place_fields(ax, place_fields[trial_type], metadata, pf_cell_idx, avg)
 
     ax.set_ylabel('ΔF/F', fontsize=12)
     ax.legend(frameon=False, fontsize=8*font_scale, loc='center right')
@@ -753,8 +754,8 @@ def save_figure(fig: Figure, path: Path, dpi: int = 150):
 
 
 if __name__ == "__main__":
-    from place_field_detection import detect_place_fields, get_place_cell_indices
-    from experiment_place_cells import detect_multiday_place_fields
+    from place_field_detection import detect_place_fields, get_place_cell_indices, DetectionParams
+    from experiment_place_cells import detect_multiday_place_fields, detect_multiday_place_fields_cached
     from df_processing import (
         find_session_dir, load_session_context, get_session_paths,
         load_processed_session, load_multiday_sessions
