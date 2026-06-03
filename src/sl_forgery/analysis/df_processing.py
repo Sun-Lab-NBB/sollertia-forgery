@@ -711,16 +711,40 @@ def save_processed_session(
 
 def load_processed_session(path: Path,
                            signal_cols: list[str] | None = None,
+                           cell_indices: list[int] | np.ndarray | None = None,
                            ) -> tuple[pl.DataFrame, dict | None]:
-    """Load processed data from parquet, and metadata from yaml
+    """Load processed data from parquet, and metadata from yaml.
 
     Args:
         path: Path to parquet file.
         signal_cols: Keep only these signal columns, drop the rest for memory.
             None keeps all signal columns.
+        cell_indices: If provided, subset each Array signal column to ONLY these
+            cells (specified by their ORIGINAL cell index = cell identity). This
+            dramatically reduces memory when only a few cells are needed
+            (e.g., loading 8+ sessions for plotting place cells).
+
+            The returned metadata dict gets a 'cell_index_map' key:
+            {original_idx: local_idx}. Plotting functions read this map to translate
+            user-facing original indices ("cell 5", which is cell identity in the
+            registered/imaging dataset) into the in-memory local position the data
+            actually occupies after subsetting.
+
+    Caveat — subsetting is a memory tradeoff:
+        Loading with cell_indices saves memory but locks you into that subset.
+        If you later realize you also want to inspect a non-loaded cell (e.g. for
+        comparison with a non-place cell), you have to RELOAD the parquets with
+        a different cell_indices. The detection cache still saves you the CPU
+        cost of re-running place field detection, but the parquet I/O is
+        unavoidable. For one-off exploration of arbitrary cells, prefer single
+        sessions with cell_indices=None. Use cell_indices for the targeted
+        multi-day plotting workflow when you already know which cells you care
+        about.
 
     Returns:
-        Tuple of (DataFrame, metadata dict or None).
+        Tuple of (DataFrame, metadata dict or None). When cell_indices is given,
+        metadata always includes a 'cell_index_map' (creating an empty metadata
+        dict if no .yaml existed).
     """
 
     path = Path(path)
@@ -739,6 +763,33 @@ def load_processed_session(path: Path,
         with open(meta_path, 'r') as f:
             metadata = yaml.safe_load(f)
 
+    # Subset cells in each remaining Array signal column.
+    # Memory fix: gather only the requested cells from each frame's length-n_cells
+    # vector, then rechunk to drop references to the original wide arrays. Without
+    # this, holding 8+ sessions in memory OOMs.
+    if cell_indices is not None:
+        cell_indices = [int(i) for i in cell_indices]
+        n_keep = len(cell_indices)
+
+        signals_in_df = [c for c in SIGNAL_COLUMNS if c in df.columns]
+        if signals_in_df:
+            df = df.with_columns([
+                pl.col(c).arr.to_list()
+                         .list.gather(cell_indices)
+                         .list.to_array(n_keep)
+                         .alias(c)
+                for c in signals_in_df
+            ])
+            # Force materialization so polars frees the original Arrow buffers
+            # before the next session is loaded.
+            df = df.rechunk()
+
+        # Index map: original cell identity -> local position in the loaded array.
+        cell_index_map = {orig: local for local, orig in enumerate(cell_indices)}
+        if metadata is None:
+            metadata = {}
+        metadata['cell_index_map'] = cell_index_map
+
     return df, metadata
 
 
@@ -748,6 +799,7 @@ def load_multiday_sessions(
     date_range: tuple[str, str] | None = None,
     auto_process: bool = False,
     signal_cols: list[str] | None = None,
+    cell_indices: list[int] | np.ndarray | dict[str, list[int]] | None = None,
 ) -> dict[str, dict]:
     '''
     Load multiple processed sessions for cross-day comparison.
@@ -760,6 +812,12 @@ def load_multiday_sessions(
             Provide either dates or date_range, not both.
         auto_process: bool, choose if you want to automatically process (cue-offset) the data is it's not found
         signal_cols: signal columns to load, important for multiday for memory constraints
+        cell_indices: If provided, subset signal columns to only these cells. Pass a
+            list/array (applied to all sessions — the natural choice when cells are
+            registered across days), or a dict[date -> list[int]] for per-session
+            subsetting. Each loaded session's metadata gets a 'cell_index_map' so
+            plotting functions can keep using original (identity-preserving) cell
+            indices. See load_processed_session() for the memory-vs-flexibility caveat.
 
     Returns:
         sessions: dict[str, dict], keyed by date string (sorted chronologically), each containing:
@@ -799,7 +857,20 @@ def load_multiday_sessions(
     for date in sorted(dates):
         try:
             parquet_path, session_data, config = ensure_processed(mouse_dir, date, auto_process=auto_process)
-            data, metadata = load_processed_session(parquet_path, signal_cols=signal_cols)
+
+            # Resolve cell_indices for this specific date.
+            if isinstance(cell_indices, dict):
+                ci_for_date = cell_indices.get(date)
+            elif cell_indices is not None:
+                ci_for_date = list(cell_indices)
+            else:
+                ci_for_date = None
+
+            data, metadata = load_processed_session(
+                parquet_path,
+                signal_cols=signal_cols,
+                cell_indices=ci_for_date,
+            )
 
             sessions[date] = {
                 'data': data,
@@ -809,7 +880,8 @@ def load_multiday_sessions(
             }
             print(f"  Loaded {date}: {len(data)} frames, "
                   f"{data['trial'].n_unique()} trials, "
-                  f"types={sorted(data['trial_type'].unique().to_list())}")
+                  f"types={sorted(data['trial_type'].unique().to_list())}"
+                  + (f", {len(ci_for_date)} cells (subset)" if ci_for_date is not None else ""))
         except (FileNotFoundError, ValueError) as e:
             print(f"  WARNING: Could not load {date}: {e}")
 
