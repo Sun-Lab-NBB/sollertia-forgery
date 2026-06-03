@@ -64,6 +64,28 @@ class ColoringStrategy(Enum):
 _PLOTLY_AXIS = dict(visible=False, showbackground=False, showgrid=False, zeroline=False)
 
 
+def _build_title_prefix(filtered_df: pl.DataFrame,
+                        mouse_id: str | None,
+                        session_info: str | None) -> str:
+    """Build a ' | '-joined prefix from mouse id, session date(s), and session_info.
+
+    The date portion is pulled from `filtered_df['session_date']` when present.
+    Returns an empty string if no parts are available.
+    """
+    parts: list[str] = []
+    if mouse_id is not None:
+        parts.append(f'Mouse {mouse_id}')
+    if 'session_date' in filtered_df.columns:
+        dates = sorted(set(filtered_df['session_date'].to_numpy()))
+        if len(dates) == 1:
+            parts.append(str(dates[0]))
+        else:
+            parts.append(f'{dates[0]} → {dates[-1]} ({len(dates)} days)')
+    if session_info:
+        parts.append(session_info)
+    return ' | '.join(parts)
+
+
 def _truncated_cmap(name: str, lo: float = 0.25, hi: float = 1.0, n: int = 256):
     """Return a matplotlib cmap restricted to [lo, hi] of the original range.
 
@@ -178,35 +200,43 @@ def prepare_umap_data(
             .max().over('trial').alias('nominal_track_length')
         )
 
-    # Within-(day-or-session) normalized progress [0, 1]. For single-day data
-    # this is equivalent to normalizing the 'trial' column directly; for
-    # multiday it makes trials comparable across sessions of different lengths.
+    # Within-session elapsed-time progress [0, 1]. Uses 'frame' (linear in time
+    # at a fixed imaging frame rate) rather than 'trial' so that long trials
+    # don't compress and short trials don't expand on the colorscale.
     group_col = 'session_date' if 'session_date' in filtered.columns else None
+    time_col = 'frame' if 'frame' in filtered.columns else 'trial'
     if group_col is not None:
         filtered = filtered.with_columns(
-            ((pl.col('trial') - pl.col('trial').min().over(group_col))
-             / (pl.col('trial').max().over(group_col) - pl.col('trial').min().over(group_col)).clip(lower_bound=1))
+            ((pl.col(time_col) - pl.col(time_col).min().over(group_col))
+             / (pl.col(time_col).max().over(group_col)
+                - pl.col(time_col).min().over(group_col)).clip(lower_bound=1))
             .alias('session_progress')
         )
     else:
-        t_min = filtered['trial'].min()
-        t_max = filtered['trial'].max()
+        t_min = filtered[time_col].min()
+        t_max = filtered[time_col].max()
         denom = max(1, t_max - t_min)
         filtered = filtered.with_columns(
-            ((pl.col('trial') - t_min) / denom).alias('session_progress')
+            ((pl.col(time_col) - t_min) / denom).alias('session_progress')
         )
 
-    # Across-day normalized progress [0, 1]: dense-rank over (session_date, trial)
-    # so day-1 trial-1 = 0, last day's last trial = 1. For single-day data this
-    # equals session_progress.
+    # Across-experiment progress [0, 1]: each day occupies one equal slot
+    # [day_idx / N, (day_idx + 1) / N], filled linearly by session_progress.
+    # Real wall-clock gaps between sessions are NOT preserved; this is a
+    # coarse ordinal map (day-1 start = 0, last-day end = 1).
     if group_col is not None:
-        rank_expr = pl.struct([group_col, 'trial']).rank('dense').cast(pl.Float64)
+        dates_sorted = sorted(filtered[group_col].unique().to_list())
+        n_days = len(dates_sorted)
+        day_idx_map = {d: i for i, d in enumerate(dates_sorted)}
+        day_idx = pl.col(group_col).replace_strict(day_idx_map, return_dtype=pl.Int32)
+        filtered = filtered.with_columns(
+            ((day_idx.cast(pl.Float64) + pl.col('session_progress')) / max(1, n_days))
+            .alias('experiment_progress')
+        )
     else:
-        rank_expr = pl.col('trial').rank('dense').cast(pl.Float64)
-    filtered = filtered.with_columns(
-        ((rank_expr - 1) / (rank_expr.max() - 1).clip(lower_bound=1))
-        .alias('experiment_progress')
-    )
+        filtered = filtered.with_columns(
+            pl.col('session_progress').alias('experiment_progress')
+        )
 
     # Drop signal columns — neural_data already extracted as numpy array
     signal_cols = [c for c in filtered.columns if c.startswith(('single_day_', 'multi_day_'))]
@@ -1006,6 +1036,8 @@ def plot_umap(
         save_path: Path | str | None = None,
         alpha: float = 0.6,
         s: float = 20,
+        mouse_id: str | None = None,
+        session_info: str | None = None,
 ):
     """Unified UMAP visualization.
 
@@ -1031,6 +1063,10 @@ def plot_umap(
         save_path: Save as .html (interactive) or image format. None to skip.
         alpha: Matplotlib scatter alpha (1D/2D only).
         s: Matplotlib scatter point size (1D/2D only).
+        mouse_id: Mouse identifier prepended to the auto-generated title.
+        session_info: Free-form context string (e.g. 'reference-aligned to 2025-08-20')
+            appended after mouse_id / date range in the auto-title. Ignored if
+            `title` is set.
 
     Returns:
         tuple of (figure, plot_info) where:
@@ -1044,6 +1080,8 @@ def plot_umap(
     if not isinstance(strategy, list):
         strategy = [strategy]
     strategies = [ColoringStrategy(s) if isinstance(s, str) else s for s in strategy]
+
+    info_prefix = _build_title_prefix(filtered_df, mouse_id, session_info)
 
     # Build plot_info return dict
     trial_types = sorted(np.unique(filtered_df['trial_type'].to_numpy()).tolist())
@@ -1059,7 +1097,11 @@ def plot_umap(
     if n_dims <= 2:
         if len(strategies) > 1:
             print("Warning: Multiple strategies only supported for 3D. Using first strategy.")
-        fig = _plot_matplotlib(embedding, filtered_df, strategies[0], title, save_path, alpha, s)
+        mpl_auto_title = f'UMAP — {strategies[0].value}'
+        if info_prefix:
+            mpl_auto_title = f'{info_prefix} — {mpl_auto_title}'
+        fig = _plot_matplotlib(embedding, filtered_df, strategies[0],
+                               title or mpl_auto_title, save_path, alpha, s)
         return fig, plot_info
 
     # ── 3D: Plotly ───────────────────────────────────────────────────────
@@ -1074,6 +1116,8 @@ def plot_umap(
             fig.add_trace(t)
 
         auto_title = f'3D UMAP — {strategies[0].value}'
+        if info_prefix:
+            auto_title = f'{info_prefix} — {auto_title}'
 
     else:
         # Multiple strategies — build all trace groups, wire up dropdown
@@ -1115,6 +1159,8 @@ def plot_umap(
 
         labels = [s_.value for s_ in strategies]
         auto_title = f'3D UMAP — toggle: {" / ".join(labels)}'
+        if info_prefix:
+            auto_title = f'{info_prefix} — {auto_title}'
 
     fig.update_layout(
         title=title or auto_title,
@@ -1138,6 +1184,9 @@ def plot_umap_2d_density(
         alpha_contour: float = 0.8,
         s: float = 5,
         save_path: Path | None = None,
+        mouse_id: str | None = None,
+        session_info: str | None = None,
+        title: str | None = None,
 ) -> plt.Figure:
     """Plot 2D UMAP with KDE density contours per trial type.
 
@@ -1214,6 +1263,12 @@ def plot_umap_2d_density(
     ax_overlay.spines['right'].set_visible(False)
     ax_overlay.legend()
 
+    suptitle = title
+    if suptitle is None:
+        prefix = _build_title_prefix(filtered_df, mouse_id, session_info)
+        suptitle = f'{prefix} — UMAP 2D density' if prefix else 'UMAP 2D density'
+    fig.suptitle(suptitle, fontweight='bold', y=1.02)
+
     plt.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -1233,6 +1288,9 @@ def plot_umap_3d_single_trial_trajectory(
         show_background: bool = True,
         background_opacity: float = 0.3,
         save_path: Path | None = None,
+        mouse_id: str | None = None,
+        session_info: str | None = None,
+        title: str | None = None,
 ) -> 'go.Figure':
     """3D UMAP with lines connecting consecutive frames within individual trials.
 
@@ -1357,8 +1415,12 @@ def plot_umap_3d_single_trial_trajectory(
             hovertemplate=f'Trial {trial_id} START<extra></extra>',
         ))
 
+    auto_title = 'UMAP: Single-Trial Trajectories (◆ = start, cool→warm = early→late)'
+    prefix = _build_title_prefix(filtered_df, mouse_id, session_info)
+    if prefix:
+        auto_title = f'{prefix} — {auto_title}'
     fig.update_layout(
-        title='UMAP: Single-Trial Trajectories (◆ = start, cool→warm = early→late)',
+        title=title or auto_title,
         scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
         legend=dict(x=1, y=0.9, itemsizing='constant', groupclick='toggleitem'),
     )
@@ -1375,6 +1437,9 @@ def plot_umap_3d_position_matched(
         point_size: int = 2,
         opacity: float = 0.7,
         save_path: Path | None = None,
+        mouse_id: str | None = None,
+        session_info: str | None = None,
+        title: str | None = None,
 ) -> 'go.Figure':
     """Side-by-side trial types for shared position range only.
 
@@ -1443,8 +1508,12 @@ def plot_umap_3d_position_matched(
                 customdata=positions[out_of_range],
             ))
 
+    auto_title = f'UMAP: Position-Matched Comparison (0–{max_position:.0f} cm)'
+    prefix = _build_title_prefix(filtered_df, mouse_id, session_info)
+    if prefix:
+        auto_title = f'{prefix} — {auto_title}'
     fig.update_layout(
-        title=f'UMAP: Position-Matched Comparison (0–{max_position:.0f} cm)',
+        title=title or auto_title,
         scene=dict(xaxis=_PLOTLY_AXIS, yaxis=_PLOTLY_AXIS, zaxis=_PLOTLY_AXIS),
         legend=dict(x=0, y=1),
     )
@@ -1465,8 +1534,8 @@ if __name__ == '__main__':
     from df_processing import (find_session_dir, get_session_paths, process_session,
                                load_session_context, load_processed_session, save_processed_session)
 
-    mouse_id = '26'
-    date = '2025-09-16'
+    mouse_id = '14'
+    date = '2025-08-27'
     mouse_dir = Path('/Users/cs963/Desktop/sun_lab_projects/datasets', mouse_id)
 
     session_dir = find_session_dir(mouse_dir, date)
@@ -1492,7 +1561,8 @@ if __name__ == '__main__':
     embedding, _ = compute_umap(neural_data, n_components=3, n_neighbors=50)       #3D embedding
 
     # plot
-    fig, meta = plot_umap(embedding, filtered_df, strategy=['trial_type', 'cue']) #basic plot, 3D
+    fig, meta = plot_umap(embedding, filtered_df, strategy=['trial_type', 'cue', 'session_progress', 'speed' ]) #basic
+    # plot, 3D
 
     fig1= plot_umap_3d_single_trial_trajectory(embedding, filtered_df, n_trials_per_type=10) # individual rtial plot
 
