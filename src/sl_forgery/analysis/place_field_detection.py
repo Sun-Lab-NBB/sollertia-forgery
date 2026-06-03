@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from scipy.ndimage import label, gaussian_filter1d
+from scipy.signal import find_peaks, peak_widths
 from skimage.measure import regionprops
 
 from df_processing import compute_session_averages, get_track_length
@@ -48,16 +49,24 @@ class DetectionParams:
         n_shuffles: Number of shuffle iterations for validation.
         n_chunks: Number of chunks for temporal shuffle.
     """
-    smooth_sigma: float = 1.5
+    method: str = 'threshold'
+    smooth_sigma: float = 1.0
     base_quantile: float = 0.25
     signal_threshold: float = 0.20
     min_bins: int = 2
     outside_threshold: float = 3.0
     min_peak: float | None = None
-    min_speed_cm_s: float | None = 2.0
+    min_speed_cm_s: float | None = 5.0
     sig_threshold: float = 0.05
     n_shuffles: int = 500
     n_chunks: int = 100
+    # Prominence-detection params (used only when method='prominence').
+    # Independence by construction: each peak is evaluated against its own local
+    # valleys via scipy.signal.find_peaks(prominence=...) rather than a global
+    # per-cell threshold. A tall peak in one location cannot suppress detection
+    # of a separate peak elsewhere on the track.
+    min_prominence_frac: float = 0.20
+    field_rel_height: float = 0.5
 
 
 # PLACE FIELDS CONTAINER
@@ -185,11 +194,26 @@ class PlaceFields1d:
 
         ind = np.atleast_1d(ind).flatten()
 
-        # Zero out removed fields, renumber remaining
-        pf.label_im[np.isin(pf.label_im, ind + 1)] = 0
-        for counter, value in enumerate(np.unique(pf.label_im)):
-            if value != 0:
-                pf.label_im[pf.label_im == value] = counter
+        # Map field-index -> actual label number via the sorted unique-labels
+        # list. regionprops returns props in ascending label order, so the i-th
+        # unique non-zero label IS the label for field-index i. This holds
+        # whether labels are contiguous (1..N) or have gaps (e.g. prominence
+        # detection can leave label gaps when overlapping fields overwrite each
+        # other's bins). The old `ind + 1` arithmetic assumed contiguous labels
+        # and silently wiped the wrong field whenever a gap was present.
+        unique_labels = np.unique(pf.label_im)
+        unique_labels = unique_labels[unique_labels > 0]
+        labels_to_remove = unique_labels[ind]
+        pf.label_im[np.isin(pf.label_im, labels_to_remove)] = 0
+
+        # Renumber surviving labels to contiguous 1..K so downstream consumers
+        # can keep using simple counters.
+        remaining = np.unique(pf.label_im)
+        remaining = remaining[remaining > 0]
+        new_label_im = np.zeros_like(pf.label_im)
+        for new_id, old_id in enumerate(remaining, start=1):
+            new_label_im[pf.label_im == old_id] = new_id
+        pf.label_im = new_label_im
 
         pf.centers = np.delete(pf.centers, ind, axis=0)
         return pf
@@ -319,15 +343,17 @@ def _quantile_threshold(
         threshold = signal_threshold * peak
 
     else:
-        # Robust peak (99th percentile) so a single extreme bin doesn't lift the
-        # threshold above legitimate secondary fields.
-        peak = np.nanpercentile(binF, 99, axis=1, keepdims=True)
         quantile_values = np.nanquantile(binF, base_quantile, axis=1, keepdims=True)
         # Mean of bins at or below the quantile — lower and more accurate than using
         # the quantile value itself as the baseline.
         sub_threshold_mask = binF <= quantile_values
         masked = np.where(sub_threshold_mask, binF, np.nan)
         baseline = np.nanmean(masked, axis=1, keepdims=True)
+        # Robust peak (99th percentile) so a single extreme bin doesn't lift the
+        # threshold above legitimate secondary fields. Using nanmax here caused
+        # cross-day inconsistency: a one-bin noise spike on day B would raise the
+        # threshold and reject the same real field that passed on day A.
+        peak = np.nanpercentile(binF, 99, axis=1, keepdims=True)
         threshold = baseline + signal_threshold * (peak - baseline)
 
     return (binF > threshold).astype(int)
@@ -424,6 +450,119 @@ def circular_connected_placefields(
 
         centers_list.append([float(cell_idx), float(center_bin)])
         counter += 1
+
+    centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
+    return PlaceFields1d(result_label, binF, centers=centers_out, bin_size_cm=bin_size_cm)
+
+
+def prominence_placefields(
+    smoothed: np.ndarray,
+    binF: np.ndarray,
+    min_prominence_frac: float,
+    base_quantile: float,
+    min_bins: int,
+    rel_height: float,
+    bin_size_cm: float,
+) -> PlaceFields1d:
+    """Detect place fields via local peak prominence.
+
+    Each cell's tuning curve is scanned with `scipy.signal.find_peaks`, where
+    every peak is required to clear a prominence threshold computed PER-CELL
+    from the cell's own dynamic range. Prominence is the topographic height of
+    a peak above its surrounding valleys — it does NOT depend on taller peaks
+    elsewhere in the curve. This gives field-independent detection: a tall peak
+    cannot shadow a smaller but still locally-prominent peak on the same cell.
+
+    Field extent for each detected peak is taken from `peak_widths` at
+    `rel_height` of the prominence (default 0.5 == half-prominence width,
+    standard in the place-cell literature).
+
+    Args:
+        smoothed: Smoothed binned activity, shape (n_cells, n_bins). Used for
+            peak finding; field extent and statistics are computed from binF.
+        binF: Raw binned activity, shape (n_cells, n_bins). Stored on the result.
+        min_prominence_frac: Required peak prominence as a fraction of the cell's
+            (peak - baseline) dynamic range. 0.20 mirrors signal_threshold.
+        base_quantile: Quantile for baseline estimation (mean of bins at or below
+            this quantile of the cell's curve).
+        min_bins: Minimum field width in bins. Fields narrower than this are
+            dropped.
+        rel_height: Fractional height at which field width is measured, passed
+            to `scipy.signal.peak_widths`. 0.5 = half-prominence (standard).
+        bin_size_cm: Spatial bin size in cm. Passed to PlaceFields1d.
+
+    Returns:
+        PlaceFields1d with one field per accepted peak.
+    """
+    n_cells, num_bins = smoothed.shape
+    result_label = np.zeros((n_cells, num_bins), dtype=np.uint32)
+    centers_list = []
+    counter = 1
+
+    # Per-cell baseline (same definition as _quantile_threshold dff branch).
+    quantile_values = np.nanquantile(smoothed, base_quantile, axis=1, keepdims=True)
+    sub_threshold_mask = smoothed <= quantile_values
+    masked_low = np.where(sub_threshold_mask, smoothed, np.nan)
+    baseline = np.nanmean(masked_low, axis=1)  # shape (n_cells,)
+    # Robust peak (matches threshold branch) so a single extreme bin doesn't
+    # set an unreachable prominence requirement.
+    peak = np.nanpercentile(smoothed, 99, axis=1)  # shape (n_cells,)
+
+    for cell_idx in range(n_cells):
+        curve = smoothed[cell_idx]
+        dynamic_range = peak[cell_idx] - baseline[cell_idx]
+        if not np.isfinite(dynamic_range) or dynamic_range <= 0:
+            continue
+        min_prominence = min_prominence_frac * dynamic_range
+
+        tiled = np.concatenate([curve, curve, curve])
+        peaks_tiled, _ = find_peaks(tiled, prominence=min_prominence)
+        if len(peaks_tiled) == 0:
+            continue
+
+        in_middle = (peaks_tiled >= num_bins) & (peaks_tiled < 2 * num_bins)
+        peaks_tiled = peaks_tiled[in_middle]
+        if len(peaks_tiled) == 0:
+            continue
+
+        widths, _, left_ips, right_ips = peak_widths(
+            tiled, peaks_tiled, rel_height=rel_height,
+        )
+
+        for peak_pos_tiled, left, right in zip(peaks_tiled, left_ips, right_ips):
+            # Map tiled coords back to original [0, num_bins). The peak
+            # position in the original curve is simply peak_pos_tiled - num_bins.
+            peak_pos = peak_pos_tiled - num_bins
+            left_bin = int(np.floor(left)) - num_bins
+            right_bin = int(np.ceil(right)) - num_bins
+            n_bins_field = right_bin - left_bin + 1
+            if n_bins_field < min_bins:
+                continue
+
+            # Wrap into [0, num_bins). A field crossing the seam produces two
+            # contiguous segments in the original frame; np.unique handles
+            # duplicate bins if the field is wider than the track (rare).
+            bin_indices = np.arange(left_bin, right_bin + 1) % num_bins
+            bin_indices = np.unique(bin_indices)
+
+            result_label[cell_idx, bin_indices] = counter
+            weights = binF[cell_idx, bin_indices]
+            weight_sum = weights.sum()
+            if weight_sum == 0:
+                center_bin = float(peak_pos % num_bins)
+            else:
+                # Circular weighted mean for fields that wrap the seam.
+                touches_start = 0 in bin_indices
+                touches_end = (num_bins - 1) in bin_indices
+                is_wrapped = touches_start and touches_end and (n_bins_field < num_bins)
+                if is_wrapped:
+                    shifted = (bin_indices + num_bins // 2) % num_bins
+                    center_shifted = np.average(shifted, weights=weights)
+                    center_bin = float((center_shifted - num_bins // 2) % num_bins)
+                else:
+                    center_bin = float(np.average(bin_indices, weights=weights))
+            centers_list.append([float(cell_idx), center_bin])
+            counter += 1
 
     centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
     return PlaceFields1d(result_label, binF, centers=centers_out, bin_size_cm=bin_size_cm)
@@ -532,12 +671,24 @@ def _detect_on_tuning_curves(
     else:
         smoothed = binF
 
-    # Threshold on smoothed data for robust detection, but store raw binF for plotting/filtering
-    thres_im = _quantile_threshold(
-        smoothed, signal_type, params.base_quantile, params.signal_threshold,
-    )
-    # Connected components (circular) — use raw binF so heatmaps aren't blurred
-    pf = circular_connected_placefields(thres_im, binF, min_bins=params.min_bins, bin_size_cm=bin_size_cm)
+    if params.method == 'prominence':
+        # Field-independent detection: each peak evaluated by local prominence,
+        # not against a per-cell global threshold dominated by the tallest peak.
+        pf = prominence_placefields(
+            smoothed, binF,
+            min_prominence_frac=params.min_prominence_frac,
+            base_quantile=params.base_quantile,
+            min_bins=params.min_bins,
+            rel_height=params.field_rel_height,
+            bin_size_cm=bin_size_cm,
+        )
+    else:
+        # Threshold on smoothed data for robust detection, but store raw binF for plotting/filtering
+        thres_im = _quantile_threshold(
+            smoothed, signal_type, params.base_quantile, params.signal_threshold,
+        )
+        # Connected components (circular) — use raw binF so heatmaps aren't blurred
+        pf = circular_connected_placefields(thres_im, binF, min_bins=params.min_bins, bin_size_cm=bin_size_cm)
 
     # Filter: outside-field ratio
     pf = outside_field_threshold(pf, params.outside_threshold)
@@ -550,14 +701,13 @@ def _detect_on_tuning_curves(
     return pf
 
 
-# MAIN
-# TODO fix bin size
 def detect_place_fields(
     df: pl.DataFrame,
     config: dict,
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     params: DetectionParams | None = None,
+    metadata: dict | None = None,
 ) -> PlaceFieldResult:
     """Detect place fields from frame-level data.
 
@@ -568,12 +718,19 @@ def detect_place_fields(
         df: Frame-level DataFrame from process_session() (after fix_cue_offset).
         config: Experiment configuration dict.
         signal_col: Column containing neural signals (list per frame).
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         params: Detection parameters. Uses defaults if None.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if
+            ``bin_size_cm`` is not supplied.
 
     Returns:
         PlaceFieldResult with per-trial-type detection results.
     """
+    from df_processing import get_bin_size
+
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
+
     if params is None:
         params = DetectionParams()
 
@@ -614,15 +771,15 @@ def detect_place_fields(
 
     return result
 
-# TODO Fix bin size
 def validate_place_fields(
     df: pl.DataFrame,
     config: dict,
     result: PlaceFieldResult | None = None,
     signal_col: str = 'multi_day_dff',
-    bin_size_cm: int = 5,
+    bin_size_cm: int | None = None,
     params: DetectionParams | None = None,
     seed: int = 42,
+    metadata: dict | None = None,
 ) -> PlaceFieldResult:
     """Validate place fields with a chunk-shuffle test.  This slows down processing significantly.
 
@@ -641,13 +798,20 @@ def validate_place_fields(
         config: Experiment configuration dict.
         result: Existing PlaceFieldResult to update. If None, runs detection first.
         signal_col: Column containing neural signals.
-        bin_size_cm: Spatial bin size in cm.
+        bin_size_cm: Spatial bin size in cm. If None, resolved from ``metadata``.
         params: Detection parameters. Uses result.params or defaults if None.
         seed: Random seed for reproducibility.
+        metadata: Session metadata dict carrying ``bin_size_cm``. Required if
+            ``bin_size_cm`` is not supplied.
 
     Returns:
         Updated PlaceFieldResult with p_values and sig_cells populated.
     """
+    from df_processing import get_bin_size
+
+    if bin_size_cm is None:
+        bin_size_cm = get_bin_size(metadata, df)
+
     if params is None:
         params = result.params if result is not None else DetectionParams()
 
