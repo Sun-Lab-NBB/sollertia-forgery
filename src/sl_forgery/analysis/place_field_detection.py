@@ -564,6 +564,23 @@ def prominence_placefields(
             centers_list.append([float(cell_idx), center_bin])
             counter += 1
 
+    # Consolidate label numbering. When a later field's window overlaps an
+    # earlier field's bins, the later assignment overwrites the earlier label.
+    # If the earlier label is fully overwritten, the counter still advanced
+    # past it AND centers_list got a row for it — but no bins in result_label
+    # carry that label. Those phantom centers must be dropped, or downstream
+    # regionprops-based properties (cell_id, mean_intensity) will desynchronize
+    # from centers and silently mis-pair fields.
+    unique_surviving = np.unique(result_label)
+    unique_surviving = unique_surviving[unique_surviving > 0]
+    new_result_label = np.zeros_like(result_label)
+    new_centers_list: list[list[float]] = []
+    for new_id, old_id in enumerate(unique_surviving, start=1):
+        new_result_label[result_label == old_id] = new_id
+        new_centers_list.append(centers_list[int(old_id) - 1])
+    result_label = new_result_label
+    centers_list = new_centers_list
+
     centers_out = np.array(centers_list) if centers_list else np.empty((0, 2))
     return PlaceFields1d(result_label, binF, centers=centers_out, bin_size_cm=bin_size_cm)
 
