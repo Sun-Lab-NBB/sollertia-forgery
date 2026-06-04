@@ -750,6 +750,212 @@ def load_multiday_result(path: Path) -> MultidayPlaceFieldResult:
     )
 
 
+# FIELD TRACKING ACROSS DAYS
+#
+# Continuous per-day quantification at positions where a cell ever had a strict
+# detection. Replaces the binary "is/isn't a place field on day X" framing with
+# continuous metrics (amplitude, position, prominence) that downstream code can
+# threshold per analysis. The strict per-session detector is used only to pick
+# anchor positions; tracking measurements never apply a detection threshold.
+
+
+@dataclass
+class TrackedFields:
+    """Continuous per-day response metrics for fields tracked across sessions.
+
+    A 'tracked field' is one (cell × trial_type × anchor_position) tuple
+    representing a location where the cell had at least one strict detection
+    across the analyzed dates. For each day, we report the actual measured
+    response in a ±window_cm/2 window around the anchor — never a binary
+    'is/isn't a field' label.
+
+    Per-row interpretation (one row = one tracked field):
+        - anchor_positions_cm[i] is the canonical position (mean centroid of
+          all strict-detected days that joined this tracked field).
+        - positions_cm[i, d] is the actual peak position within the window on
+          day d (the per-segment view). drifts_cm[i, d] = positions_cm - anchor.
+        - amplitudes[i, d] and prominences[i, d] are continuous response
+          metrics; strict_detected[i, d] flags whether the strict per-session
+          detector also flagged a field for this cell on this day.
+
+    NaN in amplitudes/positions/prominences means the trial type was absent on
+    that day, or the cell index was out of range — not 'no field.'
+
+    Args:
+        trial_type: Trial type these tracked fields belong to.
+        cell_ids: Original cell indices, shape (n_tracked,).
+        anchor_positions_cm: Mean centroid per tracked field, shape (n_tracked,).
+        dates: Sorted list of session dates, length n_days.
+        amplitudes: Peak amplitude in window, shape (n_tracked, n_days).
+        positions_cm: Per-day peak position, shape (n_tracked, n_days).
+        prominences: Peak minus window minimum, shape (n_tracked, n_days).
+        drifts_cm: positions_cm minus anchor, shape (n_tracked, n_days).
+        strict_detected: Whether the strict detector flagged a field at this
+            anchor on each day, shape (n_tracked, n_days), bool.
+        window_cm: Total window width used for measurements.
+    """
+    trial_type: str
+    cell_ids: np.ndarray
+    anchor_positions_cm: np.ndarray
+    dates: list[str]
+    amplitudes: np.ndarray
+    positions_cm: np.ndarray
+    prominences: np.ndarray
+    drifts_cm: np.ndarray
+    strict_detected: np.ndarray
+    window_cm: float
+
+
+def track_fields_across_days(
+    multiday: MultidayPlaceFieldResult,
+    window_cm: float = 10.0,
+    smooth_sigma: float = 1.5,
+) -> dict[str, TrackedFields]:
+    """Build continuous per-day response trajectories at every anchor position
+    that strict detection ever flagged for each (cell, trial_type) pair.
+
+    Per trial type, this clusters all per-day field centroids by cell × position
+    into tracked fields, then on EVERY day measures the response inside a
+    ±window_cm/2 window around the anchor — independent of whether that day
+    passed strict detection. The output is therefore lossless with respect to
+    'rate remapping': a strong field on day A and a weakened-but-present field
+    on day B both show up in the same row, with comparable continuous metrics.
+
+    The strict per-session detections are used solely to nominate the anchor
+    positions worth tracking. They never gate the per-day measurements.
+
+    Clustering rule: two detections in the same cell join the same tracked
+    field if the second's position is within `window_cm` of the running mean
+    of the cluster (greedy 1-D agglomeration after sorting by position). A
+    cell with fields at e.g. 50 cm and 150 cm yields two distinct tracked
+    fields.
+
+    Args:
+        multiday: Strict per-session detection results, one per date.
+        window_cm: Total window width around the anchor for per-day
+            measurement. The peak position and amplitude are taken within
+            ±window_cm/2 of the anchor. 10 cm is a good default for 5 cm bins
+            (roughly two bins each side, accommodates ~10 cm of drift).
+        smooth_sigma: Gaussian smoothing in bins applied to each day's binF
+            before measurement. Matches the detection-time smoothing so the
+            measured curve is what the detector saw.
+
+    Returns:
+        Dict keyed by trial_type, each value a TrackedFields with the
+        continuous trajectories.
+    """
+    from collections import defaultdict
+    from scipy.ndimage import gaussian_filter1d as _gauss1d
+
+    results: dict[str, TrackedFields] = {}
+    n_days = len(multiday.dates)
+
+    for tt in multiday.trial_types:
+        # Step 1: collect every strict detection for this trial type as
+        # (cell_idx -> [(date_idx, position_cm), ...]). pf.centers[:, 1] is the
+        # weighted centroid in cm; pf.cell_id is the matching cell index.
+        detections_per_cell: dict[int, list[tuple[int, float]]] = defaultdict(list)
+        for di, date in enumerate(multiday.dates):
+            pfr = multiday.per_day.get(date)
+            if pfr is None or tt not in pfr.fields:
+                continue
+            pf = pfr.fields[tt]
+            if pf.centers.size == 0:
+                continue
+            cell_ids = pf.cell_id
+            positions = pf.centers[:, 1]
+            for c_id, pos in zip(cell_ids, positions):
+                detections_per_cell[int(c_id)].append((di, float(pos)))
+
+        # Step 2: cluster each cell's detections into tracked fields. Greedy
+        # 1-D agglomeration: a sorted list of positions is walked left-to-right;
+        # a new detection joins the current cluster if it's within window_cm of
+        # the cluster's running mean, else it starts a new cluster.
+        tracked_meta: list[dict] = []
+        for cell_idx, dets in detections_per_cell.items():
+            dets_sorted = sorted(dets, key=lambda x: x[1])
+            clusters: list[list[tuple[int, float]]] = []
+            for di, pos in dets_sorted:
+                if clusters:
+                    current_mean = float(np.mean([p for _, p in clusters[-1]]))
+                    if abs(pos - current_mean) <= window_cm:
+                        clusters[-1].append((di, pos))
+                        continue
+                clusters.append([(di, pos)])
+            for cluster in clusters:
+                tracked_meta.append({
+                    'cell_idx': cell_idx,
+                    'anchor': float(np.mean([p for _, p in cluster])),
+                    'strict_days': {di for di, _ in cluster},
+                })
+
+        n_tracked = len(tracked_meta)
+        amplitudes = np.full((n_tracked, n_days), np.nan)
+        positions_cm = np.full((n_tracked, n_days), np.nan)
+        prominences = np.full((n_tracked, n_days), np.nan)
+        strict_detected = np.zeros((n_tracked, n_days), dtype=bool)
+
+        # Step 3: per day, pull the cached binF, smooth, and measure each
+        # tracked field inside its ±window_cm/2 window.
+        for di, date in enumerate(multiday.dates):
+            pfr = multiday.per_day.get(date)
+            if pfr is None or tt not in pfr.fields:
+                continue
+            pf = pfr.fields[tt]
+            binF = pf.binF
+            if binF.size == 0:
+                continue
+            bin_size_cm = pf.bin_size_cm
+            n_bins = binF.shape[1]
+            smoothed = _gauss1d(binF, sigma=smooth_sigma, axis=1, mode='wrap')
+
+            half_window_bins = int(np.ceil((window_cm / 2) / bin_size_cm))
+
+            for ti, tf in enumerate(tracked_meta):
+                cell_idx = tf['cell_idx']
+                if cell_idx >= binF.shape[0]:
+                    continue
+                # Anchor cm -> bin (bin center at i*bin + bin/2, so subtract half).
+                anchor_bin = int(round(tf['anchor'] / bin_size_cm - 0.5))
+                left = max(0, anchor_bin - half_window_bins)
+                right = min(n_bins, anchor_bin + half_window_bins + 1)
+                if right <= left:
+                    continue
+                window_curve = smoothed[cell_idx, left:right]
+
+                peak_local = int(np.argmax(window_curve))
+                peak_bin = left + peak_local
+                peak_amp = float(window_curve[peak_local])
+                peak_pos_cm = peak_bin * bin_size_cm + (bin_size_cm / 2)
+                # Local prominence: peak minus minimum within the same window.
+                # This is intentionally window-local — global prominence would
+                # leak information about distant peaks.
+                window_min = float(np.min(window_curve))
+
+                amplitudes[ti, di] = peak_amp
+                positions_cm[ti, di] = peak_pos_cm
+                prominences[ti, di] = peak_amp - window_min
+                strict_detected[ti, di] = di in tf['strict_days']
+
+        anchors = np.array([tf['anchor'] for tf in tracked_meta])
+        drifts_cm = positions_cm - anchors[:, None] if n_tracked else np.empty((0, n_days))
+
+        results[tt] = TrackedFields(
+            trial_type=tt,
+            cell_ids=np.array([tf['cell_idx'] for tf in tracked_meta], dtype=int),
+            anchor_positions_cm=anchors,
+            dates=list(multiday.dates),
+            amplitudes=amplitudes,
+            positions_cm=positions_cm,
+            prominences=prominences,
+            drifts_cm=drifts_cm,
+            strict_detected=strict_detected,
+            window_cm=window_cm,
+        )
+
+    return results
+
+
 def zone_labels_per_day(
     exp_pcs: ExperimentPlaceCells,
     trial_type: str,
