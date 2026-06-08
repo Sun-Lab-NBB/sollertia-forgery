@@ -152,7 +152,7 @@ def prepare_checksum_batch_tool(
             }
             continue
 
-        tracker_path = session.checksum_tracker_path
+        tracker_path = session.raw_data.checksum_tracker_path
         expected_jobs: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, session.session_name)]
 
         # Initializes the tracker with stale entry detection. If the tracker already exists, foreign entries
@@ -667,7 +667,7 @@ def get_checksum_batch_status_overview_tool(root_directory: str) -> dict[str, An
     aggregate_scheduled = 0
 
     for session in iterate_sessions(root_path=root_path):
-        tracker_path = session.checksum_tracker_path
+        tracker_path = session.raw_data.checksum_tracker_path
         if not tracker_path.is_file():
             continue
 
@@ -761,7 +761,7 @@ def clean_checksum_tracker_tool(session_paths: list[str]) -> dict[str, Any]:
             continue
 
         # Resolves the tracker and lock file paths from the session's raw_data directory.
-        tracker_file = session.checksum_tracker_path
+        tracker_file = session.raw_data.checksum_tracker_path
         lock_file = tracker_file.with_suffix(tracker_file.suffix + ".lock")
         deleted_files: list[str] = []
 

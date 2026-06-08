@@ -63,7 +63,7 @@ def resolve_checksum(
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Applies stale
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
-    tracker = ProcessingTracker(file_path=session_data.checksum_tracker_path)
+    tracker = ProcessingTracker(file_path=session_data.raw_data.checksum_tracker_path)
     jobs = [(CHECKSUM_JOB_NAME, session_data.session_name)]
     prepare_tracker(tracker=tracker, jobs=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session_data.session_name)
@@ -90,7 +90,7 @@ def resolve_checksum(
         )
 
         # Loads the checksum stored inside the ax_checksum.txt file.
-        checksum_path = session_data.checksum_path
+        checksum_path = session_data.raw_data.checksum_path
         with checksum_path.open() as file:
             stored_checksum = file.read().strip()
 

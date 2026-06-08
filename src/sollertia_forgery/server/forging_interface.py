@@ -31,9 +31,8 @@ from . import (
 )
 from sollertia_shared_assets import filter_sessions
 
-from ..forging import DatasetData
 from .pipeline import execute_pipelines, check_session_eligibility
-from ..shared_assets import ProjectManifest, delay_timer, delay_terminal
+from ..shared_assets import DatasetData, ProjectManifest, delay_timer, delay_terminal
 from ..forging.pipeline import FORGING_JOB_NAME
 from .managing_interface import resolve_project_manifest
 
@@ -315,7 +314,7 @@ def _construct_data_assembly_pipeline(
     session_names = [s.session for s in dataset.sessions]
 
     # Extracts the first animal from the dataset for pipeline metadata.
-    first_animal = dataset.animals[0] if dataset.animals else "unknown"
+    first_animal = dataset.animals[0].animal if dataset.animals else "unknown"
 
     # Precreates the iterable to store the assembly jobs (single stage pipeline).
     stage_1 = []

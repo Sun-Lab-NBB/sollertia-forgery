@@ -1,11 +1,11 @@
-"""Contains tests for the DatasetData and DatasetSession dataclasses relocated from sollertia-shared-assets."""
+"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.shared_assets."""
 
 from pathlib import Path
 
 import pytest
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-from sollertia_forgery.forging import DatasetData, DatasetSession
+from sollertia_forgery.shared_assets import DatasetData, DatasetSession
 
 
 # Tests for DatasetSession dataclass
@@ -192,8 +192,8 @@ def test_dataset_data_load_errors_when_no_marker(tmp_path: Path) -> None:
         DatasetData.load(dataset_path=tmp_path / "empty_dataset")
 
 
-def test_dataset_data_surgery_paths_maps_each_animal(tmp_path: Path) -> None:
-    """Verifies that surgery_paths yields a per-animal mapping anchored on the dataset root."""
+def test_dataset_data_animals_expose_per_animal_paths(tmp_path: Path) -> None:
+    """Verifies that DatasetAnimal instances expose the canonical per-animal subpaths."""
     sessions = (
         DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_a"),
         DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_b"),
@@ -208,16 +208,20 @@ def test_dataset_data_surgery_paths_maps_each_animal(tmp_path: Path) -> None:
         datasets_root=tmp_path,
     )
 
-    surgery_paths = dataset_data.surgery_paths
     dataset_root = tmp_path / "test_dataset"
+    surgery_paths = {animal.animal: animal.surgery_path for animal in dataset_data.animals}
+    bleaching_paths = {animal.animal: animal.bleaching_path for animal in dataset_data.animals}
+    bleaching_table_paths = {animal.animal: animal.bleaching_table_path for animal in dataset_data.animals}
 
     assert set(surgery_paths.keys()) == {"animal_a", "animal_b"}
     assert surgery_paths["animal_a"] == dataset_root / "animal_a" / "surgery_metadata.yaml"
     assert surgery_paths["animal_b"] == dataset_root / "animal_b" / "surgery_metadata.yaml"
+    assert bleaching_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.yaml"
+    assert bleaching_table_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.feather"
 
 
 def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:
-    """Verifies that the animals property exposes a sorted tuple of unique animal identifiers."""
+    """Verifies that the animals property exposes one DatasetAnimal per unique animal in sorted order."""
     sessions = (
         DatasetSession(session="2024-01-15-12-30-45-000001", animal="animal_b"),
         DatasetSession(session="2024-01-15-12-30-45-000002", animal="animal_a"),
@@ -232,7 +236,8 @@ def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:
         datasets_root=tmp_path,
     )
 
-    assert dataset_data.animals == ("animal_a", "animal_b")
+    animal_ids = tuple(animal.animal for animal in dataset_data.animals)
+    assert animal_ids == ("animal_a", "animal_b")
 
 
 def test_dataset_data_get_sessions_for_animal(tmp_path: Path) -> None:

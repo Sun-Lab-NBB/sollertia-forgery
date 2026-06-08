@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from numba import njit  # type: ignore[import-untyped]
+from numba import njit
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import console
@@ -68,9 +68,7 @@ def assemble_behavior_dataset(
 
     # Loads the core behavior data present for all session types.
     valve_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
-    system_state_df = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
-    )
+    system_state_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True)
     lick_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
     valve_time = valve_df["time_us"].to_numpy()
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 import polars as pl
 from filelock import FileLock
@@ -41,6 +40,7 @@ _DESCRIPTOR_CLASSES: dict[
 }
 """Maps each session type to its corresponding descriptor class. All descriptor classes share the
 ``experimenter_notes`` and ``incomplete`` attributes used by manifest generation."""
+
 
 def generate_project_manifest(project_directory: Path) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
@@ -101,7 +101,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "animal": [],
                 # Session names.
                 "session": [],
-                # Session names stored as timezone-aware date-time objects in EST.
+                # Session names stored as timezone-aware date-time objects in the host machine's local time.
                 "date": [],
                 # Session types (e.g., mesoscope experiment, run training, etc.).
                 "type": [],
@@ -131,7 +131,7 @@ def generate_project_manifest(project_directory: Path) -> None:
             # completion status for datasets discovered on non-main sessions.
             multi_recording_registry: dict[str, bool] = {}
             for session_data in sessions:
-                multi_recording_root = session_data.cindra_multi_recording_path
+                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
                 if not multi_recording_root.is_dir():
                     continue
                 for dataset_dir in multi_recording_root.iterdir():
@@ -148,9 +148,6 @@ def generate_project_manifest(project_directory: Path) -> None:
                     )
                     multi_recording_registry[dataset_name] = ProcessingTracker(file_path=tracker_path).complete
 
-            # Pre-creates the Eastern timezone object for UTC-to-EST/EDT conversion.
-            eastern = ZoneInfo("America/New_York")
-
             # Loops over each session of every animal in the project and extracts session ID information and
             # information about which processing steps have been successfully applied to the session.
             for session_data in sessions:
@@ -164,7 +161,8 @@ def generate_project_manifest(project_directory: Path) -> None:
                 manifest["type"].append(session_data.session_type)
                 manifest["system"].append(session_data.acquisition_system)
 
-                # Parses session name into a timezone-aware datetime in Eastern time.
+                # Parses the session name (a UTC timestamp) into a timezone-aware datetime in the host machine's
+                # local time.
                 date_time_components = session_data.session_name.split("-")
                 date_time = datetime(
                     year=int(date_time_components[0]),
@@ -175,13 +173,13 @@ def generate_project_manifest(project_directory: Path) -> None:
                     second=int(date_time_components[5]),
                     microsecond=int(date_time_components[6]),
                     tzinfo=UTC,
-                ).astimezone(eastern)
+                ).astimezone()
                 manifest["date"].append(date_time)
 
                 # Loads the session descriptor to extract experimenter notes and completeness status. Window
                 # Checking sessions acquired before sollertia-experiment 3.0.0 lack descriptors, so a missing
                 # file is handled gracefully for that session type only.
-                descriptor_path = session_data.session_descriptor_path
+                descriptor_path = session_data.raw_data.session_descriptor_path
                 descriptor_class = _DESCRIPTOR_CLASSES.get(session_data.session_type)
                 if descriptor_class is None:
                     message = (
@@ -205,7 +203,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 manifest["complete"].append(is_complete)
 
                 # Resolves data integrity verification status from the canonical checksum tracker path.
-                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.checksum_tracker_path)
+                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.raw_data.checksum_tracker_path)
                 is_verified = checksum_tracker.complete if checksum_tracker is not None else False
                 manifest["integrity"].append(is_verified)
 
@@ -221,19 +219,19 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
                 # canonical tracker paths exposed by SessionData.
-                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.cindra_single_recording_tracker_path)
+                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.cindra_single_recording_tracker_path)
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
-                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.behavior_tracker_path)
+                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.behavior_tracker_path)
                 manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
-                video_tracker = _load_tracker_if_exists(tracker_path=session_data.video_tracker_path)
+                video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)
                 manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
 
                 # Resolves multi-recording dataset membership by enumerating the session's
                 # ``cindra/multi_recording`` subdirectories, then looks up each dataset's completion status
                 # from the project-wide registry built above.
-                multi_recording_root = session_data.cindra_multi_recording_path
+                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
                 session_datasets: list[str] = []
                 session_dataset_complete: list[bool] = []
                 if multi_recording_root.is_dir():

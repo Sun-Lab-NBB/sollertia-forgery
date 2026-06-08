@@ -1,9 +1,11 @@
 """Provides assets for maintaining the Sollertia platform analysis dataset data hierarchy across all processing
-machines.
+machines. The hierarchy is written by the forging pipeline and read by the analysis pipelines, so the schema lives
+under shared_assets.
 """
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from dataclasses import field, dataclass
 
@@ -11,8 +13,75 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import RawDataFiles, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import YamlConfig
 
-DATA_FILENAME: str = "data.feather"
-"""The filename of the assembled session data inside each session directory of a forged dataset."""
+from .metadata import DatasetFiles
+
+
+class DatasetColumn(StrEnum):
+    """Defines every column that can appear in the assembled session data feather produced by the forging pipeline.
+
+    Notes:
+        Members covering optional columns (`REINFORCING_GUIDED`, `AVERSIVE_GUIDED`) are present in the feather only
+        when the corresponding upstream events were recorded. All other members are guaranteed to exist in every
+        forged session.
+    """
+
+    # Behavior alignment columns (from forging.behavior).
+    TIME_US = "time_us"
+    """Microsecond-precision sample timestamps from the acquisition reference clock."""
+    ELAPSED_MINUTES = "elapsed_minutes"
+    """Elapsed session time in minutes since the first sample."""
+    BRAKE = "brake"
+    """Wheel brake engagement at each sample."""
+    SCREENS = "screens"
+    """Display panel state at each sample."""
+    TORQUE_N_CM = "torque_N_cm"
+    """Wheel torque in N·cm at each sample. Forced to zero during 'run' periods upstream."""
+    DISTANCE_CM = "distance_cm"
+    """Cumulative distance traveled by the animal in centimeters at each sample."""
+    SPEED_CM_S = "speed_cm_s"
+    """Animal running speed in cm/s at each sample."""
+    LICK = "lick"
+    """Lick sensor state at each sample."""
+    WATER_UL = "water_uL"
+    """Per-sample water reward delivery in microliters."""
+    REWARD = "reward"
+    """Reward event flag at each sample."""
+    SYSTEM_STATE = "system_state"
+    """Acquisition system state at each sample (idle, rest, run)."""
+
+    # Runtime/experiment columns (from forging.runtime).
+    TRIAL = "trial"
+    """One-based trial identifier at each sample. 255 marks samples outside any trial."""
+    TRIAL_TYPE = "trial_type"
+    """Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."""
+    CUE = "cue"
+    """Active virtual reality cue identifier at each sample."""
+    IN_TRIGGER_ZONE = "in_trigger_zone"
+    """Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."""
+    RUNTIME_STATE = "runtime_state"
+    """Experiment runtime state label at each sample."""
+    REINFORCING_GUIDED = "reinforcing_guided"
+    """Optional. Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded."""
+    AVERSIVE_GUIDED = "aversive_guided"
+    """Optional. Aversive guidance state at each sample. Present only when aversive guidance was recorded."""
+
+    # Cindra fluorescence columns (from forging.cindra).
+    SINGLE_DAY_CELL_FLUORESCENCE = "single_day_cell_fluorescence"
+    """Single-recording raw cell fluorescence trace per ROI."""
+    SINGLE_DAY_NEUROPIL_FLUORESCENCE = "single_day_neuropil_fluorescence"
+    """Single-recording raw neuropil fluorescence trace per ROI."""
+    SINGLE_DAY_SUBTRACTED_FLUORESCENCE = "single_day_subtracted_fluorescence"
+    """Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence."""
+    SINGLE_DAY_SPIKES = "single_day_spikes"
+    """Single-recording OASIS-deconvolved spike rates per ROI."""
+    MULTI_DAY_CELL_FLUORESCENCE = "multi_day_cell_fluorescence"
+    """Multi-recording raw cell fluorescence trace per ROI."""
+    MULTI_DAY_NEUROPIL_FLUORESCENCE = "multi_day_neuropil_fluorescence"
+    """Multi-recording raw neuropil fluorescence trace per ROI."""
+    MULTI_DAY_SUBTRACTED_FLUORESCENCE = "multi_day_subtracted_fluorescence"
+    """Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days."""
+    MULTI_DAY_SPIKES = "multi_day_spikes"
+    """Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,12 +104,91 @@ class DatasetSession:
     @property
     def data_path(self) -> Path:
         """Returns the path to the session's assembled ``data.feather`` file within the dataset hierarchy."""
-        return self.session_path.joinpath(DATA_FILENAME)
+        return self.session_path.joinpath(DatasetFiles.DATA)
 
     @property
     def descriptor_path(self) -> Path:
         """Returns the path to the session's ``session_descriptor.yaml`` file within the dataset hierarchy."""
         return self.session_path.joinpath(RawDataFiles.SESSION_DESCRIPTOR)
+
+    @property
+    def geometry_path(self) -> Path:
+        """Returns the path to the session's ``trial_geometry.yaml`` data file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
+
+    @property
+    def tuning_summary_path(self) -> Path:
+        """Returns the path to the session's ``tuning_summary.yaml`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.TUNING_SUMMARY)
+
+    @property
+    def tuning_cells_path(self) -> Path:
+        """Returns the path to the session's ``tuning_cells.feather`` per-cell table within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.TUNING_CELLS_TABLE)
+
+    @property
+    def sce_summary_path(self) -> Path:
+        """Returns the path to the session's ``sce_summary.yaml`` file within the dataset hierarchy."""
+        return self.session_path.joinpath(DatasetFiles.SCE_SUMMARY)
+
+    @property
+    def sce_cells_path(self) -> Path:
+        """Returns the path to the session's ``sce_cells.feather`` per-cell SCE participation table within the
+        dataset hierarchy.
+        """
+        return self.session_path.joinpath(DatasetFiles.SCE_CELLS_TABLE)
+
+    @property
+    def sce_periods_path(self) -> Path:
+        """Returns the path to the session's ``sce_periods.feather`` per-period SCE-state table within the dataset
+        hierarchy.
+        """
+        return self.session_path.joinpath(DatasetFiles.SCE_PERIODS_TABLE)
+
+
+@dataclass(frozen=True, slots=True)
+class DatasetAnimal:
+    """Defines a single animal included in an analysis dataset.
+
+    Combines the animal identity metadata with the resolved path to the animal's directory within the dataset
+    hierarchy. Per-animal artifacts (surgery metadata, chronic photobleaching evaluation) are co-located in this
+    directory and exposed as derived properties.
+    """
+
+    animal: str
+    """The unique identifier of the animal."""
+    animal_path: Path = Path()
+    """The path to the animal's directory within the dataset hierarchy (dataset/animal)."""
+
+    @property
+    def surgery_path(self) -> Path:
+        """Returns the path to the animal's ``surgery_metadata.yaml`` file within the dataset hierarchy."""
+        return self.animal_path.joinpath(RawDataFiles.SURGERY_METADATA)
+
+    @property
+    def bleaching_path(self) -> Path:
+        """Returns the path to the animal's ``bleaching.yaml`` summary file within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.BLEACHING_SUMMARY)
+
+    @property
+    def bleaching_table_path(self) -> Path:
+        """Returns the path to the animal's ``bleaching.feather`` per-session table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.BLEACHING_TABLE)
+
+    @property
+    def drift_summary_path(self) -> Path:
+        """Returns the path to the animal's ``drift.yaml`` summary file within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_SUMMARY)
+
+    @property
+    def drift_cells_path(self) -> Path:
+        """Returns the path to the animal's ``drift_cells.feather`` per-cell table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_CELLS_TABLE)
+
+    @property
+    def drift_pairs_path(self) -> Path:
+        """Returns the path to the animal's ``drift_pairs.feather`` per-pair table within the dataset hierarchy."""
+        return self.animal_path.joinpath(DatasetFiles.DRIFT_PAIRS_TABLE)
 
 
 @dataclass
@@ -217,19 +365,44 @@ class DatasetData(YamlConfig):
         self.to_yaml(file_path=self.dataset_data_path)
 
     @property
-    def animals(self) -> tuple[str, ...]:
-        """Returns a tuple of unique animal identifiers included in the dataset."""
-        return tuple(sorted({session.animal for session in self.sessions}))
+    def animals(self) -> tuple[DatasetAnimal, ...]:
+        """Returns a tuple of DatasetAnimal instances, one per unique animal in the dataset.
 
-    @property
-    def surgery_paths(self) -> dict[str, Path]:
-        """Returns a mapping of each animal identifier to the path of its surgery metadata YAML file.
-
-        The returned paths point to ``surgery_metadata.yaml`` files stored at the root of each animal
-        directory within the forged dataset hierarchy.
+        Each instance carries the animal identifier and the resolved path to the animal's directory under
+        the dataset root, anchored on the ``dataset.yaml`` file's filesystem location so the result remains
+        portable across processing machines.
         """
         dataset_root = self.dataset_data_path.parent
-        return {animal: dataset_root.joinpath(animal, RawDataFiles.SURGERY_METADATA) for animal in self.animals}
+        unique_animals = sorted({session.animal for session in self.sessions})
+        return tuple(
+            DatasetAnimal(animal=animal, animal_path=dataset_root.joinpath(animal)) for animal in unique_animals
+        )
+
+    def get_animal(self, animal: str) -> DatasetAnimal:
+        """Returns the DatasetAnimal instance for the specified animal identifier.
+
+        Args:
+            animal: The unique identifier of the animal to look up.
+
+        Returns:
+            The DatasetAnimal instance carrying the animal identity metadata and the path to the animal's
+            directory within the dataset hierarchy.
+
+        Raises:
+            ValueError: If the specified animal is not found in the dataset.
+        """
+        for candidate in self.animals:
+            if candidate.animal == animal:
+                return candidate
+
+        message = (
+            f"Unable to look up the animal '{animal}'. The animal must exist in the '{self.name}' dataset, "
+            f"but no matching DatasetAnimal was found."
+        )
+        console.error(message=message, error=ValueError)
+        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+        # noinspection PyUnreachableCode
+        raise ValueError(message)  # pragma: no cover
 
     def get_sessions_for_animal(self, animal: str) -> tuple[DatasetSession, ...]:
         """Returns the DatasetSession instances for all sessions performed by the specified animal.
