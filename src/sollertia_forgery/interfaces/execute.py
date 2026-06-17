@@ -111,11 +111,11 @@ def execute_cli(
     exclude_animal: tuple[str, ...],
     keep_job_logs: bool,
 ) -> None:
-    """Executes management, processing, and analysis data workflows on the adopted project's sessions.
+    """Executes management, processing, and dataset formation workflows on the adopted project's sessions.
 
     This CLI group functions as the entry-point for all data processing pipelines supported by the Sollertia data
-    workflows. See the documentation for each of the workflow subgroups ('managing', 'processing', 'forging', or
-    'analysis') for the available processing pipelines.
+    workflows. See the documentation for each of the workflow subgroups ('managing', 'processing', or 'forging') for
+    the available processing pipelines.
     """
     ctx.ensure_object(dict)
 
