@@ -4,26 +4,20 @@ from __future__ import annotations
 
 from enum import StrEnum
 import stat
-import select
-import socket
 from typing import TYPE_CHECKING
 from pathlib import Path
-from secrets import randbelow
 import tempfile
-import threading
-import contextlib
 from dataclasses import dataclass
 
 import paramiko
 from ataraxis_time import PrecisionTimer, TimerPrecisions, TimestampFormats, get_timestamp
 from ataraxis_base_utilities import LogLevel, console
 
-from .job import Job, JupyterJob
-
 if TYPE_CHECKING:
     from paramiko.client import SSHClient
     from paramiko.sftp_client import SFTPClient
 
+    from .job import Job
     from .server_configuration import ServerConfiguration
 
 
@@ -42,27 +36,24 @@ class CommandResult:
     return_code: int
 
 
-def get_remote_job_work_directory(
-    server: Server, job_name: str, pipeline_name: str, *, base_path: Path | None = None
-) -> Path:
+def get_remote_job_work_directory(server: Server, job_name: str, pipeline_name: str, *, base_path: Path) -> Path:
     """Resolves and creates the remote compute server log directory for the specified job.
 
     Args:
         server: The Server instance that interfaces with the remote compute server used to execute the job.
         job_name: The name of the job to be executed.
         pipeline_name: The name of the pipeline to which this job belongs.
-        base_path: The data directory under which to nest the job's log directory. When None, the server's root
-            directory is used. Processing and forging pipelines pass the processed session or dataset path so that
-            job logs are stored under the data they operate on, rather than under a separate user directory.
+        base_path: The data directory under which to nest the job's log directory. Each pipeline passes the
+            processed session, dataset, or project path so that job logs are always stored under the data
+            they operate on, scoped to a 'logs' subdirectory of that directory.
 
     Returns:
         The path to the job's log directory on the remote compute server.
     """
-    # Resolves the log directory name using a timestamp (accurate to minutes) and the job's name. Job logs are nested
-    # under a 'logs' subdirectory of the processed data directory (or the server root when no data path is given).
+    # Resolves the log directory name using a timestamp (accurate to minutes) and the job's name. Job logs are
+    # nested under a 'logs' subdirectory of the data directory the job operates on.
     timestamp = "-".join(get_timestamp(output_format=TimestampFormats.STRING).split("-")[:5])
-    logs_root = base_path if base_path is not None else server.root
-    working_directory = logs_root.joinpath("logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}")
+    working_directory = base_path.joinpath("logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}")
 
     # Creates the log directory on the remote server.
     server.create(remote_path=working_directory, is_dir=True, parents=True)
@@ -91,134 +82,6 @@ class JobStatus(StrEnum):
     """The job was terminated for exceeding memory limits."""
     UNKNOWN = "UNKNOWN"
     """The job status could not be determined."""
-
-
-class _SSHTunnel:
-    """Manages an SSH tunnel for local port forwarding using paramiko's direct-tcpip channel.
-
-    This class creates a local socket server that listens for incoming connections and forwards them through an
-    SSH channel to a remote destination. It is used to enable localhost access to services running on remote
-    compute nodes.
-
-    Args:
-        ssh_client: The paramiko SSHClient instance to use for creating the tunnel.
-        local_port: The local port to listen on for incoming connections.
-        remote_host: The hostname of the remote destination (e.g., compute node).
-        remote_port: The port on the remote destination to forward traffic to.
-
-    Attributes:
-        _ssh_client: The SSH client used for the tunnel.
-        _local_port: The local listening port.
-        _remote_host: The remote destination hostname.
-        _remote_port: The remote destination port.
-        _server_socket: The local socket server accepting connections.
-        _running: Flag indicating whether the tunnel is active.
-        _accept_thread: The thread running the connection accept loop.
-    """
-
-    def __init__(
-        self,
-        ssh_client: SSHClient,
-        local_port: int,
-        remote_host: str,
-        remote_port: int,
-    ) -> None:
-        self._ssh_client = ssh_client
-        self._local_port = local_port
-        self._remote_host = remote_host
-        self._remote_port = remote_port
-        self._server_socket: socket.socket | None = None
-        self._running = False
-        self._accept_thread: threading.Thread | None = None
-
-    def __del__(self) -> None:
-        """Ensures graceful resource deallocation when the tunnel instance is garbage collected."""
-        self.stop()
-
-    def start(self) -> None:
-        """Starts the SSH tunnel by creating a local socket server and spawning the 'accept' loop thread."""
-        self._server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_socket.settimeout(1.0)  # Allows periodic checking of _running flag
-        self._server_socket.bind(("127.0.0.1", self._local_port))
-        self._server_socket.listen(5)
-        self._running = True
-
-        # Starts the 'accept' loop in a daemon thread
-        self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
-        self._accept_thread.start()
-
-    def stop(self) -> None:
-        """Stops the SSH tunnel and closes all connections."""
-        self._running = False
-        if self._server_socket:
-            with contextlib.suppress(OSError):
-                self._server_socket.close()
-
-    def _accept_loop(self) -> None:
-        """Accepts incoming connections on the local socket and spawns forwarding threads for each connection."""
-        while self._running:
-            try:
-                client_socket, addr = self._server_socket.accept()
-
-                # Opens a direct-tcpip channel to the remote destination
-                transport = self._ssh_client.get_transport()
-                if transport is None:
-                    client_socket.close()
-                    continue
-
-                try:
-                    channel = transport.open_channel("direct-tcpip", (self._remote_host, self._remote_port), addr)
-                except Exception:
-                    client_socket.close()
-                    continue
-
-                # Starts bidirectional forwarding in a separate thread
-                forward_thread = threading.Thread(
-                    target=self._forward_tunnel, args=(client_socket, channel), daemon=True
-                )
-                forward_thread.start()
-
-            except TimeoutError:
-                # Timeout allows periodic checking of the _running flag
-                continue
-            except OSError:
-                # Socket was closed
-                if self._running:
-                    continue
-                break
-
-    def _forward_tunnel(self, client_socket: socket.socket, channel: paramiko.Channel) -> None:
-        """Bidirectionally forwards the data between the local client socket and the SSH channel.
-
-        Args:
-            client_socket: The local socket connected to the client application.
-            channel: The paramiko channel connected to the remote destination.
-        """
-        try:
-            while self._running:
-                # Uses select to wait for data on either the socket or the channel
-                r, _, _ = select.select([client_socket, channel], [], [], 0.5)
-
-                if client_socket in r:
-                    data = client_socket.recv(4096)
-                    if len(data) == 0:
-                        break
-                    channel.send(data)
-
-                if channel in r:
-                    data = channel.recv(4096)
-                    if len(data) == 0:
-                        break
-                    client_socket.send(data)
-
-        except OSError:
-            pass
-        finally:
-            with contextlib.suppress(OSError):
-                channel.close()
-            with contextlib.suppress(OSError):
-                client_socket.close()
 
 
 class Server:
@@ -298,112 +161,7 @@ class Server:
         """If the instance is connected to the server, terminates the connection before the instance is destroyed."""
         self.close()
 
-    def launch_jupyter_server(
-        self,
-        job_name: str,
-        conda_environment: str,
-        notebook_directory: Path,
-        cpu_threads: int = 2,
-        ram: int = 32,
-        time: int = 240,
-        port: int = 0,
-        jupyter_arguments: str = "",
-    ) -> JupyterJob:
-        """Launches a remote Jupyter notebook session on the target remote compute server.
-
-        Args:
-            job_name: The descriptive name of the Jupyter SLURM job to be created.
-            conda_environment: The name of the conda environment to activate on the server before running the job logic.
-                For Jupyter jobs, the environment must include the 'notebook' and 'jupyterlab' packages.
-            port: The connection port number for the Jupyter server. If set to 0 (default), a random port number between
-                8888 and 9999 is assigned to this connection to reduce the possibility of colliding with other
-                user sessions.
-            notebook_directory: The root directory where to run the Jupyter notebook. During runtime, the notebook
-                only has access to items stored under this directory.
-            cpu_threads: The number of CPU threads to allocate to the Jupyter server.
-            ram: The amount of RAM, in GB, to allocate to the Jupyter server.
-            time: The maximum Jupyter server uptime, in minutes.
-            jupyter_arguments: The additional arguments to pass to the jupyter notebook initialization command.
-
-        Returns:
-            The JupyterJob instance containing information about the completed session.
-
-        Raises:
-            TimeoutError: If the Jupyter server doesn't start within 120 seconds of being submitted.
-            RuntimeError: If the job submission fails for any reason.
-        """
-        # Resolves the job's working directory
-        working_directory = get_remote_job_work_directory(server=self, job_name=job_name, pipeline_name="JUPYTER")
-
-        # If necessary, generates and sets port to a random value between 8888 and 9999.
-        if port == 0:
-            port = 8888 + randbelow(1112)  # Range: 8888-9999
-
-        job = JupyterJob(
-            job_name=job_name,
-            output_log=working_directory.joinpath("stdout.txt"),
-            error_log=working_directory.joinpath("stderr.txt"),
-            working_directory=working_directory,
-            conda_environment=conda_environment,
-            notebook_directory=notebook_directory,
-            port=port,
-            cpu_threads=cpu_threads,
-            ram=ram,
-            time=time,
-            jupyter_arguments=jupyter_arguments,
-        )
-
-        # Submits the job to the server and waits for connection info
-        job = self.submit_job(job=job)  # type: ignore[assignment]
-
-        # At this point, submit_job should populate connection_info for JupyterJob
-        if job.connection_info is None:
-            message = f"Failed to retrieve connection information for Jupyter session {job.job_name}."
-            console.error(message, RuntimeError)
-            raise RuntimeError(message)
-
-        # Creates and starts the SSH tunnel to enable localhost access to the Jupyter server
-        tunnel = _SSHTunnel(
-            ssh_client=self._client,
-            local_port=job.connection_info.port,
-            remote_host=job.connection_info.compute_node,
-            remote_port=job.connection_info.port,
-        )
-
-        try:
-            tunnel.start()
-            console.echo(message="SSH tunnel: Established.", level=LogLevel.SUCCESS)
-
-            # Prints connection information for the user
-            console.echo(message=f"Jupyter server running on the compute node: {job.connection_info.compute_node}")
-            console.echo(message=f"Local access port: {job.connection_info.port}")
-            console.echo(message=f"Access URL: {job.connection_info.localhost_url}", level=LogLevel.INFO)
-
-            # Blocks until the user presses Enter
-            console.echo(message="Enter anything to terminate the interactive Jupyter session...")
-            input()
-
-        except KeyboardInterrupt:
-            # Handles Ctrl+C gracefully
-            console.echo(
-                message=(
-                    f"Keyboard interrupt signal: Detected. Terminating the interactive Jupyter session "
-                    f"{job.job_name}..."
-                ),
-                level=LogLevel.WARNING,
-            )
-
-        finally:
-            # Cleanup: stops the tunnel and aborts the SLURM job
-            console.echo(message=f"Terminating the interactive Jupyter session {job.job_name}...")
-            tunnel.stop()
-
-            if job.job_id is not None:
-                self.abort_job(slurm_job_id=int(job.job_id))
-
-        return job
-
-    def submit_job(self, job: Job | JupyterJob, *, verbose: bool = True) -> Job | JupyterJob:
+    def submit_job(self, job: Job, *, verbose: bool = True) -> Job:
         """Submits the input job to the managed remote compute server via the SLURM job manager.
 
         This method is the entry point for all headless jobs that are executed on the remote compute server.
@@ -460,62 +218,6 @@ class Server:
         # Job object
         job_id = job_output.split()[-1]
         job.job_id = job_id
-
-        # Special processing for Jupyter jobs: waits for and parses connection information
-        if isinstance(job, JupyterJob):
-            # Transfers host and user information to the JupyterJob object
-            job.host = self.host
-            job.user = self.user
-
-            # Initializes a timer class to optionally delay loop cycling below
-            timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
-
-            timer.reset()
-            _wait_time = 120  # 2 minutes
-            while timer.elapsed < _wait_time:  # Waits for at most 2 minutes before terminating with an error
-                # Checks if the connection info file exists
-                try:
-                    # Pulls the connection info file
-                    local_info_file = Path(tempfile.gettempdir()) / f"{job.job_name}_connection.txt"
-                    self.pull(local_path=local_info_file, remote_path=job.connection_info_file)
-
-                    # Parses connection data from the file and caches it inside Job class attributes
-                    job.parse_connection_data(local_info_file)
-
-                    # Removes the local file copy after it is parsed
-                    local_info_file.unlink(missing_ok=True)
-
-                    # Also removes the remote copy once the runtime is over
-                    self.remove(remote_path=job.connection_info_file, is_dir=False)
-
-                    # Breaks the waiting loop
-                    break
-
-                except Exception:
-                    # The file doesn't exist yet or job initialization failed. Checks if the job has already
-                    # terminated, indicating a startup error.
-                    if job.job_id is not None:
-                        status = self.get_job_status(slurm_job_id=int(job.job_id))
-                        if status not in (JobStatus.PENDING, JobStatus.RUNNING):
-                            message = (
-                                f"Remote jupyter session job {job.job_name} with id {job.job_id} encountered a "
-                                f"startup error and was terminated prematurely."
-                            )
-                            console.error(message, RuntimeError)
-
-                timer.delay(delay=5, allow_sleep=True, block=False)  # Waits for 5 seconds before checking again
-            else:
-                # Aborts the job if the server is busy running other jobs
-                self.abort_job(slurm_job_id=int(job.job_id))
-
-                # Only raises the timeout error if the while loop is not broken in 120 seconds
-                message = (
-                    f"Remote jupyter session job {job.job_name} with id {job.job_id} did not start within 120 seconds "
-                    f"from being submitted. Since all jupyter jobs are intended to be interactive and the server is "
-                    f"busy running other jobs, this job has been cancelled."
-                )
-                console.error(message, TimeoutError)
-                raise TimeoutError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
 
         if verbose:
             console.echo(message=f"{job.job_name} job: Submitted to {self.host}.", level=LogLevel.SUCCESS)

@@ -169,7 +169,7 @@ def execute_cli(
 def manage_cli() -> None:
     """Manages the project's sessions on the remote compute server.
 
-    This command group provides the pipelines for managing the project's session data integrity and lifecycle.
+    This command group provides the pipeline for verifying and recomputing the project's session data checksums.
     """
 
 
@@ -206,30 +206,6 @@ def checksum_command(ctx: click.Context, *, recompute: bool) -> None:
         sessions=sessions,
         verify_checksum=not recompute,
         recompute_checksum=recompute,
-        delete_sessions=False,
-        keep_job_logs=keep_job_logs,
-    )
-
-
-# noinspection PyUnresolvedReferences
-@manage_cli.command("delete")
-@click.pass_context
-def delete_command(ctx: click.Context) -> None:
-    """Deletes the selected sessions from the remote compute server's data root."""
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    manifest_path = ctx.obj["manifest_path"]
-    sessions = ctx.obj["sessions"]
-    keep_job_logs = ctx.obj["keep_job_logs"]
-
-    # Executes the deletion operation.
-    manage_project_data(
-        manifest_path=manifest_path,
-        project=project,
-        sessions=sessions,
-        verify_checksum=False,
-        recompute_checksum=False,
-        delete_sessions=True,
         keep_job_logs=keep_job_logs,
     )
 

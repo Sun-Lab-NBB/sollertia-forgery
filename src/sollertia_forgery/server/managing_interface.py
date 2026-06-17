@@ -18,15 +18,9 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from . import (
-    Job,
-    Server,
-    JobStatus,
-    ProcessingPipeline,
-    get_server_configuration,
-    get_remote_job_work_directory,
-)
-from .pipeline import execute_pipelines, check_session_eligibility
+from .job import Job
+from .server import Server, JobStatus, get_remote_job_work_directory
+from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
 from ..shared_assets import (
     DatasetSession,
     ProjectManifest,
@@ -34,6 +28,7 @@ from ..shared_assets import (
     delay_timer,
     delay_terminal,
 )
+from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -265,151 +260,6 @@ def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
     return discovered_sessions
 
 
-def transfer_data(
-    source: Path,
-    destination: Path,
-    *,
-    keep_job_logs: bool = False,
-    poll_delay: int = 10,
-) -> None:
-    """Transfers a data directory from one location to another on the remote compute server.
-
-    Notes:
-        Both the source and destination are supplied as absolute remote paths (typically pointing to different data
-        roots) rather than being resolved from the server configuration. The transfer is executed as a SLURM job via
-        the 'sl-process transfer' command.
-
-    Args:
-        source: The absolute path, on the remote server, to the directory to transfer.
-        destination: The absolute path, on the remote server, to the location the data should be transferred to.
-        keep_job_logs: Determines whether to keep the completed transfer job's logs on the server. If the job fails,
-            its logs are kept regardless of this argument's value.
-        poll_delay: The delay (in seconds) between polling the server for the job's status.
-
-    Raises:
-        RuntimeError: If the data transfer job fails.
-    """
-    console.echo(message=f"Initializing data transfer from '{source}' to '{destination}'...", level=LogLevel.INFO)
-
-    # Establishes communication with the compute server.
-    configuration = get_server_configuration()
-    server = Server(configuration=configuration)
-
-    try:
-        # Resolves the job's name and log directory.
-        job_name = f"{source.name}_transfer"
-        working_directory = get_remote_job_work_directory(server=server, job_name=job_name, pipeline_name="transfer")
-
-        # Creates and configures the transfer job.
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath("output.txt"),
-            error_log=working_directory.joinpath("errors.txt"),
-            working_directory=working_directory,
-            conda_environment="forge",
-            cpu_threads=1,
-            ram=20,
-            time=120,
-        )
-        job.add_command(f"sl-process transfer -sp {source} -dp {destination}")
-
-        # Submits the job and waits for it to complete.
-        job = server.submit_job(job=job, verbose=False)
-        console.echo(message=f"Waiting for the data transfer job with ID {job.job_id} to complete...")
-        job_status = server.get_job_status(slurm_job_id=int(job.job_id))
-        while job_status in (JobStatus.PENDING, JobStatus.RUNNING):
-            delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
-            job_status = server.get_job_status(slurm_job_id=int(job.job_id))
-
-        # Reports the outcome.
-        if job_status != JobStatus.COMPLETED:
-            message = f"Data transfer from '{source}' to '{destination}' failed (SLURM status: {job_status})."
-            console.error(message=message, error=RuntimeError)
-
-        # Removes the job logs if configured to do so.
-        if not keep_job_logs:
-            server.remove(remote_path=working_directory, recursive=True, is_dir=True)
-    finally:
-        server.close()
-
-    console.echo(message=f"Data transfer from '{source}' to '{destination}': Complete.", level=LogLevel.SUCCESS)
-
-
-def _delete_remote_session_data(
-    manifest: ProjectManifest,
-    sessions: list[DatasetSession],
-    project: str,
-    server: Server,
-    *,
-    keep_job_logs: bool = False,
-    poll_delay: int = 10,
-) -> tuple[tuple[DatasetSession, JobStatus], ...]:
-    """Deletes the specified sessions from the remote compute server's data root.
-
-    This function generates and submits the session data deletion jobs using SLURM and verifies that they successfully
-    delete the target sessions.
-
-    Args:
-        manifest: The ProjectManifest instance that stores the processed project's metadata.
-        sessions: The list of DatasetSession instances that define the sessions to delete.
-        project: The name of the project containing the sessions.
-        server: The Server instance used to communicate with the remote compute server.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If any job fails, its logs are kept regardless of this argument's value.
-        poll_delay: The delay (in seconds) between polling the server for job status updates.
-
-    Returns:
-        A tuple of (DatasetSession, JobStatus) pairs representing the outcome of each deletion job.
-    """
-    results: list[tuple[DatasetSession, JobStatus]] = []
-
-    with console.progress(total=len(sessions), description="Executing session deletion jobs", unit="session") as pbar:
-        for session_metadata in sessions:
-            # Resolves the path to the session directory using the manifest.
-            animal = manifest.get_animal_for_session(session=session_metadata.session)
-            session_path = server.root.joinpath(project, animal, session_metadata.session)
-
-            # Resolves the job's name and log directory.
-            job_name = f"{session_metadata.session}_deletion"
-            working_directory = get_remote_job_work_directory(
-                server=server, job_name=job_name, pipeline_name="deletion"
-            )
-
-            # Creates and configures the deletion job.
-            job = Job(
-                job_name=job_name,
-                output_log=working_directory.joinpath("output.txt"),
-                error_log=working_directory.joinpath("errors.txt"),
-                working_directory=working_directory,
-                conda_environment="forge",
-                cpu_threads=1,
-                ram=4,
-                time=30,
-            )
-            job.add_command(f"sl-process transfer -sp {session_path} -rm")
-
-            # Submits the job to the server.
-            job = server.submit_job(job=job, verbose=False)
-
-            # Waits for the job to complete.
-            while True:
-                job_status = server.get_job_status(slurm_job_id=int(job.job_id))
-                if job_status not in (JobStatus.PENDING, JobStatus.RUNNING):
-                    break
-                delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
-
-            # Records the outcome for this session.
-            results.append((session_metadata, job_status))
-
-            # Removes job logs if configured to do so and the job completed successfully.
-            if job_status == JobStatus.COMPLETED and not keep_job_logs:
-                server.remove(remote_path=working_directory, recursive=True, is_dir=True)
-
-            pbar.update()
-
-    return tuple(results)
-
-
 def _construct_checksum_resolution_pipeline(
     manifest: ProjectManifest,
     project: str,
@@ -514,18 +364,12 @@ def manage_project_data(
     *,
     verify_checksum: bool = False,
     recompute_checksum: bool = False,
-    delete_sessions: bool = False,
     keep_job_logs: bool = False,
 ) -> None:
     """Resolves and executes the necessary data management pipelines for the target project.
 
     This function allows managing the sessions stored on the remote compute server. Specifically, it can be used to
-    either verify or recompute the session's data integrity checksum or to delete the session's data from the server's
-    data root.
-
-    Notes:
-        The verify_checksum/recompute_checksum operations and delete_sessions operation are mutually exclusive.
-        If delete_sessions is True, checksum operations are skipped.
+    verify or recompute the session's data integrity checksum.
 
     Args:
         manifest_path: The path to the project's manifest .feather file.
@@ -534,19 +378,17 @@ def manage_project_data(
         verify_checksum: Determines whether to verify the data integrity checksum for the target sessions.
         recompute_checksum: Determines whether to recompute (regenerate) the data integrity checksum for the target
             sessions. This overwrites the existing checksum stored in the ax_checksum.txt file for each session.
-        delete_sessions: Determines whether to delete the target sessions from the server's data root.
-            If True, checksum operations are skipped.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             each pipeline completes successfully. If the pipeline fails, the job logs are kept regardless of this
             argument's value.
     """
     # Ensures that the caller has specified the processing pipeline to execute.
-    if not verify_checksum and not recompute_checksum and not delete_sessions:
+    if not verify_checksum and not recompute_checksum:
         console.error(
             message=(
                 f"Unable to manage the '{project}' project's data, as no management pipeline was selected. "
-                f"Call the data management CLI command with --verify-checksum (-vc), --recompute-checksum (-rc), or "
-                f"--delete (-d) flag to execute the desired management pipeline."
+                f"Call the data management CLI command with the --verify-checksum (-vc) or "
+                f"--recompute-checksum (-rc) flag to execute the desired management pipeline."
             ),
             error=RuntimeError,
         )
@@ -559,54 +401,6 @@ def manage_project_data(
 
     # Loads the project's manifest data.
     manifest = ProjectManifest(manifest_file=manifest_path)
-
-    # SESSION DELETION PIPELINE
-    if delete_sessions:
-        console.echo(message="Pipeline: Deletion...", level=LogLevel.INFO)
-        delay_terminal()
-
-        # Executes the deletion jobs.
-        deletion_results = _delete_remote_session_data(
-            manifest=manifest,
-            sessions=list(sessions),
-            project=project,
-            server=server,
-            keep_job_logs=keep_job_logs,
-            poll_delay=10,
-        )
-        delay_terminal()
-
-        # Refreshes the locally stored manifest file to reflect the processing outcome.
-        resolve_project_manifest(project=project, server=server, generate=True)
-
-        # Calculates the deletion outcome statistics.
-        total_deleted = sum(1 for _, status in deletion_results if status == JobStatus.COMPLETED)
-        total_failed = len(deletion_results) - total_deleted
-
-        # Displays the overall deletion summary message.
-        delay_terminal()
-        message = (
-            f"Project '{project}' session deletion: Complete. Deleted: {total_deleted}, Failed: {total_failed}. "
-            f"The details about the processing outcome for each session are available below:"
-        )
-        console.echo(message=message, level=LogLevel.INFO)
-
-        # Prints detailed results for each deletion job.
-        for session_metadata, job_status in deletion_results:
-            if job_status == JobStatus.COMPLETED:
-                message = (
-                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': Deleted."
-                )
-                console.echo(message=message, level=LogLevel.SUCCESS)
-            else:
-                message = (
-                    f"Session '{session_metadata.session}' performed by animal '{session_metadata.animal}': "
-                    f"Failed to be deleted (SLURM status: {job_status})."
-                )
-                console.echo(message=message, level=LogLevel.ERROR)
-
-        console.echo(message="Management: Complete.", level=LogLevel.SUCCESS)
-        return
 
     # CHECKSUM VERIFICATION/RECOMPUTATION PIPELINE
     console.echo(
