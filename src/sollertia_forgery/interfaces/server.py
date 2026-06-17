@@ -1,10 +1,18 @@
 """Provides CLIs for directly interacting with the remote compute server."""
 
+from pathlib import Path
+
 import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import Server, get_server_configuration, create_server_configuration_file
+from ..server import (
+    Server,
+    transfer_data,
+    discover_project_data,
+    get_server_configuration,
+    create_server_configuration_file,
+)
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -151,16 +159,25 @@ def server_cli() -> None:
     required=True,
     help="The host name or IP address of the server.",
 )
+@click.option(
+    "-r",
+    "--root",
+    type=str,
+    required=True,
+    help="The absolute path, on the remote server, to the root directory that stores all Sollertia data.",
+)
 def configure_server(
     username: str,
     password: str,
     host: str,
+    root: str,
 ) -> None:  # pragma: no cover
     """Creates the remote compute server configuration file in the Sollertia platform working directory."""
     create_server_configuration_file(
         username=username,
         password=password,
         host=host,
+        root=root,
     )
 
 
@@ -232,7 +249,7 @@ def start_jupyter_server(environment: str, cores: int, memory: int, time: int, p
         server.launch_jupyter_server(
             job_name="interactive_jupyter_server",
             conda_environment=environment,
-            notebook_directory=server.user_working_root,
+            notebook_directory=server.root,
             cpu_threads=cores,
             ram=memory,
             port=port,
@@ -405,3 +422,44 @@ def print_slurm_info(
 
     finally:
         server.close()
+
+
+@server_cli.command("discover")
+@click.option(
+    "-p",
+    "--project",
+    type=str,
+    required=True,
+    help="The name of the project whose sessions to discover under the server's data root.",
+)
+def discover_project_sessions_command(project: str) -> None:
+    """Discovers and prints the sessions stored under the project's directory on the remote compute server."""
+    discover_project_data(project=project)
+
+
+@server_cli.command("transfer")
+@click.option(
+    "-s",
+    "--source",
+    type=str,
+    required=True,
+    help="The absolute path, on the remote server, to the directory to transfer.",
+)
+@click.option(
+    "-d",
+    "--destination",
+    type=str,
+    required=True,
+    help="The absolute path, on the remote server, to the location the data should be transferred to.",
+)
+@click.option(
+    "-k",
+    "--keep-job-logs",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to keep the completed transfer job's logs on the server.",
+)
+def transfer_data_command(source: str, destination: str, *, keep_job_logs: bool) -> None:
+    """Transfers a data directory from one location to another (typically between two data roots) on the server."""
+    transfer_data(source=Path(source), destination=Path(destination), keep_job_logs=keep_job_logs)

@@ -1,5 +1,7 @@
 """Provides API for submitting jobs to SLURM-managed servers, monitoring job status, and managing remote data."""
 
+from __future__ import annotations
+
 from enum import StrEnum
 import stat
 import select
@@ -13,9 +15,8 @@ import contextlib
 from dataclasses import dataclass
 
 import paramiko
-from ataraxis_time import PrecisionTimer, TimerPrecisions
+from ataraxis_time import PrecisionTimer, TimerPrecisions, TimestampFormats, get_timestamp
 from ataraxis_base_utilities import LogLevel, console
-from ataraxis_time.time_helpers import TimestampFormats, get_timestamp
 
 from .job import Job, JupyterJob
 
@@ -41,24 +42,29 @@ class CommandResult:
     return_code: int
 
 
-def get_remote_job_work_directory(server: Server, job_name: str, pipeline_name: str) -> Path:
-    """Resolves and creates the remote compute server working directory for the specified job.
+def get_remote_job_work_directory(
+    server: Server, job_name: str, pipeline_name: str, *, base_path: Path | None = None
+) -> Path:
+    """Resolves and creates the remote compute server log directory for the specified job.
 
     Args:
         server: The Server instance that interfaces with the remote compute server used to execute the job.
         job_name: The name of the job to be executed.
         pipeline_name: The name of the pipeline to which this job belongs.
+        base_path: The data directory under which to nest the job's log directory. When None, the server's root
+            directory is used. Processing and forging pipelines pass the processed session or dataset path so that
+            job logs are stored under the data they operate on, rather than under a separate user directory.
 
     Returns:
-        The path to the job's working directory on the remote compute server.
+        The path to the job's log directory on the remote compute server.
     """
-    # Resolves working directory name using timestamp (accurate to minutes) and the job's name.
+    # Resolves the log directory name using a timestamp (accurate to minutes) and the job's name. Job logs are nested
+    # under a 'logs' subdirectory of the processed data directory (or the server root when no data path is given).
     timestamp = "-".join(get_timestamp(output_format=TimestampFormats.STRING).split("-")[:5])
-    working_directory = Path(server.user_working_root).joinpath(
-        "job_logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}"
-    )
+    logs_root = base_path if base_path is not None else server.root
+    working_directory = logs_root.joinpath("logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}")
 
-    # Creates the working directory on the remote server.
+    # Creates the log directory on the remote server.
     server.create(remote_path=working_directory, is_dir=True, parents=True)
 
     return working_directory
@@ -856,32 +862,11 @@ class Server:
             self._open = False
 
     @property
-    def shared_storage_root(self) -> Path:
-        """Returns the absolute path to the shared storage volume directory of the remote compute server accessible
-        through this instance.
+    def root(self) -> Path:
+        """Returns the absolute path to the single root directory of the remote compute server that stores all
+        Sollertia data (raw and processed) accessible through this instance.
         """
-        return Path(self._configuration.shared_storage_root)
-
-    @property
-    def shared_working_root(self) -> Path:
-        """Returns the absolute path to the shared working volume directory of the remote compute server accessible
-        through this instance.
-        """
-        return Path(self._configuration.shared_working_root)
-
-    @property
-    def user_data_root(self) -> Path:
-        """Returns the absolute path to the storage volume directory used to store user's data on the remote compute
-        server accessible through this instance.
-        """
-        return Path(self._configuration.user_data_root)
-
-    @property
-    def user_working_root(self) -> Path:
-        """Returns the absolute path to the working volume directory used to store user's data on the remote compute
-        server accessible through this instance.
-        """
-        return Path(self._configuration.user_working_root)
+        return Path(self._configuration.root)
 
     @property
     def host(self) -> str:
@@ -895,10 +880,10 @@ class Server:
 
     @property
     def cindra_configurations_directory(self) -> Path:
-        """Returns the absolute path to the user's cindra configuration directory."""
-        return self.user_working_root.joinpath("cindra_configurations")
+        """Returns the absolute path to the cindra configuration directory under the server's data root."""
+        return self.root.joinpath("cindra_configurations")
 
     @property
     def dlc_projects_directory(self) -> Path:
-        """Returns the absolute path to the user's DeepLabCut project directory."""
-        return self.user_working_root.joinpath("deeplabcut_projects")
+        """Returns the absolute path to the DeepLabCut project directory under the server's data root."""
+        return self.root.joinpath("deeplabcut_projects")
