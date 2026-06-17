@@ -11,7 +11,10 @@ from dataclasses import dataclass
 
 import polars as pl
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import BaseTrial, GasPuffTrial, WaterRewardTrial
+from sollertia_shared_assets import (
+    MesoscopeGasPuffTrial as GasPuffTrial,
+    MesoscopeWaterRewardTrial as WaterRewardTrial,
+)
 from ataraxis_data_structures import YamlConfig
 
 if TYPE_CHECKING:
@@ -139,7 +142,7 @@ class StimulusMode(StrEnum):
 
 
 # noinspection PyUnhashable
-_TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[BaseTrial], StimulusMode] = {
+_TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[WaterRewardTrial | GasPuffTrial], StimulusMode] = {
     WaterRewardTrial: StimulusMode.REWARD,
     GasPuffTrial: StimulusMode.AVERSIVE,
 }
