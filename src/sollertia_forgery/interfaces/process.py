@@ -1,4 +1,4 @@
-"""Provides CLIs for executing data management, processing, and analysis pipelines exposed by the library."""
+"""Provides CLIs for executing data management, processing, and dataset formation pipelines exposed by the library."""
 
 from pathlib import Path
 

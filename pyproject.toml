@@ -51,20 +51,6 @@ dependencies = [
     "polars>=1,<2",
     "numpy>=2,<3",
     "numba>=0.63,<1",
-    "scipy>=1,<2",
-
-    # Visualization
-    "matplotlib>=3,<4",
-    "cmocean>=4,<5",  # Perceptually uniform colormaps; importing it registers the cmo.* names with matplotlib
-    "PySide6>=6,<7",  # Qt backend for matplotlib interactive plots
-    "plotly>=6,<7",
-
-    # Interactive Notebooks
-    "notebook>=7,<8",
-    "ipympl>=0,<1",  # Enables `%matplotlib widget` for interactive matplotlib in notebooks
-
-    # Trajectory plotting
-    "umap-learn>=0,<1",
 
     # Remote Execution
     "paramiko>=4,<5",
@@ -75,7 +61,6 @@ dependencies = [
     # Utilities
     "filelock>=3,<4",
     "natsort-rs>=0,<1",
-    "python-dateutil>=2,<3",
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
@@ -91,7 +76,6 @@ Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 [project.scripts]
 sl-project = "sollertia_forgery.interfaces.project:project_cli"
 sl-process = "sollertia_forgery.interfaces.process:process_cli"
-sl-analyze = "sollertia_forgery.interfaces.analyze:analyze_cli"
 sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
 
 # Development dependencies (PEP 735). Not published to PyPI.
@@ -107,9 +91,7 @@ dev = [
 
     # Types
     "types-filelock>=3,<4",
-    "types-python-dateutil>=2,<3",
     "types-tabulate>=0,<1",
-    "scipy-stubs>=1,<2"
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
@@ -204,7 +186,7 @@ ignore_errors = true
 
 # Suppresses missing-stub warnings for third-party libraries that do not ship type information.
 [[tool.mypy.overrides]]
-module = ["numba", "numba.*", "tqdm", "tqdm.*", "threadpoolctl", "threadpoolctl.*"]
+module = ["numba", "numba.*"]
 ignore_missing_imports = true
 
 # Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
