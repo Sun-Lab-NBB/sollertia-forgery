@@ -26,13 +26,13 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .pipeline import (
+from .forging import (
     FORGING_JOB_NAME,
     resolve_dataset,
     run_forging_pipeline,
 )
 from ..interfaces import mcp
-from ..shared_assets import (
+from ..cross_system import (
     RESERVED_CORES,
     PendingJob,
     DatasetData,

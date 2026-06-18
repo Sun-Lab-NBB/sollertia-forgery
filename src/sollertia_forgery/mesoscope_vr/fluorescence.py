@@ -12,7 +12,7 @@ import polars as pl
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import MesoscopeDirectories
 
-from ..shared_assets import BehaviorDataFiles
+from .metadata import BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path

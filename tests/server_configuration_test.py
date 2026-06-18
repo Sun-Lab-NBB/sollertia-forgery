@@ -8,7 +8,7 @@ import pytest
 import platformdirs
 from sollertia_shared_assets import set_working_directory
 
-from sollertia_forgery.server.server_configuration import (
+from sollertia_forgery.cross_system.server_configuration import (
     ServerConfiguration,
     create_server_configuration_file,
     get_server_configuration,
@@ -77,6 +77,7 @@ def test_create_server_configuration_file(clean_working_directory: Path) -> None
         username="test_user",
         password="test_pass",  # noqa: S106 - literal test credential.
         host="test.server.com",
+        root="/remote/sollertia/root",
     )
 
     config_file = clean_working_directory / "configuration" / "server_configuration.yaml"
@@ -97,6 +98,7 @@ def test_get_server_configuration_user(clean_working_directory: Path) -> None:
         username="test_user",
         password="test_pass",  # noqa: S106 - literal test credential.
         host="test.server.com",
+        root="/remote/sollertia/root",
     )
 
     config = get_server_configuration()

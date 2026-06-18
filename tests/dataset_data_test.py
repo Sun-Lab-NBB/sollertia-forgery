@@ -1,11 +1,11 @@
-"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.shared_assets."""
+"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.cross_system."""
 
 from pathlib import Path
 
 import pytest
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-from sollertia_forgery.shared_assets import DatasetData, DatasetSession
+from sollertia_forgery.cross_system import DatasetData, DatasetSession
 
 
 # Tests for DatasetSession dataclass

@@ -13,7 +13,7 @@ from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba 
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import LogArchiveReader
 
-from ..shared_assets import BehaviorDataFiles
+from .metadata import BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path

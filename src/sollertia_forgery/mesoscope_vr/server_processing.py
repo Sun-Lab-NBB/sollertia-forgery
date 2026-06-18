@@ -18,12 +18,20 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .job import Job
-from .server import Server, get_remote_job_work_directory
-from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
-from ..shared_assets import DatasetSession, ProjectManifest, ProcessingPipelines, delay_terminal
-from .managing_interface import resolve_project_manifest
-from .server_configuration import get_server_configuration
+from ..cross_system import (
+    Job,
+    Server,
+    DatasetSession,
+    ProjectManifest,
+    ProcessingPipeline,
+    ProcessingPipelines,
+    delay_terminal,
+    execute_pipelines,
+    get_server_configuration,
+    resolve_project_manifest,
+    check_session_eligibility,
+    get_remote_job_work_directory,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -111,7 +119,7 @@ def _construct_behavior_processing_pipeline(
             ram=4,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Face camera processing job
@@ -130,7 +138,7 @@ def _construct_behavior_processing_pipeline(
             ram=90,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process video -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Body camera processing job
@@ -149,7 +157,7 @@ def _construct_behavior_processing_pipeline(
             ram=60,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process video -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Actor microcontroller data processing job
@@ -168,7 +176,7 @@ def _construct_behavior_processing_pipeline(
             ram=10,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Sensor microcontroller data processing job
@@ -187,7 +195,7 @@ def _construct_behavior_processing_pipeline(
             ram=60,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Encoder microcontroller data processing job
@@ -206,7 +214,7 @@ def _construct_behavior_processing_pipeline(
             ram=200,
             time=90,
         )
-        job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.
@@ -312,7 +320,7 @@ def _construct_cindra_processing_pipeline(
         ram=10,
         time=180,
     )
-    job.add_command(f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -b")
+    job.add_command(f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -b")
     stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Plane processing
@@ -337,7 +345,7 @@ def _construct_cindra_processing_pipeline(
             time=180,
         )
         job.add_command(
-            f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -p -t {plane}"
+            f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -p -t {plane}"  # noqa: E501
         )
         stage_2.append((job, working_directory, job_id))
 
@@ -361,7 +369,7 @@ def _construct_cindra_processing_pipeline(
         ram=30,
         time=180,
     )
-    job.add_command(f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -c")
+    job.add_command(f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -c")
     stage_3.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.

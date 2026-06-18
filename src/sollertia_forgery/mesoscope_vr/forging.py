@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from concurrent.futures import Future, ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import polars as pl
-from natsort_rs import natsort  # type: ignore[import-untyped]
+from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count, ensure_directory_exists
 from sollertia_shared_assets import (
     SessionData,
@@ -24,16 +24,16 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
-from .cindra import assemble_cindra_dataset
-from .runtime import assemble_runtime_dataset, _mask_non_run_experiment_data
-from .behavior import assemble_behavior_dataset
-from ..shared_assets import (
+from .metadata import TrialGeometry
+from .fluorescence import assemble_cindra_dataset
+from ..cross_system import (
     DatasetData,
     DatasetFiles,
-    TrialGeometry,
     DatasetSession,
     prepare_tracker,
 )
+from .runtime_dataset import assemble_runtime_dataset, _mask_non_run_experiment_data
+from .behavior_dataset import assemble_behavior_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -379,7 +379,7 @@ def _copy_animal_surgery_files(
         animal_sessions = sessions_by_animal[dataset_animal.animal]
 
         # Picks the most recent session for the animal via natural sort over the timestamped session names.
-        latest_session_name = natsort([path.name for path in animal_sessions])[-1]
+        latest_session_name = natsorted([path.name for path in animal_sessions])[-1]
         latest_session_path = next(path for path in animal_sessions if path.name == latest_session_name)
         session_data = SessionData.load(session_path=latest_session_path)
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from natsort_rs import natsort
+from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     Directories,
@@ -21,20 +21,24 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .job import Job
-from .server import Server, JobStatus, get_remote_job_work_directory
-from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
-from ..shared_assets import (
+from .forging import FORGING_JOB_NAME
+from ..cross_system import (
+    Job,
+    Server,
+    JobStatus,
     DatasetData,
     DatasetSession,
     ProjectManifest,
+    ProcessingPipeline,
     ProcessingPipelines,
     delay_timer,
     delay_terminal,
+    execute_pipelines,
+    get_server_configuration,
+    resolve_project_manifest,
+    check_session_eligibility,
+    get_remote_job_work_directory,
 )
-from ..forging.pipeline import FORGING_JOB_NAME
-from .managing_interface import resolve_project_manifest
-from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,7 +98,7 @@ def _define_dataset_remote(
         ram=4,
         time=10,
     )
-    job.add_command(f"sl-process define -dn {dataset_name} -pr {project_root} {session_specs}")
+    job.add_command(f"slf mesoscope dataset -dn {dataset_name} -pp {project_root} {session_specs}")
 
     # If configured to remove job logs after runtime, adds a command to delete the job's working directory.
     if not keep_job_logs:
@@ -182,7 +186,7 @@ def _construct_cindra_multiday_pipeline(
     session_path_args = " ".join(f"-sp {path}" for path in session_paths)
 
     # Determines the main session (first after natural sort) for tracker storage.
-    sorted_sessions = natsort(sessions)
+    sorted_sessions = natsorted(sessions)
     main_session = sorted_sessions[0]
     main_session_path = project_root.joinpath(animal, main_session)
     # Cindra writes multi-recording output to ``processed_data/cindra/multi_recording/<dataset_name>/``. The
@@ -230,7 +234,7 @@ def _construct_cindra_multiday_pipeline(
         ram=80,
         time=180,
     )
-    job.add_command(f"cindra run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -d")
+    job.add_command(f"slf mesoscope dataset -i {configuration_path} {session_path_args} -id {job_id} -d")
     stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Across-day-tracked cell fluorescence extraction.
@@ -255,7 +259,7 @@ def _construct_cindra_multiday_pipeline(
             time=180,
         )
         job.add_command(
-            f"cindra run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -e -t {session}"
+            f"slf mesoscope dataset -i {configuration_path} {session_path_args} -id {job_id} -e -t {session}"
         )
         stage_2.append((job, working_directory, job_id))
 
@@ -343,7 +347,7 @@ def _construct_data_assembly_pipeline(
             ram=32,
             time=60,
         )
-        job.add_command(f"sl-process assemble -dp {remote_dataset_path} -pr {project_root} -id {job_id}")
+        job.add_command(f"slf mesoscope dataset -dn {remote_dataset_path.name} -pp {project_root} -id {job_id}")
         stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.

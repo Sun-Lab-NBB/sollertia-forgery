@@ -47,10 +47,15 @@ dependencies = [
     "ataraxis-data-structures>=6,<7",
     "sollertia-shared-assets>=9,<10",
 
+    # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
+    "ataraxis-video-system>=4,<5",
+    "ataraxis-communication-interface>=6,<7",
+    "cindra>=1,<2",
+
     # Data Processing
     "polars>=1,<2",
     "numpy>=2,<3",
-    "numba>=0.63,<1",
+    "numba>=0.64,<1",
 
     # Remote Execution
     "paramiko>=4,<5",
@@ -60,7 +65,7 @@ dependencies = [
 
     # Utilities
     "filelock>=3,<4",
-    "natsort-rs>=0,<1",
+    "natsort>=8,<9",
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
@@ -72,11 +77,10 @@ dependencies = [
 Homepage = "https://github.com/Sun-Lab-NBB/sollertia-forgery"
 Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 
-# CLI interfaces.
+# CLI interface. A single root command exposes the system-agnostic management commands, the agentic MCP server,
+# the remote project-workflow orchestration group, and the system-specific 'mesoscope' command group.
 [project.scripts]
-sl-project = "sollertia_forgery.interfaces.project:project_cli"
-sl-process = "sollertia_forgery.interfaces.process:process_cli"
-sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
+slf = "sollertia_forgery.interfaces.entry_points:slf_cli"
 
 # Development dependencies (PEP 735). Not published to PyPI.
 [dependency-groups]
@@ -181,7 +185,16 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["sollertia_forgery.server.*"]
+module = [
+    "sollertia_forgery.cross_system.server",
+    "sollertia_forgery.cross_system.job",
+    "sollertia_forgery.cross_system.remote_pipeline",
+    "sollertia_forgery.cross_system.remote_management",
+    "sollertia_forgery.cross_system.server_configuration",
+    "sollertia_forgery.cross_system.server_mcp_tools",
+    "sollertia_forgery.mesoscope_vr.server_processing",
+    "sollertia_forgery.mesoscope_vr.server_forging",
+]
 ignore_errors = true
 
 # Suppresses missing-stub warnings for third-party libraries that do not ship type information.
@@ -193,7 +206,7 @@ ignore_missing_imports = true
 # inside a live MCP server or CLI invocation.
 [tool.coverage.run]
 omit = [
-    "*/mcp_tools.py",
+    "*mcp_tools.py",
     "*/interfaces/*.py",
 ]
 

@@ -1,5 +1,7 @@
-"""Provides the main behavior processing pipeline entry point that discovers available jobs, validates the session,
-constructs the processing graph, and executes jobs following the same pattern as axvs, axci, and cindra pipelines.
+"""Provides the end-to-end behavior processing pipeline entry point. Extracts the raw microcontroller log archives
+in-process via the ataraxis-communication-interface binding, discovers the resulting runtime and microcontroller
+module jobs, validates the session, and executes the jobs following the same pattern as the axvs, axci, and cindra
+pipelines. Camera-timestamp extraction is handled separately by the video pipeline.
 """
 
 from __future__ import annotations
@@ -19,9 +21,8 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from .camera import find_camera_feathers, extract_camera_source_id, process_camera_timestamps
 from .runtime import RUNTIME_SOURCE_ID, find_log_archive, process_runtime_data
-from ..shared_assets import prepare_tracker
+from ..cross_system import prepare_tracker
 from .microcontrollers import (
     is_module_eligible,
     find_module_feathers,
@@ -48,10 +49,8 @@ class BehaviorJobNames(StrEnum):
 
     RUNTIME = "runtime_processing"
     """Extracts acquisition system and runtime task data from system log NPZ archives."""
-    CAMERA = "camera_processing"
-    """Processes pre-extracted camera timestamp feather files."""
     MICROCONTROLLER = "microcontroller_processing"
-    """Processes pre-extracted microcontroller module feather files."""
+    """Parses the microcontroller module feather files extracted in-process from the raw log archives."""
 
 
 def run_behavior_processing_pipeline(
@@ -110,6 +109,11 @@ def run_behavior_processing_pipeline(
 
     # Loads experiment configuration for experiment sessions (required for runtime data extraction).
     experiment_configuration = _load_experiment_configuration(session=session)
+
+    # Extracts the raw microcontroller log archives into per-module feather files in-process via axci. This makes
+    # the behavior pipeline end-to-end (raw .npz logs -> module feathers -> parsed behavior feathers) instead of
+    # depending on a separate, pre-run extraction step.
+    _extract_microcontroller_logs(session=session, workers=workers, display_progress=display_progress)
 
     # Discovers all available processing jobs based on files present in the session directory. The mapping
     # caches the feather file already resolved for each job, so the execution helpers can skip a second glob
@@ -273,6 +277,62 @@ def _load_experiment_configuration(session: SessionData) -> MesoscopeExperimentC
     return MesoscopeExperimentConfiguration.from_yaml(file_path=experiment_configuration_path)
 
 
+def _extract_microcontroller_logs(
+    session: SessionData,
+    *,
+    workers: int,
+    display_progress: bool,
+) -> None:
+    """Extracts the raw microcontroller log archives into per-module feather files via ataraxis-communication-interface.
+
+    Notes:
+        Runs the axci log-processing binding in-process, reading the raw ``{controller_id}_log.npz`` archives from
+        the session's raw behavior data directory and writing per-module feather files into the canonical
+        ``processed_data/microcontroller_data`` directory consumed by the downstream module-parsing jobs. The
+        extraction is driven by the session's ``extraction_configuration.yaml``, which is authored during
+        acquisition and encodes the per-controller event codes to extract. The ataraxis-communication-interface
+        import is deferred to call time so importing this module does not require the acquisition library.
+
+        The extraction configuration is resolved from the session's raw behavior data directory (alongside the
+        raw log archives). Confirm this location matches the acquisition convention on the target machine.
+
+    Args:
+        session: The loaded SessionData instance.
+        workers: The number of worker processes the extraction binding may use. Set to -1 to use all available
+            CPU cores (minus reserved cores).
+        display_progress: Determines whether to display a progress bar during extraction.
+
+    Raises:
+        FileNotFoundError: If the extraction configuration is not present at the session's canonical location.
+    """
+    # Deferred import: the acquisition binding is only required when behavior processing actually runs.
+    from ataraxis_communication_interface import (  # noqa: PLC0415
+        EXTRACTION_CONFIGURATION_FILENAME,
+        run_log_processing_pipeline,
+    )
+
+    log_directory = session.raw_data.behavior_data_path
+    config_path = log_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
+    if not config_path.is_file():
+        message = (
+            f"Unable to extract microcontroller logs for session '{session.session_name}'. No extraction "
+            f"configuration was found at '{config_path}'. The extraction configuration is authored during "
+            f"acquisition and defines the per-controller event codes the log-processing pipeline extracts."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    output_directory = session.processed_data.microcontroller_data_path
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    run_log_processing_pipeline(
+        log_directory=log_directory,
+        output_directory=output_directory,
+        config=config_path,
+        workers=workers,
+        display_progress=display_progress,
+    )
+
+
 def _discover_jobs(
     session: SessionData,
     hardware_state: MesoscopeHardwareState,
@@ -280,17 +340,17 @@ def _discover_jobs(
     """Discovers all available processing jobs based on files present in the session directories.
 
     Args:
-        session: The loaded SessionData instance. Canonical subdirectories (``raw_behavior_data_path``,
-            ``camera_timestamps_path``, ``microcontroller_data_path``) are queried directly to avoid
-            recursive project scans.
+        session: The loaded SessionData instance. Canonical subdirectories (``behavior_data_path`` for the raw
+            runtime archive and ``microcontroller_data_path`` for the extracted module feathers) are queried
+            directly to avoid recursive project scans.
         hardware_state: The hardware configuration used to filter microcontroller modules by eligibility.
 
     Returns:
         An ordered mapping from each (job_name, specifier) tuple to the absolute input file path resolved
         during discovery. Insertion order is preserved, so iterating ``.keys()`` yields the jobs in the same
-        order they were discovered (runtime archive first, then camera feathers, then microcontroller module
-        feathers). Caching the resolved path on the mapping lets the execution helpers reuse it instead of
-        running a second recursive glob over the session directory.
+        order they were discovered (runtime archive first, then microcontroller module feathers). Caching the
+        resolved path on the mapping lets the execution helpers reuse it instead of running a second recursive
+        glob over the session directory.
     """
     job_paths: dict[tuple[str, str], Path] = {}
 
@@ -300,15 +360,7 @@ def _discover_jobs(
     if archive_path is not None:
         job_paths[(BehaviorJobNames.RUNTIME, RUNTIME_SOURCE_ID)] = archive_path
 
-    # Discovers camera processing jobs from pre-extracted camera timestamp feather files.
-    job_paths.update(
-        {
-            (BehaviorJobNames.CAMERA, str(extract_camera_source_id(feather_path=feather_path))): feather_path
-            for feather_path in find_camera_feathers(data_directory=session.processed_data.camera_timestamps_path)
-        }
-    )
-
-    # Discovers microcontroller processing jobs from pre-extracted module feather files, filtering out modules
+    # Discovers microcontroller processing jobs from the extracted module feather files, filtering out modules
     # whose hardware parameters are not configured.
     for feather_path in find_module_feathers(data_directory=session.processed_data.microcontroller_data_path):
         controller_id, module_type, module_id = parse_module_feather_name(feather_path=feather_path)
@@ -522,9 +574,6 @@ def _run_job(
             output_directory=output_directory,
             experiment_configuration=experiment_configuration,
         )
-
-    elif job_name == BehaviorJobNames.CAMERA:
-        process_camera_timestamps(feather_path=input_path, output_directory=output_directory)
 
     elif job_name == BehaviorJobNames.MICROCONTROLLER:
         process_microcontroller_data(

@@ -4,15 +4,15 @@ import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import filter_sessions, get_working_directory
 
-from ..server import (
+from ..cross_system import (
     Server,
-    forge_dataset,
+    DatasetSession,
+    ProjectManifest,
     manage_project_data,
-    process_project_data,
     get_server_configuration,
     resolve_project_manifest,
 )
-from ..shared_assets import DatasetSession, ProjectManifest
+from ..mesoscope_vr import forge_dataset, process_project_data
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

@@ -1,6 +1,6 @@
 """Provides assets for maintaining the Sollertia platform analysis dataset data hierarchy across all processing
-machines. The hierarchy is written by the forging pipeline and read by the analysis pipelines, so the schema lives
-under shared_assets.
+machines. The hierarchy is written by the forging pipeline and read by the analysis pipelines, so the system-agnostic
+hierarchy schema lives under cross_system.
 """
 
 from __future__ import annotations
@@ -13,75 +13,54 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import RawDataFiles, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import YamlConfig
 
-from .metadata import DatasetFiles
 
-
-class DatasetColumn(StrEnum):
-    """Defines every column that can appear in the assembled session data feather produced by the forging pipeline.
+class DatasetFiles(StrEnum):
+    """Enumerates the canonical filenames written into a forged dataset hierarchy at session and animal granularity.
 
     Notes:
-        Members covering optional columns (`REINFORCING_GUIDED`, `AVERSIVE_GUIDED`) are present in the feather only
-        when the corresponding upstream events were recorded. All other members are guaranteed to exist in every
-        forged session.
+        Centralizes filenames consumed by both the forging and analysis pipelines so new artifacts can be added
+        in one place and referenced symbolically from path-resolution properties on DatasetSession and
+        DatasetAnimal. These filenames describe the system-agnostic dataset hierarchy contract, so they live
+        alongside the hierarchy classes in cross_system.
     """
 
-    # Behavior alignment columns (from forging.behavior).
-    TIME_US = "time_us"
-    """Microsecond-precision sample timestamps from the acquisition reference clock."""
-    ELAPSED_MINUTES = "elapsed_minutes"
-    """Elapsed session time in minutes since the first sample."""
-    BRAKE = "brake"
-    """Wheel brake engagement at each sample."""
-    SCREENS = "screens"
-    """Display panel state at each sample."""
-    TORQUE_N_CM = "torque_N_cm"
-    """Wheel torque in N·cm at each sample. Forced to zero during 'run' periods upstream."""
-    DISTANCE_CM = "distance_cm"
-    """Cumulative distance traveled by the animal in centimeters at each sample."""
-    SPEED_CM_S = "speed_cm_s"
-    """Animal running speed in cm/s at each sample."""
-    LICK = "lick"
-    """Lick sensor state at each sample."""
-    WATER_UL = "water_uL"
-    """Per-sample water reward delivery in microliters."""
-    REWARD = "reward"
-    """Reward event flag at each sample."""
-    SYSTEM_STATE = "system_state"
-    """Acquisition system state at each sample (idle, rest, run)."""
-
-    # Runtime/experiment columns (from forging.runtime).
-    TRIAL = "trial"
-    """One-based trial identifier at each sample. 255 marks samples outside any trial."""
-    TRIAL_TYPE = "trial_type"
-    """Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."""
-    CUE = "cue"
-    """Active virtual reality cue identifier at each sample."""
-    IN_TRIGGER_ZONE = "in_trigger_zone"
-    """Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."""
-    RUNTIME_STATE = "runtime_state"
-    """Experiment runtime state label at each sample."""
-    REINFORCING_GUIDED = "reinforcing_guided"
-    """Optional. Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded."""
-    AVERSIVE_GUIDED = "aversive_guided"
-    """Optional. Aversive guidance state at each sample. Present only when aversive guidance was recorded."""
-
-    # Cindra fluorescence columns (from forging.cindra).
-    SINGLE_DAY_CELL_FLUORESCENCE = "single_day_cell_fluorescence"
-    """Single-recording raw cell fluorescence trace per ROI."""
-    SINGLE_DAY_NEUROPIL_FLUORESCENCE = "single_day_neuropil_fluorescence"
-    """Single-recording raw neuropil fluorescence trace per ROI."""
-    SINGLE_DAY_SUBTRACTED_FLUORESCENCE = "single_day_subtracted_fluorescence"
-    """Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence."""
-    SINGLE_DAY_SPIKES = "single_day_spikes"
-    """Single-recording OASIS-deconvolved spike rates per ROI."""
-    MULTI_DAY_CELL_FLUORESCENCE = "multi_day_cell_fluorescence"
-    """Multi-recording raw cell fluorescence trace per ROI."""
-    MULTI_DAY_NEUROPIL_FLUORESCENCE = "multi_day_neuropil_fluorescence"
-    """Multi-recording raw neuropil fluorescence trace per ROI."""
-    MULTI_DAY_SUBTRACTED_FLUORESCENCE = "multi_day_subtracted_fluorescence"
-    """Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days."""
-    MULTI_DAY_SPIKES = "multi_day_spikes"
-    """Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days."""
+    DATA = "data.feather"
+    """The assembled per-session data feather written by the forging pipeline and read by every analysis pipeline."""
+    TRIAL_GEOMETRY = "trial_geometry.yaml"
+    """The per-session trial geometry data file written by the forging pipeline and read by the analysis pipelines
+    that need canonical track lengths and trigger-zone boundaries."""
+    BLEACHING_SUMMARY = "bleaching.yaml"
+    """The per-animal chronic photobleaching evaluation summary YAML produced by the bleaching evaluation pipeline."""
+    BLEACHING_TABLE = "bleaching.feather"
+    """The per-animal chronic photobleaching per-session table feather paired with ``BLEACHING_SUMMARY``."""
+    TUNING_SUMMARY = "tuning_summary.yaml"
+    """The per-session tuning summary YAML produced by the tuning pipeline. Carries the place- and reward-cell
+    detection configurations, geometry / sampling scalars, and the reward-mixture-model fit."""
+    TUNING_CELLS_TABLE = "tuning_cells.feather"
+    """The per-session tuning per-cell table feather paired with ``TUNING_SUMMARY``. Holds one row per cell with
+    place-field, reward-cell, and stability metrics."""
+    SCE_SUMMARY = "sce_summary.yaml"
+    """The per-session SCE summary YAML produced by the SCE pipeline. Carries the SCE detection configuration and
+    session-level period / event totals."""
+    SCE_CELLS_TABLE = "sce_cells.feather"
+    """The per-session SCE per-cell participation feather paired with ``SCE_SUMMARY``. Holds one row per cell with
+    cross-period SCE participation counts, rates, p-values, and the recruitment flag."""
+    SCE_PERIODS_TABLE = "sce_periods.feather"
+    """The per-session SCE detection state feather paired with ``SCE_SUMMARY``. Holds one row per detected
+    stationary period and a sparse representation of the SCE onset matrix."""
+    DRIFT_SUMMARY = "drift.yaml"
+    """The per-animal cross-session tuning-drift summary YAML produced by the drift evaluation pipeline.
+    Carries the drift configuration, lag-binned population-vector correlation fit, and animal-level
+    persistent-cell counts."""
+    DRIFT_CELLS_TABLE = "drift_cells.feather"
+    """The per-animal drift per-cell feather paired with ``DRIFT_SUMMARY``. Holds one row per multi-day-registered
+    cell with classification trajectories, persistence flags, mean rate-map correlation, peak / COM shift
+    statistics, Fisher-combined random-remapping p-value, bleaching-baseline slope, and composite
+    ``is_stably_tuned_*`` flags."""
+    DRIFT_PAIRS_TABLE = "drift_pairs.feather"
+    """The per-animal drift per-pair feather paired with ``DRIFT_SUMMARY``. Holds one row per ordered
+    (session_a, session_b) session pair with the population-vector correlation, recurrence counts, lag in
+    days, and per-cell rate-map-r / peak-shift / COM-shift list columns."""
 
 
 @dataclass(frozen=True, slots=True)

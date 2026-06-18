@@ -20,14 +20,11 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete
 
 from .job import Job
 from .server import Server, JobStatus, get_remote_job_work_directory
-from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
-from ..shared_assets import (
-    DatasetSession,
-    ProjectManifest,
-    ProcessingPipelines,
-    delay_timer,
-    delay_terminal,
-)
+from .pipelines import ProcessingPipelines
+from .utilities import delay_timer, delay_terminal
+from .dataset_data import DatasetSession
+from .remote_pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from .project_manifest import ProjectManifest
 from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
@@ -147,7 +144,7 @@ def _generate_remote_manifest(
     )
 
     # Configures the job to call the appropriate CLI command.
-    job.add_command(f"sl-process manifest -pp {project_storage_root}")
+    job.add_command(f"slf manifest generate -pp {project_storage_root}")
 
     # If configured to remove job logs after runtime, adds a command to delete the job's working directory.
     if not keep_job_logs:
@@ -335,8 +332,8 @@ def _construct_checksum_resolution_pipeline(
         time=40,
     )
 
-    # Instructs the server to execute the target processing pipeline via the sl-process CLI.
-    job.add_command(f"sl-process checksum -sp {remote_session_path} {'-rc' if recreate_checksum else ''}")
+    # Instructs the server to execute the target processing pipeline via the slf CLI.
+    job.add_command(f"slf checksum -sp {remote_session_path} {'-rc' if recreate_checksum else ''}")
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = remote_session_path.joinpath("tracking_data", ProcessingTrackers.CHECKSUM)

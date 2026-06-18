@@ -20,12 +20,12 @@ from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import Directories, SessionData, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .pipeline import (
+from .processing import (
     discover_behavior_jobs,
     run_behavior_processing_pipeline,
 )
 from ..interfaces import mcp
-from ..shared_assets import (
+from ..cross_system import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,

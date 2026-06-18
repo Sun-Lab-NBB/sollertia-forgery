@@ -12,7 +12,7 @@ import polars as pl
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
-from ..shared_assets import BehaviorDataFiles
+from .metadata import BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path

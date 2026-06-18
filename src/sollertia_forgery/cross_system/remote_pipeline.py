@@ -16,7 +16,8 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .server import Server, JobStatus
-from ..shared_assets import ProcessingPipelines, delay_timer
+from .pipelines import ProcessingPipelines
+from .utilities import delay_timer
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,7 +26,7 @@ if TYPE_CHECKING:
 
     # noinspection PyUnusedImports
     from .job import Job
-    from ..shared_assets import ProjectManifest
+    from .project_manifest import ProjectManifest
 
 # Type alias for the jobs' dictionary to improve readability. Each stage maps to a tuple of (Job, remote log directory,
 # tracker job ID) triples. The tracker job ID is the identifier the remote worker uses to update the shared tracker, so

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from typing import Literal
 
-from ..forging import mcp_tools as _forging_mcp_tools  # noqa: F401
-from ..managing import mcp_tools as _managing_mcp_tools  # noqa: F401
-from ..processing import mcp_tools as _processing_mcp_tools  # noqa: F401
 from .mcp_instance import mcp
-from ..shared_assets import mcp_tools as _shared_mcp_tools  # noqa: F401
+from ..cross_system import (
+    mcp_tools as _cross_system_mcp_tools,  # noqa: F401
+    server_mcp_tools as _server_mcp_tools,  # noqa: F401
+)
+from ..mesoscope_vr import (
+    forging_mcp_tools as _forging_mcp_tools,  # noqa: F401
+    processing_mcp_tools as _processing_mcp_tools,  # noqa: F401
+)
 
 
 def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None:

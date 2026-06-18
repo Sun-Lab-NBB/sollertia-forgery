@@ -13,7 +13,7 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import RawDataFiles, MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
 
-from ..shared_assets import BehaviorDataFiles
+from .metadata import BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path

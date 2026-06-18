@@ -4,7 +4,7 @@ import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import (
+from ..cross_system import (
     Server,
     discover_project_data,
     get_server_configuration,
@@ -127,8 +127,8 @@ def server_cli() -> None:
 
     This CLI group provides commands for managing non-standardized server interactions, including authoring the
     server access configuration, discovering project sessions, and viewing SLURM job information. All data
-    workflow interactions available through sl-project and sl-execute command groups must be carried out through those
-    groups, rather than the commands exposed by this CLI.
+    workflow interactions available through the 'slf manifest' and 'slf execute' command groups must be carried out
+    through those groups, rather than the commands exposed by this CLI.
     """
 
 
