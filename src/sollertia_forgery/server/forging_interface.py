@@ -5,6 +5,8 @@ Notes:
     remote compute server and assume the server is properly configured to execute all forging tasks.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from natsort_rs import natsort
@@ -12,29 +14,27 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     Directories,
     SessionTypes,
-    SessionMetadata,
-    ProcessingStatus,
-    ProcessingTracker,
     AcquisitionSystems,
     ProcessingTrackers,
-    ProcessingPipelines,
+    filter_sessions,
     get_working_directory,
 )
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from . import (
-    Job,
-    Server,
-    JobStatus,
-    ProcessingPipeline,
-    get_remote_job_work_directory,
-    get_server_configuration,
+from .job import Job
+from .server import Server, JobStatus, get_remote_job_work_directory
+from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from ..shared_assets import (
+    DatasetData,
+    DatasetSession,
+    ProjectManifest,
+    ProcessingPipelines,
+    delay_timer,
+    delay_terminal,
 )
-from sollertia_shared_assets import filter_sessions
-
-from .pipeline import execute_pipelines, check_session_eligibility
-from ..shared_assets import DatasetData, ProjectManifest, delay_timer, delay_terminal
 from ..forging.pipeline import FORGING_JOB_NAME
 from .managing_interface import resolve_project_manifest
+from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 def _define_dataset_remote(
     project: str,
     dataset_name: str,
-    filtered_sessions: set[SessionMetadata],
+    filtered_sessions: set[DatasetSession],
     server: Server,
     *,
     keep_job_logs: bool = False,
@@ -57,7 +57,7 @@ def _define_dataset_remote(
     Args:
         project: The name of the project from which the dataset's sessions originate.
         dataset_name: The unique name for the dataset to create.
-        filtered_sessions: The set of SessionMetadata instances representing the sessions to include in the dataset.
+        filtered_sessions: The set of DatasetSession instances representing the sessions to include in the dataset.
         server: The Server class instance that manages access to the remote server.
         keep_job_logs: Determines whether to keep completed job logs on the server.
 
@@ -71,7 +71,7 @@ def _define_dataset_remote(
     local_working_directory = get_working_directory()
 
     # Resolves paths. Note, the project root serves as both the session data root and the datasets root.
-    project_root = server.user_working_root.joinpath(project)
+    project_root = server.root.joinpath(project)
     remote_dataset_path = project_root.joinpath(dataset_name)
 
     # Constructs the session specifications for the CLI command.
@@ -80,7 +80,7 @@ def _define_dataset_remote(
     # Resolves the job name and working directory.
     job_name = f"{dataset_name}_definition"
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING
+        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING, base_path=project_root
     )
 
     # Creates the job.
@@ -175,7 +175,7 @@ def _construct_cindra_multiday_pipeline(
     configuration_path = server.cindra_configurations_directory.joinpath(configuration_file)
 
     # Resolves full session paths using the project structure.
-    project_root = server.user_working_root.joinpath(project)
+    project_root = server.root.joinpath(project)
     session_paths = [project_root.joinpath(animal, session) for session in sessions]
 
     # Builds CLI session path arguments for the new cindra interface.
@@ -197,7 +197,7 @@ def _construct_cindra_multiday_pipeline(
         exclusion_reason = check_session_eligibility(
             manifest=manifest,
             session=session,
-            pipeline=ProcessingPipelines.MULTIDAY,
+            pipeline=ProcessingPipelines.CINDRA_MULTI_RECORDING,
             server=server,
             supported_systems={AcquisitionSystems.MESOSCOPE_VR},
             supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
@@ -213,9 +213,12 @@ def _construct_cindra_multiday_pipeline(
 
     # Stage 1: Multi-day cell tracking (discovery).
     job_name = f"{dataset_name}_cindra_discovery"
-    job_id = ProcessingTracker.generate_job_id(session_path=main_session_multiday, job_name=job_name)
+    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(main_session_multiday))
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
+        server=server,
+        job_name=job_name,
+        pipeline_name=ProcessingPipelines.CINDRA_MULTI_RECORDING,
+        base_path=main_session_multiday,
     )
     job = Job(
         job_name=job_name,
@@ -228,14 +231,17 @@ def _construct_cindra_multiday_pipeline(
         time=180,
     )
     job.add_command(f"cindra run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -d")
-    stage_1.append((job, working_directory))
+    stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Across-day-tracked cell fluorescence extraction.
     for session in sessions:
         job_name = f"{dataset_name}_cindra_extraction_session_{session}"
-        job_id = ProcessingTracker.generate_job_id(session_path=main_session_multiday, job_name=job_name)
+        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(main_session_multiday))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.MULTIDAY
+            server=server,
+            job_name=job_name,
+            pipeline_name=ProcessingPipelines.CINDRA_MULTI_RECORDING,
+            base_path=main_session_multiday,
         )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
@@ -251,7 +257,7 @@ def _construct_cindra_multiday_pipeline(
         job.add_command(
             f"cindra run -i {configuration_path} -w -1 multi-day {session_path_args} -id {job_id} -e -t {session}"
         )
-        stage_2.append((job, working_directory))
+        stage_2.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files (now in main session's multiday folder).
     remote_tracker_path = main_session_multiday.joinpath("multiday_tracker.json")
@@ -268,7 +274,7 @@ def _construct_cindra_multiday_pipeline(
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
-        pipeline=ProcessingPipelines.MULTIDAY,
+        pipeline=ProcessingPipelines.CINDRA_MULTI_RECORDING,
         server=server,
         data_path=main_session_multiday,
         jobs={1: tuple(stage_1), 2: tuple(stage_2)},
@@ -307,8 +313,8 @@ def _construct_data_assembly_pipeline(
     local_working_directory = get_working_directory()
 
     # Resolves dataset and project paths.
-    remote_dataset_path = server.user_working_root.joinpath(project, dataset.name)
-    project_root = server.user_working_root.joinpath(project)
+    remote_dataset_path = server.root.joinpath(project, dataset.name)
+    project_root = server.root.joinpath(project)
 
     # Collects the session names from the dataset.
     session_names = [s.session for s in dataset.sessions]
@@ -324,7 +330,7 @@ def _construct_data_assembly_pipeline(
         job_name = f"{dataset.name}_{ProcessingPipelines.FORGING}_session_{session}"
         job_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.FORGING, base_path=remote_dataset_path
         )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
@@ -338,7 +344,7 @@ def _construct_data_assembly_pipeline(
             time=60,
         )
         job.add_command(f"sl-process assemble -dp {remote_dataset_path} -pr {project_root} -id {job_id}")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.
     remote_tracker_path = remote_dataset_path.joinpath(ProcessingTrackers.FORGING)
@@ -362,7 +368,7 @@ def _construct_data_assembly_pipeline(
 def forge_dataset(
     manifest_path: Path,
     project: str,
-    sessions: tuple[SessionMetadata, ...],
+    sessions: tuple[DatasetSession, ...],
     dataset_name: str,
     *,
     start_date: str | None = None,
@@ -380,7 +386,7 @@ def forge_dataset(
 ) -> None:
     """Resolves and executes the necessary dataset forging pipelines for the target project.
 
-    This function acts as the main entry point for all dataset forging in the Sollertia. As part of its runtime, it first
+    This function acts as the main entry point for all dataset forging. As part of its runtime, it first
     defines the dataset by filtering the available sessions and creating the dataset hierarchy structure. Then, it
     executes the requested processing pipelines on the remote compute server by iteratively submitting batches of
     remote compute jobs to the server. The session type and acquisition system are derived automatically from the
@@ -389,7 +395,7 @@ def forge_dataset(
     Args:
         manifest_path: The path to the project's manifest .feather file.
         project: The name of the project whose data to forge into a dataset.
-        sessions: A tuple of SessionMetadata instances defining the project's sessions available for dataset creation.
+        sessions: A tuple of DatasetSession instances defining the project's sessions available for dataset creation.
         dataset_name: The unique name to assign to the created dataset.
         start_date: The start date for the date range filter. Sessions recorded on or after this date are included.
         end_date: The end date for the date range filter. Sessions recorded on or before this date are included.
@@ -437,7 +443,7 @@ def forge_dataset(
 
     # Applies the filtering rules to the provided sessions. sollertia-shared-assets' filter_sessions
     # operates on plain (session_name, animal) tuples; the map rehydrates the filtered keys back to
-    # SessionMetadata.
+    # DatasetSession.
     session_map = {(session.session, session.animal): session for session in sessions}
     filtered_sessions = {
         session_map[key]

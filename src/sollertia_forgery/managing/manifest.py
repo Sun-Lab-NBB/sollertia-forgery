@@ -219,10 +219,14 @@ def generate_project_manifest(project_directory: Path) -> None:
 
                 # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
                 # canonical tracker paths exposed by SessionData.
-                cindra_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.cindra_single_recording_tracker_path)
+                cindra_tracker = _load_tracker_if_exists(
+                    tracker_path=session_data.processed_data.cindra_single_recording_tracker_path
+                )
                 manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
 
-                behavior_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.behavior_tracker_path)
+                behavior_tracker = _load_tracker_if_exists(
+                    tracker_path=session_data.processed_data.behavior_tracker_path
+                )
                 manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
 
                 video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)

@@ -5,7 +5,7 @@ from pathlib import Path
 import click
 
 from ..forging import run_forging_pipeline
-from ..managing import resolve_checksum, transfer_session, generate_project_manifest
+from ..managing import resolve_checksum, generate_project_manifest
 from ..processing import run_behavior_processing_pipeline
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -58,45 +58,6 @@ def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -
     resolve_checksum(
         session_path=session_path,
         regenerate_checksum=regenerate_checksum,
-    )
-
-
-@process_cli.command("transfer")
-@click.option(
-    "-sp",
-    "--source-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The absolute path to the transferred session's source data directory.",
-)
-@click.option(
-    "-dp",
-    "--destination-path",
-    type=click.Path(file_okay=False, dir_okay=True, path_type=Path),
-    required=False,
-    help="The absolute path to the destination directory where to transfer the session's data.",
-)
-@click.option(
-    "-rm",
-    "--remove-source",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to delete the source session directory after completing the transfer. If the destination "
-        "path is not provided, this command deletes the source session directory without transferring."
-    ),
-)
-def transfer_session_data(source_path: Path, destination_path: Path | None, *, remove_source: bool) -> None:
-    """Transfers the session's data from source to destination or deletes the source session.
-
-    This command can be used to move session's data between storage locations or to delete the session data that is no
-    longer needed.
-    """
-    transfer_session(
-        source_path=source_path,
-        destination_path=destination_path,
-        remove_source=remove_source,
     )
 
 

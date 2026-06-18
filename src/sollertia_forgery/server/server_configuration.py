@@ -2,12 +2,17 @@
 server.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
-from pathlib import Path
 
 from ataraxis_base_utilities import LogLevel, console
-from ataraxis_data_structures import YamlConfig
 from sollertia_shared_assets import get_working_directory
+from ataraxis_data_structures import YamlConfig
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _SERVER_CONFIG_FILENAME: str = "server_configuration.yaml"
 """Canonical filename for the ServerConfiguration YAML stored under the working directory's configuration
@@ -20,7 +25,7 @@ configuration assets."""
 
 @dataclass
 class ServerConfiguration(YamlConfig):
-    """Defines the access credentials for the Sollertia platform remote compute server."""
+    """Defines the access credentials and data root for the Sollertia platform remote compute server."""
 
     username: str = ""
     """The username to use for server authentication."""
@@ -28,12 +33,16 @@ class ServerConfiguration(YamlConfig):
     """The password to use for server authentication."""
     host: str = ""
     """The hostname or IP address of the server to connect to."""
+    root: str = ""
+    """The absolute path, on the remote compute server, to the single root directory that stores all Sollertia data
+    (raw and processed). All server-side data operations resolve their paths relative to this root."""
 
 
 def create_server_configuration_file(
     username: str,
     password: str,
     host: str,
+    root: str,
 ) -> None:
     """Creates the .YAML configuration file for the Sollertia platform compute server and configures the local machine
     (PC) to use this file for all future server-related calls.
@@ -42,12 +51,14 @@ def create_server_configuration_file(
         username: The username to use for server authentication.
         password: The password to use for server authentication.
         host: The hostname or IP address of the server to connect to.
+        root: The absolute path, on the remote compute server, to the root directory that stores all Sollertia data.
     """
     output_directory = get_working_directory().joinpath(_CONFIGURATION_DIR)
     ServerConfiguration(
         username=username,
         password=password,
         host=host,
+        root=root,
     ).to_yaml(file_path=output_directory.joinpath(_SERVER_CONFIG_FILENAME))
     console.echo(message="Server configuration file: Created.", level=LogLevel.SUCCESS)
 
@@ -77,10 +88,10 @@ def get_server_configuration() -> ServerConfiguration:
 
     configuration = ServerConfiguration.from_yaml(file_path=config_path)
 
-    if not all((configuration.username, configuration.password, configuration.host)):
+    if not all((configuration.username, configuration.password, configuration.host, configuration.root)):
         message = (
             "Unable to load the server configuration. The 'server_configuration.yaml' file appears to be unconfigured "
-            "or contains placeholder values for one or more required fields (username, password, host). Call the "
+            "or contains placeholder values for one or more required fields (username, password, host, root). Call the "
             "'sl-server configure' CLI command to reconfigure the server access credentials."
         )
         console.error(message=message, error=ValueError)

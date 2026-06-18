@@ -45,7 +45,7 @@ dependencies = [
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
-    "sollertia-shared-assets>=8.0.0rc7,<9",
+    "sollertia-shared-assets>=9,<10",
 
     # Data Processing
     "polars>=1,<2",
@@ -110,7 +110,7 @@ target-version = "py314"  # Targets the lowest supported version of python
 src = ["src"]             # The name of the root source code directory
 
 # Excludes 'service' .py files, such as the sphinx configuration file, from linting.
-extend-exclude = ["conf.py", "src/sollertia_forgery/server"]
+extend-exclude = ["conf.py"]
 
 # Checks for all potential violations and uses the exclusions below to target-disable specific ones.
 lint.select = ["ALL"]

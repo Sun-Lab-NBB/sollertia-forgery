@@ -7,6 +7,7 @@ from .metadata import (
     ProjectManifest,
     BehaviorDataFiles,
     TrialGeometryEntry,
+    ProcessingPipelines,
 )
 from .utilities import delay_timer, delay_terminal
 from .dataset_data import (
@@ -40,6 +41,7 @@ __all__ = [
     "DatasetSession",
     "JobExecutionState",
     "PendingJob",
+    "ProcessingPipelines",
     "ProjectManifest",
     "StimulusMode",
     "TrialGeometry",

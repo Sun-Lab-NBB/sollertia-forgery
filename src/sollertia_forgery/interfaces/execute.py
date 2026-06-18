@@ -1,4 +1,4 @@
-"""Provides CLIs for executing management, processing, and analysis workflows on adopted project sessions."""
+"""Provides CLIs for executing management, processing, and forging workflows on a project's sessions."""
 
 import click
 from ataraxis_base_utilities import console
@@ -111,7 +111,7 @@ def execute_cli(
     exclude_animal: tuple[str, ...],
     keep_job_logs: bool,
 ) -> None:
-    """Executes management, processing, and dataset formation workflows on the adopted project's sessions.
+    """Executes management, processing, and dataset formation workflows on the project's sessions.
 
     This CLI group functions as the entry-point for all data processing pipelines supported by the Sollertia data
     workflows. See the documentation for each of the workflow subgroups ('managing', 'processing', or 'forging') for
@@ -167,9 +167,9 @@ def execute_cli(
 
 @execute_cli.group("manage")
 def manage_cli() -> None:
-    """Manages adopted project sessions on the remote compute server.
+    """Manages the project's sessions on the remote compute server.
 
-    This command group provides the pipelines for managing the adopted session's data integrity and lifecycle.
+    This command group provides the pipeline for verifying and recomputing the project's session data checksums.
     """
 
 
@@ -206,30 +206,6 @@ def checksum_command(ctx: click.Context, *, recompute: bool) -> None:
         sessions=sessions,
         verify_checksum=not recompute,
         recompute_checksum=recompute,
-        delete_sessions=False,
-        keep_job_logs=keep_job_logs,
-    )
-
-
-# noinspection PyUnresolvedReferences
-@manage_cli.command("delete")
-@click.pass_context
-def delete_command(ctx: click.Context) -> None:
-    """Deletes the selected sessions from the user's working directory on the remote server."""
-    # Retrieves shared context data.
-    project = ctx.obj["project"]
-    manifest_path = ctx.obj["manifest_path"]
-    sessions = ctx.obj["sessions"]
-    keep_job_logs = ctx.obj["keep_job_logs"]
-
-    # Executes the deletion operation.
-    manage_project_data(
-        manifest_path=manifest_path,
-        project=project,
-        sessions=sessions,
-        verify_checksum=False,
-        recompute_checksum=False,
-        delete_sessions=True,
         keep_job_logs=keep_job_logs,
     )
 

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import uuid
-import contextlib
 from typing import Any
-from pathlib import Path
+import contextlib
 
 import yaml  # type: ignore[import-untyped]
 
@@ -29,7 +28,12 @@ def _error_response(message: str) -> dict[str, Any]:
 
 def _serialize(instance: ServerConfiguration) -> dict[str, Any]:
     """Converts a ServerConfiguration instance into a JSON-friendly dict."""
-    return {"username": instance.username, "password": instance.password, "host": instance.host}
+    return {
+        "username": instance.username,
+        "password": instance.password,
+        "host": instance.host,
+        "root": instance.root,
+    }
 
 
 @mcp.tool()
@@ -59,7 +63,7 @@ def write_server_configuration_tool(
 
     Args:
         configuration_payload: The complete ServerConfiguration payload (must include ``username``, ``password``,
-            and ``host``).
+            ``host``, and ``root``).
         overwrite: Determines whether to overwrite an existing server configuration file.
 
     Returns:

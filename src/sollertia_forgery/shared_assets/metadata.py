@@ -11,13 +11,41 @@ from dataclasses import dataclass
 
 import polars as pl
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import BaseTrial, GasPuffTrial, WaterRewardTrial
+from sollertia_shared_assets import (
+    MesoscopeGasPuffTrial as GasPuffTrial,
+    MesoscopeWaterRewardTrial as WaterRewardTrial,
+)
 from ataraxis_data_structures import YamlConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from sollertia_shared_assets import MesoscopeExperimentConfiguration
+
+
+class ProcessingPipelines(StrEnum):
+    """Enumerates the data processing and management pipelines orchestrated against the remote compute server.
+
+    Notes:
+        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum
+        (one tracker per pipeline), but the values are short pipeline identifiers rather than tracker filenames.
+        Only the subset of pipelines that sollertia-forgery dispatches to the remote server is enumerated here.
+    """
+
+    MANIFEST = "manifest"
+    """The project manifest generation pipeline."""
+    CHECKSUM = "checksum"
+    """The raw data integrity (checksum) verification pipeline."""
+    BEHAVIOR = "behavior"
+    """The behavior and camera data processing pipeline."""
+    VIDEO = "video"
+    """The video data processing pipeline."""
+    CINDRA_SINGLE_RECORDING = "cindra_single_recording"
+    """The single-day cindra (calcium imaging) processing pipeline."""
+    CINDRA_MULTI_RECORDING = "cindra_multi_recording"
+    """The multi-day cindra (across-session cell tracking) processing pipeline."""
+    FORGING = "forging"
+    """The dataset assembly (forging) pipeline."""
 
 
 class BehaviorDataFiles(StrEnum):
@@ -139,7 +167,7 @@ class StimulusMode(StrEnum):
 
 
 # noinspection PyUnhashable
-_TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[BaseTrial], StimulusMode] = {
+_TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[WaterRewardTrial | GasPuffTrial], StimulusMode] = {
     WaterRewardTrial: StimulusMode.REWARD,
     GasPuffTrial: StimulusMode.AVERSIVE,
 }

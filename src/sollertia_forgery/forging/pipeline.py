@@ -437,7 +437,9 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
     # Derives the cindra multi-recording output path. Cindra writes the dataset directory as
     # ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple animals under a single
     # analysis name, so the animal identifier is prepended here.
-    multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(f"{session.animal_id}_{dataset_name}")
+    multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(
+        f"{session.animal_id}_{dataset_name}"
+    )
 
     return _SessionPaths(
         behavior_data_path=session.processed_data.behavior_data_path,

@@ -5,6 +5,8 @@ Notes:
     configured to execute all data processing tasks.
 """
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import LogLevel, console
@@ -16,24 +18,20 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from . import Job, Server, ProcessingPipeline, get_remote_job_work_directory, get_server_configuration
+from .job import Job
+from .server import Server, get_remote_job_work_directory
+from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from ..shared_assets import DatasetSession, ProjectManifest, ProcessingPipelines, delay_terminal
 from .managing_interface import resolve_project_manifest
-from ..shared_assets import ProjectManifest, SessionMetadata, delay_terminal
-from .pipeline import execute_pipelines, check_session_eligibility
+from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-_BEHAVIOR_PIPELINE_NAME: str = "behavior"
-"""The pipeline identifier for the behavior data processing pipeline."""
-
-_SUITE2P_PIPELINE_NAME: str = "cindra"
-"""The pipeline identifier for the single-day cindra data processing pipeline."""
-
 _SUITE2P_TRACKER_FILENAME: str = "cindra_processing_tracker.yaml"
-"""The filename for the cindra processing tracker YAML file. Distinct from ``ProcessingTrackers.CINDRA_SINGLE_RECORDING``
-— this is the server-side forgery-dispatch mirror, not the tracker cindra writes at the recording root. Pending
-server-package refactor to align with shared-assets."""
+"""The filename for the cindra processing tracker YAML file. Distinct from the
+``ProcessingTrackers.CINDRA_SINGLE_RECORDING`` tracker — this is the server-side forgery-dispatch mirror, not the
+tracker cindra writes at the recording root. Pending server-package refactor to align with shared-assets."""
 
 
 def _construct_behavior_processing_pipeline(
@@ -72,13 +70,13 @@ def _construct_behavior_processing_pipeline(
     system = manifest.get_system_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
-    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
+    remote_session_path = server.root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     exclusion_reason = check_session_eligibility(
         manifest=manifest,
         session=session,
-        pipeline=_BEHAVIOR_PIPELINE_NAME,
+        pipeline=ProcessingPipelines.BEHAVIOR,
         server=server,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={
@@ -101,7 +99,7 @@ def _construct_behavior_processing_pipeline(
         job_name = f"{session}_runtime_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -114,13 +112,13 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
         # Face camera processing job
         job_name = f"{session}_face_camera_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -133,13 +131,13 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
         # Body camera processing job
         job_name = f"{session}_body_camera_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -152,13 +150,13 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
         # Actor microcontroller data processing job
         job_name = f"{session}_actor_microcontroller_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -171,13 +169,13 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
         # Sensor microcontroller data processing job
         job_name = f"{session}_sensor_microcontroller_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -190,13 +188,13 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
         # Encoder microcontroller data processing job
         job_name = f"{session}_encoder_microcontroller_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_BEHAVIOR_PIPELINE_NAME
+            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
         )
         job = Job(
             job_name=job_name,
@@ -209,17 +207,15 @@ def _construct_behavior_processing_pipeline(
             time=90,
         )
         job.add_command(f"sl-process behavior -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory))
+        stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = server.shared_storage_root.joinpath(
-        project, animal, session, "tracking_data", ProcessingTrackers.BEHAVIOR
-    )
+    remote_tracker_path = server.root.joinpath(project, animal, session, "tracking_data", ProcessingTrackers.BEHAVIOR)
     local_tracker_path = local_working_directory.joinpath(project, f"{session}_behavior", ProcessingTrackers.BEHAVIOR)
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
-        pipeline=_BEHAVIOR_PIPELINE_NAME,
+        pipeline=ProcessingPipelines.BEHAVIOR,
         server=server,
         data_path=remote_session_path,
         jobs={1: tuple(stage_1)},
@@ -272,14 +268,14 @@ def _construct_cindra_processing_pipeline(
     animal = manifest.get_animal_for_session(session=session)
 
     # Parses the path to the session directory on the remote server.
-    remote_session_path = server.shared_storage_root.joinpath(project, animal, session)
+    remote_session_path = server.root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.
     configuration_path = server.cindra_configurations_directory.joinpath(configuration_file)
     exclusion_reason = check_session_eligibility(
         manifest=manifest,
         session=session,
-        pipeline=_SUITE2P_PIPELINE_NAME,
+        pipeline=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
         server=server,
         supported_systems={AcquisitionSystems.MESOSCOPE_VR},
         supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
@@ -301,7 +297,10 @@ def _construct_cindra_processing_pipeline(
     job_name = f"{session}_cindra_binarization"
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
+        server=server,
+        job_name=job_name,
+        pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
+        base_path=remote_session_path,
     )
     job = Job(
         job_name=job_name,
@@ -314,14 +313,17 @@ def _construct_cindra_processing_pipeline(
         time=180,
     )
     job.add_command(f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -b")
-    stage_1.append((job, working_directory))
+    stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Plane processing
     for plane in range(plane_count):
         job_name = f"{session}_cindra_processing_plane_{plane}"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
         working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
+            server=server,
+            job_name=job_name,
+            pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
+            base_path=remote_session_path,
         )
         server.create(remote_path=working_directory, is_dir=True)
         job = Job(
@@ -337,13 +339,16 @@ def _construct_cindra_processing_pipeline(
         job.add_command(
             f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -p -t {plane}"
         )
-        stage_2.append((job, working_directory))
+        stage_2.append((job, working_directory, job_id))
 
     # Stage 3: Combination
     job_name = f"{session}_cindra_combination"
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
     working_directory = get_remote_job_work_directory(
-        server=server, job_name=job_name, pipeline_name=_SUITE2P_PIPELINE_NAME
+        server=server,
+        job_name=job_name,
+        pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
+        base_path=remote_session_path,
     )
     server.create(remote_path=working_directory, is_dir=True)
     job = Job(
@@ -357,19 +362,17 @@ def _construct_cindra_processing_pipeline(
         time=180,
     )
     job.add_command(f"cindra run {configuration_command} -w -1 single-day -sp {remote_session_path} -id {job_id} -c")
-    stage_3.append((job, working_directory))
+    stage_3.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = server.shared_storage_root.joinpath(
-        project, animal, session, "tracking_data", _SUITE2P_TRACKER_FILENAME
-    )
+    remote_tracker_path = server.root.joinpath(project, animal, session, "tracking_data", _SUITE2P_TRACKER_FILENAME)
     local_tracker_path = local_working_directory.joinpath(
         project, f"{session}_cindra_sd_processing", _SUITE2P_TRACKER_FILENAME
     )
 
     # Packages job data into a ProcessingPipeline object and returns it to the caller.
     return ProcessingPipeline(
-        pipeline=_SUITE2P_PIPELINE_NAME,
+        pipeline=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
         server=server,
         data_path=remote_session_path,
         jobs={1: tuple(stage_1), 2: tuple(stage_2), 3: tuple(stage_3)},
@@ -385,7 +388,7 @@ def _construct_cindra_processing_pipeline(
 def process_project_data(
     manifest_path: Path,
     project: str,
-    sessions: tuple[SessionMetadata, ...],
+    sessions: tuple[DatasetSession, ...],
     *,
     process_behavior: bool = False,
     process_cindra: bool = False,
@@ -397,7 +400,7 @@ def process_project_data(
 ) -> None:
     """Resolves and executes the necessary data processing pipelines for the target project.
 
-    This function acts as the main entry point for all data processing in the Sollertia. As part of its runtime, it first
+    This function acts as the main entry point for all data processing. As part of its runtime, it first
     determines which processing pipelines need to be executed for each session of the project. Then it efficiently
     executes these pipelines on the remote compute server by iteratively submitting batches of remote compute jobs
     to the server.
@@ -405,7 +408,7 @@ def process_project_data(
     Args:
         manifest_path: The path to the project's manifest .feather file.
         project: The name of the project whose data to process.
-        sessions: A tuple of SessionMetadata instances defining the project's sessions to process.
+        sessions: A tuple of DatasetSession instances defining the project's sessions to process.
         process_behavior: Determines whether to execute the behavior data processing pipeline.
         process_cindra: Determines whether to execute the single-day cindra data processing pipeline.
         reprocess: Determines whether to reprocess the sessions that have already been processed. This setting applies
@@ -452,7 +455,7 @@ def process_project_data(
 
     # Build processing pipelines
     processing_pipelines: list[ProcessingPipeline] = []
-    processing_exclusions: dict[str, tuple[SessionMetadata, str]] = {}  # Maps session names to (metadata, reason)
+    processing_exclusions: dict[str, tuple[DatasetSession, str]] = {}  # Maps session names to (metadata, reason)
 
     for session_metadata in console.track(sessions, description="Resolving the data processing graph", unit="session"):
         # Behavior pipeline

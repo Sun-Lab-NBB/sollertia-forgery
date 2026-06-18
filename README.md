@@ -102,26 +102,3 @@ highly advised to study the API documentation for the Job and Server classes to 
 **Critical!** Since running remote jobs is largely equivalent to executing them locally, all users are highly encouraged
 to test their job scripts locally before deploying them server-side. If a script works on a local machine, it is likely 
 that the script would behave similarly and work on the server.
-
-### Interactive Jobs
-
-Interactive jobs are a special extension of the headless job type discussed above. Specifically, an interactive job is 
-a headless job, whose only purpose is to **create and maintain a Jupyter lab server** under the SLURM control. 
-Specifically, it requests SLURM to set up an isolated environment, starts a Jupyter server in that environment, and 
-sends the credentials for the started server back to the user.
-
-In essence, this allocates a set of resources the user can use interactively by running various Jupyter notebooks. 
-While convenient for certain data analysis cases, this type of jobs has the potential to inefficiently hog server 
-resources for prolonged periods of time. Therefore, users are encouraged to only resort to this type of jobs when 
-strictly necessary and to minimize the resources and time allocated to running these jobs.
-
-To run an interactive job, call the `sl-start-jupyter` CLI command exposed by this library and follow the instructions 
-printed to the terminal by the command during runtime.
-
-**Critical!** While this command tries to minimize collisions with other users, it is possible that an access port 
-collision occurs when multiple users try to instantiate a jupyter server at the same time. If you cannot authenticate
-with the Jupyter server, this likely indicates that the target port was in use and Jupyter automatically incremented the
-port number by 1. In this case, add 1 to your port number and try connecting to that port using the Jupyter credentials 
-provided by the command. For example, if your target port was '8888,' try port '8889.'
-
----

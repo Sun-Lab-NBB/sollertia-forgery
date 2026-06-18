@@ -18,7 +18,11 @@ from ..shared_assets import BehaviorDataFiles
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sollertia_shared_assets import GasPuffTrial, WaterRewardTrial, MesoscopeExperimentConfiguration
+    from sollertia_shared_assets import (
+        MesoscopeGasPuffTrial as GasPuffTrial,
+        MesoscopeWaterRewardTrial as WaterRewardTrial,
+        MesoscopeExperimentConfiguration,
+    )
 
 RUNTIME_SOURCE_ID: str = "1"
 """The source ID used by the Mesoscope-VR runtime DataLogger for its log archive. Every processable session
