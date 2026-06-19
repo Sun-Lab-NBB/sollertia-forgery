@@ -102,7 +102,7 @@ class DatasetColumn(StrEnum):
 
     # Runtime/experiment columns (from forging runtime assembly).
     TRIAL = "trial"
-    """One-based trial identifier at each sample. 255 marks samples outside any trial."""
+    """One-based trial identifier at each sample. 65535 marks samples outside any trial."""
     TRIAL_TYPE = "trial_type"
     """Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."""
     CUE = "cue"
