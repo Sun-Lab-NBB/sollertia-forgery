@@ -11,6 +11,7 @@ Notes:
 from .job import Job
 from .video import VIDEO_JOB_NAME, run_video_processing_pipeline
 from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
+from .dataset import resolve_dataset
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import MANIFEST_JOB_NAME, generate_project_manifest
 from .pipelines import ProcessingPipelines
@@ -89,6 +90,7 @@ __all__ = [
     "prepare_tracker",
     "read_tracker_status",
     "resolve_checksum",
+    "resolve_dataset",
     "resolve_project_manifest",
     "run_video_processing_pipeline",
 ]

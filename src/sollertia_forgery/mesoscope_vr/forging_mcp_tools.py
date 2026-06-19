@@ -20,6 +20,7 @@ from ataraxis_base_utilities import resolve_worker_count
 from sollertia_shared_assets import (
     SurgeryData,
     RawDataFiles,
+    SessionTypes,
     ProcessingTrackers,
     MesoscopeExperimentDescriptor,
     validate_directory,
@@ -28,7 +29,6 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete
 
 from .forging import (
     FORGING_JOB_NAME,
-    resolve_dataset,
     run_forging_pipeline,
 )
 from ..interfaces import mcp
@@ -39,6 +39,7 @@ from ..cross_system import (
     DatasetFiles,
     JobExecutionState,
     prepare_tracker,
+    resolve_dataset,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -128,6 +129,7 @@ def prepare_forging_batch_tool(
                 name=name,
                 session_names=session_names,
                 project_root=project_root,
+                required_session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
                 force_recreate=force_recreate,
             )
         except Exception as resolve_error:

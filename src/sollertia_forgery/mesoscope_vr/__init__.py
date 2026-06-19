@@ -9,7 +9,6 @@ Notes:
 
 from .forging import (
     FORGING_JOB_NAME,
-    resolve_dataset,
     run_forging_pipeline,
 )
 from .activity import (
@@ -42,7 +41,6 @@ __all__ = [
     "discover_behavior_jobs",
     "forge_dataset",
     "process_project_data",
-    "resolve_dataset",
     "run_activity_processing_pipeline",
     "run_behavior_processing_pipeline",
     "run_forging_pipeline",
