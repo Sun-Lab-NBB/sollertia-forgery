@@ -12,14 +12,6 @@ from .job import Job
 from .video import VIDEO_JOB_NAME, run_video_processing_pipeline
 from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
 from .dataset import resolve_dataset
-from .feather import (
-    get_event_data,
-    partition_events,
-    merge_event_streams,
-    find_module_feathers,
-    get_event_timestamps,
-    parse_module_feather_name,
-)
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import MANIFEST_JOB_NAME, generate_project_manifest
 from .pipelines import ProcessingPipelines
@@ -42,6 +34,14 @@ from .orchestration import (
     group_jobs_by_tracker,
     job_execution_manager,
     clean_output_subdirectory,
+)
+from .microcontroller import (
+    get_event_data,
+    partition_events,
+    merge_event_streams,
+    find_module_feathers,
+    get_event_timestamps,
+    parse_module_feather_name,
 )
 from .remote_pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
 from .project_manifest import ProjectManifest
