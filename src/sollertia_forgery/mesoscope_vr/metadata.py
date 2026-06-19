@@ -65,12 +65,6 @@ class BehaviorDataFiles(StrEnum):
     """The runtime feather holding VR trigger-zone entry and exit events."""
     TRIAL = "trial_data.feather"
     """The runtime feather holding per-trial metadata (trial index, trial type, traveled distance at trial start)."""
-    FACE_CAMERA_TIMESTAMPS = "face_camera_timestamps.feather"
-    """The face-camera timestamp feather extracted from the ataraxis-video-system camera log under its legacy
-    sollertia-forgery name."""
-    BODY_CAMERA_TIMESTAMPS = "body_camera_timestamps.feather"
-    """The body-camera timestamp feather extracted from the ataraxis-video-system camera log under its legacy
-    sollertia-forgery name."""
 
 
 class DatasetColumn(StrEnum):

@@ -86,7 +86,7 @@ def behavior_command(session_path: Path, job_id: str | None, workers: int, *, pr
 @_PROGRESS_OPTION
 def video_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
     """Extracts the camera frame acquisition timestamps from the raw VideoSystem log archives."""
-    from ..mesoscope_vr import run_video_processing_pipeline  # noqa: PLC0415
+    from ..cross_system import run_video_processing_pipeline  # noqa: PLC0415
 
     run_video_processing_pipeline(
         session_path=session_path,

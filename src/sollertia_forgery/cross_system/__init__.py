@@ -1,7 +1,7 @@
 """Provides system-agnostic assets shared across every acquisition system supported by the library: the analysis
 dataset data hierarchy, project management (manifest generation and checksum verification), the project manifest
-viewer, batch-orchestration primitives, and the generic remote compute-server machinery (SSH/SLURM execution and
-remote project management).
+viewer, the camera-timestamp extraction pipeline, batch-orchestration primitives, and the generic remote
+compute-server machinery (SSH/SLURM execution and remote project management).
 
 Notes:
     This package must never import from a system-specific package (such as ``mesoscope_vr``). The dependency
@@ -9,6 +9,7 @@ Notes:
 """
 
 from .job import Job
+from .video import VIDEO_JOB_NAME, run_video_processing_pipeline
 from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import MANIFEST_JOB_NAME, generate_project_manifest
@@ -52,6 +53,7 @@ __all__ = [
     "CHECKSUM_JOB_NAME",
     "MANIFEST_JOB_NAME",
     "RESERVED_CORES",
+    "VIDEO_JOB_NAME",
     "ActiveJob",
     "CommandResult",
     "DatasetAnimal",
@@ -88,4 +90,5 @@ __all__ = [
     "read_tracker_status",
     "resolve_checksum",
     "resolve_project_manifest",
+    "run_video_processing_pipeline",
 ]

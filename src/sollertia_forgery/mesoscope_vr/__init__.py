@@ -1,5 +1,5 @@
 """Provides the Mesoscope-VR system-specific assets: the behavior/dataset metadata schema, the end-to-end
-processing pipelines (behavior, video, and cell-activity extraction), and the dataset forging pipeline.
+processing pipelines (behavior and cell-activity extraction), and the dataset forging pipeline.
 
 Notes:
     This package depends on ``cross_system`` for the shared data hierarchy, management, and orchestration assets.
@@ -7,7 +7,6 @@ Notes:
     imported lazily inside the pipeline functions so importing this package stays cheap.
 """
 
-from .video import VIDEO_JOB_NAME, run_video_processing_pipeline
 from .forging import (
     FORGING_JOB_NAME,
     resolve_dataset,
@@ -34,7 +33,6 @@ from .server_processing import process_project_data
 
 __all__ = [
     "FORGING_JOB_NAME",
-    "VIDEO_JOB_NAME",
     "BehaviorDataFiles",
     "DatasetColumn",
     "FluorescenceColumn",
@@ -49,5 +47,4 @@ __all__ = [
     "run_behavior_processing_pipeline",
     "run_forging_pipeline",
     "run_multidataset_processing_pipeline",
-    "run_video_processing_pipeline",
 ]
