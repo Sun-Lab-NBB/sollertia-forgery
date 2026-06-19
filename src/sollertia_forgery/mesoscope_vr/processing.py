@@ -22,11 +22,13 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 
 from .runtime import RUNTIME_SOURCE_ID, find_log_archive, process_runtime_data
-from ..cross_system import prepare_tracker
-from .microcontrollers import (
-    is_module_eligible,
+from ..cross_system import (
+    prepare_tracker,
     find_module_feathers,
     parse_module_feather_name,
+)
+from .microcontrollers import (
+    is_module_eligible,
     process_microcontroller_data,
 )
 

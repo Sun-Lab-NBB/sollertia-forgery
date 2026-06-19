@@ -1,5 +1,5 @@
-"""Provides assets for discovering, reading, and processing pre-extracted microcontroller module feather files
-produced by the ataraxis-communication-interface library.
+"""Provides the Mesoscope-VR module parsers that convert pre-extracted microcontroller module feather files into
+domain-specific behavior feathers.
 """
 
 from __future__ import annotations
@@ -13,6 +13,13 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
 from .metadata import BehaviorDataFiles
+from ..cross_system import (
+    get_event_data,
+    partition_events,
+    merge_event_streams,
+    get_event_timestamps,
+    parse_module_feather_name,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -20,10 +27,6 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import MesoscopeHardwareState
-
-_MODULE_FEATHER_PATTERN: str = "controller_*_module_*.feather"
-"""The glob pattern used to discover microcontroller module feather files produced by ataraxis-communication-interface.
-"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,53 +57,6 @@ class _ModuleSpecification:
             if isinstance(value, bool) and not value:
                 return False
         return True
-
-
-def find_module_feathers(data_directory: Path) -> list[Path]:
-    """Discovers microcontroller module feather files under the data directory.
-
-    Searches ``data_directory`` non-recursively for feather files matching the ``controller_*_module_*.feather``
-    naming convention used by ataraxis-communication-interface. The directory is expected to be the session's
-    canonical ``processed_data/microcontroller_data`` location exposed by
-    ``SessionData.microcontroller_data_path``.
-
-    Args:
-        data_directory: The path to the session's microcontroller data directory.
-
-    Returns:
-        A sorted list of paths to the discovered module feather files. Returns an empty list if the directory does
-        not exist or if no matching files are found.
-    """
-    if not data_directory.is_dir():
-        return []
-    return sorted(data_directory.glob(_MODULE_FEATHER_PATTERN))
-
-
-def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
-    """Extracts the controller ID, module type, and module ID from a module feather filename.
-
-    Args:
-        feather_path: The path to the module feather file. The filename must follow the
-            ``controller_{controller_id}_module_{module_type}_{module_id}.feather`` naming convention.
-
-    Returns:
-        A tuple of three integers: (controller_id, module_type, module_id).
-
-    Raises:
-        ValueError: If the filename does not follow the expected naming convention.
-    """
-    stem = feather_path.stem  # e.g., "controller_101_module_3_1"
-    parts = stem.split("_")
-
-    _expected_part_count = 5
-    if len(parts) != _expected_part_count or parts[0] != "controller" or parts[2] != "module":
-        message = (
-            f"Unable to parse module feather filename '{feather_path.name}'. The filename does not follow the "
-            f"expected 'controller_{{id}}_module_{{type}}_{{id}}.feather' naming convention."
-        )
-        console.error(message=message, error=ValueError)
-
-    return int(parts[1]), int(parts[3]), int(parts[4])
 
 
 def process_microcontroller_data(
@@ -142,7 +98,7 @@ def process_microcontroller_data(
     # Then partitions it by event code in a single pass, so parse functions can resolve their per-event lookups
     # in O(1) without re-scanning the full DataFrame.
     module_dataframe = pl.read_ipc(source=feather_path, memory_map=True)
-    event_partition = _partition_events(module_dataframe=module_dataframe)
+    event_partition = partition_events(module_dataframe=module_dataframe)
 
     # Ensures the output directory exists.
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -179,110 +135,6 @@ def is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosco
     return specification.check_eligibility(hardware_state=hardware_state)
 
 
-def _partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
-    """Partitions a module DataFrame into per-event sub-DataFrames in a single pass.
-
-    Notes:
-        Replaces the pattern of calling ``module_dataframe.filter(pl.col("event") == code)`` once per event
-        code, which scans the entire DataFrame each time. Polars' partition_by traverses the DataFrame once
-        and returns the groups keyed by event code, allowing subsequent lookups to be O(1).
-
-    Args:
-        module_dataframe: The Polars DataFrame read from an axci module feather file with the standard 5-column
-            schema (timestamp_us, command, event, dtype, data).
-
-    Returns:
-        A dictionary mapping integer event codes to their corresponding sub-DataFrames.
-    """
-    # polars 1.x partition_by(as_dict=True) returns single-element tuples as keys, even when partitioning on
-    # a single column, so the event code is always at index 0.
-    raw_partition = module_dataframe.partition_by("event", as_dict=True)
-    return {int(key[0]): value for key, value in raw_partition.items()}
-
-
-def _get_event_timestamps(partition: dict[int, pl.DataFrame], event_code: int) -> NDArray[np.uint64]:
-    """Returns the timestamp array for a given event code from a partitioned DataFrame.
-
-    Notes:
-        Designed for state-only events that do not carry data payloads.
-
-    Args:
-        partition: The event-code-keyed partition dictionary produced by _partition_events().
-        event_code: The event code to look up.
-
-    Returns:
-        A NumPy uint64 array of timestamps, or an empty array if the event code is not present.
-    """
-    event_dataframe = partition.get(event_code)
-    if event_dataframe is None:
-        return np.array([], dtype=np.uint64)
-    return event_dataframe["timestamp_us"].to_numpy().astype(np.uint64)
-
-
-def _get_event_data[ScalarT: np.generic](
-    partition: dict[int, pl.DataFrame],
-    event_code: int,
-    values_dtype: type[ScalarT],
-) -> tuple[NDArray[np.uint64], NDArray[ScalarT]]:
-    """Returns timestamps and vectorized-reconstructed data values for a given event code.
-
-    Notes:
-        Relies on the axci protocol guarantee that all messages sharing an event code also share a payload
-        dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call instead
-        of a per-row Python loop. The reconstructed values are then cast to the requested output dtype for
-        uniform downstream handling.
-
-    Args:
-        partition: The event-code-keyed partition dictionary produced by _partition_events().
-        event_code: The event code to look up.
-        values_dtype: The NumPy scalar type to cast the reconstructed values to.
-
-    Returns:
-        A tuple of (uint64 timestamp array, values array cast to values_dtype). Both arrays are empty if the
-        event code is not present in the partition.
-    """
-    event_dataframe = partition.get(event_code)
-    if event_dataframe is None:
-        return np.array([], dtype=np.uint64), np.array([], dtype=values_dtype)
-
-    timestamps: NDArray[np.uint64] = event_dataframe["timestamp_us"].to_numpy().astype(np.uint64)
-
-    data_list = event_dataframe["data"].to_list()
-    dtype_list = event_dataframe["dtype"].to_list()
-    payload_dtype = dtype_list[0]
-    values: NDArray[ScalarT] = np.frombuffer(b"".join(data_list), dtype=payload_dtype).astype(values_dtype)
-
-    return timestamps, values
-
-
-def _merge_event_streams[ScalarT: np.generic](
-    timestamps_a: NDArray[np.uint64],
-    values_a: NDArray[ScalarT],
-    timestamps_b: NDArray[np.uint64],
-    values_b: NDArray[ScalarT],
-) -> tuple[NDArray[np.uint64], NDArray[ScalarT]]:
-    """Merges two chronologically-sorted event streams into a single timestamp-sorted stream.
-
-    Notes:
-        Consolidates the allocate-empty-arrays / fill-halves / argsort pattern that was previously duplicated
-        across every parse function. Uses NumPy's stable mergesort, which is near-linear on the already-sorted
-        runs produced by the axci log format.
-
-    Args:
-        timestamps_a: The uint64 timestamp array for the first event stream.
-        values_a: The value array for the first event stream.
-        timestamps_b: The uint64 timestamp array for the second event stream.
-        values_b: The value array for the second event stream.
-
-    Returns:
-        A tuple of (merged timestamps, reordered values) sorted chronologically.
-    """
-    timestamps = np.concatenate([timestamps_a, timestamps_b])
-    values = np.concatenate([values_a, values_b])
-    order = np.argsort(timestamps, kind="stable")
-    return timestamps[order], values[order]
-
-
 def _parse_encoder_data(
     event_partition: dict[int, pl.DataFrame], output_file: Path, hardware_state: MesoscopeHardwareState
 ) -> None:
@@ -301,15 +153,15 @@ def _parse_encoder_data(
 
     # Pre-declares variable types so the fallback-branch reassignments below are checked against a fixed
     # declared type rather than widening into a union, which avoids a false-positive type mismatch when
-    # passing these arrays into _merge_event_streams().
+    # passing these arrays into merge_event_streams().
     ccw_timestamps: NDArray[np.uint64]
     ccw_values: NDArray[np.float64]
     cw_timestamps: NDArray[np.uint64]
     cw_values: NDArray[np.float64]
 
     # Extracts CCW (event 51) and CW (event 52) rotation data with displacement values.
-    ccw_timestamps, ccw_values = _get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
-    cw_timestamps, cw_values = _get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
+    ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
+    cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
 
     # Synthesizes an artificial zero-code entry if one direction is completely missing.
     if len(ccw_timestamps) == 0:
@@ -323,7 +175,7 @@ def _parse_encoder_data(
         # noinspection PyTypeChecker
         cw_values = np.array([0.0], dtype=np.float64)
 
-    timestamps, displacements = _merge_event_streams(
+    timestamps, displacements = merge_event_streams(
         timestamps_a=ccw_timestamps, values_a=ccw_values, timestamps_b=cw_timestamps, values_b=-cw_values
     )
 
@@ -354,14 +206,14 @@ def _parse_ttl_data(
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration (unused for TTL processing but required for uniform dispatch).
     """
-    on_timestamps = _get_event_timestamps(partition=event_partition, event_code=51)
-    off_timestamps = _get_event_timestamps(partition=event_partition, event_code=52)
+    on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
+    off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
     # Aborts early if either ON or OFF signals are missing, as rising edges cannot be detected.
     if len(on_timestamps) == 0 or len(off_timestamps) == 0:
         return
 
-    timestamps, triggers = _merge_event_streams(
+    timestamps, triggers = merge_event_streams(
         timestamps_a=on_timestamps,
         values_a=np.ones(len(on_timestamps), dtype=np.uint8),
         timestamps_b=off_timestamps,
@@ -399,10 +251,10 @@ def _parse_brake_data(
         minimum_brake_strength_value = getattr(hardware_state, "minimum_break_strength", None)
     minimum_brake_strength = np.float64(minimum_brake_strength_value)
 
-    engaged_timestamps = _get_event_timestamps(partition=event_partition, event_code=51)
-    disengaged_timestamps = _get_event_timestamps(partition=event_partition, event_code=52)
+    engaged_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
+    disengaged_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
-    timestamps, torques = _merge_event_streams(
+    timestamps, torques = merge_event_streams(
         timestamps_a=engaged_timestamps,
         values_a=np.full(len(engaged_timestamps), maximum_brake_strength, dtype=np.float64),
         timestamps_b=disengaged_timestamps,
@@ -431,8 +283,8 @@ def _parse_valve_data(
     scale_coefficient = np.float64(hardware_state.valve_scale_coefficient)
     nonlinearity_exponent = np.float64(hardware_state.valve_nonlinearity_exponent)
 
-    open_timestamps = _get_event_timestamps(partition=event_partition, event_code=51)
-    closed_timestamps = _get_event_timestamps(partition=event_partition, event_code=52)
+    open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
+    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
     # Handles the edge case where the valve was never opened (no water dispensed).
     if len(open_timestamps) == 0:
@@ -446,7 +298,7 @@ def _parse_valve_data(
         result_dataframe.write_ipc(file=output_file, compression="uncompressed")
         return
 
-    timestamps, volume = _merge_event_streams(
+    timestamps, volume = merge_event_streams(
         timestamps_a=open_timestamps,
         values_a=np.ones(len(open_timestamps), dtype=np.float64),
         timestamps_b=closed_timestamps,
@@ -471,10 +323,10 @@ def _parse_valve_data(
     volumes = np.insert(volumes, 0, 0.0)
 
     # Extracts tone buzzer signals (event 54 = ON, event 55 = OFF).
-    tone_on_timestamps = _get_event_timestamps(partition=event_partition, event_code=54)
-    tone_off_timestamps = _get_event_timestamps(partition=event_partition, event_code=55)
+    tone_on_timestamps = get_event_timestamps(partition=event_partition, event_code=54)
+    tone_off_timestamps = get_event_timestamps(partition=event_partition, event_code=55)
 
-    tone_timestamps, tone_states = _merge_event_streams(
+    tone_timestamps, tone_states = merge_event_streams(
         timestamps_a=tone_on_timestamps,
         values_a=np.ones(len(tone_on_timestamps), dtype=np.uint8),
         timestamps_b=tone_off_timestamps,
@@ -524,8 +376,8 @@ def _parse_gas_puff_data(
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration (unused for gas puff processing but required for uniform dispatch).
     """
-    open_timestamps = _get_event_timestamps(partition=event_partition, event_code=51)
-    closed_timestamps = _get_event_timestamps(partition=event_partition, event_code=52)
+    open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
+    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
     # Handles the edge case where no gas puffs were delivered.
     if len(open_timestamps) == 0:
@@ -539,7 +391,7 @@ def _parse_gas_puff_data(
         result_dataframe.write_ipc(file=output_file, compression="uncompressed")
         return
 
-    timestamps, states = _merge_event_streams(
+    timestamps, states = merge_event_streams(
         timestamps_a=open_timestamps,
         values_a=np.ones(len(open_timestamps), dtype=np.uint8),
         timestamps_b=closed_timestamps,
@@ -583,7 +435,7 @@ def _parse_lick_data(
     lick_threshold = np.uint16(hardware_state.lick_threshold)
 
     # Extracts voltage change events (event 51 only, preserving uint16 resolution).
-    timestamps, voltages = _get_event_data(partition=event_partition, event_code=51, values_dtype=np.uint16)
+    timestamps, voltages = get_event_data(partition=event_partition, event_code=51, values_dtype=np.uint16)
 
     # Sorts by timestamp for additional safety.
     sort_indices = np.argsort(timestamps, kind="stable")
@@ -620,8 +472,8 @@ def _parse_torque_data(
     cw_timestamps: NDArray[np.uint64]
     cw_values: NDArray[np.float64]
 
-    ccw_timestamps, ccw_values = _get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
-    cw_timestamps, cw_values = _get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
+    ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
+    cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
 
     # Synthesizes missing direction data to handle edge cases.
     if len(ccw_timestamps) == 0:
@@ -635,7 +487,7 @@ def _parse_torque_data(
         # noinspection PyTypeChecker
         cw_values = np.array([0.0], dtype=np.float64)
 
-    timestamps, torques = _merge_event_streams(
+    timestamps, torques = merge_event_streams(
         timestamps_a=ccw_timestamps,
         values_a=ccw_values * torque_per_adc_unit,
         timestamps_b=cw_timestamps,
@@ -674,8 +526,8 @@ def _parse_screen_data(
     # arithmetic on line ~711 and keeps the existing uint8 semantics (False/None -> 0, True -> 1).
     initially_on: int = 1 if hardware_state.screens_initially_on else 0
 
-    on_timestamps = _get_event_timestamps(partition=event_partition, event_code=51)
-    off_timestamps = _get_event_timestamps(partition=event_partition, event_code=52)
+    on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
+    off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
     # Handles the case where screens never changed state.
     if len(on_timestamps) == 0:
@@ -688,7 +540,7 @@ def _parse_screen_data(
         result_dataframe.write_ipc(file=output_file, compression="uncompressed")
         return
 
-    timestamps, triggers = _merge_event_streams(
+    timestamps, triggers = merge_event_streams(
         timestamps_a=on_timestamps,
         values_a=np.ones(len(on_timestamps), dtype=np.uint8),
         timestamps_b=off_timestamps,

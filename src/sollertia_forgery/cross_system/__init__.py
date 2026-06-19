@@ -12,6 +12,14 @@ from .job import Job
 from .video import VIDEO_JOB_NAME, run_video_processing_pipeline
 from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
 from .dataset import resolve_dataset
+from .feather import (
+    get_event_data,
+    partition_events,
+    merge_event_streams,
+    find_module_feathers,
+    get_event_timestamps,
+    parse_module_feather_name,
+)
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import MANIFEST_JOB_NAME, generate_project_manifest
 from .pipelines import ProcessingPipelines
@@ -80,13 +88,19 @@ __all__ = [
     "discover_project_data",
     "discover_project_sessions",
     "execute_pipelines",
+    "find_module_feathers",
     "generate_project_manifest",
+    "get_event_data",
+    "get_event_timestamps",
     "get_remote_job_work_directory",
     "get_server_configuration",
     "get_server_configuration_path",
     "group_jobs_by_tracker",
     "job_execution_manager",
     "manage_project_data",
+    "merge_event_streams",
+    "parse_module_feather_name",
+    "partition_events",
     "prepare_tracker",
     "read_tracker_status",
     "resolve_checksum",
