@@ -1,6 +1,5 @@
-"""Provides assets for maintaining the Sollertia platform analysis dataset data hierarchy across all processing
-machines. The hierarchy is written by the forging pipeline and read by the analysis pipelines, so the system-agnostic
-hierarchy schema lives under cross_system.
+"""Provides the forged dataset data hierarchy: the container classes and the canonical filenames written by the
+forging pipeline.
 """
 
 from __future__ import annotations
@@ -15,57 +14,23 @@ from ataraxis_data_structures import YamlConfig
 
 
 class DatasetFiles(StrEnum):
-    """Enumerates the canonical filenames written into a forged dataset hierarchy at session and animal granularity.
+    """Enumerates the canonical filenames written into a forged dataset hierarchy at session granularity.
 
     Notes:
-        Centralizes filenames consumed by both the forging and analysis pipelines so new artifacts can be added
-        in one place and referenced symbolically from path-resolution properties on DatasetSession and
-        DatasetAnimal. These filenames describe the system-agnostic dataset hierarchy contract, so they live
-        alongside the hierarchy classes in cross_system.
+        Centralizes the forging-pipeline filenames so new artifacts can be added in one place and referenced
+        symbolically from path-resolution properties on DatasetSession and DatasetAnimal.
     """
 
     DATA = "data.feather"
-    """The assembled per-session data feather written by the forging pipeline and read by every analysis pipeline."""
+    """The assembled per-session data feather written by the forging pipeline."""
     TRIAL_GEOMETRY = "trial_geometry.yaml"
-    """The per-session trial geometry data file written by the forging pipeline and read by the analysis pipelines
-    that need canonical track lengths and trigger-zone boundaries."""
-    BLEACHING_SUMMARY = "bleaching.yaml"
-    """The per-animal chronic photobleaching evaluation summary YAML produced by the bleaching evaluation pipeline."""
-    BLEACHING_TABLE = "bleaching.feather"
-    """The per-animal chronic photobleaching per-session table feather paired with ``BLEACHING_SUMMARY``."""
-    TUNING_SUMMARY = "tuning_summary.yaml"
-    """The per-session tuning summary YAML produced by the tuning pipeline. Carries the place- and reward-cell
-    detection configurations, geometry / sampling scalars, and the reward-mixture-model fit."""
-    TUNING_CELLS_TABLE = "tuning_cells.feather"
-    """The per-session tuning per-cell table feather paired with ``TUNING_SUMMARY``. Holds one row per cell with
-    place-field, reward-cell, and stability metrics."""
-    SCE_SUMMARY = "sce_summary.yaml"
-    """The per-session SCE summary YAML produced by the SCE pipeline. Carries the SCE detection configuration and
-    session-level period / event totals."""
-    SCE_CELLS_TABLE = "sce_cells.feather"
-    """The per-session SCE per-cell participation feather paired with ``SCE_SUMMARY``. Holds one row per cell with
-    cross-period SCE participation counts, rates, p-values, and the recruitment flag."""
-    SCE_PERIODS_TABLE = "sce_periods.feather"
-    """The per-session SCE detection state feather paired with ``SCE_SUMMARY``. Holds one row per detected
-    stationary period and a sparse representation of the SCE onset matrix."""
-    DRIFT_SUMMARY = "drift.yaml"
-    """The per-animal cross-session tuning-drift summary YAML produced by the drift evaluation pipeline.
-    Carries the drift configuration, lag-binned population-vector correlation fit, and animal-level
-    persistent-cell counts."""
-    DRIFT_CELLS_TABLE = "drift_cells.feather"
-    """The per-animal drift per-cell feather paired with ``DRIFT_SUMMARY``. Holds one row per multi-day-registered
-    cell with classification trajectories, persistence flags, mean rate-map correlation, peak / COM shift
-    statistics, Fisher-combined random-remapping p-value, bleaching-baseline slope, and composite
-    ``is_stably_tuned_*`` flags."""
-    DRIFT_PAIRS_TABLE = "drift_pairs.feather"
-    """The per-animal drift per-pair feather paired with ``DRIFT_SUMMARY``. Holds one row per ordered
-    (session_a, session_b) session pair with the population-vector correlation, recurrence counts, lag in
-    days, and per-cell rate-map-r / peak-shift / COM-shift list columns."""
+    """The per-session trial geometry data file written by the forging pipeline. Carries the canonical track
+    lengths and trigger-zone boundaries."""
 
 
 @dataclass(frozen=True, slots=True)
 class DatasetSession:
-    """Defines a single session included in an analysis dataset.
+    """Defines a single session included in a forged dataset.
 
     Combines the session identity metadata with the resolved path to the session's directory within the dataset
     hierarchy.
@@ -95,43 +60,14 @@ class DatasetSession:
         """Returns the path to the session's ``trial_geometry.yaml`` data file within the dataset hierarchy."""
         return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
 
-    @property
-    def tuning_summary_path(self) -> Path:
-        """Returns the path to the session's ``tuning_summary.yaml`` file within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.TUNING_SUMMARY)
-
-    @property
-    def tuning_cells_path(self) -> Path:
-        """Returns the path to the session's ``tuning_cells.feather`` per-cell table within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.TUNING_CELLS_TABLE)
-
-    @property
-    def sce_summary_path(self) -> Path:
-        """Returns the path to the session's ``sce_summary.yaml`` file within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.SCE_SUMMARY)
-
-    @property
-    def sce_cells_path(self) -> Path:
-        """Returns the path to the session's ``sce_cells.feather`` per-cell SCE participation table within the
-        dataset hierarchy.
-        """
-        return self.session_path.joinpath(DatasetFiles.SCE_CELLS_TABLE)
-
-    @property
-    def sce_periods_path(self) -> Path:
-        """Returns the path to the session's ``sce_periods.feather`` per-period SCE-state table within the dataset
-        hierarchy.
-        """
-        return self.session_path.joinpath(DatasetFiles.SCE_PERIODS_TABLE)
-
 
 @dataclass(frozen=True, slots=True)
 class DatasetAnimal:
-    """Defines a single animal included in an analysis dataset.
+    """Defines a single animal included in a forged dataset.
 
     Combines the animal identity metadata with the resolved path to the animal's directory within the dataset
-    hierarchy. Per-animal artifacts (surgery metadata, chronic photobleaching evaluation) are co-located in this
-    directory and exposed as derived properties.
+    hierarchy. Per-animal artifacts (surgery metadata) are co-located in this directory and exposed as derived
+    properties.
     """
 
     animal: str
@@ -144,37 +80,12 @@ class DatasetAnimal:
         """Returns the path to the animal's ``surgery_metadata.yaml`` file within the dataset hierarchy."""
         return self.animal_path.joinpath(RawDataFiles.SURGERY_METADATA)
 
-    @property
-    def bleaching_path(self) -> Path:
-        """Returns the path to the animal's ``bleaching.yaml`` summary file within the dataset hierarchy."""
-        return self.animal_path.joinpath(DatasetFiles.BLEACHING_SUMMARY)
-
-    @property
-    def bleaching_table_path(self) -> Path:
-        """Returns the path to the animal's ``bleaching.feather`` per-session table within the dataset hierarchy."""
-        return self.animal_path.joinpath(DatasetFiles.BLEACHING_TABLE)
-
-    @property
-    def drift_summary_path(self) -> Path:
-        """Returns the path to the animal's ``drift.yaml`` summary file within the dataset hierarchy."""
-        return self.animal_path.joinpath(DatasetFiles.DRIFT_SUMMARY)
-
-    @property
-    def drift_cells_path(self) -> Path:
-        """Returns the path to the animal's ``drift_cells.feather`` per-cell table within the dataset hierarchy."""
-        return self.animal_path.joinpath(DatasetFiles.DRIFT_CELLS_TABLE)
-
-    @property
-    def drift_pairs_path(self) -> Path:
-        """Returns the path to the animal's ``drift_pairs.feather`` per-pair table within the dataset hierarchy."""
-        return self.animal_path.joinpath(DatasetFiles.DRIFT_PAIRS_TABLE)
-
 
 @dataclass
 class DatasetData(YamlConfig):
-    """Defines the structure and the metadata of an analysis dataset.
+    """Defines the structure and the metadata of a forged dataset.
 
-    An analysis dataset aggregates multiple data acquisition sessions of the same type, recorded across different
+    A forged dataset aggregates multiple data acquisition sessions of the same type, recorded across different
     animals by the same acquisition system. This class encapsulates the information necessary to access the dataset's
     assembled (forged) data stored on disk and functions as the entry point for all interactions with the dataset.
 
@@ -220,7 +131,7 @@ class DatasetData(YamlConfig):
         sessions: tuple[DatasetSession, ...] | set[DatasetSession],
         datasets_root: Path,
     ) -> DatasetData:
-        """Creates a new analysis dataset and initializes its data structure on disk.
+        """Creates a new forged dataset and initializes its data structure on disk.
 
         Notes:
             To access the data of an already existing dataset, use the load() method.
@@ -249,7 +160,7 @@ class DatasetData(YamlConfig):
 
         if not sessions:
             message = (
-                f"Unable to create the '{name}' analysis dataset. The 'sessions' argument must contain at least one "
+                f"Unable to create the '{name}' forged dataset. The 'sessions' argument must contain at least one "
                 f"DatasetSession instance, but got an empty collection."
             )
             console.error(message=message, error=ValueError)
@@ -260,7 +171,7 @@ class DatasetData(YamlConfig):
         # Prevents overwriting existing datasets.
         if dataset_path.exists():
             message = (
-                f"Unable to create the '{name}' analysis dataset. The destination directory must not exist, but a "
+                f"Unable to create the '{name}' forged dataset. The destination directory must not exist, but a "
                 f"dataset already exists at {dataset_path}."
             )
             console.error(message=message, error=FileExistsError)

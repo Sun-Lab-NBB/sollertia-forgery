@@ -4,15 +4,10 @@ import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import filter_sessions, get_working_directory
 
-from ..cross_system import (
-    Server,
-    DatasetSession,
-    ProjectManifest,
-    manage_project_data,
-    get_server_configuration,
-    resolve_project_manifest,
-)
-from ..mesoscope_vr import forge_dataset, process_project_data
+from ..server import Server, get_server_configuration
+from ..managing import ProjectManifest, manage_project_data, resolve_project_manifest
+from ..registries import resolve_remote_forging_orchestrator, resolve_remote_processing_orchestrator
+from ..shared_assets import DatasetSession
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -158,11 +153,17 @@ def execute_cli(
         message = "No sessions match the specified filtering criteria. Adjust the filtering criteria and try again."
         console.error(message=message, error=ValueError)
 
+    # Infers the project's acquisition system from its sessions. All sessions in a project share one acquisition
+    # system, so the system resolved for the first session keys the registry dispatch for every workflow below.
+    resolved_sessions = tuple(filtered_sessions)
+    system = manifest.get_system_for_session(session=resolved_sessions[0].session)
+
     # Stores resolved data in the context for subcommands.
     ctx.obj["project"] = project
     ctx.obj["manifest_path"] = manifest_path
-    ctx.obj["sessions"] = tuple(filtered_sessions)
+    ctx.obj["sessions"] = resolved_sessions
     ctx.obj["keep_job_logs"] = keep_job_logs
+    ctx.obj["system"] = system
 
 
 @execute_cli.group("manage")
@@ -281,8 +282,9 @@ def process_command(
     sessions = ctx.obj["sessions"]
     keep_job_logs = ctx.obj["keep_job_logs"]
 
-    # Executes the processing operation.
-    process_project_data(
+    # Dispatches to the acquisition system's remote data-processing orchestrator.
+    orchestrator = resolve_remote_processing_orchestrator(ctx.obj["system"])
+    orchestrator(
         manifest_path=manifest_path,
         project=project,
         sessions=sessions,
@@ -356,7 +358,7 @@ def forge_command(
     cindra_config: str,
     batch_size: int,
 ) -> None:
-    """Forges an analysis dataset from the selected sessions.
+    """Forges a dataset from the selected sessions.
 
     This command creates a new dataset from the selected sessions, optionally runs the multi-day processing
     pipeline, and/or assembles the processed data into unified data.feather files. The session type and acquisition
@@ -368,8 +370,9 @@ def forge_command(
     sessions = ctx.obj["sessions"]
     keep_job_logs = ctx.obj["keep_job_logs"]
 
-    # Executes the forging operation.
-    forge_dataset(
+    # Dispatches to the acquisition system's remote dataset-forging orchestrator.
+    orchestrator = resolve_remote_forging_orchestrator(ctx.obj["system"])
+    orchestrator(
         manifest_path=manifest_path,
         project=project,
         sessions=sessions,

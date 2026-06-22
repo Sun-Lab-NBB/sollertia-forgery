@@ -4,12 +4,8 @@ import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
 
-from ..cross_system import (
-    Server,
-    discover_project_data,
-    get_server_configuration,
-    create_server_configuration_file,
-)
+from ..server import Server, get_server_configuration, create_server_configuration_file
+from ..managing import discover_project_data
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -163,11 +159,22 @@ def server_cli() -> None:
     required=True,
     help="The absolute path, on the remote server, to the root directory that stores all Sollertia data.",
 )
+@click.option(
+    "-e",
+    "--environment",
+    type=str,
+    required=True,
+    help=(
+        "The name of the shared conda environment, on the remote server, in which sollertia-forgery and all of its "
+        "processing dependencies are installed."
+    ),
+)
 def configure_server(
     username: str,
     password: str,
     host: str,
     root: str,
+    environment: str,
 ) -> None:  # pragma: no cover
     """Creates the remote compute server configuration file in the Sollertia platform working directory."""
     create_server_configuration_file(
@@ -175,6 +182,7 @@ def configure_server(
         password=password,
         host=host,
         root=root,
+        environment=environment,
     )
 
 

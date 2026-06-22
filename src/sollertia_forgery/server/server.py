@@ -581,6 +581,14 @@ class Server:
         return self._configuration.username
 
     @property
+    def environment(self) -> str:
+        """Returns the name of the shared conda environment, on the server, in which the ``slf`` CLI and all of its
+        processing dependencies are installed. Every remote compute job activates this environment before invoking the
+        ``slf`` CLI.
+        """
+        return self._configuration.environment
+
+    @property
     def cindra_configurations_directory(self) -> Path:
         """Returns the absolute path to the cindra configuration directory under the server's data root."""
         return self.root.joinpath("cindra_configurations")

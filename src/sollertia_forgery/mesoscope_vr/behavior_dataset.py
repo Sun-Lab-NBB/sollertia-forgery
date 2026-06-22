@@ -174,7 +174,7 @@ def assemble_behavior_dataset(
     behavior_data = pl.DataFrame(aligned_data)
 
     # Cleans up minor inconsistencies and data formatting issues that result from the interpolation process. Also
-    # reformats certain data columns to improve future data analysis.
+    # reformats certain data columns to improve downstream processing.
     behavior_data = (
         behavior_data
         # Converts system_state to Enum, adds elapsed session time, and flags active tone regions.

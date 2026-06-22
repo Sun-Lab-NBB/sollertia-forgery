@@ -19,7 +19,7 @@ class ProjectManifest:
 
     Notes:
         This class provides the entry-point API for working with Sollertia research project data. It is used by most
-        data processing and analysis dataset formation pipelines to work with the processed project's data.
+        data processing and dataset forging pipelines to work with the processed project's data.
 
     Args:
         manifest_file: The path to the .feather manifest file that stores the snapshot of the target project's state.

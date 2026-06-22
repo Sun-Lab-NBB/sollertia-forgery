@@ -61,8 +61,8 @@ two short pulses, so the default leaves headroom for unusual setups."""
 
 
 class FluorescenceColumn(StrEnum):
-    """Defines the neuropil-subtracted, baseline-corrected fluorescence columns produced by the forging pipeline that
-    are valid analysis inputs for the place-cell, reward-cell, and SCE detectors.
+    """Defines the neuropil-subtracted, baseline-corrected dF/F0 fluorescence columns produced by the forging
+    pipeline.
     """
 
     SINGLE_DAY_SUBTRACTED = "single_day_subtracted_fluorescence"
@@ -180,7 +180,7 @@ def assemble_cindra_dataset(
     )
 
     # Uses the single-recording cell classification data to create a filtering mask that excludes non-cell ROIs from
-    # the analysis dataset. cindra stores classification results as a (num_rois, 2) float32 array where column 0 holds
+    # the forged dataset. cindra stores classification results as a (num_rois, 2) float32 array where column 0 holds
     # the is_cell label (1.0 or 0.0) and column 1 holds the classifier probability.
     classification = np.load(file=cindra_data_path.joinpath("cell_classification.npy"), mmap_mode="r")
     is_cell_mask: NDArray[np.bool_] = classification[:, 0] == 1

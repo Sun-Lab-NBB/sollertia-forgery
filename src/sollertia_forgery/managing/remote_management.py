@@ -18,14 +18,19 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .job import Job
-from .server import Server, JobStatus, get_remote_job_work_directory
-from .pipelines import ProcessingPipelines
-from .utilities import delay_timer, delay_terminal
-from .dataset_data import DatasetSession
-from .remote_pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from ..server import (
+    Job,
+    Server,
+    JobStatus,
+    ProcessingPipeline,
+    execute_pipelines,
+    get_server_configuration,
+    check_session_eligibility,
+    get_remote_job_work_directory,
+)
+from ..pipelines import ProcessingPipelines
+from ..shared_assets import DatasetSession, delay_timer, delay_terminal
 from .project_manifest import ProjectManifest
-from .server_configuration import get_server_configuration
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -137,7 +142,7 @@ def _generate_remote_manifest(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="forge",
+        conda_environment=server.environment,
         cpu_threads=1,
         ram=1,
         time=20,
@@ -326,7 +331,7 @@ def _construct_checksum_resolution_pipeline(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="forge",
+        conda_environment=server.environment,
         cpu_threads=1,
         ram=20,
         time=40,

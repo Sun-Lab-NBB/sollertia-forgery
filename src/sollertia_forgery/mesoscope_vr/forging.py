@@ -22,14 +22,10 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
+from ..forging import resolve_dataset
 from .metadata import TrialGeometry
 from .fluorescence import assemble_cindra_dataset
-from ..cross_system import (
-    DatasetFiles,
-    DatasetSession,
-    prepare_tracker,
-    resolve_dataset,
-)
+from ..shared_assets import DatasetFiles, DatasetSession, prepare_tracker
 from .runtime_dataset import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 
@@ -227,7 +223,7 @@ def _resolve_session_paths(session_data_path: Path, dataset_name: str) -> _Sessi
 
     # Derives the cindra multi-recording output path. Cindra writes the dataset directory as
     # ``{animal_id}_{dataset_name}`` for collision avoidance when batching multiple animals under a single
-    # analysis name, so the animal identifier is prepended here.
+    # forged dataset name, so the animal identifier is prepended here.
     multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(
         f"{session.animal_id}_{dataset_name}"
     )
@@ -246,12 +242,12 @@ def _assemble_session_dataset(
     *,
     progress: bool = False,
 ) -> None:
-    """Assembles the experiment analysis dataset for the target session.
+    """Assembles the experiment forged dataset for the target session.
 
     Extracts, post-processes, and combines all relevant data for the processed session into a unified Polars
     DataFrame and saves it to an uncompressed .feather file at ``output_path``. Also copies the session's
     experiment descriptor YAML alongside the feather file so the forged session is self-contained for
-    downstream analysis.
+    downstream consumers.
 
     Args:
         session_paths: The resolved filesystem paths for the target session's data directories.
@@ -347,14 +343,14 @@ def _assemble_session_dataset(
 
         # Copies the experiment descriptor next to data.feather so the forged session carries the experimenter
         # context (animal weight, water dispensed/consumed, completion status, notes) needed for downstream
-        # analysis without reaching back into the raw session.
+        # consumers without reaching back into the raw session.
         shutil.copy2(
             src=source_descriptor_path,
             dst=output_path.parent.joinpath(RawDataFiles.SESSION_DESCRIPTOR),
         )
 
         # Projects the canonical trial geometry out of the experiment configuration and writes it next to data.feather
-        # so downstream analysis can reconstruct per-trial position without re-reading the raw experiment configuration.
+        # so downstream consumers can reconstruct per-trial position without re-reading the experiment configuration.
         trial_geometry = TrialGeometry.from_experiment_configuration(experiment_configuration=experiment_configuration)
         trial_geometry.to_yaml(file_path=output_path.parent.joinpath(DatasetFiles.TRIAL_GEOMETRY))
     finally:

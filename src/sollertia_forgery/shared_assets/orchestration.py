@@ -59,6 +59,35 @@ class PendingJob:
 
 
 @dataclass(slots=True)
+class GenericPendingJob(PendingJob):
+    """Describes a single batch processing job for the system-agnostic processing tools.
+
+    Notes:
+        Extends the shared ``PendingJob`` base with the small descriptor set shared by every registered
+        pipeline worker, so a single descriptor replaces the former per-pipeline ``PendingJob`` subclasses. The
+        picklable workers in the worker registry map these fields onto each pipeline's call convention (the
+        behavior worker uses ``unit_path``; the forging worker uses ``name`` and ``project_root``). Fields that
+        do not apply to a given pipeline are left at their defaults, and the processing tools assert the
+        required fields per pipeline before dispatch.
+    """
+
+    name: str = ""
+    """The human-readable unit name (the session name for behavior jobs or the dataset name for forging jobs)
+    used for logging and status reporting."""
+    unit_path: Path = field(default_factory=Path)
+    """The path to the processing unit this job operates on (the session root for behavior jobs)."""
+    job_name: str = ""
+    """The pipeline job type name registered in the ``ProcessingTracker`` (paired with ``specifier`` to derive
+    the job ID)."""
+    specifier: str = ""
+    """The job-specific specifier that differentiates jobs of the same type within a unit (the system ID, the
+    controller-type-id triple, or the session name for forging assembly jobs)."""
+    project_root: Path | None = None
+    """The project root directory passed to the forging worker. Unused by pipelines that resolve their output
+    location from the unit path alone."""
+
+
+@dataclass(slots=True)
 class ActiveJob[PendingJobT: PendingJob]:
     """Tracks a single pending job currently executing as a ``Future`` on the shared process pool."""
 

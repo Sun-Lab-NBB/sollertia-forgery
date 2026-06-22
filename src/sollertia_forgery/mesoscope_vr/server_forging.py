@@ -1,8 +1,8 @@
 """Provides interface functions for dataset forging pipelines.
 
 Notes:
-    The assets from this module forge (assemble) and post-process analysis datasets from processed data stored on the
-    remote compute server and assume the server is properly configured to execute all forging tasks.
+    The assets from this module forge (assemble) datasets from processed data stored on the remote compute server
+    and assume the server is properly configured to execute all forging tasks.
 """
 
 from __future__ import annotations
@@ -21,24 +21,20 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .forging import FORGING_JOB_NAME
-from ..cross_system import (
+from ..server import (
     Job,
     Server,
     JobStatus,
-    DatasetData,
-    DatasetSession,
-    ProjectManifest,
     ProcessingPipeline,
-    ProcessingPipelines,
-    delay_timer,
-    delay_terminal,
     execute_pipelines,
     get_server_configuration,
-    resolve_project_manifest,
     check_session_eligibility,
     get_remote_job_work_directory,
 )
+from .forging import FORGING_JOB_NAME
+from ..managing import ProjectManifest, resolve_project_manifest
+from ..pipelines import ProcessingPipelines
+from ..shared_assets import DatasetData, DatasetSession, delay_timer, delay_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,7 +48,7 @@ def _define_dataset_remote(
     *,
     keep_job_logs: bool = False,
 ) -> DatasetData:
-    """Creates a new analysis dataset on the remote compute server.
+    """Creates a new forged dataset on the remote compute server.
 
     This function submits a job to the remote server to create the dataset directory structure and metadata file,
     waits for the job to complete, and then loads the created DatasetData instance. The session type and acquisition
@@ -93,12 +89,12 @@ def _define_dataset_remote(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="forge",
+        conda_environment=server.environment,
         cpu_threads=1,
         ram=4,
         time=10,
     )
-    job.add_command(f"slf mesoscope dataset -dn {dataset_name} -pp {project_root} {session_specs}")
+    job.add_command(f"slf forge -dn {dataset_name} -pp {project_root} {session_specs}")
 
     # If configured to remove job logs after runtime, adds a command to delete the job's working directory.
     if not keep_job_logs:
@@ -229,12 +225,12 @@ def _construct_cindra_multiday_pipeline(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="cindra",
+        conda_environment=server.environment,
         cpu_threads=30,
         ram=80,
         time=180,
     )
-    job.add_command(f"slf mesoscope dataset -i {configuration_path} {session_path_args} -id {job_id} -d")
+    job.add_command(f"slf forge -i {configuration_path} {session_path_args} -id {job_id} -d")
     stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Across-day-tracked cell fluorescence extraction.
@@ -253,13 +249,13 @@ def _construct_cindra_multiday_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="cindra",
+            conda_environment=server.environment,
             cpu_threads=30,
             ram=80,
             time=180,
         )
         job.add_command(
-            f"slf mesoscope dataset -i {configuration_path} {session_path_args} -id {job_id} -e -t {session}"
+            f"slf forge -i {configuration_path} {session_path_args} -id {job_id} -e -t {session}"
         )
         stage_2.append((job, working_directory, job_id))
 
@@ -342,12 +338,12 @@ def _construct_data_assembly_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=8,
             ram=32,
             time=60,
         )
-        job.add_command(f"slf mesoscope dataset -dn {remote_dataset_path.name} -pp {project_root} -id {job_id}")
+        job.add_command(f"slf forge -dn {remote_dataset_path.name} -pp {project_root} -id {job_id}")
         stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.

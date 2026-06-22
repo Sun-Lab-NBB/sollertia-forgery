@@ -19,7 +19,7 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingTracker
 
-from .orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -141,7 +141,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                     if not tracker_path.is_file():
                         continue
                     # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision
-                    # avoidance when batching multiple animals under one analysis. The manifest surfaces the
+                    # avoidance when batching multiple animals under one forged dataset. The manifest surfaces the
                     # unqualified base name, so the animal_id prefix is stripped here.
                     dataset_name = _strip_animal_prefix(
                         qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
@@ -293,7 +293,7 @@ def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
     """Strips the ``{animal_id}_`` prefix from a cindra multi-recording dataset directory name.
 
     Cindra's ``resolve_dataset_name_tool`` prepends the animal identifier to user-supplied dataset names to
-    produce collision-free output directories when batching multiple animals with the same analysis. This
+    produce collision-free output directories when batching multiple animals with the same forged dataset. This
     helper reverses that qualification so manifest consumers see the logical base name instead of the
     filesystem-qualified name.
 

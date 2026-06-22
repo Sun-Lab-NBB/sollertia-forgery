@@ -1,6 +1,6 @@
 """Provides the end-to-end cell-activity (calcium-imaging) processing pipelines, threading the cindra binding
-in-process. Exposes the single-recording pipeline used by ``slf mesoscope process activity`` and the
-multi-recording (across-session cell tracking) pipeline used as the first stage of ``slf mesoscope dataset``.
+in-process. Exposes the single-recording pipeline used by ``slf process activity`` and the
+multi-recording (across-session cell tracking) pipeline used as the first stage of ``slf forge``.
 
 Notes:
     cindra owns the heavy per-plane / per-stage job decomposition and writes its own processing trackers at the

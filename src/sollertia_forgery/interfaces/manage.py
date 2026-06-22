@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 from ataraxis_base_utilities import console
 
-from ..cross_system import ProjectManifest, resolve_checksum, generate_project_manifest
+from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""

@@ -1,12 +1,11 @@
-"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.cross_system."""
+"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.shared_assets."""
 
 from pathlib import Path
 
 import pytest
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-from sollertia_forgery.cross_system import DatasetData, DatasetSession
-
+from sollertia_forgery.shared_assets import DatasetData, DatasetSession
 
 # Tests for DatasetSession dataclass
 
@@ -210,14 +209,10 @@ def test_dataset_data_animals_expose_per_animal_paths(tmp_path: Path) -> None:
 
     dataset_root = tmp_path / "test_dataset"
     surgery_paths = {animal.animal: animal.surgery_path for animal in dataset_data.animals}
-    bleaching_paths = {animal.animal: animal.bleaching_path for animal in dataset_data.animals}
-    bleaching_table_paths = {animal.animal: animal.bleaching_table_path for animal in dataset_data.animals}
 
     assert set(surgery_paths.keys()) == {"animal_a", "animal_b"}
     assert surgery_paths["animal_a"] == dataset_root / "animal_a" / "surgery_metadata.yaml"
     assert surgery_paths["animal_b"] == dataset_root / "animal_b" / "surgery_metadata.yaml"
-    assert bleaching_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.yaml"
-    assert bleaching_table_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.feather"
 
 
 def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:

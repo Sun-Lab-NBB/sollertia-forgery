@@ -13,7 +13,7 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
 from .metadata import BehaviorDataFiles
-from ..cross_system import (
+from ..shared_assets import (
     get_event_data,
     partition_events,
     merge_event_streams,

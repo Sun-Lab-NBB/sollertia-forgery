@@ -1,6 +1,5 @@
 """Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and DatasetColumn enumerations, the
-StimulusMode enumeration, and the per-session TrialGeometry data file consumed by both the forging and analysis
-pipelines.
+StimulusMode enumeration, and the per-session TrialGeometry data file written by the forging pipeline.
 """
 
 from __future__ import annotations
@@ -139,10 +138,9 @@ class StimulusMode(StrEnum):
     """Defines the semantic meaning of the stimulus delivered when a trial's stimulus trigger zone fires.
 
     Notes:
-        Projects each upstream trial-class type onto the analysis-relevant axis of "what does the animal experience
-        when the trigger fires." Decoupled from TriggerType, which describes the activation
-        mechanism rather than the resulting outcome. Analysis modules use this enum to gate semantically appropriate
-        pipelines (e.g., reward-cell analysis runs only against trial types whose stimulus_mode is REWARD).
+        Projects each upstream trial-class type onto the axis of "what does the animal experience when the trigger
+        fires." Decoupled from TriggerType, which describes the activation mechanism rather than the resulting
+        outcome.
     """
 
     REWARD = "reward"
@@ -177,7 +175,7 @@ class TrialGeometryEntry:
     """The trial-relative location of the stimulus boundary, in centimeters."""
     cue_offset_cm: float = 0.0
     """The offset between the runtime's trial start and the canonical start of the first cue in the cue sequence,
-    in centimeters. When non-zero, the runtime begins recording mid-cue, so analysis-side trial boundaries must be
+    in centimeters. When non-zero, the runtime begins recording mid-cue, so downstream trial boundaries must be
     re-aligned to the first-cue transition before cue zones (and the trigger zone) read at canonical positions."""
 
 
@@ -186,10 +184,10 @@ class TrialGeometry(YamlConfig):
     """Maps each trial type name to its canonical geometry, written as a data file alongside data.feather.
 
     Notes:
-        Projects the analysis-relevant slice of MesoscopeExperimentConfiguration.trial_structures so that downstream
-        analysis can reconstruct canonical per-trial position without re-reading the upstream experiment configuration.
-        This decouples the analysis dataset schema from the upstream configuration schema, limiting migration impact
-        when MesoscopeExperimentConfiguration evolves.
+        Projects the canonical slice of MesoscopeExperimentConfiguration.trial_structures so that downstream
+        consumers can reconstruct canonical per-trial position without re-reading the upstream experiment
+        configuration. This decouples the forged dataset schema from the upstream configuration schema, limiting
+        migration impact when MesoscopeExperimentConfiguration evolves.
     """
 
     entries: dict[str, TrialGeometryEntry]

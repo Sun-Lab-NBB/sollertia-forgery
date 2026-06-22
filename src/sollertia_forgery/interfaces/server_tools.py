@@ -8,12 +8,12 @@ import contextlib
 
 import yaml  # type: ignore[import-untyped]
 
-from ..interfaces import mcp
-from .server_configuration import (
+from ..server import (
     ServerConfiguration,
     get_server_configuration,
     get_server_configuration_path,
 )
+from .mcp_instance import mcp
 
 
 def _ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -33,6 +33,7 @@ def _serialize(instance: ServerConfiguration) -> dict[str, Any]:
         "password": instance.password,
         "host": instance.host,
         "root": instance.root,
+        "environment": instance.environment,
     }
 
 
@@ -63,7 +64,7 @@ def write_server_configuration_tool(
 
     Args:
         configuration_payload: The complete ServerConfiguration payload (must include ``username``, ``password``,
-            ``host``, and ``root``).
+            ``host``, ``root``, and ``environment``).
         overwrite: Determines whether to overwrite an existing server configuration file.
 
     Returns:

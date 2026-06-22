@@ -22,10 +22,14 @@ from ataraxis_base_utilities import resolve_worker_count, resolve_parallel_job_c
 from sollertia_shared_assets import SessionData, ProcessingTrackers, iterate_sessions, validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
-from .manifest import generate_project_manifest
-from ..interfaces import mcp
-from .orchestration import (
+from ..managing import (
+    CHECKSUM_JOB_NAME,
+    ProjectManifest,
+    resolve_checksum,
+    generate_project_manifest,
+)
+from .mcp_instance import mcp
+from ..shared_assets import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
@@ -35,7 +39,6 @@ from .orchestration import (
     group_jobs_by_tracker,
     job_execution_manager,
 )
-from .project_manifest import ProjectManifest
 
 _STATUS_COLUMNS: frozenset[str] = frozenset({"complete", "integrity", "cindra", "behavior", "video"})
 """The manifest column names that store boolean-like UInt8 processing status flags, cast to native bools by

@@ -36,6 +36,10 @@ class ServerConfiguration(YamlConfig):
     root: str = ""
     """The absolute path, on the remote compute server, to the single root directory that stores all Sollertia data
     (raw and processed). All server-side data operations resolve their paths relative to this root."""
+    environment: str = ""
+    """The name of the shared conda environment, on the remote compute server, in which sollertia-forgery and all of
+    its processing dependencies are installed. Every remote compute job activates this single environment before
+    invoking the ``slf`` CLI, so all processing and forging pipelines share one environment."""
 
 
 def create_server_configuration_file(
@@ -43,6 +47,7 @@ def create_server_configuration_file(
     password: str,
     host: str,
     root: str,
+    environment: str,
 ) -> None:
     """Creates the .YAML configuration file for the Sollertia platform compute server and configures the local machine
     (PC) to use this file for all future server-related calls.
@@ -52,6 +57,8 @@ def create_server_configuration_file(
         password: The password to use for server authentication.
         host: The hostname or IP address of the server to connect to.
         root: The absolute path, on the remote compute server, to the root directory that stores all Sollertia data.
+        environment: The name of the shared conda environment, on the remote compute server, in which
+            sollertia-forgery and all of its processing dependencies are installed.
     """
     output_directory = get_working_directory().joinpath(_CONFIGURATION_DIR)
     ServerConfiguration(
@@ -59,6 +66,7 @@ def create_server_configuration_file(
         password=password,
         host=host,
         root=root,
+        environment=environment,
     ).to_yaml(file_path=output_directory.joinpath(_SERVER_CONFIG_FILENAME))
     console.echo(message="Server configuration file: Created.", level=LogLevel.SUCCESS)
 
@@ -88,11 +96,19 @@ def get_server_configuration() -> ServerConfiguration:
 
     configuration = ServerConfiguration.from_yaml(file_path=config_path)
 
-    if not all((configuration.username, configuration.password, configuration.host, configuration.root)):
+    if not all(
+        (
+            configuration.username,
+            configuration.password,
+            configuration.host,
+            configuration.root,
+            configuration.environment,
+        )
+    ):
         message = (
             "Unable to load the server configuration. The 'server_configuration.yaml' file appears to be unconfigured "
-            "or contains placeholder values for one or more required fields (username, password, host, root). Call the "
-            "'sl-server configure' CLI command to reconfigure the server access credentials."
+            "or contains placeholder values for one or more required fields (username, password, host, root, "
+            "environment). Call the 'slf server configure' CLI command to reconfigure the server access credentials."
         )
         console.error(message=message, error=ValueError)
 

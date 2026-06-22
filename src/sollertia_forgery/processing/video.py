@@ -13,7 +13,7 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker
 
-from .orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,7 +30,7 @@ _RAW_CAMERA_LOG_PART_COUNT: int = 2
 
 _FRAME_TIME_COLUMN: str = "frame_time_us"
 """The output column name holding the per-frame acquisition timestamps, in microseconds since the UTC epoch. This
-matches the canonical camera-timestamp column recognized across the downstream forging and analysis pipelines."""
+matches the canonical camera-timestamp column recognized across the downstream forging pipelines."""
 
 _CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
 """The suffix appended to each camera's manifest name to form its canonical timestamp feather filename within the

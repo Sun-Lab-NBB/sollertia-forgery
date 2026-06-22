@@ -18,20 +18,18 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from ..cross_system import (
+from ..server import (
     Job,
     Server,
-    DatasetSession,
-    ProjectManifest,
     ProcessingPipeline,
-    ProcessingPipelines,
-    delay_terminal,
     execute_pipelines,
     get_server_configuration,
-    resolve_project_manifest,
     check_session_eligibility,
     get_remote_job_work_directory,
 )
+from ..managing import ProjectManifest, resolve_project_manifest
+from ..pipelines import ProcessingPipelines
+from ..shared_assets import DatasetSession, delay_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,12 +112,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=2,
             ram=4,
             time=90,
         )
-        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Face camera processing job
@@ -133,12 +131,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=30,
             ram=90,
             time=90,
         )
-        job.add_command(f"slf mesoscope process video -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process video -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Body camera processing job
@@ -152,12 +150,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=30,
             ram=60,
             time=90,
         )
-        job.add_command(f"slf mesoscope process video -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process video -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Actor microcontroller data processing job
@@ -171,12 +169,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=5,
             ram=10,
             time=90,
         )
-        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Sensor microcontroller data processing job
@@ -190,12 +188,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=15,
             ram=60,
             time=90,
         )
-        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
         # Encoder microcontroller data processing job
@@ -209,12 +207,12 @@ def _construct_behavior_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="forge",
+            conda_environment=server.environment,
             cpu_threads=30,
             ram=200,
             time=90,
         )
-        job.add_command(f"slf mesoscope process behavior -sp {remote_session_path} -id {job_id} -w -1")
+        job.add_command(f"slf process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.
@@ -315,12 +313,12 @@ def _construct_cindra_processing_pipeline(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="cindra",
+        conda_environment=server.environment,
         cpu_threads=1,
         ram=10,
         time=180,
     )
-    job.add_command(f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -b")
+    job.add_command(f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -b")
     stage_1.append((job, working_directory, job_id))
 
     # Stage 2: Plane processing
@@ -339,13 +337,13 @@ def _construct_cindra_processing_pipeline(
             output_log=working_directory.joinpath("output.txt"),
             error_log=working_directory.joinpath("errors.txt"),
             working_directory=working_directory,
-            conda_environment="cindra",
+            conda_environment=server.environment,
             cpu_threads=30,
             ram=80,
             time=180,
         )
         job.add_command(
-            f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -p -t {plane}"  # noqa: E501
+            f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -p -t {plane}"
         )
         stage_2.append((job, working_directory, job_id))
 
@@ -364,12 +362,12 @@ def _construct_cindra_processing_pipeline(
         output_log=working_directory.joinpath("output.txt"),
         error_log=working_directory.joinpath("errors.txt"),
         working_directory=working_directory,
-        conda_environment="cindra",
+        conda_environment=server.environment,
         cpu_threads=1,
         ram=30,
         time=180,
     )
-    job.add_command(f"slf mesoscope process activity {configuration_command} -sp {remote_session_path} -id {job_id} -c")
+    job.add_command(f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -c")
     stage_3.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files.

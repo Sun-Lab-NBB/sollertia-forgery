@@ -1,11 +1,11 @@
 """Provides the single ``slf`` console-script root command group for the sollertia-forgery library.
 
 Notes:
-    Mirrors the sl-experiment CLI shape: one root command exposes the system-agnostic management commands
-    (manifest, checksum, server), the agentic Model Context Protocol server, the remote project-workflow
-    orchestration group, and the system-specific ``mesoscope`` command group. Subcommand groups are imported and
-    registered lazily at module load so that resolving ``slf --help`` does not import the heavy acquisition-library
-    bindings, which are only pulled in inside the individual command callbacks.
+    One root command exposes the system-agnostic management commands (manifest, checksum, server), the agentic Model
+    Context Protocol server, the generic processing and forging commands, and the remote project-workflow
+    orchestration group. Subcommand groups are imported and registered lazily at module load so that resolving
+    ``slf --help`` stays inexpensive, and the heavy acquisition-library bindings are pulled in only inside the
+    individual command callbacks.
 """
 
 import click
@@ -19,8 +19,8 @@ def slf_cli() -> None:
     """Processes and manages data acquired with the Sollertia data acquisition platform.
 
     Exposes system-agnostic management commands ('manifest', 'checksum', 'server'), the agentic MCP server ('mcp'),
-    the remote project-workflow orchestration group ('execute'), and the system-specific 'mesoscope' command group
-    for running and forging Mesoscope-VR data.
+    the generic processing and forging commands ('process', 'forge'), and the remote project-workflow orchestration
+    group ('execute'). The acquisition system is inferred from the data, so no command takes a system selector.
     """
 
 
@@ -34,16 +34,18 @@ def run_mcp_server_command() -> None:
 
 def _register_subcommands() -> None:
     """Imports and registers every subcommand group on the top-level ``slf`` Click group."""
+    from .forge import forge_command  # noqa: PLC0415
     from .manage import manifest_cli, checksum_command  # noqa: PLC0415
     from .server import server_cli  # noqa: PLC0415
     from .execute import execute_cli  # noqa: PLC0415
-    from .mesoscope_vr import mesoscope  # noqa: PLC0415
+    from .process import process_cli  # noqa: PLC0415
 
     slf_cli.add_command(cmd=manifest_cli)
     slf_cli.add_command(cmd=checksum_command)
     slf_cli.add_command(cmd=server_cli)
     slf_cli.add_command(cmd=execute_cli)
-    slf_cli.add_command(cmd=mesoscope)
+    slf_cli.add_command(cmd=process_cli)
+    slf_cli.add_command(cmd=forge_command)
 
 
 _register_subcommands()

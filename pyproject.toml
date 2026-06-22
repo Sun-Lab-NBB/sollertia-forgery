@@ -186,12 +186,12 @@ exclude = [
 
 [[tool.mypy.overrides]]
 module = [
-    "sollertia_forgery.cross_system.server",
-    "sollertia_forgery.cross_system.job",
-    "sollertia_forgery.cross_system.remote_pipeline",
-    "sollertia_forgery.cross_system.remote_management",
-    "sollertia_forgery.cross_system.server_configuration",
-    "sollertia_forgery.cross_system.server_mcp_tools",
+    "sollertia_forgery.server.server",
+    "sollertia_forgery.server.job",
+    "sollertia_forgery.server.pipeline",
+    "sollertia_forgery.managing.remote_management",
+    "sollertia_forgery.server.server_configuration",
+    "sollertia_forgery.interfaces.server_tools",
     "sollertia_forgery.mesoscope_vr.server_processing",
     "sollertia_forgery.mesoscope_vr.server_forging",
 ]
@@ -230,4 +230,48 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
     "pass",
+]
+
+# Import-linter contracts that enforce the registry-hub architecture: the acquisition-system subpackages
+# (mesoscope_vr and its future siblings) are reachable only through the registries hub, and neither the
+# cross-system layers nor the interface layer ever import a system package directly.
+[tool.importlinter]
+root_package = "sollertia_forgery"
+
+[[tool.importlinter.contracts]]
+name = "Acquisition-system packages are reached only through the registry hub"
+type = "forbidden"
+source_modules = [
+    "sollertia_forgery.pipelines",
+    "sollertia_forgery.shared_assets",
+    "sollertia_forgery.server",
+    "sollertia_forgery.processing",
+    "sollertia_forgery.forging",
+    "sollertia_forgery.managing",
+    "sollertia_forgery.interfaces",
+]
+forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
+
+[[tool.importlinter.contracts]]
+name = "System packages never import the registry hub or the interface layer"
+type = "forbidden"
+source_modules = ["sollertia_forgery.mesoscope_vr"]
+forbidden_modules = [
+    "sollertia_forgery.registries",
+    "sollertia_forgery.interfaces",
+]
+
+[[tool.importlinter.contracts]]
+name = "Cross-system layers never import the registry hub or the interface layer"
+type = "forbidden"
+source_modules = [
+    "sollertia_forgery.shared_assets",
+    "sollertia_forgery.server",
+    "sollertia_forgery.processing",
+    "sollertia_forgery.forging",
+    "sollertia_forgery.managing",
+]
+forbidden_modules = [
+    "sollertia_forgery.registries",
+    "sollertia_forgery.interfaces",
 ]

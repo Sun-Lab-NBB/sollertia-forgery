@@ -1,4 +1,4 @@
-"""Provides operations for resolving and creating the analysis dataset hierarchy from acquisition sessions."""
+"""Provides operations for resolving and creating the forged dataset hierarchy from acquisition sessions."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import delete_directory
 
-from .dataset_data import DatasetData, DatasetSession
+from ..shared_assets import DatasetData, DatasetSession
 
 if TYPE_CHECKING:
     from pathlib import Path

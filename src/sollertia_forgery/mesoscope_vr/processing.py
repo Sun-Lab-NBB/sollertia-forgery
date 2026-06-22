@@ -22,7 +22,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 
 from .runtime import RUNTIME_SOURCE_ID, find_log_archive, process_runtime_data
-from ..cross_system import (
+from ..shared_assets import (
     prepare_tracker,
     find_module_feathers,
     parse_module_feather_name,
@@ -514,8 +514,8 @@ def _execute_job(
         ``ProcessingTracker.generate_job_id``, so callers never need to materialize or forward the ID explicitly.
 
     Args:
-        job_name: The job type name (runtime_processing, camera_processing, or microcontroller_processing).
-        specifier: The job-specific specifier (system ID, camera source ID, or controller-type-id triple).
+        job_name: The job type name (runtime_processing or microcontroller_processing).
+        specifier: The job-specific specifier (the runtime source ID or the controller-type-id triple).
         input_path: The input file path resolved by ``_discover_jobs``. Reusing the cached path avoids a second
             recursive glob over the session directory.
         output_directory: The path to the behavior data output directory.
@@ -560,7 +560,7 @@ def _run_job(
         returns ``None`` on success or propagates any raised exception back through the future.
 
     Args:
-        job_name: The job type name (runtime_processing, camera_processing, or microcontroller_processing).
+        job_name: The job type name (runtime_processing or microcontroller_processing).
         input_path: The input file path resolved by ``_discover_jobs`` for this job.
         output_directory: The path to the behavior data output directory.
         hardware_state: The hardware configuration used by the microcontroller processing path.
