@@ -21,20 +21,17 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from ..server import (
-    Job,
-    Server,
-    JobStatus,
-    ProcessingPipeline,
-    execute_pipelines,
-    get_server_configuration,
-    check_session_eligibility,
-    get_remote_job_work_directory,
-)
+from ..server import Job, Server, JobStatus, get_server_configuration, get_remote_job_work_directory
 from .forging import FORGING_JOB_NAME
-from ..managing import ProjectManifest, resolve_project_manifest
+from ..managing import ProjectManifest
 from ..pipelines import ProcessingPipelines
 from ..shared_assets import DatasetData, DatasetSession, delay_timer, delay_terminal
+from ..remote_orchestration import (
+    ProcessingPipeline,
+    execute_pipelines,
+    resolve_project_manifest,
+    check_session_eligibility,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -254,9 +251,7 @@ def _construct_cindra_multiday_pipeline(
             ram=80,
             time=180,
         )
-        job.add_command(
-            f"slf forge -i {configuration_path} {session_path_args} -id {job_id} -e -t {session}"
-        )
+        job.add_command(f"slf forge -i {configuration_path} {session_path_args} -id {job_id} -e -t {session}")
         stage_2.append((job, working_directory, job_id))
 
     # Resolves the paths to the local and remote job tracker files (now in main session's multiday folder).

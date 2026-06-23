@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     from typing import Any
     from collections.abc import Callable, Iterator
 
-    from .shared_assets import GenericPendingJob
     from .mesoscope_vr.batch import ConcurrencyDescriptor
+    from .local_orchestration import GenericPendingJob
 
 __all__ = [
     "AGNOSTIC_PIPELINES",
@@ -204,9 +204,7 @@ def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
     return AcquisitionSystems(system)
 
 
-def resolve_local_pipeline(
-    system: str | AcquisitionSystems, pipeline: ProcessingPipelines
-) -> Callable[..., None]:
+def resolve_local_pipeline(system: str | AcquisitionSystems, pipeline: ProcessingPipelines) -> Callable[..., None]:
     """Resolves the in-process entry point that runs the target pipeline for the target acquisition system.
 
     Args:

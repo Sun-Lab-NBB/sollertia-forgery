@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from datetime import UTC, datetime
 
 import polars as pl
+from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
@@ -18,7 +19,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
-from ..shared_assets import prepare_tracker
+from ..local_orchestration import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -79,16 +80,14 @@ def generate_project_manifest(project_directory: Path) -> None:
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
-        # Marks the job as running.
         tracker.start_job(job_id=job_id)
         try:
-            # Pre-creates the 'manifest' dictionary structure.
             manifest: dict[str, list] = {
                 # Animal IDs.
                 "animal": [],
                 # Session names.
                 "session": [],
-                # Session names stored as timezone-aware date-time objects in the host machine's local time.
+                # Session acquisition time as a timezone-aware datetime in the host machine's local time.
                 "date": [],
                 # Session types (e.g., mesoscope experiment, run training, etc.).
                 "type": [],
@@ -127,9 +126,9 @@ def generate_project_manifest(project_directory: Path) -> None:
                     tracker_path = dataset_dir.joinpath(ProcessingTrackers.CINDRA_MULTI_RECORDING)
                     if not tracker_path.is_file():
                         continue
-                    # Cindra writes the dataset directory as ``{animal_id}_{base_name}`` for collision
-                    # avoidance when batching multiple animals under one forged dataset. The manifest surfaces the
-                    # unqualified base name, so the animal_id prefix is stripped here.
+                    # The forging pipeline writes the dataset directory as ``{animal_id}_{base_name}`` for
+                    # collision avoidance when batching multiple animals under one forged dataset. The manifest
+                    # surfaces the unqualified base name, so the animal_id prefix is stripped here.
                     dataset_name = _strip_animal_prefix(
                         qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
                     )
@@ -204,7 +203,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                     manifest["video"].append(False)
                     manifest["multi_recording_datasets"].append([])
                     manifest["multi_recording_complete"].append([])
-                    continue  # Cycles to the next session
+                    continue
 
                 # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
                 # canonical tracker paths exposed by SessionData.
@@ -228,7 +227,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 session_datasets: list[str] = []
                 session_dataset_complete: list[bool] = []
                 if multi_recording_root.is_dir():
-                    for dataset_dir in sorted(multi_recording_root.iterdir()):
+                    for dataset_dir in natsorted(multi_recording_root.iterdir()):
                         if not dataset_dir.is_dir():
                             continue
                         dataset_name = _strip_animal_prefix(
@@ -260,58 +259,21 @@ def generate_project_manifest(project_directory: Path) -> None:
             }
             manifest_frame = pl.DataFrame(data=manifest, schema=schema, strict=False)
 
-            # Sorts the DataFrame by animal and then session. Since animal IDs are monotonically increasing
-            # according to Sollertia standards and session 'names' are based on acquisition timestamps, the
-            # sort order is chronological.
+            # Sorts the DataFrame by animal, then session. Animal IDs are monotonically increasing per Sollertia
+            # standards and session names are acquisition timestamps, so rows are grouped by animal and ordered
+            # chronologically within each animal group.
             sorted_manifest = manifest_frame.sort(by=["animal", "session"])
 
             # Saves the generated manifest to the project-specific uncompressed .feather file to allow
             # memory-mapped reads.
             sorted_manifest.write_ipc(file=manifest_path, compression="uncompressed")
 
-            # Marks the job as completed.
             tracker.complete_job(job_id=job_id)
 
         except Exception:
             # If the code reaches this section, this means the runtime encountered an error.
             tracker.fail_job(job_id=job_id)
             raise
-
-
-def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
-    """Strips the ``{animal_id}_`` prefix from a cindra multi-recording dataset directory name.
-
-    Cindra's ``resolve_dataset_name_tool`` prepends the animal identifier to user-supplied dataset names to
-    produce collision-free output directories when batching multiple animals with the same forged dataset. This
-    helper reverses that qualification so manifest consumers see the logical base name instead of the
-    filesystem-qualified name.
-
-    Args:
-        qualified_name: The on-disk directory name as produced by cindra.
-        animal_id: The animal identifier that was prepended by cindra as the specifier.
-
-    Returns:
-        The dataset name with the ``{animal_id}_`` prefix removed when present, or the input unchanged when
-        the prefix is absent.
-    """
-    prefix = f"{animal_id}_"
-    if qualified_name.startswith(prefix):
-        return qualified_name[len(prefix) :]
-    return qualified_name
-
-
-def _load_tracker_if_exists(tracker_path: Path) -> ProcessingTracker | None:
-    """Returns a ProcessingTracker bound to the target path when it exists, or None otherwise.
-
-    Args:
-        tracker_path: The canonical path to the processing tracker YAML file.
-
-    Returns:
-        A ProcessingTracker instance when the file is present on disk, or None when it is missing.
-    """
-    if not tracker_path.is_file():
-        return None
-    return ProcessingTracker(file_path=tracker_path)
 
 
 class ProjectManifest:
@@ -330,8 +292,11 @@ class ProjectManifest:
     """
 
     def __init__(self, manifest_file: Path) -> None:
-        # Reads the data from the target manifest file into the class attribute.
         self._data: pl.DataFrame = pl.read_ipc(source=manifest_file, memory_map=True)
+
+    def __repr__(self) -> str:
+        """Returns a string representation of the ProjectManifest instance."""
+        return f"ProjectManifest(sessions={self._data.height})"
 
     def print_data(self) -> None:
         """Prints the entire contents of the manifest file to the terminal."""
@@ -340,8 +305,8 @@ class ProjectManifest:
             set_tbl_cols=-1,  # Displays all columns (-1 means unlimited)
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="LEFT",
-            set_tbl_width_chars=250,  # Sets table width to 250 characters
-            set_fmt_str_lengths=600,  # Allows longer strings to display properly (default is 32)
+            set_tbl_width_chars=250,
+            set_fmt_str_lengths=600,  # Allows longer strings to display properly (default is 30)
         ):
             console.echo(message=str(self._data), raw=True)
 
@@ -371,12 +336,11 @@ class ProjectManifest:
             "multi_recording_complete",
         ]
 
-        # Retrieves the data.
-        df = self._data.select(summary_cols)
+        data_frame = self._data.select(summary_cols)
 
         # Optionally filters the data for the target animal.
         if animal is not None:
-            df = df.filter(pl.col("animal") == int(animal))
+            data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
         # Ensures the data displays properly.
         with pl.Config(
@@ -386,10 +350,11 @@ class ProjectManifest:
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="CENTER",
         ):
-            console.echo(message=str(df), raw=True)
+            console.echo(message=str(data_frame), raw=True)
 
     def print_notes(self, animal: int | None = None) -> None:
-        """Prints the animal ID, session ID, and experimenter notes data for each project's session to the terminal.
+        """Prints the animal ID, session date, session ID, session type, acquisition system, and experimenter notes
+        data for each project's session to the terminal.
 
         This data view is optimized for determining what data acquisition sessions have been carried out and checking
         the outcomes of each session recorded in the experimenter notes.
@@ -399,11 +364,11 @@ class ProjectManifest:
                 displays the data for that animal. Otherwise, it displays the data for all animals.
         """
         # Pre-selects the columns to display.
-        df = self._data.select(["animal", "date", "session", "type", "system", "notes"])
+        data_frame = self._data.select(["animal", "date", "session", "type", "system", "notes"])
 
         # Optionally filters the data for the target animal.
         if animal is not None:
-            df = df.filter(pl.col("animal") == int(animal))
+            data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
         # Prints the extracted data.
         with pl.Config(
@@ -414,7 +379,7 @@ class ProjectManifest:
             set_tbl_width_chars=170,  # Wider columns for notes
             set_fmt_str_lengths=2000,  # Allows very long strings for notes
         ):
-            console.echo(message=str(df), raw=True)
+            console.echo(message=str(data_frame), raw=True)
 
     @property
     def animals(self) -> tuple[int, ...]:
@@ -472,18 +437,16 @@ class ProjectManifest:
             ValueError: If the specified session is not found in the manifest file.
         """
         # Filters the data for the specified session.
-        df = self._data.filter(pl.col("session") == session)
+        data_frame = self._data.filter(pl.col("session") == session)
 
-        # Checks if the session exists.
-        if df.is_empty():
+        if data_frame.is_empty():
             message = (
                 f"Session ID '{session}' not found in the project manifest. "
                 f"Available sessions: {self.get_sessions(animal=None, exclude_incomplete=False)}."
             )
             console.error(message=message, error=ValueError)
 
-        # Extracts and returns the animal ID.
-        return int(df.select("animal").item())
+        return int(data_frame.select("animal").item())
 
     def get_system_for_session(self, session: str) -> str:
         """Returns the data acquisition system used to acquire the specified session's data.
@@ -498,18 +461,16 @@ class ProjectManifest:
             ValueError: If the specified session is not found in the manifest file.
         """
         # Filters the data for the specified session.
-        df = self._data.filter(pl.col("session") == session)
+        data_frame = self._data.filter(pl.col("session") == session)
 
-        # Checks if the session exists.
-        if df.is_empty():
+        if data_frame.is_empty():
             message = (
                 f"Session ID '{session}' not found in the project manifest. "
                 f"Available sessions: {self.get_sessions(animal=None, exclude_incomplete=False)}."
             )
             console.error(message=message, error=ValueError)
 
-        # Extracts and returns the acquisition system used to acquire the session.
-        return str(df.select("system").item())
+        return str(data_frame.select("system").item())
 
     def summarize(self) -> dict[str, Any]:
         """Returns a structured summary of the project manifest for programmatic consumption.
@@ -572,7 +533,7 @@ class ProjectManifest:
 
                 dataset_summary = {
                     "total_datasets": len(datasets),
-                    "datasets": sorted(datasets, key=lambda d: d["name"]),
+                    "datasets": natsorted(datasets, key=lambda dataset: dataset["name"]),
                 }
 
         return {
@@ -635,3 +596,38 @@ class ProjectManifest:
         # Formats and returns session IDs to the caller.
         sessions = data.select("session").sort("session").to_series().to_list()
         return tuple(sessions)
+
+
+def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
+    """Strips the ``{animal_id}_`` prefix from a cindra multi-recording dataset directory name.
+
+    The slf forging pipeline prepends the animal identifier to the dataset name to produce collision-free
+    output directories when batching multiple animals with the same forged dataset. This helper reverses that
+    qualification so manifest consumers see the logical base name instead of the filesystem-qualified name.
+
+    Args:
+        qualified_name: The on-disk directory name produced by the forging pipeline.
+        animal_id: The animal identifier prepended to qualify the on-disk dataset directory name.
+
+    Returns:
+        The dataset name with the ``{animal_id}_`` prefix removed when present, or the input unchanged when
+        the prefix is absent.
+    """
+    prefix = f"{animal_id}_"
+    if qualified_name.startswith(prefix):
+        return qualified_name[len(prefix) :]
+    return qualified_name
+
+
+def _load_tracker_if_exists(tracker_path: Path) -> ProcessingTracker | None:
+    """Returns a ProcessingTracker bound to the target path when it exists, or None otherwise.
+
+    Args:
+        tracker_path: The canonical path to the processing tracker YAML file.
+
+    Returns:
+        A ProcessingTracker instance when the file is present on disk, or None when it is missing.
+    """
+    if not tracker_path.is_file():
+        return None
+    return ProcessingTracker(file_path=tracker_path)

@@ -15,7 +15,7 @@ from dataclasses import field, dataclass
 from ataraxis_base_utilities import console, ensure_directory_exists
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .server import Server, JobStatus
+from ..server import Server, JobStatus
 from ..pipelines import ProcessingPipelines
 from ..shared_assets import delay_timer
 
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
     # noinspection PyUnusedImports
-    from .job import Job
+    from ..server import Job
     from ..managing import ProjectManifest
 
 # Type alias for the jobs' dictionary to improve readability. Each stage maps to a tuple of (Job, remote log directory,

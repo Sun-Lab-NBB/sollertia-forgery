@@ -29,7 +29,7 @@ from ..managing import (
     generate_project_manifest,
 )
 from .mcp_instance import mcp
-from ..shared_assets import (
+from ..local_orchestration import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,

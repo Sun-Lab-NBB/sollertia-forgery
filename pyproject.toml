@@ -52,13 +52,16 @@ dependencies = [
     "ataraxis-communication-interface>=6,<7",
     "cindra>=1,<2",
 
+    # Machine Vision (GenICam runtime for ataraxis-video-system; sourced from TestPyPI via [tool.uv.sources])
+    "genicam==1.6.0",
+
     # Data Processing
     "polars>=1,<2",
     "numpy>=2,<3",
     "numba>=0.64,<1",
 
     # Remote Execution
-    "paramiko>=4,<5",
+    "paramiko>=5,<6",
 
     # Model Context Protocol
     "mcp[cli]>=1,<2",
@@ -96,6 +99,7 @@ dev = [
     # Types
     "types-filelock>=3,<4",
     "types-tabulate>=0,<1",
+    "types-paramiko>=5,<6",
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
@@ -188,19 +192,14 @@ exclude = [
 module = [
     "sollertia_forgery.server.server",
     "sollertia_forgery.server.job",
-    "sollertia_forgery.server.pipeline",
-    "sollertia_forgery.managing.remote_management",
     "sollertia_forgery.server.server_configuration",
     "sollertia_forgery.interfaces.server_tools",
+    "sollertia_forgery.remote_orchestration.pipeline",
+    "sollertia_forgery.remote_orchestration.managing",
     "sollertia_forgery.mesoscope_vr.server_processing",
     "sollertia_forgery.mesoscope_vr.server_forging",
 ]
 ignore_errors = true
-
-# Suppresses missing-stub warnings for third-party libraries that do not ship type information.
-[[tool.mypy.overrides]]
-module = ["numba", "numba.*"]
-ignore_missing_imports = true
 
 # Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
 # inside a live MCP server or CLI invocation.
@@ -248,6 +247,8 @@ source_modules = [
     "sollertia_forgery.processing",
     "sollertia_forgery.forging",
     "sollertia_forgery.managing",
+    "sollertia_forgery.local_orchestration",
+    "sollertia_forgery.remote_orchestration",
     "sollertia_forgery.interfaces",
 ]
 forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
@@ -270,6 +271,8 @@ source_modules = [
     "sollertia_forgery.processing",
     "sollertia_forgery.forging",
     "sollertia_forgery.managing",
+    "sollertia_forgery.local_orchestration",
+    "sollertia_forgery.remote_orchestration",
 ]
 forbidden_modules = [
     "sollertia_forgery.registries",

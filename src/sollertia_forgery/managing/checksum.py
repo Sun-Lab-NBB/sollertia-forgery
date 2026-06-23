@@ -8,7 +8,7 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
-from ..shared_assets import prepare_tracker
+from ..local_orchestration import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,8 +25,8 @@ _CHECKSUM_EXCLUDED_FILES: set[str] = {
     _CHECKSUM_TRACKER_LOCK_FILENAME,
 }
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
-tracker, and its lock file to prevent the tracker presence from altering the checksum value. Only includes files 
-canonically found under 'raw_data' session data directory."""
+tracker, and its lock file to prevent the tracker presence from altering the checksum value. Only includes files
+canonically found under the 'raw_data' session data directory."""
 
 
 def resolve_checksum(
@@ -51,8 +51,8 @@ def resolve_checksum(
         regenerate_checksum: Determines whether to update the checksum stored in the ax_checksum.txt file instead of
             verifying its integrity.
         workers: The number of processes to use for parallel checksum calculation. Setting this to a value less than
-            1 uses all available CPU cores (minus reserved cores). Setting this to 1 conducts the calculation
-            sequentially without spawning additional processes.
+            1 uses all available CPU cores (minus reserved cores). Setting this to 1 limits the calculation to a
+            single worker process (no parallelism).
         display_progress: Determines whether to display console messages and a progress bar during checksum
             calculation.
 
@@ -69,7 +69,6 @@ def resolve_checksum(
     prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session_data.session_name)
 
-    # Marks the job as running.
     tracker.start_job(job_id=job_id)
     try:
         if display_progress:
