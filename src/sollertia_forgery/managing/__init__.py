@@ -1,5 +1,4 @@
-"""Provides project data-management assets: raw-data checksum verification, project manifest generation and viewing,
-and remote project management.
+"""Provides project data-management assets: raw-data checksum verification and project manifest generation and viewing.
 """
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
