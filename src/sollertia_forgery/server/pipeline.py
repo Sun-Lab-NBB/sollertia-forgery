@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     # noinspection PyUnusedImports
     from .job import Job
-    from .project_manifest import ProjectManifest
+    from ..managing import ProjectManifest
 
 # Type alias for the jobs' dictionary to improve readability. Each stage maps to a tuple of (Job, remote log directory,
 # tracker job ID) triples. The tracker job ID is the identifier the remote worker uses to update the shared tracker, so

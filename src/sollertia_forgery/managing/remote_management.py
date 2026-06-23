@@ -28,9 +28,9 @@ from ..server import (
     check_session_eligibility,
     get_remote_job_work_directory,
 )
+from .manifest import ProjectManifest
 from ..pipelines import ProcessingPipelines
 from ..shared_assets import DatasetSession, delay_timer, delay_terminal
-from .project_manifest import ProjectManifest
 
 if TYPE_CHECKING:
     from pathlib import Path

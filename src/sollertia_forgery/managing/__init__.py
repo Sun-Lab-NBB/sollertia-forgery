@@ -3,8 +3,7 @@ and remote project management.
 """
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
-from .manifest import MANIFEST_JOB_NAME, generate_project_manifest
-from .project_manifest import ProjectManifest
+from .manifest import MANIFEST_JOB_NAME, ProjectManifest, generate_project_manifest
 from .remote_management import (
     manage_project_data,
     discover_project_data,

@@ -25,7 +25,8 @@ _CHECKSUM_EXCLUDED_FILES: set[str] = {
     _CHECKSUM_TRACKER_LOCK_FILENAME,
 }
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
-tracker, and its lock file to prevent the tracker presence from altering the checksum value."""
+tracker, and its lock file to prevent the tracker presence from altering the checksum value. Only includes files 
+canonically found under 'raw_data' session data directory."""
 
 
 def resolve_checksum(
