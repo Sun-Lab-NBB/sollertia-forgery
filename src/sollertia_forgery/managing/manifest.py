@@ -13,13 +13,10 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
     SessionTypes,
     ProcessingTrackers,
-    RunTrainingDescriptor,
-    LickTrainingDescriptor,
-    WindowCheckingDescriptor,
-    MesoscopeExperimentDescriptor,
     iterate_sessions,
 )
 from ataraxis_data_structures import ProcessingTracker
+from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
 from ..shared_assets import prepare_tracker
 
@@ -30,18 +27,6 @@ if TYPE_CHECKING:
 
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
-
-_DESCRIPTOR_CLASSES: dict[
-    str,
-    type[LickTrainingDescriptor | RunTrainingDescriptor | MesoscopeExperimentDescriptor | WindowCheckingDescriptor],
-] = {
-    SessionTypes.LICK_TRAINING: LickTrainingDescriptor,
-    SessionTypes.RUN_TRAINING: RunTrainingDescriptor,
-    SessionTypes.MESOSCOPE_EXPERIMENT: MesoscopeExperimentDescriptor,
-    SessionTypes.WINDOW_CHECKING: WindowCheckingDescriptor,
-}
-"""Maps each session type to its corresponding descriptor class. All descriptor classes share the
-``experimenter_notes`` and ``incomplete`` attributes used by manifest generation."""
 
 
 def generate_project_manifest(project_directory: Path) -> None:
@@ -182,7 +167,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 # Checking sessions acquired before sollertia-experiment 3.0.0 lack descriptors, so a missing
                 # file is handled gracefully for that session type only.
                 descriptor_path = session_data.raw_data.session_descriptor_path
-                descriptor_class = _DESCRIPTOR_CLASSES.get(session_data.session_type)
+                descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
                 if descriptor_class is None:
                     message = (
                         f"Unsupported session type '{session_data.session_type}' encountered for session "
@@ -193,9 +178,11 @@ def generate_project_manifest(project_directory: Path) -> None:
                     console.error(message=message, error=ValueError)
 
                 try:
+                    # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields
+                    # the manifest reads (every registered descriptor declares them) need an attribute-defined ignore.
                     descriptor = descriptor_class.from_yaml(file_path=descriptor_path)
-                    is_complete = not descriptor.incomplete
-                    manifest["notes"].append(descriptor.experimenter_notes)
+                    is_complete = not descriptor.incomplete  # type: ignore[attr-defined]
+                    manifest["notes"].append(descriptor.experimenter_notes)  # type: ignore[attr-defined]
                 except Exception:
                     if session_data.session_type != SessionTypes.WINDOW_CHECKING:
                         raise
