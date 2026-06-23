@@ -25,13 +25,13 @@ from ..server import Job, Server, JobStatus, get_server_configuration, get_remot
 from .forging import FORGING_JOB_NAME
 from ..managing import ProjectManifest
 from ..pipelines import ProcessingPipelines
-from ..shared_assets import DatasetData, DatasetSession, delay_timer, delay_terminal
-from ..remote_orchestration import (
+from ..orchestration import (
     ProcessingPipeline,
     execute_pipelines,
     resolve_project_manifest,
     check_session_eligibility,
 )
+from ..shared_assets import DatasetData, DatasetSession, delay_timer, delay_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path

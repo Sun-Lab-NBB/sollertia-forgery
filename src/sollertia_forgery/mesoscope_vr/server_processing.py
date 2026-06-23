@@ -21,13 +21,13 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 from ..server import Job, Server, get_server_configuration, get_remote_job_work_directory
 from ..managing import ProjectManifest
 from ..pipelines import ProcessingPipelines
-from ..shared_assets import DatasetSession, delay_terminal
-from ..remote_orchestration import (
+from ..orchestration import (
     ProcessingPipeline,
     execute_pipelines,
     resolve_project_manifest,
     check_session_eligibility,
 )
+from ..shared_assets import DatasetSession, delay_terminal
 
 if TYPE_CHECKING:
     from pathlib import Path

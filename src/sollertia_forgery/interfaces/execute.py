@@ -7,8 +7,8 @@ from sollertia_shared_assets import filter_sessions, get_working_directory
 from ..server import Server, get_server_configuration
 from ..managing import ProjectManifest
 from ..registries import resolve_remote_forging_orchestrator, resolve_remote_processing_orchestrator
+from ..orchestration import manage_project_data, resolve_project_manifest
 from ..shared_assets import DatasetSession
-from ..remote_orchestration import manage_project_data, resolve_project_manifest
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}

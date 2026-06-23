@@ -211,7 +211,7 @@ def _construct_checksum_resolution_pipeline(
     local_working_directory = get_working_directory()
 
     # Parses the path to the session's directory on the remote server.
-    animal = manifest.get_animal_for_session(session=session)
+    animal = str(manifest.get_animal_for_session(session=session))
     remote_session_path = server.root.joinpath(project, animal, session)
 
     # Determines whether the session is eligible for processing.

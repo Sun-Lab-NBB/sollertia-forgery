@@ -40,8 +40,8 @@ if TYPE_CHECKING:
     from typing import Any
     from collections.abc import Callable, Iterator
 
+    from .orchestration import GenericPendingJob
     from .mesoscope_vr.batch import ConcurrencyDescriptor
-    from .local_orchestration import GenericPendingJob
 
 __all__ = [
     "AGNOSTIC_PIPELINES",

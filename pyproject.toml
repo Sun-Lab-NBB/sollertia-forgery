@@ -194,8 +194,8 @@ module = [
     "sollertia_forgery.server.job",
     "sollertia_forgery.server.server_configuration",
     "sollertia_forgery.interfaces.server_tools",
-    "sollertia_forgery.remote_orchestration.pipeline",
-    "sollertia_forgery.remote_orchestration.managing",
+    "sollertia_forgery.orchestration.pipeline",
+    "sollertia_forgery.orchestration.managing",
     "sollertia_forgery.mesoscope_vr.server_processing",
     "sollertia_forgery.mesoscope_vr.server_forging",
 ]
@@ -247,8 +247,7 @@ source_modules = [
     "sollertia_forgery.processing",
     "sollertia_forgery.forging",
     "sollertia_forgery.managing",
-    "sollertia_forgery.local_orchestration",
-    "sollertia_forgery.remote_orchestration",
+    "sollertia_forgery.orchestration",
     "sollertia_forgery.interfaces",
 ]
 forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
@@ -271,8 +270,7 @@ source_modules = [
     "sollertia_forgery.processing",
     "sollertia_forgery.forging",
     "sollertia_forgery.managing",
-    "sollertia_forgery.local_orchestration",
-    "sollertia_forgery.remote_orchestration",
+    "sollertia_forgery.orchestration",
 ]
 forbidden_modules = [
     "sollertia_forgery.registries",

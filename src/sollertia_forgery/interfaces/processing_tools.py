@@ -40,7 +40,7 @@ from ..registries import (
     resolve_concurrency,
 )
 from .mcp_instance import mcp
-from ..local_orchestration import (
+from ..orchestration import (
     RESERVED_CORES,
     GenericPendingJob,
     JobExecutionState,
