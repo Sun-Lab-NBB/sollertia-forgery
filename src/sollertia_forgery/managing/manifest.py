@@ -73,7 +73,7 @@ def generate_project_manifest(project_directory: Path) -> None:
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
     tracker = ProcessingTracker(file_path=project_directory.joinpath(ProcessingTrackers.MANIFEST))
     jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
-    prepare_tracker(tracker=tracker, jobs=jobs)
+    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.

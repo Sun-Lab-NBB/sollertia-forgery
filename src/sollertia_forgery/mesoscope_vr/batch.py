@@ -402,7 +402,7 @@ def prepare_forging_unit(unit: dict[str, Any]) -> dict[str, Any]:
     # Prepares the processing tracker and aligns it with the session set.
     tracker = ProcessingTracker(file_path=tracker_path)
     jobs_tuples = [(FORGING_JOB_NAME, entry.session) for entry in dataset.sessions]
-    prepare_tracker(tracker=tracker, jobs=jobs_tuples)
+    prepare_tracker(tracker=tracker, jobs=jobs_tuples, universe=jobs_tuples)
 
     # Builds enriched job descriptors directly from the in-memory tracker, which prepare_tracker just aligned.
     # This avoids a redundant YAML deserialization.

@@ -240,7 +240,7 @@ def prepare_checksum_batch_tool(
         # are detected and the tracker is reset before reinitializing with the expected job set. If the tracker
         # does not exist, it is created from scratch with the expected jobs.
         tracker = ProcessingTracker(file_path=tracker_path)
-        prepare_tracker(tracker=tracker, jobs=expected_jobs)
+        prepare_tracker(tracker=tracker, jobs=expected_jobs, universe=expected_jobs)
 
         # Reads the (possibly just-repaired or freshly-created) tracker state to return to the caller.
         try:

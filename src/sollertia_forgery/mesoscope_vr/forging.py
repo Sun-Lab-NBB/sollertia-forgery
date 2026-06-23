@@ -125,7 +125,7 @@ def run_forging_pipeline(
     # for the tracker to track.
     tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
     jobs = [(FORGING_JOB_NAME, session) for session in dataset_session_names]
-    prepare_tracker(tracker=tracker, jobs=jobs)
+    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
 
     job_ids = {
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)

@@ -139,8 +139,10 @@ def run_behavior_processing_pipeline(
     data_path = session.processed_data.behavior_data_path
     data_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=data_path / ProcessingTrackers.BEHAVIOR)
+    # In-process extraction emits every module feather before discovery runs, so the discovered set is the
+    # session's full job universe; foreign detection therefore runs against the same set.
     jobs = list(job_paths.keys())
-    prepare_tracker(tracker=tracker, jobs=jobs)
+    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
 
     if job_id is not None:
         # Remote mode: resolves the (job_name, specifier) tuple for the requested job ID and executes that

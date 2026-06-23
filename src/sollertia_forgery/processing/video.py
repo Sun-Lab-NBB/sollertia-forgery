@@ -206,7 +206,12 @@ def run_video_processing_pipeline(
     output_directory = session.processed_data.behavior_data_path
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=session.processed_data.camera_tracker_path)
-    prepare_tracker(tracker=tracker, jobs=list(job_paths.keys()))
+    # Detects foreign entries against the manifest-declared camera universe rather than the disk-discovered
+    # subset, so a partial discovery (a camera log missing or staged late) aligns the tracker without wiping the
+    # previously-completed sibling cameras.
+    jobs = list(job_paths.keys())
+    universe = [(VIDEO_JOB_NAME, str(source_id)) for source_id in output_names]
+    prepare_tracker(tracker=tracker, jobs=jobs, universe=universe)
 
     if job_id is not None:
         id_to_job = {
