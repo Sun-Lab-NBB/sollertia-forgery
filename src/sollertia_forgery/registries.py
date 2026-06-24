@@ -35,6 +35,16 @@ from .mesoscope_vr import (
     run_behavior_processing_pipeline,
     run_multidataset_processing_pipeline,
 )
+from .mesoscope_vr.microcontrollers import (
+    parse_lick,
+    parse_brake,
+    parse_valve,
+    parse_screen,
+    parse_torque,
+    parse_encoder,
+    parse_gas_puff,
+    parse_mesoscope_frame,
+)
 
 if TYPE_CHECKING:
     from typing import Any
@@ -49,6 +59,7 @@ __all__ = [
     "CONCURRENCY_REGISTRY",
     "LOCAL_PIPELINE_REGISTRY",
     "MCP_BATCH_PIPELINES",
+    "MICROCONTROLLER_PARSER_REGISTRY",
     "OVERVIEW_REGISTRY",
     "PREPARE_REGISTRY",
     "REMOTE_FORGING_ORCHESTRATOR_REGISTRY",
@@ -59,6 +70,7 @@ __all__ = [
     "resolve_clean",
     "resolve_concurrency",
     "resolve_local_pipeline",
+    "resolve_microcontroller_parsers",
     "resolve_overview",
     "resolve_prepare",
     "resolve_remote_forging_orchestrator",
@@ -176,6 +188,24 @@ WORKER_REGISTRY: dict[ProcessingPipelines, Callable[[GenericPendingJob], None]] 
 }
 """Maps each batch pipeline to its picklable module-level worker, which maps the generic ``GenericPendingJob`` fields
 onto the pipeline's call convention and runs the single job in the worker subprocess."""
+
+MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Callable[..., None]] = {
+    (AcquisitionSystems.MESOSCOPE_VR, 1, 1): parse_mesoscope_frame,
+    (AcquisitionSystems.MESOSCOPE_VR, 2, 1): parse_encoder,
+    (AcquisitionSystems.MESOSCOPE_VR, 3, 1): parse_brake,
+    (AcquisitionSystems.MESOSCOPE_VR, 4, 1): parse_lick,
+    (AcquisitionSystems.MESOSCOPE_VR, 5, 1): parse_valve,
+    (AcquisitionSystems.MESOSCOPE_VR, 5, 2): parse_gas_puff,
+    (AcquisitionSystems.MESOSCOPE_VR, 6, 1): parse_torque,
+    (AcquisitionSystems.MESOSCOPE_VR, 7, 1): parse_screen,
+}
+"""The single, fully-visible registry of microcontroller module parsers, keyed by ``(acquisition system, module type,
+module id)``. Each value is a plain module-level ``parse(event_partition, output_directory, session)`` function that an
+acquisition-system package implements for one hardware module. The agnostic microcontroller pipeline infers the system
+from the processed session and dispatches the matching function for every extracted module, so a module is parseable
+for a system exactly when it appears here. Per-session hardware eligibility (whether the module's conversion parameters
+were configured for the session) is handled inside each function, which skips silently when its hardware was not
+configured rather than being gated by a separate predicate."""
 
 
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
@@ -372,6 +402,28 @@ def resolve_worker(pipeline: ProcessingPipelines) -> Callable[[GenericPendingJob
         ValueError: If the pipeline is not exposed by the batch MCP tools.
     """
     return WORKER_REGISTRY[_resolve_batch_pipeline(pipeline)]
+
+
+def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tuple[int, int], Callable[..., None]]:
+    """Resolves the microcontroller module parsers registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        A mapping from each ``(module_type, module_id)`` pair the system parses to its parser function. The agnostic
+        microcontroller pipeline treats this mapping as the set of parseable modules for the session.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    resolved_system = _resolve_system(system)
+    return {
+        (module_type, module_id): parser
+        for (registered_system, module_type, module_id), parser in MICROCONTROLLER_PARSER_REGISTRY.items()
+        if registered_system == resolved_system
+    }
 
 
 def _assert_registry_coverage() -> None:

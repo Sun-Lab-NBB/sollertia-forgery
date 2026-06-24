@@ -1,6 +1,6 @@
 """Provides the end-to-end, two-stage microcontroller log processing pipeline: extracts raw per-module data from
 controller log archives via the acquisition library, then parses each module into a domain-specific feather using
-the parser provider registered for the session's acquisition system.
+the parser function registered for the session's acquisition system in the central registry.
 """
 
 from __future__ import annotations
@@ -16,19 +16,22 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_communication_interface.microcontroller import EXTRACTION_JOB_NAME
 
-from .parsers import resolve_parsers
 from .extraction import extract_controller, resolve_controllers, find_controller_archive
+from ..registries import resolve_microcontroller_parsers
 from ..orchestration import prepare_tracker
 from ..shared_assets import partition_events, find_module_feathers, parse_module_feather_name
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Callable
     from concurrent.futures import Future
 
     from ataraxis_communication_interface.microcontroller import ControllerExtractionConfig
 
-    from .parsers import ModuleParser
+# The registered parser for a single module, resolved from the central MICROCONTROLLER_PARSER_REGISTRY: a plain
+# module-level function ``parse(event_partition, output_directory, session) -> None``. The PEP 695 alias is evaluated
+# lazily, so its annotation-only operands (Callable, Path, SessionData) need not exist at runtime.
+type ModuleParser = Callable[[dict[int, pl.DataFrame], Path, SessionData], None]
 
 PARSE_JOB_NAME: str = "module_parsing"
 """The job name identifying per-module parsing jobs in the microcontroller processing tracker. Stage 1 extraction
@@ -49,9 +52,10 @@ def run_microcontroller_processing_pipeline(
         This is a two-stage pipeline. Stage 1 (extraction) reads each ``{controller_id}_log.npz`` archive via the
         ataraxis-communication-interface binding and writes raw per-module feather files into the session's
         ``processed_data/microcontroller_data`` directory. Stage 2 (parsing) reads each raw module feather,
-        partitions it by event code, and runs the per-system parser to write the domain-specific feather. The
-        per-system parsers are looked up from the unified parser registry by the session's acquisition system, so
-        the pipeline itself stays system-agnostic.
+        partitions it by event code, and runs the registered parser to write the domain-specific feather into the
+        session's ``behavior_data`` directory. The parsers are looked up from the central
+        ``MICROCONTROLLER_PARSER_REGISTRY`` by the session's acquisition system, so the pipeline itself stays
+        system-agnostic and never names a system-specific type.
 
         In local mode (job_id is None), Stage 1 runs for every configured controller whose archive is present
         (sequentially, with message decoding parallelized within each archive), then Stage 2 parses all eligible
@@ -71,8 +75,8 @@ def run_microcontroller_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        ValueError: If no parser provider is registered for the session's acquisition system, if no processable
-            controllers are discovered, or if the provided job_id does not match any available job.
+        ValueError: If the session's acquisition system has no parsers registered in the central registry, if no
+            processable controllers are discovered, or if the provided job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -80,16 +84,16 @@ def run_microcontroller_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Looks up the per-system parsers from the unified registry by the session's acquisition system, then resolves
-    # the eligible module parsers for this session (binding any system configuration and output paths).
-    provider = resolve_parsers(session.acquisition_system)
-    parsers = provider.resolve(session=session)
+    # Looks up the parser function for every module this session's acquisition system can parse from the central
+    # registry, inferring the system from the session.
+    parsers = resolve_microcontroller_parsers(session.acquisition_system)
 
     # Loads the per-controller extraction configurations (validated against the microcontroller manifest).
     controllers = resolve_controllers(session=session)
 
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
+    parse_output = session.processed_data.behavior_data_path
 
     universe, requested, extraction_archives, parse_specifiers = _discover_jobs(
         controllers=controllers, parsers=parsers, log_directory=log_directory, extraction_job_name=EXTRACTION_JOB_NAME
@@ -124,30 +128,45 @@ def run_microcontroller_processing_pipeline(
             extraction_job_name=EXTRACTION_JOB_NAME,
             controllers=controllers,
             parsers=parsers,
+            session=session,
             log_directory=log_directory,
             extraction_output=extraction_output,
+            parse_output=parse_output,
             tracker=tracker,
             workers=workers,
             display_progress=display_progress,
         )
     else:
-        _run_extraction_stage(
-            extraction_archives=extraction_archives,
-            controllers=controllers,
-            extraction_output=extraction_output,
-            tracker=tracker,
-            extraction_job_name=EXTRACTION_JOB_NAME,
-            workers=workers,
-            display_progress=display_progress,
-        )
-        _run_parse_stage(
-            parse_specifiers=parse_specifiers,
-            parsers=parsers,
-            extraction_output=extraction_output,
-            tracker=tracker,
-            workers=workers,
-            display_progress=display_progress,
-        )
+        # Resolves the worker budget once and creates a single process pool that spans BOTH stages. The stages run
+        # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
+        # parse stage (one future per module), avoiding a worker re-spawn between them -- a real cost under the spawn
+        # start method that macOS and Windows default to.
+        resolved_workers = resolve_worker_count(requested_workers=workers)
+        shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
+        try:
+            _run_extraction_stage(
+                extraction_archives=extraction_archives,
+                controllers=controllers,
+                extraction_output=extraction_output,
+                tracker=tracker,
+                extraction_job_name=EXTRACTION_JOB_NAME,
+                workers=resolved_workers,
+                executor=shared_executor,
+                display_progress=display_progress,
+            )
+            _run_parse_stage(
+                parse_specifiers=parse_specifiers,
+                parsers=parsers,
+                session=session,
+                extraction_output=extraction_output,
+                parse_output=parse_output,
+                tracker=tracker,
+                executor=shared_executor,
+                display_progress=display_progress,
+            )
+        finally:
+            if shared_executor is not None:
+                shared_executor.shutdown(wait=True)
 
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
@@ -220,6 +239,7 @@ def _run_extraction_stage(
     extraction_job_name: str,
     *,
     workers: int,
+    executor: ProcessPoolExecutor | None,
     display_progress: bool,
 ) -> None:
     """Runs Stage 1: extracts each present controller's archive into raw per-module feathers.
@@ -227,8 +247,9 @@ def _run_extraction_stage(
     Notes:
         Controllers are extracted sequentially in the parent process because the acquisition binding manages each
         extraction job's tracker state internally; running the bindings concurrently would race on the shared
-        tracker file. Parallelism instead stays inside each archive via a shared process pool that decodes message
-        batches, matching how the acquisition library orchestrates a multi-controller directory.
+        tracker file. Parallelism instead stays inside each archive via the shared process pool that decodes message
+        batches, matching how the acquisition library orchestrates a multi-controller directory. The pool is owned by
+        the caller and shared with the parse stage, so this helper neither creates nor shuts it down.
 
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
@@ -236,14 +257,12 @@ def _run_extraction_stage(
         extraction_output: The directory where raw per-module feathers are written.
         tracker: The shared processing tracker.
         extraction_job_name: The acquisition library's extraction job name used to derive each job identifier.
-        workers: The requested worker-process count.
+        workers: The resolved worker-process count, passed through to size each archive's decode batches.
+        executor: The shared process pool spanning both pipeline stages, or None for sequential processing.
         display_progress: Determines whether to display a per-controller progress bar.
     """
     if not extraction_archives:
         return
-
-    resolved_workers = resolve_worker_count(requested_workers=workers)
-    shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
 
     progress_context = (
         console.progress(
@@ -253,72 +272,72 @@ def _run_extraction_stage(
         else nullcontext()
     )
 
-    try:
-        with progress_context as progress_bar:
-            for controller_id, archive_path in extraction_archives.items():
-                extraction_job_id = ProcessingTracker.generate_job_id(
-                    job_name=extraction_job_name, specifier=controller_id
+    with progress_context as progress_bar:
+        for controller_id, archive_path in extraction_archives.items():
+            extraction_job_id = ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
+            console.echo(
+                message=(
+                    f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
                 )
-                console.echo(
-                    message=(
-                        f"Running '{extraction_job_name}' job for controller '{controller_id}' "
-                        f"(ID: {extraction_job_id})..."
-                    )
-                )
-                extract_controller(
-                    archive_path=archive_path,
-                    output_directory=extraction_output,
-                    controller_id=controller_id,
-                    controller_config=controllers[controller_id],
-                    job_id=extraction_job_id,
-                    tracker=tracker,
-                    workers=resolved_workers,
-                    display_progress=False,
-                    executor=shared_executor,
-                )
-                if progress_bar is not None:
-                    progress_bar.update(1)
-    finally:
-        if shared_executor is not None:
-            shared_executor.shutdown(wait=True)
+            )
+            extract_controller(
+                archive_path=archive_path,
+                output_directory=extraction_output,
+                controller_id=controller_id,
+                controller_config=controllers[controller_id],
+                job_id=extraction_job_id,
+                tracker=tracker,
+                workers=workers,
+                display_progress=False,
+                executor=executor,
+            )
+            if progress_bar is not None:
+                progress_bar.update(1)
 
 
 def _run_parse_stage(
     parse_specifiers: dict[str, tuple[str, int, int]],
     parsers: Mapping[tuple[int, int], ModuleParser],
+    session: SessionData,
     extraction_output: Path,
+    parse_output: Path,
     tracker: ProcessingTracker,
     *,
-    workers: int,
+    executor: ProcessPoolExecutor | None,
     display_progress: bool,
 ) -> None:
     """Runs Stage 2: parses each eligible module's raw feather into its domain-specific feather.
 
     Notes:
-        The acquisition binding writes a raw feather only for modules that produced at least one message, so a
-        configured, eligible module can legitimately have no feather. Such a parse job is completed with no output
-        rather than left unresolved. Modules with a feather are dispatched to a worker pool when more than one
-        worker is available, with the parent owning all tracker state transitions.
+        The extraction outputs are indexed once up front, so each parse job resolves its input feather with an O(1)
+        lookup rather than re-globbing and re-scanning the output directory per module. The acquisition binding
+        writes a raw feather only for modules that produced at least one message, so a configured, eligible module
+        can legitimately have no feather; such a parse job is completed with no output rather than left unresolved.
+        Modules with a feather are dispatched to the shared process pool when one is available and more than one
+        module is runnable, with the parent owning all tracker state transitions.
 
     Args:
         parse_specifiers: The requested parse specifiers mapped to their ``(controller_id, type, id)`` triples.
-        parsers: The eligible module parsers, keyed by ``(module_type, module_id)``.
+        parsers: The registered module parsers for the session's acquisition system, keyed by
+            ``(module_type, module_id)``.
+        session: The loaded session, passed through to each parser so it can resolve its own system configuration.
         extraction_output: The directory holding the raw per-module feathers.
+        parse_output: The directory the parsers write their domain-specific feathers into (the session's
+            ``behavior_data`` directory).
         tracker: The shared processing tracker.
-        workers: The requested worker-process count.
+        executor: The shared process pool spanning both pipeline stages, or None for sequential processing.
         display_progress: Determines whether to display a per-module progress bar.
     """
     if not parse_specifiers:
         return
 
+    # Indexes every extracted module feather once, keyed by (controller_id, module_type, module_id), so each parse
+    # job resolves its input with a single dict lookup instead of re-globbing and re-scanning the output directory.
+    feather_index = _index_module_feathers(extraction_output=extraction_output)
+
     runnable: dict[str, tuple[Path, ModuleParser]] = {}
     for specifier, (controller_id, module_type, module_id) in parse_specifiers.items():
-        feather_path = _locate_module_feather(
-            extraction_output=extraction_output,
-            controller_id=controller_id,
-            module_type=module_type,
-            module_id=module_id,
-        )
+        feather_path = feather_index.get((controller_id, module_type, module_id))
         if feather_path is None:
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(
@@ -335,18 +354,30 @@ def _run_parse_stage(
     if not runnable:
         return
 
-    resolved_workers = resolve_worker_count(requested_workers=workers)
-    if resolved_workers > 1 and len(runnable) > 1:
+    if executor is not None and len(runnable) > 1:
         _execute_parse_jobs_parallel(
-            runnable=runnable, tracker=tracker, workers=resolved_workers, display_progress=display_progress
+            runnable=runnable,
+            tracker=tracker,
+            session=session,
+            parse_output=parse_output,
+            executor=executor,
+            display_progress=display_progress,
         )
     else:
-        _execute_parse_jobs_sequential(runnable=runnable, tracker=tracker, display_progress=display_progress)
+        _execute_parse_jobs_sequential(
+            runnable=runnable,
+            tracker=tracker,
+            session=session,
+            parse_output=parse_output,
+            display_progress=display_progress,
+        )
 
 
 def _execute_parse_jobs_sequential(
     runnable: dict[str, tuple[Path, ModuleParser]],
     tracker: ProcessingTracker,
+    session: SessionData,
+    parse_output: Path,
     *,
     display_progress: bool,
 ) -> None:
@@ -355,6 +386,8 @@ def _execute_parse_jobs_sequential(
     Args:
         runnable: The parse jobs mapping each specifier to its ``(feather_path, module_parser)`` pair.
         tracker: The shared processing tracker.
+        session: The loaded session, passed through to each parser.
+        parse_output: The directory the parsers write their domain-specific feathers into.
         display_progress: Determines whether to display a per-module progress bar.
     """
     progress_context = (
@@ -369,7 +402,12 @@ def _execute_parse_jobs_sequential(
             console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
             try:
-                _run_parse(feather_path=feather_path, module_parser=module_parser)
+                _run_parse(
+                    feather_path=feather_path,
+                    module_parser=module_parser,
+                    output_directory=parse_output,
+                    session=session,
+                )
                 tracker.complete_job(job_id=job_id)
             except Exception as exception:
                 tracker.fail_job(job_id=job_id, error_message=str(exception))
@@ -381,52 +419,63 @@ def _execute_parse_jobs_sequential(
 def _execute_parse_jobs_parallel(
     runnable: dict[str, tuple[Path, ModuleParser]],
     tracker: ProcessingTracker,
+    session: SessionData,
+    parse_output: Path,
     *,
-    workers: int,
+    executor: ProcessPoolExecutor,
     display_progress: bool,
 ) -> None:
-    """Runs the parse jobs concurrently across a process pool, with the parent owning tracker state.
+    """Runs the parse jobs concurrently across the shared process pool, with the parent owning tracker state.
 
     Notes:
-        Each job's tracker state is advanced to running immediately before its future is submitted, then resolved
-        as the future completes. In-flight futures are allowed to finish on failure so the tracker stays accurate
-        for every dispatched job; the first captured exception is re-raised after all futures resolve.
+        The pool is the one shared with the extraction stage and is owned by the caller, so this helper submits to
+        it without shutting it down. Each job's tracker state is advanced to running immediately before its future
+        is submitted, then resolved as the future completes. In-flight futures are allowed to finish on failure so
+        the tracker stays accurate for every dispatched job; the first captured exception is re-raised after all
+        futures resolve.
 
     Args:
         runnable: The parse jobs mapping each specifier to its ``(feather_path, module_parser)`` pair.
         tracker: The shared processing tracker.
-        workers: The resolved worker-process count for the pool.
+        session: The loaded session, passed through to each parser; must be picklable for the worker processes.
+        parse_output: The directory the parsers write their domain-specific feathers into.
+        executor: The shared process pool to submit the parse jobs to. Owned by the caller; not shut down here.
         display_progress: Determines whether to display a per-module progress bar.
     """
     first_exception: Exception | None = None
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        future_to_job_id: dict[Future[None], str] = {}
-        for specifier, (feather_path, module_parser) in runnable.items():
-            job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
-            console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
-            tracker.start_job(job_id=job_id)
-            future = executor.submit(_run_parse, feather_path=feather_path, module_parser=module_parser)
-            future_to_job_id[future] = job_id
-
-        progress_context = (
-            console.progress(total=len(runnable), description="Parsing microcontroller modules", unit="module")
-            if display_progress
-            else nullcontext()
+    future_to_job_id: dict[Future[None], str] = {}
+    for specifier, (feather_path, module_parser) in runnable.items():
+        job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
+        console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
+        tracker.start_job(job_id=job_id)
+        future = executor.submit(
+            _run_parse,
+            feather_path=feather_path,
+            module_parser=module_parser,
+            output_directory=parse_output,
+            session=session,
         )
+        future_to_job_id[future] = job_id
 
-        with progress_context as progress_bar:
-            for completed_future in as_completed(future_to_job_id):
-                completed_job_id = future_to_job_id[completed_future]
-                try:
-                    completed_future.result()
-                    tracker.complete_job(job_id=completed_job_id)
-                except Exception as exception:
-                    tracker.fail_job(job_id=completed_job_id, error_message=str(exception))
-                    if first_exception is None:
-                        first_exception = exception
-                if progress_bar is not None:
-                    progress_bar.update(1)
+    progress_context = (
+        console.progress(total=len(runnable), description="Parsing microcontroller modules", unit="module")
+        if display_progress
+        else nullcontext()
+    )
+
+    with progress_context as progress_bar:
+        for completed_future in as_completed(future_to_job_id):
+            completed_job_id = future_to_job_id[completed_future]
+            try:
+                completed_future.result()
+                tracker.complete_job(job_id=completed_job_id)
+            except Exception as exception:
+                tracker.fail_job(job_id=completed_job_id, error_message=str(exception))
+                if first_exception is None:
+                    first_exception = exception
+            if progress_bar is not None:
+                progress_bar.update(1)
 
     if first_exception is not None:
         raise first_exception
@@ -438,8 +487,10 @@ def _execute_remote_job(
     extraction_job_name: str,
     controllers: dict[str, ControllerExtractionConfig],
     parsers: Mapping[tuple[int, int], ModuleParser],
+    session: SessionData,
     log_directory: Path,
     extraction_output: Path,
+    parse_output: Path,
     tracker: ProcessingTracker,
     *,
     workers: int,
@@ -452,9 +503,12 @@ def _execute_remote_job(
         universe: Every ``(job_name, specifier)`` tuple the configuration could produce, used to resolve the job.
         extraction_job_name: The acquisition library's extraction job name distinguishing Stage 1 from Stage 2 jobs.
         controllers: The per-controller extraction configurations, keyed by controller ID.
-        parsers: The eligible module parsers, keyed by ``(module_type, module_id)``.
+        parsers: The registered module parsers for the session's acquisition system, keyed by
+            ``(module_type, module_id)``.
+        session: The loaded session, passed through to the parser for a remote parse job.
         log_directory: The raw behavior data directory holding the controller log archives.
         extraction_output: The directory holding (or receiving) the raw per-module feathers.
+        parse_output: The directory a parser writes its domain-specific feather into.
         tracker: The shared processing tracker.
         workers: The requested worker-process count.
         display_progress: Determines whether to display a progress bar.
@@ -501,8 +555,8 @@ def _execute_remote_job(
 
     controller_id, module_type, module_id = _split_parse_specifier(specifier=specifier)
     module_parser = parsers[(module_type, module_id)]
-    feather_path = _locate_module_feather(
-        extraction_output=extraction_output, controller_id=controller_id, module_type=module_type, module_id=module_id
+    feather_path = _index_module_feathers(extraction_output=extraction_output).get(
+        (controller_id, module_type, module_id)
     )
 
     console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
@@ -518,50 +572,56 @@ def _execute_remote_job(
         tracker.complete_job(job_id=job_id)
         return
     try:
-        _run_parse(feather_path=feather_path, module_parser=module_parser)
+        _run_parse(
+            feather_path=feather_path, module_parser=module_parser, output_directory=parse_output, session=session
+        )
         tracker.complete_job(job_id=job_id)
     except Exception as exception:
         tracker.fail_job(job_id=job_id, error_message=str(exception))
         raise
 
 
-def _run_parse(feather_path: Path, module_parser: ModuleParser) -> None:
+def _run_parse(feather_path: Path, module_parser: ModuleParser, output_directory: Path, session: SessionData) -> None:
     """Parses one raw module feather into its domain-specific feather.
 
     Notes:
         This is the atomic unit of work dispatched to worker processes by the parallel parse path, so it must
         remain importable at module level and accept only picklable arguments. It reads the raw module feather via
-        memory mapping, partitions it by event code in a single pass, and delegates to the system-bound parser.
+        memory mapping, partitions it by event code in a single pass, and delegates to the registered parser, which
+        resolves any system configuration from the session and writes its feather into the output directory.
 
     Args:
         feather_path: The path to the raw per-module feather produced by the extraction stage.
-        module_parser: The system-bound parser and output destination for this module.
+        module_parser: The registered parser function for this module.
+        output_directory: The directory the parser writes its domain-specific feather into.
+        session: The loaded session, from which the parser resolves its own system configuration.
     """
     module_dataframe = pl.read_ipc(source=feather_path, memory_map=True)
     event_partition = partition_events(module_dataframe=module_dataframe)
-    module_parser.output_path.parent.mkdir(parents=True, exist_ok=True)
-    module_parser.parse(event_partition, module_parser.output_path)
+    output_directory.mkdir(parents=True, exist_ok=True)
+    module_parser(event_partition, output_directory, session)
 
 
-def _locate_module_feather(
-    extraction_output: Path, controller_id: str, module_type: int, module_id: int
-) -> Path | None:
-    """Locates the raw feather for a specific module among the extraction outputs.
+def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int], Path]:
+    """Indexes the raw module feathers in the extraction output directory by their module identity.
+
+    Notes:
+        Globs the directory once and parses each feather name a single time, building a lookup keyed by
+        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with an O(1) dict lookup
+        instead of re-globbing and re-scanning the directory once per module.
 
     Args:
         extraction_output: The directory holding the raw per-module feathers.
-        controller_id: The controller ID the module belongs to.
-        module_type: The module type code.
-        module_id: The module instance ID.
 
     Returns:
-        The path to the module's raw feather, or None if the extraction stage produced none for it.
+        A mapping from each ``(controller_id, module_type, module_id)`` triple to its raw feather path. The
+        controller ID is stored as a string to match the specifier form used throughout the pipeline.
     """
+    index: dict[tuple[str, int, int], Path] = {}
     for feather_path in find_module_feathers(data_directory=extraction_output):
         feather_controller, feather_type, feather_id = parse_module_feather_name(feather_path=feather_path)
-        if str(feather_controller) == controller_id and feather_type == module_type and feather_id == module_id:
-            return feather_path
-    return None
+        index[(str(feather_controller), feather_type, feather_id)] = feather_path
+    return index
 
 
 def _split_parse_specifier(specifier: str) -> tuple[str, int, int]:

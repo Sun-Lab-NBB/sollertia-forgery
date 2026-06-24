@@ -1,9 +1,10 @@
 """Tests for the standalone microcontroller log processing pipeline.
 
-The pipeline is exercised through a stub parser provider registered in the unified registry, with real extraction
-configuration and manifest fixtures (so ``resolve_controllers`` runs for real) and a faked Stage 1 extraction (so
-no real ``.npz`` archive or acquisition-library extraction is required). Stage 2 parsing, the unified tracker, job
-discovery, and local/remote dispatch all run as production code.
+The pipeline is exercised through stub parser functions injected in place of the central
+``resolve_microcontroller_parsers`` lookup, with real extraction configuration and manifest fixtures (so
+``resolve_controllers`` runs for real) and a faked Stage 1 extraction (so no real ``.npz`` archive or
+acquisition-library extraction is required). Stage 2 parsing, the unified tracker, job discovery, and local/remote
+dispatch all run as production code.
 """
 
 from __future__ import annotations
@@ -28,48 +29,44 @@ from ataraxis_communication_interface.microcontroller import (
     MICROCONTROLLER_MANIFEST_FILENAME,
 )
 
-from sollertia_forgery.microcontrollers import (
-    PARSE_JOB_NAME,
-    ModuleParser,
-    register_parsers,
-    resolve_parsers,
-    run_microcontroller_processing_pipeline,
-)
-from sollertia_forgery.microcontrollers import parsers as parsers_module
+from sollertia_forgery.registries import MICROCONTROLLER_PARSER_REGISTRY, resolve_microcontroller_parsers
+from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, run_microcontroller_processing_pipeline
 from sollertia_forgery.microcontrollers import pipeline as pipeline_module
 
-# Module-level stub parser so ModuleParser instances stay picklable for the parallel parse path.
+# Module-level stub parsers so the parallel parse path can pickle them by reference. Each writes a trivial domain
+# feather, named for its module, recording which event codes the partition carried. Their signature matches the
+# registered parsers: parse(event_partition, output_directory, session) -> None.
 
 
-def _stub_parse(event_partition: dict[int, pl.DataFrame], output_file: Path) -> None:
-    """Writes a trivial domain feather recording which event codes the partition carried."""
-    pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(file=output_file, compression="uncompressed")
+def _stub_parse_2_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+    pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
+        file=output_directory / "module_2_1.feather", compression="uncompressed"
+    )
 
 
-class _StubProvider:
-    """A minimal MicrocontrollerParserProvider that exposes a fixed set of eligible modules."""
-
-    def __init__(self, output_directory: Path, eligible: set[tuple[int, int]]) -> None:
-        self._output_directory = Path(output_directory)
-        self._eligible = set(eligible)
-
-    def resolve(self, session: object) -> dict[tuple[int, int], ModuleParser]:  # noqa: ARG002
-        return {
-            (module_type, module_id): ModuleParser(
-                parse=_stub_parse, output_path=self._output_directory / f"module_{module_type}_{module_id}.feather"
-            )
-            for module_type, module_id in self._eligible
-        }
+def _stub_parse_4_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+    pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
+        file=output_directory / "module_4_1.feather", compression="uncompressed"
+    )
 
 
-@pytest.fixture(autouse=True)
-def _clean_registry():
-    """Isolates each test from registry state leaking across tests."""
-    saved = dict(parsers_module._PARSER_REGISTRY)
-    parsers_module._PARSER_REGISTRY.clear()
-    yield
-    parsers_module._PARSER_REGISTRY.clear()
-    parsers_module._PARSER_REGISTRY.update(saved)
+def _stub_parse_6_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+    pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
+        file=output_directory / "module_6_1.feather", compression="uncompressed"
+    )
+
+
+_STUB_PARSERS: dict[tuple[int, int], object] = {(2, 1): _stub_parse_2_1, (4, 1): _stub_parse_4_1, (6, 1): _stub_parse_6_1}
+
+
+def _patch_parsers(monkeypatch: pytest.MonkeyPatch, eligible: set[tuple[int, int]]) -> None:
+    """Replaces the central parser lookup with one returning only the requested stub parsers.
+
+    The pipeline binds ``resolve_microcontroller_parsers`` into its own namespace via a top-level import, so the
+    stub set is injected by patching the name on the pipeline module rather than on the registries hub.
+    """
+    parsers = {key: _STUB_PARSERS[key] for key in eligible}
+    monkeypatch.setattr(pipeline_module, "resolve_microcontroller_parsers", lambda system: dict(parsers))  # noqa: ARG005
 
 
 def _make_session(
@@ -189,27 +186,27 @@ def _count_by_status(tracker_path: Path) -> dict[ProcessingStatus, int]:
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# Registry and helpers
+# Central registry and helpers
 # ----------------------------------------------------------------------------------------------------------------------
 
 
-def test_register_and_resolve_parsers() -> None:
-    provider = _StubProvider(Path("/tmp"), set())
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, provider)
-
-    assert resolve_parsers(AcquisitionSystems.MESOSCOPE_VR) is provider
+def test_resolve_microcontroller_parsers_returns_mesoscope_callables() -> None:
+    parsers = resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR)
+    assert parsers  # Mesoscope-VR registers at least one module parser.
+    assert all(callable(parser) for parser in parsers.values())
     # The session stores the acquisition system as a string; resolution must accept that form too.
-    assert resolve_parsers(AcquisitionSystems.MESOSCOPE_VR.value) is provider
+    assert resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR.value).keys() == parsers.keys()
 
 
-def test_resolve_unregistered_system_raises() -> None:
+def test_resolve_microcontroller_parsers_invalid_system_raises() -> None:
     with pytest.raises(ValueError):
-        resolve_parsers(AcquisitionSystems.MESOSCOPE_VR)
+        resolve_microcontroller_parsers("not_a_real_system")
 
 
-def test_resolve_invalid_system_raises() -> None:
-    with pytest.raises(ValueError):
-        resolve_parsers("not_a_real_system")
+def test_registered_parsers_are_picklable() -> None:
+    # Every registered parser is dispatched to worker processes, so each must pickle by reference.
+    for key, parser in MICROCONTROLLER_PARSER_REGISTRY.items():
+        assert pickle.loads(pickle.dumps(parser)) is parser, key
 
 
 def test_split_parse_specifier() -> None:
@@ -233,16 +230,14 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
             kernel=None,
         ),
     }
-    parsers = {
-        (2, 1): ModuleParser(parse=_stub_parse, output_path=tmp_path / "a.feather"),
-        (6, 1): ModuleParser(parse=_stub_parse, output_path=tmp_path / "b.feather"),
-    }
+    # Module (4, 1) is not registered for the system, so it is never parseable.
+    parsers = {(2, 1): _stub_parse_2_1, (6, 1): _stub_parse_6_1}
 
     universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
         controllers=controllers, parsers=parsers, log_directory=tmp_path, extraction_job_name=EXTRACTION_JOB_NAME
     )
 
-    # Module (4, 1) is ineligible, so it never appears; controller 102 is eligible but has no archive on disk.
+    # Module (4, 1) has no registered parser, so it never appears; controller 102 is parseable but has no archive.
     assert set(universe) == {
         (EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),
@@ -254,13 +249,6 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
     assert parse_specifiers == {"101-2-1": ("101", 2, 1)}
 
 
-def test_module_parser_is_picklable() -> None:
-    parser = ModuleParser(parse=_stub_parse, output_path=Path("/tmp/out.feather"))
-    restored = pickle.loads(pickle.dumps(parser))
-    assert restored.output_path == parser.output_path
-    assert restored.parse is _stub_parse
-
-
 # ----------------------------------------------------------------------------------------------------------------------
 # End-to-end pipeline
 # ----------------------------------------------------------------------------------------------------------------------
@@ -270,7 +258,7 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
     session = _make_session(tmp_path)
     _write_inputs(session)
     output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
 
@@ -280,7 +268,7 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
     # Stage 1 wrote the raw per-module feathers into microcontroller_data.
     assert (microcontroller_data / "controller_101_module_2_1.feather").is_file()
     assert (microcontroller_data / "controller_101_module_4_1.feather").is_file()
-    # Stage 2 wrote one domain feather per eligible module into behavior_data.
+    # Stage 2 wrote one domain feather per parseable module into behavior_data.
     assert (output_directory / "module_2_1.feather").is_file()
     assert (output_directory / "module_4_1.feather").is_file()
     # The unified tracker lives in behavior_data, not microcontroller_data.
@@ -292,11 +280,11 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
     assert counts[ProcessingStatus.SUCCEEDED] == 3
 
 
-def test_ineligible_module_produces_no_parse_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unregistered_module_produces_no_parse_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
     output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1)}))  # only (2, 1) eligible
+    _patch_parsers(monkeypatch, {(2, 1)})  # only (2, 1) is registered for this system
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
 
@@ -305,7 +293,7 @@ def test_ineligible_module_produces_no_parse_job(tmp_path: Path, monkeypatch: py
     assert (output_directory / "module_2_1.feather").is_file()
     assert not (output_directory / "module_4_1.feather").exists()
     counts = _count_by_status(output_directory / ProcessingTrackers.MICROCONTROLLER)
-    assert sum(counts.values()) == 2  # extraction + the single eligible parse job
+    assert sum(counts.values()) == 2  # extraction + the single parseable parse job
     assert counts[ProcessingStatus.SUCCEEDED] == 2
 
 
@@ -313,7 +301,7 @@ def test_missing_feather_completes_parse_job_without_output(tmp_path: Path, monk
     session = _make_session(tmp_path)
     _write_inputs(session)
     output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     # Extraction produces no feather for (4, 1), mimicking a configured module that logged no messages.
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory(skip={(4, 1)}))
@@ -328,11 +316,10 @@ def test_missing_feather_completes_parse_job_without_output(tmp_path: Path, monk
     assert counts[ProcessingStatus.SUCCEEDED] == 3
 
 
-def test_no_eligible_controllers_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_parseable_controllers_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, set()))  # nothing eligible
+    _patch_parsers(monkeypatch, set())  # nothing registered
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
 
@@ -344,7 +331,7 @@ def test_remote_extraction_runs_single_controller(tmp_path: Path, monkeypatch: p
     session = _make_session(tmp_path)
     _write_inputs(session)
     output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
 
@@ -369,7 +356,7 @@ def test_remote_parse_runs_single_module(tmp_path: Path, monkeypatch: pytest.Mon
     _make_raw_module_dataframe().write_ipc(
         file=microcontroller_data / "controller_101_module_2_1.feather", compression="uncompressed"
     )
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     # A remote parse job must not trigger extraction.
     monkeypatch.setattr(pipeline_module, "extract_controller", _fail_if_called)
@@ -385,8 +372,7 @@ def test_remote_parse_runs_single_module(tmp_path: Path, monkeypatch: pytest.Mon
 def test_invalid_job_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
-    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1)}))
+    _patch_parsers(monkeypatch, {(2, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
 
