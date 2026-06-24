@@ -54,10 +54,12 @@ def run_video_processing_pipeline(
 
     Notes:
         The pipeline has two stages tracked by the session's camera processing tracker. Stage 1 (``parse``) creates
-        one job per camera registered in the session's camera manifest; each job extracts the frame acquisition
-        timestamps from that camera's raw ``{source_id}_log.npz`` archive and writes a
-        ``camera_{source_id}_timestamps.feather`` into the camera timestamps directory that ataraxis-video-system
-        owns. Stage 2 (``rename``) is a single job that hardlinks every parsed feather under its canonical manifest
+        one job per camera whose raw ``{source_id}_log.npz`` archive is discovered on disk (the intersection of the
+        cameras registered in the session's camera manifest and the discovered archives); the full manifest
+        registration set defines only the job universe used for tracker alignment. Each job extracts the frame
+        acquisition timestamps from that camera's archive and writes a ``camera_{source_id}_timestamps.feather`` into
+        the camera timestamps directory that ataraxis-video-system owns. Stage 2 (``rename``) is a single job that
+        hardlinks every parsed feather under its canonical manifest
         name (for example, ``face_camera_timestamps.feather``) into the behavior data directory, the aggregate of the
         session's processed data that the downstream forging pipeline reads. When neither stage flag is requested,
         both stages run in sequence, so a single local invocation performs the full pipeline. In remote mode (job_id
@@ -71,7 +73,8 @@ def run_video_processing_pipeline(
         parse: Determines whether to run the per-camera timestamp parsing stage.
         rename: Determines whether to run the timestamp renaming stage.
         target_camera: The numeric source ID of the single camera to parse when running the parsing stage. Set to -1
-            to parse all discovered cameras. Ignored by the renaming stage, which always publishes every parsed feather.
+            to parse all discovered cameras. Ignored by the renaming stage, which always publishes every parsed
+            feather, and in remote mode (when job_id is provided), where the job to run is selected entirely by job_id.
         workers: The number of worker processes the extraction binding may use per archive. Set to -1 to use all
             available CPU cores (minus reserved cores).
         display_progress: Determines whether to display a progress bar during each archive's parsing.
