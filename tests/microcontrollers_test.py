@@ -1,0 +1,394 @@
+"""Tests for the standalone microcontroller log processing pipeline.
+
+The pipeline is exercised through a stub parser provider registered in the unified registry, with real extraction
+configuration and manifest fixtures (so ``resolve_controllers`` runs for real) and a faked Stage 1 extraction (so
+no real ``.npz`` archive or acquisition-library extraction is required). Stage 2 parsing, the unified tracker, job
+discovery, and local/remote dispatch all run as production code.
+"""
+
+from __future__ import annotations
+
+import pickle
+from types import SimpleNamespace
+from pathlib import Path
+
+import polars as pl
+import pytest
+from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_communication_interface.microcontroller import (
+    EXTRACTION_JOB_NAME,
+    ModuleSourceData,
+    ExtractionConfig,
+    ModuleExtractionConfig,
+    MicroControllerManifest,
+    MicroControllerSourceData,
+    ControllerExtractionConfig,
+    EXTRACTION_CONFIGURATION_FILENAME,
+    MICROCONTROLLER_MANIFEST_FILENAME,
+)
+
+from sollertia_forgery.microcontrollers import (
+    PARSE_JOB_NAME,
+    ModuleParser,
+    register_parsers,
+    resolve_parsers,
+    run_microcontroller_processing_pipeline,
+)
+from sollertia_forgery.microcontrollers import parsers as parsers_module
+from sollertia_forgery.microcontrollers import pipeline as pipeline_module
+
+# Module-level stub parser so ModuleParser instances stay picklable for the parallel parse path.
+
+
+def _stub_parse(event_partition: dict[int, pl.DataFrame], output_file: Path) -> None:
+    """Writes a trivial domain feather recording which event codes the partition carried."""
+    pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(file=output_file, compression="uncompressed")
+
+
+class _StubProvider:
+    """A minimal MicrocontrollerParserProvider that exposes a fixed set of eligible modules."""
+
+    def __init__(self, output_directory: Path, eligible: set[tuple[int, int]]) -> None:
+        self._output_directory = Path(output_directory)
+        self._eligible = set(eligible)
+
+    def resolve(self, session: object) -> dict[tuple[int, int], ModuleParser]:  # noqa: ARG002
+        return {
+            (module_type, module_id): ModuleParser(
+                parse=_stub_parse, output_path=self._output_directory / f"module_{module_type}_{module_id}.feather"
+            )
+            for module_type, module_id in self._eligible
+        }
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """Isolates each test from registry state leaking across tests."""
+    saved = dict(parsers_module._PARSER_REGISTRY)
+    parsers_module._PARSER_REGISTRY.clear()
+    yield
+    parsers_module._PARSER_REGISTRY.clear()
+    parsers_module._PARSER_REGISTRY.update(saved)
+
+
+def _make_session(
+    tmp_path: Path, *, acquisition_system: str = AcquisitionSystems.MESOSCOPE_VR.value
+) -> SimpleNamespace:
+    """Builds a lightweight stand-in for SessionData exposing only the attributes the pipeline reads."""
+    raw_behavior = tmp_path / "raw_data" / "behavior_data"
+    raw_behavior.mkdir(parents=True)
+    return SimpleNamespace(
+        session_name="test_session",
+        acquisition_system=acquisition_system,
+        raw_data=SimpleNamespace(behavior_data_path=raw_behavior),
+        processed_data=SimpleNamespace(
+            microcontroller_data_path=tmp_path / "processed_data" / "microcontroller_data",
+            behavior_data_path=tmp_path / "processed_data" / "behavior_data",
+        ),
+    )
+
+
+def _write_inputs(
+    session: SimpleNamespace, *, modules: tuple[tuple[int, int], ...] = ((2, 1), (4, 1)), stage_archive: bool = True
+) -> None:
+    """Writes the acquisition-time extraction configuration, manifest, and (optionally) a log archive placeholder."""
+    behavior = session.raw_data.behavior_data_path
+
+    config = ExtractionConfig(
+        controllers=[
+            ControllerExtractionConfig(
+                controller_id=101,
+                modules=tuple(
+                    ModuleExtractionConfig(module_type=module_type, module_id=module_id, event_codes=(51, 52))
+                    for module_type, module_id in modules
+                ),
+                kernel=None,
+            )
+        ]
+    )
+    config.save(file_path=behavior / EXTRACTION_CONFIGURATION_FILENAME)
+
+    manifest = MicroControllerManifest(
+        controllers=[
+            MicroControllerSourceData(
+                id=101,
+                name="actor",
+                modules=tuple(
+                    ModuleSourceData(
+                        module_type=module_type, module_id=module_id, name=f"module_{module_type}_{module_id}"
+                    )
+                    for module_type, module_id in modules
+                ),
+            )
+        ]
+    )
+    manifest.save(file_path=behavior / MICROCONTROLLER_MANIFEST_FILENAME)
+
+    if stage_archive:
+        (behavior / "101_log.npz").touch()
+
+
+def _make_raw_module_dataframe() -> pl.DataFrame:
+    """Builds a raw per-module feather in the five-column schema produced by the acquisition library."""
+    return pl.DataFrame(
+        {
+            "timestamp_us": pl.Series([1, 2, 3], dtype=pl.UInt64),
+            "command": pl.Series([1, 1, 1], dtype=pl.UInt8),
+            "event": pl.Series([51, 52, 51], dtype=pl.UInt8),
+            "dtype": pl.Series([None, None, None], dtype=pl.String),
+            "data": pl.Series([None, None, None], dtype=pl.Binary),
+        }
+    )
+
+
+def _fake_extract_factory(skip: set[tuple[int, int]] | None = None):
+    """Returns a stand-in for ``extract_controller`` that writes raw module feathers and drives the tracker."""
+    skipped = set(skip or set())
+
+    def fake_extract(
+        archive_path,  # noqa: ANN001, ARG001
+        output_directory,  # noqa: ANN001
+        controller_id,  # noqa: ANN001
+        controller_config,  # noqa: ANN001
+        job_id,  # noqa: ANN001
+        tracker,  # noqa: ANN001
+        *,
+        workers,  # noqa: ANN001, ARG001
+        display_progress,  # noqa: ANN001, ARG001
+        executor=None,  # noqa: ANN001, ARG001
+    ) -> None:
+        tracker.start_job(job_id=job_id)
+        Path(output_directory).mkdir(parents=True, exist_ok=True)
+        for module in controller_config.modules:
+            if (module.module_type, module.module_id) in skipped:
+                continue
+            feather = (
+                Path(output_directory)
+                / f"controller_{controller_id}_module_{module.module_type}_{module.module_id}.feather"
+            )
+            _make_raw_module_dataframe().write_ipc(file=feather, compression="uncompressed")
+        tracker.complete_job(job_id=job_id)
+
+    return fake_extract
+
+
+def _fail_if_called(*args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG001
+    raise AssertionError("extract_controller must not be called for a remote parse job.")
+
+
+def _status(tracker_path: Path, job_name: str, specifier: str) -> ProcessingStatus:
+    # ProcessingTracker loads its persisted state lazily inside its public methods, so query through them.
+    tracker = ProcessingTracker(file_path=tracker_path)
+    return tracker.get_job_status(job_id=ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier))
+
+
+def _count_by_status(tracker_path: Path) -> dict[ProcessingStatus, int]:
+    tracker = ProcessingTracker(file_path=tracker_path)
+    return {status: len(tracker.get_jobs_by_status(status)) for status in ProcessingStatus}
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Registry and helpers
+# ----------------------------------------------------------------------------------------------------------------------
+
+
+def test_register_and_resolve_parsers() -> None:
+    provider = _StubProvider(Path("/tmp"), set())
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, provider)
+
+    assert resolve_parsers(AcquisitionSystems.MESOSCOPE_VR) is provider
+    # The session stores the acquisition system as a string; resolution must accept that form too.
+    assert resolve_parsers(AcquisitionSystems.MESOSCOPE_VR.value) is provider
+
+
+def test_resolve_unregistered_system_raises() -> None:
+    with pytest.raises(ValueError):
+        resolve_parsers(AcquisitionSystems.MESOSCOPE_VR)
+
+
+def test_resolve_invalid_system_raises() -> None:
+    with pytest.raises(ValueError):
+        resolve_parsers("not_a_real_system")
+
+
+def test_split_parse_specifier() -> None:
+    assert pipeline_module._split_parse_specifier("101-2-1") == ("101", 2, 1)
+
+
+def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
+    (tmp_path / "101_log.npz").touch()  # controller 101 archive present; controller 102 absent
+    controllers = {
+        "101": ControllerExtractionConfig(
+            controller_id=101,
+            modules=(
+                ModuleExtractionConfig(module_type=2, module_id=1, event_codes=(51,)),
+                ModuleExtractionConfig(module_type=4, module_id=1, event_codes=(51,)),
+            ),
+            kernel=None,
+        ),
+        "102": ControllerExtractionConfig(
+            controller_id=102,
+            modules=(ModuleExtractionConfig(module_type=6, module_id=1, event_codes=(51,)),),
+            kernel=None,
+        ),
+    }
+    parsers = {
+        (2, 1): ModuleParser(parse=_stub_parse, output_path=tmp_path / "a.feather"),
+        (6, 1): ModuleParser(parse=_stub_parse, output_path=tmp_path / "b.feather"),
+    }
+
+    universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
+        controllers=controllers, parsers=parsers, log_directory=tmp_path, extraction_job_name=EXTRACTION_JOB_NAME
+    )
+
+    # Module (4, 1) is ineligible, so it never appears; controller 102 is eligible but has no archive on disk.
+    assert set(universe) == {
+        (EXTRACTION_JOB_NAME, "101"),
+        (PARSE_JOB_NAME, "101-2-1"),
+        (EXTRACTION_JOB_NAME, "102"),
+        (PARSE_JOB_NAME, "102-6-1"),
+    }
+    assert set(requested) == {(EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert set(archives) == {"101"}
+    assert parse_specifiers == {"101-2-1": ("101", 2, 1)}
+
+
+def test_module_parser_is_picklable() -> None:
+    parser = ModuleParser(parse=_stub_parse, output_path=Path("/tmp/out.feather"))
+    restored = pickle.loads(pickle.dumps(parser))
+    assert restored.output_path == parser.output_path
+    assert restored.parse is _stub_parse
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# End-to-end pipeline
+# ----------------------------------------------------------------------------------------------------------------------
+
+
+def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    microcontroller_data = session.processed_data.microcontroller_data_path
+    # Stage 1 wrote the raw per-module feathers into microcontroller_data.
+    assert (microcontroller_data / "controller_101_module_2_1.feather").is_file()
+    assert (microcontroller_data / "controller_101_module_4_1.feather").is_file()
+    # Stage 2 wrote one domain feather per eligible module into behavior_data.
+    assert (output_directory / "module_2_1.feather").is_file()
+    assert (output_directory / "module_4_1.feather").is_file()
+    # The unified tracker lives in behavior_data, not microcontroller_data.
+    tracker_path = output_directory / ProcessingTrackers.MICROCONTROLLER
+    assert tracker_path.is_file()
+    assert not (microcontroller_data / ProcessingTrackers.MICROCONTROLLER).exists()
+    counts = _count_by_status(tracker_path)
+    assert sum(counts.values()) == 3  # one extraction job + two parse jobs
+    assert counts[ProcessingStatus.SUCCEEDED] == 3
+
+
+def test_ineligible_module_produces_no_parse_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1)}))  # only (2, 1) eligible
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    assert (output_directory / "module_2_1.feather").is_file()
+    assert not (output_directory / "module_4_1.feather").exists()
+    counts = _count_by_status(output_directory / ProcessingTrackers.MICROCONTROLLER)
+    assert sum(counts.values()) == 2  # extraction + the single eligible parse job
+    assert counts[ProcessingStatus.SUCCEEDED] == 2
+
+
+def test_missing_feather_completes_parse_job_without_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    # Extraction produces no feather for (4, 1), mimicking a configured module that logged no messages.
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory(skip={(4, 1)}))
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    assert (output_directory / "module_2_1.feather").is_file()
+    assert not (output_directory / "module_4_1.feather").exists()
+    counts = _count_by_status(output_directory / ProcessingTrackers.MICROCONTROLLER)
+    # The parse job for the data-less module is still resolved to SUCCEEDED with no output.
+    assert sum(counts.values()) == 3
+    assert counts[ProcessingStatus.SUCCEEDED] == 3
+
+
+def test_no_eligible_controllers_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, set()))  # nothing eligible
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+
+    with pytest.raises(ValueError):
+        run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+
+def test_remote_extraction_runs_single_controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+
+    extraction_job_id = ProcessingTracker.generate_job_id(job_name=EXTRACTION_JOB_NAME, specifier="101")
+    run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=extraction_job_id, workers=1)
+
+    # The extraction ran (raw feathers present) but no parse job did (no domain feathers).
+    assert (session.processed_data.microcontroller_data_path / "controller_101_module_2_1.feather").is_file()
+    assert not (output_directory / "module_2_1.feather").exists()
+    tracker_path = output_directory / ProcessingTrackers.MICROCONTROLLER
+    assert _status(tracker_path, EXTRACTION_JOB_NAME, "101") == ProcessingStatus.SUCCEEDED
+    assert _status(tracker_path, PARSE_JOB_NAME, "101-2-1") == ProcessingStatus.SCHEDULED
+
+
+def test_remote_parse_runs_single_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    microcontroller_data = session.processed_data.microcontroller_data_path
+    microcontroller_data.mkdir(parents=True)
+    # A prior extraction run already produced the raw module feather.
+    _make_raw_module_dataframe().write_ipc(
+        file=microcontroller_data / "controller_101_module_2_1.feather", compression="uncompressed"
+    )
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1), (4, 1)}))
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    # A remote parse job must not trigger extraction.
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fail_if_called)
+
+    parse_job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier="101-2-1")
+    run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=parse_job_id, workers=1)
+
+    assert (output_directory / "module_2_1.feather").is_file()
+    tracker_path = output_directory / ProcessingTrackers.MICROCONTROLLER
+    assert _status(tracker_path, PARSE_JOB_NAME, "101-2-1") == ProcessingStatus.SUCCEEDED
+
+
+def test_invalid_job_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session)
+    output_directory = session.processed_data.behavior_data_path
+    register_parsers(AcquisitionSystems.MESOSCOPE_VR, _StubProvider(output_directory, {(2, 1)}))
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+
+    with pytest.raises(ValueError):
+        run_microcontroller_processing_pipeline(session_path=tmp_path, job_id="deadbeef", workers=1)
