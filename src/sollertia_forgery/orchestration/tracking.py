@@ -1,5 +1,4 @@
-"""Provides the processing-tracker job-registry alignment helper shared across library pipelines.
-"""
+"""Provides the processing-tracker job-registry alignment helper shared across library pipelines."""
 
 from __future__ import annotations
 
@@ -11,27 +10,22 @@ def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]], uni
     """Aligns a processing tracker's job registry with the jobs requested for the current pipeline invocation.
 
     Notes:
-        Foreign entries are detected by comparing the tracker's existing job IDs against the ``universe`` of every
-        job the current input set could produce, not against the invocation's requested ``jobs`` subset. This lets
-        a subset invocation (for example, a single concurrent remote job, or a discovery that only finds part of
-        the expected inputs) align the tracker without wiping previously-completed state for its sibling jobs. Only
-        entries that fall outside the universe are treated as architectural drift (the input set itself has changed
-        since the tracker was last written) and surfaced through a warning before the tracker is rebuilt.
+        Foreign entries are detected against the ``universe`` of every job the current input set could produce, not
+        against the requested ``jobs`` subset. This lets a subset invocation (a single concurrent remote job, or a
+        discovery that finds only part of the expected inputs) align the tracker without wiping the completed state
+        of its sibling jobs.
 
-        If the tracker file does not yet exist on disk, the helper initializes it with the requested jobs. If the
-        file exists and contains job IDs that are not part of the universe, those entries are classified as foreign
-        and the helper emits a warning before resetting and reinitializing the tracker. If the file exists with only
-        universe-valid entries but is missing some requested jobs, the helper performs an additive
-        ``initialize_jobs`` call that registers the missing entries without clobbering any existing state. If the
-        file already contains every requested job, the helper is a no-op, which keeps ``initialize_jobs`` from
-        emitting duplicate-entry warnings for the fully-aligned case.
+        The helper initializes a missing tracker with the requested jobs, additively registers any requested jobs
+        absent from an otherwise-valid tracker, and is a no-op when every requested job is already present. Only
+        when the tracker holds entries outside the universe (the input set itself has changed) does it warn and
+        rebuild the tracker from the requested jobs.
 
     Args:
-        tracker: The ProcessingTracker instance bound to the target directory.
-        jobs: The list of ``(job_name, specifier)`` tuples the current invocation intends to execute.
-        universe: The list of ``(job_name, specifier)`` tuples enumerating every job the current input set could
-            produce. Used exclusively for foreign-entry detection. Callers whose requested set is always the full
-            job universe pass the same list as ``jobs``.
+        tracker: The processing tracker bound to the target directory.
+        jobs: The ``(job_name, specifier)`` tuples the current invocation intends to execute.
+        universe: The ``(job_name, specifier)`` tuples enumerating every job the current input set could produce,
+            used only for foreign-entry detection. Callers whose requested set is always the full universe pass the
+            same list as ``jobs``.
     """
     universe_ids = {
         ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier) for job_name, specifier in universe
