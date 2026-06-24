@@ -8,10 +8,11 @@ import shutil
 from typing import TYPE_CHECKING
 
 from natsort import natsorted
+from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
-from ataraxis_video_system.video import CAMERA_MANIFEST_FILENAME, CameraManifest, execute_job
+from ataraxis_video_system.video import execute_job
 
 from ..orchestration import prepare_tracker
 
@@ -41,80 +42,6 @@ behavior data directory (e.g., the ``face_camera`` source produces ``face_camera
 _PARSED_TIMESTAMP_TEMPLATE: str = "camera_{source_id}_timestamps.feather"
 """The timestamp feather name written by the parsing stage (via the ataraxis-video-system extraction binding) into
 the camera timestamps directory, before the renaming stage hardlinks it under its canonical name."""
-
-
-def find_camera_logs(data_directory: Path) -> list[Path]:
-    """Discovers raw VideoSystem camera log archives inside the canonical raw camera data directory.
-
-    Args:
-        data_directory: The path to the session's raw camera data directory
-            (``session.raw_data.camera_data_path``).
-
-    Returns:
-        A naturally sorted list of paths to the discovered ``{source_id}_log.npz`` archives. Returns an empty list if
-        the directory does not exist or contains no matching archives.
-    """
-    if not data_directory.is_dir():
-        return []
-    return natsorted(data_directory.glob(_RAW_CAMERA_LOG_PATTERN))
-
-
-def extract_camera_source_id(log_path: Path) -> int:
-    """Extracts the numeric camera source ID from a raw camera log archive filename.
-
-    Args:
-        log_path: The path to the raw camera log archive. The filename must follow the ``{source_id}_log.npz``
-            naming convention.
-
-    Returns:
-        The numeric source ID encoded in the filename.
-
-    Raises:
-        ValueError: If the filename does not follow the expected naming convention.
-    """
-    stem = log_path.stem  # e.g., "51_log"
-    parts = stem.split("_")
-
-    if len(parts) != _RAW_CAMERA_LOG_PART_COUNT or parts[1] != "log" or not parts[0].isdigit():
-        message = (
-            f"Unable to extract the camera source ID from '{log_path.name}'. The filename does not follow the "
-            f"expected '{{source_id}}_log.npz' naming convention."
-        )
-        console.error(message=message, error=ValueError)
-
-    return int(parts[0])
-
-
-def resolve_camera_output_names(data_directory: Path) -> dict[int, str]:
-    """Maps each camera source ID registered in the acquisition-time manifest to its canonical timestamp filename.
-
-    Reads the camera manifest that every VideoSystem writes alongside its log archives and projects each registered
-    source into its canonical ``{name}_timestamps.feather`` output filename. The manifest is the sole source of
-    camera output names, so the pipeline requires no acquisition-system-specific configuration: the colloquial
-    source names recorded at acquisition time (for example, ``face_camera``) directly determine the output names.
-
-    Args:
-        data_directory: The path to the session's raw camera data directory (``session.raw_data.camera_data_path``),
-            which holds the camera log archives and their shared camera manifest.
-
-    Returns:
-        A dictionary mapping each registered camera source ID to its canonical timestamp feather filename.
-
-    Raises:
-        FileNotFoundError: If the camera manifest file does not exist in the data directory.
-    """
-    manifest_path = data_directory.joinpath(CAMERA_MANIFEST_FILENAME)
-    if not manifest_path.is_file():
-        message = (
-            f"Unable to resolve camera-timestamp output names. No camera manifest ('{CAMERA_MANIFEST_FILENAME}') "
-            f"was found in the raw camera data directory '{data_directory}'."
-        )
-        console.error(message=message, error=FileNotFoundError)
-
-    # Each manifest source associates a source ID with a colloquial name (e.g., 'face_camera'); the canonical output
-    # filename is that name suffixed with '_timestamps.feather'.
-    manifest = CameraManifest.from_yaml(file_path=manifest_path)
-    return {source.id: f"{source.name}{_CAMERA_TIMESTAMP_SUFFIX}" for source in manifest.sources}
 
 
 def run_video_processing_pipeline(
@@ -168,7 +95,7 @@ def run_video_processing_pipeline(
     # Resolves the canonical output name for every camera registered in the acquisition-time manifest. The manifest
     # defines the full job universe, decoupling tracker alignment from whichever archives are currently on disk.
     camera_data_directory = session.raw_data.camera_data_path
-    output_names = resolve_camera_output_names(data_directory=camera_data_directory)
+    output_names = _resolve_camera_output_names(data_directory=camera_data_directory)
     if not output_names:
         message = (
             f"Unable to process camera timestamps for session '{session.session_name}'. The camera manifest in "
@@ -182,8 +109,8 @@ def run_video_processing_pipeline(
 
     # Discovers the raw log archive backing each registered camera.
     log_paths: dict[int, Path] = {}
-    for log_path in find_camera_logs(data_directory=camera_data_directory):
-        source_id = extract_camera_source_id(log_path=log_path)
+    for log_path in _find_camera_logs(data_directory=camera_data_directory):
+        source_id = _extract_camera_source_id(log_path=log_path)
         if source_id in output_names:
             log_paths[source_id] = log_path
 
@@ -278,6 +205,79 @@ def run_video_processing_pipeline(
         )
 
     console.echo(message="All camera-timestamp processing jobs completed successfully.", level=LogLevel.SUCCESS)
+
+
+def _resolve_camera_output_names(data_directory: Path) -> dict[int, str]:
+    """Maps each camera source ID registered in the acquisition-time manifest to its canonical timestamp filename.
+
+    Reads the camera manifest that every VideoSystem writes alongside its log archives and projects each registered
+    source into its canonical ``{name}_timestamps.feather`` output filename. The manifest is the sole source of
+    camera output names, so the pipeline requires no acquisition-system-specific configuration: the colloquial
+    source names recorded at acquisition time (for example, ``face_camera``) directly determine the output names.
+
+    Args:
+        data_directory: The path to the session's raw camera data directory (``session.raw_data.camera_data_path``),
+            which holds the camera log archives and their shared camera manifest.
+
+    Returns:
+        A dictionary mapping each registered camera source ID to its canonical timestamp feather filename.
+
+    Raises:
+        FileNotFoundError: If the camera manifest file does not exist in the data directory.
+    """
+    manifest_path = data_directory.joinpath(CAMERA_MANIFEST_FILENAME)
+    if not manifest_path.is_file():
+        message = (
+            f"Unable to resolve camera-timestamp output names. No camera manifest ('{CAMERA_MANIFEST_FILENAME}') "
+            f"was found in the raw camera data directory '{data_directory}'."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    # Each manifest source associates a source ID with a colloquial name (e.g., 'face_camera'); the canonical output
+    # filename is that name suffixed with '_timestamps.feather'.
+    manifest = CameraManifest.from_yaml(file_path=manifest_path)
+    return {source.id: f"{source.name}{_CAMERA_TIMESTAMP_SUFFIX}" for source in manifest.sources}
+
+
+def _find_camera_logs(data_directory: Path) -> list[Path]:
+    """Discovers raw VideoSystem camera log archives inside the canonical raw camera data directory.
+
+    Args:
+        data_directory: The path to the session's raw camera data directory (``session.raw_data.camera_data_path``).
+
+    Returns:
+        A naturally sorted list of paths to the discovered ``{source_id}_log.npz`` archives. Returns an empty list if
+        the directory does not exist or contains no matching archives.
+    """
+    if not data_directory.is_dir():
+        return []
+    return natsorted(data_directory.glob(_RAW_CAMERA_LOG_PATTERN))
+
+
+def _extract_camera_source_id(log_path: Path) -> int:
+    """Extracts the numeric camera source ID from a raw camera log archive filename.
+
+    Args:
+        log_path: The path to the raw camera log archive. The filename must follow the ``{source_id}_log.npz``
+            naming convention.
+
+    Returns:
+        The numeric source ID encoded in the filename.
+
+    Raises:
+        ValueError: If the filename does not follow the expected naming convention.
+    """
+    stem = log_path.stem  # e.g., "51_log"
+    parts = stem.split("_")
+
+    if len(parts) != _RAW_CAMERA_LOG_PART_COUNT or parts[1] != "log" or not parts[0].isdigit():
+        message = (
+            f"Unable to extract the camera source ID from '{log_path.name}'. The filename does not follow the "
+            f"expected '{{source_id}}_log.npz' naming convention."
+        )
+        console.error(message=message, error=ValueError)
+
+    return int(parts[0])
 
 
 def _dispatch_job(
