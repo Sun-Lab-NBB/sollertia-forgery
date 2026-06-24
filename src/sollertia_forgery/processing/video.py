@@ -13,7 +13,7 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker
 
-from ..shared_assets import prepare_tracker
+from ..orchestration import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path

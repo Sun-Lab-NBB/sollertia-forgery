@@ -28,12 +28,13 @@ from ..forging import resolve_dataset
 from .processing import discover_behavior_jobs, run_behavior_processing_pipeline
 from ..orchestration import (
     GenericPendingJob,
+    prepare_tracker,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
     clean_output_subdirectory,
 )
-from ..shared_assets import DatasetData, DatasetFiles, prepare_tracker
+from ..shared_assets import DatasetData, DatasetFiles
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

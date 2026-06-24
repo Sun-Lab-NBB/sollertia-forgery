@@ -2,7 +2,6 @@
 microcontroller feather primitives, and terminal utilities.
 """
 
-from .tracking import prepare_tracker
 from .utilities import delay_timer, delay_terminal
 from .dataset_data import (
     DatasetData,
@@ -32,5 +31,4 @@ __all__ = [
     "merge_event_streams",
     "parse_module_feather_name",
     "partition_events",
-    "prepare_tracker",
 ]

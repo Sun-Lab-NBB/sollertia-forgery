@@ -1,5 +1,5 @@
 """Provides the unified orchestration layer: the in-process batch job-execution engine, the remote SLURM pipeline
-engine, and the system-agnostic remote management orchestrators for project manifest and checksum resolution.
+engine, and the processing-tracker job-registry alignment helper.
 """
 
 from .local import (
@@ -15,8 +15,8 @@ from .local import (
     job_execution_manager,
     clean_output_subdirectory,
 )
-from .managing import manage_project_data, resolve_project_manifest
 from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from .tracking import prepare_tracker
 
 __all__ = [
     "RESERVED_CORES",
@@ -32,7 +32,6 @@ __all__ = [
     "execute_pipelines",
     "group_jobs_by_tracker",
     "job_execution_manager",
-    "manage_project_data",
+    "prepare_tracker",
     "read_tracker_status",
-    "resolve_project_manifest",
 ]

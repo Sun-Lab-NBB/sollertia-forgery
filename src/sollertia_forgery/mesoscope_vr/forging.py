@@ -25,7 +25,8 @@ from ataraxis_data_structures import ProcessingTracker
 from ..forging import resolve_dataset
 from .metadata import TrialGeometry
 from .fluorescence import assemble_cindra_dataset
-from ..shared_assets import DatasetFiles, DatasetSession, prepare_tracker
+from ..orchestration import prepare_tracker
+from ..shared_assets import DatasetFiles, DatasetSession
 from .runtime_dataset import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 

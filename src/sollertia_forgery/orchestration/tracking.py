@@ -1,5 +1,4 @@
-"""Provides the processing-tracker job-registry alignment helper shared across the management and processing
-pipelines.
+"""Provides the processing-tracker job-registry alignment helper shared across library pipelines.
 """
 
 from __future__ import annotations

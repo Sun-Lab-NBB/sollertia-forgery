@@ -33,12 +33,12 @@ from ..orchestration import (
     RESERVED_CORES,
     PendingJob,
     JobExecutionState,
+    prepare_tracker,
     read_tracker_status,
     derive_tracker_status,
     group_jobs_by_tracker,
     job_execution_manager,
 )
-from ..shared_assets import prepare_tracker
 
 _STATUS_COLUMNS: frozenset[str] = frozenset({"complete", "integrity", "cindra", "behavior", "video"})
 """The manifest column names that store boolean-like UInt8 processing status flags, cast to native bools by

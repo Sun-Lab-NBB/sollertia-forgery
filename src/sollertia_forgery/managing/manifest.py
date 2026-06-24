@@ -19,7 +19,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
-from ..shared_assets import prepare_tracker
+from ..orchestration import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path

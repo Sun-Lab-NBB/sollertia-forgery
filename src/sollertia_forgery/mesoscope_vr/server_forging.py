@@ -28,7 +28,6 @@ from ..pipelines import ProcessingPipelines
 from ..orchestration import (
     ProcessingPipeline,
     execute_pipelines,
-    resolve_project_manifest,
     check_session_eligibility,
 )
 from ..shared_assets import DatasetData, DatasetSession, delay_timer, delay_terminal
@@ -505,9 +504,6 @@ def forge_dataset(
             )
             delay_terminal()
 
-            # Refreshes the manifest to include the processing results.
-            resolve_project_manifest(project=project, server=server, generate=True)
-
     # PHASE 2: DATASET DEFINITION AND DATA ASSEMBLY
     console.echo(message="Phase 2: Dataset Definition and Data Assembly...", level=LogLevel.INFO)
     delay_terminal()
@@ -545,9 +541,6 @@ def forge_dataset(
                 poll_delay=10,
             )
             delay_terminal()
-
-            # Refreshes the manifest to include the processing results.
-            resolve_project_manifest(project=project, server=server, generate=True)
 
     # Creates a visual separation before the final summary.
     delay_terminal()

@@ -24,7 +24,6 @@ from ..pipelines import ProcessingPipelines
 from ..orchestration import (
     ProcessingPipeline,
     execute_pipelines,
-    resolve_project_manifest,
     check_session_eligibility,
 )
 from ..shared_assets import DatasetSession, delay_terminal
@@ -507,9 +506,6 @@ def process_project_data(
             poll_delay=10,
         )
         delay_terminal()
-
-        # Refreshes the manifest to include the processing results.
-        resolve_project_manifest(project=project, server=server, generate=True)
 
     # Creates a visual separation before the final summary.
     delay_terminal()
