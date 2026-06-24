@@ -6,23 +6,19 @@ from __future__ import annotations
 
 import shutil
 from typing import TYPE_CHECKING
+from concurrent.futures import ProcessPoolExecutor
 
 from natsort import natsorted
 from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest
-from ataraxis_base_utilities import LogLevel, console
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
-from ataraxis_video_system.video import execute_job
+from ataraxis_video_system.video import TIMESTAMP_JOB_NAME, execute_job
 
 from ..orchestration import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-PARSE_JOB_NAME: str = "camera_timestamp_extraction"
-"""The job name used to identify per-camera timestamp parsing jobs (stage 1) in the camera processing tracker.
-Matches the job name used by the ataraxis-video-system extraction binding so the generated job IDs align across both
-libraries."""
 
 RENAME_JOB_NAME: str = "camera_timestamp_rename"
 """The job name used to identify the single timestamp renaming job (stage 2) in the camera processing tracker. The
@@ -104,7 +100,7 @@ def run_video_processing_pipeline(
         console.error(message=message, error=ValueError)
 
     # The universe is one parse job per registered camera plus the single rename job, used for tracker alignment.
-    universe = [(PARSE_JOB_NAME, str(source_id)) for source_id in output_names]
+    universe = [(TIMESTAMP_JOB_NAME, str(source_id)) for source_id in output_names]
     universe.append((RENAME_JOB_NAME, ""))
 
     # Discovers the raw log archive backing each registered camera.
@@ -140,7 +136,7 @@ def run_video_processing_pipeline(
         prepare_tracker(tracker=tracker, jobs=universe, universe=universe)
 
         job_name, specifier = id_to_job[job_id]
-        if job_name == PARSE_JOB_NAME and int(specifier) not in log_paths:
+        if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
             message = (
                 f"Unable to execute the requested timestamp parsing job with ID '{job_id}'. No raw log archive was "
                 f"discovered for camera source ID {specifier} in '{camera_data_directory}'."
@@ -157,6 +153,7 @@ def run_video_processing_pipeline(
             tracker=tracker,
             workers=workers,
             display_progress=display_progress,
+            executor=None,
         )
         console.echo(message="Camera-timestamp processing job completed successfully.", level=LogLevel.SUCCESS)
         return
@@ -173,7 +170,7 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
         if target_camera == -1:
-            jobs.extend((PARSE_JOB_NAME, str(source_id)) for source_id in log_paths)
+            jobs.extend((TIMESTAMP_JOB_NAME, str(source_id)) for source_id in log_paths)
         else:
             if target_camera not in log_paths:
                 message = (
@@ -181,7 +178,7 @@ def run_video_processing_pipeline(
                     f"registered camera log archive was discovered for it in '{camera_data_directory}'."
                 )
                 console.error(message=message, error=ValueError)
-            jobs.append((PARSE_JOB_NAME, str(target_camera)))
+            jobs.append((TIMESTAMP_JOB_NAME, str(target_camera)))
     if run_rename:
         jobs.append((RENAME_JOB_NAME, ""))
 
@@ -191,18 +188,30 @@ def run_video_processing_pipeline(
 
     console.echo(message=f"Running {len(jobs)} camera-timestamp processing job(s).")
 
-    for job_name, specifier in jobs:
-        _dispatch_job(
-            job_name=job_name,
-            specifier=specifier,
-            log_paths=log_paths,
-            output_names=output_names,
-            timestamps_directory=timestamps_directory,
-            behavior_directory=behavior_directory,
-            tracker=tracker,
-            workers=workers,
-            display_progress=display_progress,
-        )
+    # Resolves the worker count once and creates a single ProcessPoolExecutor shared across every parse job, mirroring
+    # the ataraxis-video-system pipeline. This amortizes the cost of spawning and tearing down worker processes across
+    # all cameras instead of paying it once per camera. The shared pool requires a positive, pre-resolved worker count
+    # because the extraction binding sizes its batch submissions to match the pool. The renaming stage ignores it.
+    resolved_workers = resolve_worker_count(requested_workers=workers)
+    shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
+
+    try:
+        for job_name, specifier in jobs:
+            _dispatch_job(
+                job_name=job_name,
+                specifier=specifier,
+                log_paths=log_paths,
+                output_names=output_names,
+                timestamps_directory=timestamps_directory,
+                behavior_directory=behavior_directory,
+                tracker=tracker,
+                workers=resolved_workers,
+                display_progress=display_progress,
+                executor=shared_executor,
+            )
+    finally:
+        if shared_executor is not None:
+            shared_executor.shutdown(wait=True)
 
     console.echo(message="All camera-timestamp processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
@@ -291,11 +300,12 @@ def _dispatch_job(
     *,
     workers: int,
     display_progress: bool,
+    executor: ProcessPoolExecutor | None,
 ) -> None:
     """Executes a single pipeline job, routing to the parsing or renaming stage by job name.
 
     Args:
-        job_name: The job name identifying the stage to run (``PARSE_JOB_NAME`` or ``RENAME_JOB_NAME``).
+        job_name: The job name identifying the stage to run (``TIMESTAMP_JOB_NAME`` or ``RENAME_JOB_NAME``).
         specifier: The job specifier. For a parse job this is the camera source ID; for the rename job it is empty.
         log_paths: The mapping of discovered camera source IDs to their raw log archive paths.
         output_names: The mapping of camera source IDs to their canonical timestamp feather filenames.
@@ -304,10 +314,13 @@ def _dispatch_job(
         tracker: The camera ProcessingTracker instance for recording job state transitions.
         workers: The number of worker processes the extraction binding may use.
         display_progress: Determines whether the extraction binding displays a progress bar.
+        executor: An optional process pool shared across parse jobs so the extraction binding reuses it instead of
+            spawning its own. The renaming stage ignores it. When None, the binding creates and tears down its own
+            pool for this job.
     """
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
 
-    if job_name == PARSE_JOB_NAME:
+    if job_name == TIMESTAMP_JOB_NAME:
         # The ataraxis-video-system binding extracts the timestamps, writes the
         # 'camera_{source_id}_timestamps.feather' into the camera timestamps directory, and records this job's start,
         # completion, or failure on the tracker.
@@ -319,6 +332,7 @@ def _dispatch_job(
             workers=workers,
             tracker=tracker,
             display_progress=display_progress,
+            executor=executor,
         )
     else:
         _link_parsed_timestamps(
