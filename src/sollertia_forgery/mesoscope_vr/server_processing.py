@@ -117,44 +117,6 @@ def _construct_behavior_processing_pipeline(
         job.add_command(f"slf process behavior -sp {remote_session_path} -id {job_id} -w -1")
         stage_1.append((job, working_directory, job_id))
 
-        # Face camera processing job
-        job_name = f"{session}_face_camera_processing"
-        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
-        working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
-        )
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath("output.txt"),
-            error_log=working_directory.joinpath("errors.txt"),
-            working_directory=working_directory,
-            conda_environment=server.environment,
-            cpu_threads=30,
-            ram=90,
-            time=90,
-        )
-        job.add_command(f"slf process video -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory, job_id))
-
-        # Body camera processing job
-        job_name = f"{session}_body_camera_processing"
-        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
-        working_directory = get_remote_job_work_directory(
-            server=server, job_name=job_name, pipeline_name=ProcessingPipelines.BEHAVIOR, base_path=remote_session_path
-        )
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath("output.txt"),
-            error_log=working_directory.joinpath("errors.txt"),
-            working_directory=working_directory,
-            conda_environment=server.environment,
-            cpu_threads=30,
-            ram=60,
-            time=90,
-        )
-        job.add_command(f"slf process video -sp {remote_session_path} -id {job_id} -w -1")
-        stage_1.append((job, working_directory, job_id))
-
         # Actor microcontroller data processing job
         job_name = f"{session}_actor_microcontroller_processing"
         job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))

@@ -22,8 +22,6 @@ class ProcessingPipelines(StrEnum):
     """The raw data integrity (checksum) verification pipeline."""
     BEHAVIOR = "behavior"
     """The behavior and camera data processing pipeline."""
-    VIDEO = "video"
-    """The video data processing pipeline."""
     CINDRA_SINGLE_RECORDING = "cindra_single_recording"
     """The single-day cindra (calcium imaging) processing pipeline."""
     CINDRA_MULTI_RECORDING = "cindra_multi_recording"

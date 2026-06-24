@@ -350,9 +350,6 @@ def check_session_eligibility(
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
     elif pipeline == ProcessingPipelines.BEHAVIOR:
         processed = bool(session_data["behavior"][0])
-    elif pipeline == ProcessingPipelines.VIDEO:
-        processed = bool(session_data["video"][0])
-        requires_configuration = True
     elif pipeline == ProcessingPipelines.CINDRA_SINGLE_RECORDING:
         processed = bool(session_data["cindra"][0])
         requires_configuration = True

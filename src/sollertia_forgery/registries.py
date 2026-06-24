@@ -72,12 +72,11 @@ AGNOSTIC_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
     {
         ProcessingPipelines.MANIFEST,
         ProcessingPipelines.CHECKSUM,
-        ProcessingPipelines.VIDEO,
     }
 )
 """The pipelines that are platform-wide rather than acquisition-system-specific. Their entry points live in the
-system-agnostic ``managing`` and ``processing`` layers and are invoked directly by the interface, so they are not
-dispatched through the per-system registries."""
+system-agnostic ``managing`` layer and are invoked directly by the interface, so they are not dispatched through the
+per-system registries."""
 
 SYSTEM_PIPELINES: dict[AcquisitionSystems, frozenset[ProcessingPipelines]] = {
     AcquisitionSystems.MESOSCOPE_VR: frozenset(
@@ -129,9 +128,9 @@ MCP_BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
 """The pipelines exposed by the system-agnostic batch MCP tools in ``interfaces/processing_tools.py``. Only the
 local, per-session/per-dataset batch pipelines belong here: the cindra pipelines run via the remote orchestrators
 (``REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY``) rather than these in-process batch tools, and the agnostic pipelines
-(``AGNOSTIC_PIPELINES``) either have their own dedicated MCP tools (manifest, checksum) or no batch tool at all
-(video). The generic processing tools validate every ``pipeline`` argument against this set and dispatch through the
-batch registries below, which are keyed by ``ProcessingPipelines`` rather than ``(system, pipeline)`` because reset
+(``AGNOSTIC_PIPELINES``) have their own dedicated MCP tools (manifest, checksum). The generic processing tools
+validate every ``pipeline`` argument against this set and dispatch through the batch registries below, which are
+keyed by ``ProcessingPipelines`` rather than ``(system, pipeline)`` because reset
 and overview operate on bare tracker/root paths and cannot infer the acquisition system before dispatch; the adapter
 loads the session or dataset internally where it needs system specifics."""
 
