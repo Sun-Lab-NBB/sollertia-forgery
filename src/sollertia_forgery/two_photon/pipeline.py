@@ -1,4 +1,4 @@
-"""Provides the end-to-end, single-recording two-photon (calcium-imaging) processing pipeline that resolves the
+"""Provides the single-recording two-photon (calcium-imaging) processing pipeline that resolves the
 target session's raw imaging input and processed-output locations, materializes a runnable cindra configuration from
 the supplied processing parameters, and drives the cindra binarization, per-plane processing, and combination stages.
 """
@@ -46,12 +46,12 @@ def run_two_photon_processing_pipeline(
         imaging directory (the cindra input) and the session's processed-data root (the cindra output) from the
         shared session hierarchy, so neither location is passed as an argument. It then loads the supplied processing
         configuration template, overrides its input and output paths with the session-resolved locations and its
-        runtime worker count and progress flag with the values for this invocation, and writes the result as the
-        session's cindra ``configuration.yaml``. The cindra single-recording binding consumes that materialized
-        configuration and owns the heavy work: it reads the recording's acquisition parameters, decomposes the run
-        into the binarization, per-plane processing, and combination stages, and records every stage on its own
-        processing tracker at the cindra output root. All outputs land in the session's canonical processed cindra
-        directory (``session.processed_data.cindra_data_path``).
+        runtime worker count, and writes the result as the session's cindra ``configuration.yaml``. The cindra
+        single-recording binding consumes that materialized configuration and owns the heavy work: it reads the
+        recording's acquisition parameters, decomposes the run into the binarization, per-plane processing, and
+        combination stages, and records every stage on its own processing tracker at the cindra output root.
+        All outputs land in the session's canonical processed cindra directory
+        (``session.processed_data.cindra_data_path``).
 
         The configuration is always supplied by the caller and is never defaulted: it carries the data-specific
         processing parameters (registration, ROI detection, signal extraction, and so on), while the session supplies
