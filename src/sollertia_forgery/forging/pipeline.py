@@ -1,24 +1,11 @@
 """Provides the system-agnostic, end-to-end dataset forging pipeline.
 
-This is the standalone local forging worker. It mirrors the microcontroller log processing pipeline: the entire
-pipeline body -- every job name and all local intra-pipeline orchestration -- lives here, while the only
-system-specific concern (assembling one session's data into ``data.feather`` plus its data-format descriptor) is
-resolved from the central ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system. The pipeline therefore
-never names a system-specific type; acquisition-system packages donate an assembly worker into the registry, and the
-dependency is strictly one-way (this pipeline reaches the system worker through the registry, never the reverse).
+The pipeline owns dataset definition, the optional cindra multi-day stage, and per-session orchestration; the only
+system-specific concern -- assembling one session's ``data.feather`` plus its data-format descriptor -- is resolved
+from ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system. The dependency is strictly one-way: the
+pipeline reaches the system worker through the registry, never the reverse.
 
-The pipeline runs as four stages:
-    1. Define the dataset hierarchy (``resolve_dataset``).
-    2. Run the cindra multi-day (across-session cell tracking) stage, but only when an activity configuration is
-       supplied (and only in a full local run). When no configuration is given, the stage is skipped entirely and
-       any existing cindra outputs are consumed as-is.
-    3. Forge each session's sub-datasets by dispatching the registered assembly worker.
-    4. Assemble the unified per-session dataset by re-exporting the shared assets (the VR configuration and the
-       session descriptor) alongside the worker's ``data.feather``.
-
-Stages 1 and 2 run once up front and are not tracked by the forging processing tracker (dataset definition has
-already completed, and cindra writes its own trackers). The tracker holds one per-session assembly job covering
-stages 3 and 4.
+See ``run_forging_pipeline`` for the stage ordering, the local/remote execution modes, and the tracker contract.
 """
 
 from __future__ import annotations
@@ -43,10 +30,8 @@ if TYPE_CHECKING:
 
     from .dataset import DatasetSession
 
-# The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY: a module-level
-# ``assemble(source_session_path, output_path, dataset_name) -> None`` function that writes one session's
-# ``data.feather`` and its data-format descriptor. The PEP 695 alias is evaluated lazily, so its annotation-only
-# operands need not exist at runtime.
+# The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY. The PEP 695 alias
+# is evaluated lazily, so its annotation-only operands need not exist at runtime.
 type ForgingAssemblyWorker = Callable[[Path, Path, str], None]
 
 FORGING_JOB_NAME: str = "session_data_assembly"
@@ -280,10 +265,8 @@ def _execute_jobs_parallel(
     """Runs all assembly jobs concurrently across a shared ProcessPoolExecutor.
 
     Notes:
-        The parent calls ``tracker.start_job`` immediately before submitting each future, so tracker state advances
-        in lockstep with dispatch. Results are collected via ``as_completed`` and recorded individually. In-flight
-        futures are allowed to finish on failure so the tracker stays accurate for every dispatched job; the first
-        captured exception is re-raised after all futures resolve.
+        Every dispatched job is tracked individually, and in-flight futures are allowed to finish on failure so the
+        tracker stays accurate for all of them; the first captured exception is re-raised after all futures resolve.
 
     Args:
         sessions: The ordered list of session names to assemble.
@@ -385,15 +368,10 @@ def _forge_session(
     """Forges and assembles a single session: runs the system worker, then re-exports the shared assets.
 
     Notes:
-        This is the atomic unit of work dispatched to worker processes by the parallel path, so it must remain
-        importable at module level and accept only picklable arguments (the registered ``worker`` is a module-level
-        function, hence picklable). The shared, system-agnostic assets (the VR configuration and the session
-        descriptor) are validated up front so a session missing a required asset fails fast, before the expensive
-        assembly runs and before any partial output is written. Stage 3 then runs the system-specific assembly
-        worker, which writes ``data.feather`` and its data-format descriptor. Stage 4 re-exports the shared assets
-        alongside the assembled feather so the forged session is self-contained (carrying its task definition -- cues,
-        VR environment, per-trial geometry -- and its experimenter context) without reaching back into the raw
-        session.
+        The atomic unit dispatched to worker processes by the parallel path, so it must stay importable at module
+        level and accept only picklable arguments. The shared system-agnostic assets (VR configuration, session
+        descriptor) are validated before any expensive work so a session missing a required asset fails fast, and are
+        re-exported alongside the assembled feather so the forged session is self-contained.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.

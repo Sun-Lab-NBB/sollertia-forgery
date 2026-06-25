@@ -34,8 +34,9 @@ class DatasetFiles(StrEnum):
         symbolically from path-resolution properties on DatasetSession and DatasetAnimal. Only the universal output
         contract lives here: every system's forged session writes a ``data.feather``. System-specific per-session
         artifacts (for example a data-format/schema descriptor) are named by the donating acquisition-system package,
-        not here, while shared raw-data assets re-exported alongside the data (the VR configuration, the session
-        descriptor) keep their canonical ``RawDataFiles`` names.
+        not here, while shared raw-data assets re-exported alongside the data keep their canonical ``RawDataFiles``
+        names: the VR configuration and session descriptor at session granularity, and the per-animal surgery
+        metadata at animal granularity.
     """
 
     DATA = "data.feather"
@@ -130,7 +131,8 @@ class DatasetData(YamlConfig):
     sessions: tuple[DatasetSession, ...] = field(default_factory=tuple)
     """The DatasetSession instances that identify and locate each session included in the dataset."""
     dataset_data_path: Path = Path()
-    """The path to the dataset.yaml file cached to disk."""
+    """The resolved path to this dataset's ``dataset.yaml`` file. Re-derived from the YAML's on-disk location on
+    load so the dataset remains portable across machines."""
 
     def __post_init__(self) -> None:
         """Ensures that all fields used to define the dataset are properly initialized."""

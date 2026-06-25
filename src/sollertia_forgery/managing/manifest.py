@@ -33,10 +33,9 @@ MANIFEST_JOB_NAME: str = "manifest_generation"
 def generate_project_manifest(project_directory: Path) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
-    Notes:
-        Initializes a processing tracker in the project's root directory alongside the manifest .feather output,
-        runs the manifest generation, and records the outcome. Acquires a file lock on the manifest .feather file
-        to ensure only one process writes at a time.
+    The manifest captures one row per session with its acquisition metadata and per-pipeline processing status. A
+    file lock serializes concurrent writers, and the outcome is recorded on a manifest processing tracker in the
+    project root.
 
     Args:
         project_directory: The path to the processed project's root directory.
@@ -44,6 +43,7 @@ def generate_project_manifest(project_directory: Path) -> None:
     Raises:
         FileNotFoundError: If the project directory does not exist or contains no session data.
         ValueError: If an unsupported session type is encountered.
+        Timeout: If the manifest .feather file lock cannot be acquired within 20 seconds.
     """
     if not project_directory.exists():
         message = (
@@ -162,9 +162,9 @@ def generate_project_manifest(project_directory: Path) -> None:
                 ).astimezone()
                 manifest["date"].append(date_time)
 
-                # Loads the session descriptor to extract experimenter notes and completeness status. Window
-                # Checking sessions acquired before sollertia-experiment 3.0.0 lack descriptors, so a missing
-                # file is handled gracefully for that session type only.
+                # Loads the session descriptor to extract experimenter notes and completeness status. Some legacy
+                # Window Checking sessions lack descriptors, so a missing file is handled gracefully for that session
+                # type only.
                 descriptor_path = session_data.raw_data.session_descriptor_path
                 descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
                 if descriptor_class is None:

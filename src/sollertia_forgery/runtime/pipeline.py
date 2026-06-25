@@ -20,19 +20,12 @@ from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Callable
 
     from numpy.typing import NDArray
 
-# The registered runtime parser resolved from the central RUNTIME_PARSER_REGISTRY: a plain module-level
-# ``parse(decoded_messages, output_directory, session) -> None`` function. The PEP 695 alias is evaluated lazily, so
-# its annotation-only operands (Callable, Path) need not exist at runtime.
-type RuntimeParser = Callable[[pl.DataFrame, Path, SessionData], None]
-
 RUNTIME_JOB_NAME: str = "runtime_processing"
-"""The job name identifying the runtime processing job in the behavior processing tracker. The string matches the
-runtime job name used by the legacy combined behavior pipeline, so the job identifier this pipeline derives aligns
-with the binding that records its state."""
+"""The job name identifying the runtime processing job in the shared behavior processing tracker
+(``ProcessingTrackers.BEHAVIOR``), where this pipeline records the runtime job's state."""
 
 
 def run_runtime_processing_pipeline(
@@ -46,23 +39,20 @@ def run_runtime_processing_pipeline(
 
     Notes:
         This is a single-stage pipeline. It locates the runtime DataLogger archive (``{source_id}_log.npz``) in the
-        session's raw behavior data directory, decodes it into a raw ``(time_us, payload)`` message table, and hands
-        that table to the registered runtime parser, which interprets the system-specific payloads and writes the
-        domain-specific feathers (system state, runtime state, trial structure, and so on) into the session's
-        ``behavior_data`` directory. The runtime source id and the parser are both resolved from the central
-        ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, so the pipeline itself stays system-agnostic
-        and never names a system-specific type.
+        session's raw behavior-data directory, decodes it into a raw ``(time_us, payload)`` message table, and hands
+        that table to the registered runtime parser, which writes the system's behavior feathers into the session's
+        processed behavior-data directory (``processed_data.behavior_data_path``). The runtime source id and parser
+        are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
+        system-agnostic.
 
-        The decoding is the only stage that benefits from parallelism: large archives are decoded across a worker pool
-        (each worker reads a batch of messages with the onset timestamp pre-discovered), while small archives, which
-        are the norm for runtime data, are read in a single in-process pass. The parse runs in-process because the
-        decoded table is small and the parser owns its own compiled (Numba) work. The whole pipeline is therefore a
-        single tracked job rather than separable decode and parse jobs, and the parsed output co-locates with its
-        ``behavior_data`` tracker.
+        The decode is the only stage that benefits from parallelism: when the reader splits the archive into more
+        than one batch and more than one worker is available, the batches are decoded across a worker pool; otherwise
+        the archive is read in a single in-process pass. The parse always runs in-process, so the whole pipeline is
+        one tracked job recorded against the shared ``behavior`` tracker.
 
-        In local mode (job_id is None) the runtime job runs unconditionally. In remote mode (job_id is provided), the
-        identifier must match the single runtime job, which then runs in-process; this lets an external scheduler
-        address the runtime job by its identifier exactly like the other processing pipelines.
+        In local mode (job_id is None) the runtime job runs unconditionally; in remote mode the provided job_id must
+        match this session's single runtime job. The registered parser may additionally raise system-specific errors
+        (for example ``ValueError`` or ``RuntimeError``) that propagate unchanged.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -155,11 +145,11 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
 
     Notes:
         This is the system-agnostic decode stage. It reads the DataLogger archive via ``LogArchiveReader``, which
-        resolves the onset timestamp and yields each message's absolute timestamp and raw payload bytes. The decode
-        is parallelized across a worker pool when the archive is large enough that the reader splits it into more than
-        one batch (each worker reuses the pre-discovered onset timestamp); otherwise the archive is read in a single
-        in-process bulk pass. The returned table carries the timestamps unchanged and the payloads as opaque bytes,
-        leaving every system-specific interpretation to the registered parser.
+        resolves the onset timestamp and yields each message's absolute timestamp and raw payload bytes. When the
+        reader splits the archive into more than one batch and more than one worker is available, the batches are
+        decoded across a worker pool (each worker reuses the pre-discovered onset timestamp); otherwise the archive
+        is read in a single in-process bulk pass. The returned table carries the timestamps unchanged and the
+        payloads as opaque bytes, leaving every system-specific interpretation to the registered parser.
 
     Args:
         archive_path: The path to the runtime ``{source_id}_log.npz`` archive.

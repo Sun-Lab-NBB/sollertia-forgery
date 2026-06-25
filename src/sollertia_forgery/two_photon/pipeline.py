@@ -16,15 +16,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _MATERIALIZED_CONFIGURATION_FILENAME: str = "configuration.yaml"
-"""The filename of the session-resident cindra processing configuration that the pipeline materializes from the
-caller-supplied configuration template with the session's data and output paths injected. cindra reads this file
-(and re-persists it) during processing; it is written into the session's canonical processed cindra directory
-alongside the cindra outputs, matching the location cindra itself uses for the shared configuration."""
+"""The filename cindra expects for the shared single-recording configuration. The pipeline materializes the
+caller's template under this name in the session's cindra directory (``session.processed_data.cindra_data_path``)."""
 
 _SAVED_ACQUISITION_PARAMETERS_FILENAME: str = "acquisition_parameters.yaml"
-"""The filename of the acquisition parameters cindra persists into its output directory after the first run. Its
-presence lets re-runs recover the recording's acquisition metadata without the raw imaging data, so the pipeline
-treats it as an alternative to the raw-side ``cindra_parameters.json`` when confirming the recording is processable."""
+"""The filename cindra persists acquisition parameters under in its output directory after the first run. The
+pipeline accepts its presence as an alternative to the raw-side ``cindra_parameters.json`` when validating that the
+recording is processable."""
 
 
 def run_two_photon_processing_pipeline(
@@ -41,42 +39,31 @@ def run_two_photon_processing_pipeline(
 ) -> None:
     """Materializes a session-bound cindra configuration and runs the single-recording two-photon processing pipeline.
 
+    Resolves the session's raw imaging directory (cindra input) and processed-data root (cindra output) from the
+    session hierarchy, overrides the supplied configuration template's data path, output path, worker count, and
+    progress flag with these session-resolved values, writes the result as the session's cindra ``configuration.yaml``,
+    and delegates the binarization, per-plane processing, and combination stages to cindra. When none of ``binarize``,
+    ``process``, or ``combine`` is requested, all three stages run in sequence.
+
     Notes:
-        This is the end-to-end, single-recording calcium-imaging pipeline. It resolves the recording's raw two-photon
-        imaging directory (the cindra input) and the session's processed-data root (the cindra output) from the
-        shared session hierarchy, so neither location is passed as an argument. It then loads the supplied processing
-        configuration template, overrides its input and output paths with the session-resolved locations and its
-        runtime worker count, and writes the result as the session's cindra ``configuration.yaml``. The cindra
-        single-recording binding consumes that materialized configuration and owns the heavy work: it reads the
-        recording's acquisition parameters, decomposes the run into the binarization, per-plane processing, and
-        combination stages, and records every stage on its own processing tracker at the cindra output root.
-        All outputs land in the session's canonical processed cindra directory
-        (``session.processed_data.cindra_data_path``).
-
-        The configuration is always supplied by the caller and is never defaulted: it carries the data-specific
-        processing parameters (registration, ROI detection, signal extraction, and so on), while the session supplies
-        only the data and output locations. The recording-specific acquisition metadata is read by cindra from the
-        cindra acquisition parameters file (``cindra_parameters.json``) that every system producing two-photon data
-        writes alongside the raw imaging data at acquisition time.
-
-        When none of ``binarize``, ``process``, or ``combine`` is requested, all three stages run in sequence, so a
-        single local invocation performs the full pipeline. Passing individual stage flags runs only the requested
-        stages, which (together with ``target_plane`` and ``job_id``) lets an external scheduler run each stage, and
-        each imaging plane, as an independent job.
+        The raw-imaging input is read from the session's system-specific raw-data record and currently resolves only
+        for Mesoscope-VR sessions. cindra owns the heavy work and records the run on a single per-recording tracker
+        (``single_recording_tracker.yaml``) inside its output subdirectory
+        (``session.processed_data.cindra_data_path``); the stage flags map directly onto its stages. Additional
+        ``FileNotFoundError``/``ValueError`` conditions may propagate from the underlying cindra pipeline.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
-        configuration_path: The path to the cindra single-recording configuration file describing the per-recording
-            processing parameters. The pipeline overrides the file's data path, output path, worker count, and
-            progress flag before processing; every other parameter is used as supplied.
-        job_id: The unique hexadecimal identifier for the processing job to execute. If provided, only the matching
-            cindra job is executed (remote mode); otherwise every requested stage is executed (local mode).
+        configuration_path: The path to the cindra single-recording configuration template. Its data path, output
+            path, worker count, and progress flag are overridden; every other parameter is used as supplied.
+        job_id: The unique hexadecimal identifier for the cindra job to execute. If provided, only the matching job
+            runs (remote mode); otherwise every requested stage runs (local mode).
         binarize: Determines whether to run the binarization stage.
         process: Determines whether to run the per-plane motion-correction, ROI-detection, and trace-extraction stage.
         combine: Determines whether to run the multi-plane combination stage.
         target_plane: The imaging plane to process when running the processing stage. Set to -1 to process all planes.
-        workers: The number of worker processes the cindra pipeline may use. Set to -1 to use all available CPU cores
-            (minus reserved cores).
+        workers: The number of numba worker threads cindra may use. Set to -1 to use all available CPU cores (minus
+            reserved cores).
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:

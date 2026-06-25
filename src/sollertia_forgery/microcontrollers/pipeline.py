@@ -46,9 +46,8 @@ if TYPE_CHECKING:
 type ModuleParser = Callable[[dict[int, pl.DataFrame], Path, SessionData], None]
 
 PARSE_JOB_NAME: str = "module_parsing"
-"""The job name identifying per-module parsing jobs in the microcontroller processing tracker. Stage 1 extraction
-jobs reuse the acquisition library's own extraction job name so their tracker identifiers match the binding that
-records their state."""
+"""The job name identifying per-module parsing (Stage 2) jobs in the microcontroller processing tracker. Stage 1
+extraction jobs use the acquisition library's own ``EXTRACTION_JOB_NAME`` instead."""
 
 
 def run_microcontroller_processing_pipeline(
@@ -62,21 +61,15 @@ def run_microcontroller_processing_pipeline(
 
     Notes:
         This is a two-stage pipeline. Stage 1 (extraction) reads each ``{controller_id}_log.npz`` archive via the
-        ataraxis-communication-interface binding and writes raw per-module feather files into the session's
-        ``processed_data/microcontroller_data`` directory. Stage 2 (parsing) reads each raw module feather,
-        partitions it by event code, and runs the registered parser to write the domain-specific feather into the
-        session's ``behavior_data`` directory. The parsers are looked up from the central
-        ``MICROCONTROLLER_PARSER_REGISTRY`` by the session's acquisition system, so the pipeline itself stays
-        system-agnostic and never names a system-specific type.
+        ataraxis-communication-interface binding and writes raw per-module feathers into the session's
+        ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
+        parser registered for the session's acquisition system (in ``MICROCONTROLLER_PARSER_REGISTRY``), writing the
+        domain-specific feather into ``behavior_data``; the pipeline stays system-agnostic.
 
-        In local mode (job_id is None), Stage 1 runs for every configured controller whose archive is present
-        (sequentially, with message decoding parallelized within each archive). Then, Stage 2 parses all eligible
-        modules (distributed across a worker pool when more than one worker is available). In remote mode (job_id
-        is provided), only the single matching job runs in-process: an extraction job for one controller, or a
-        parse job for one module (whose raw feather must already exist from a prior extraction run).
-
-        The processing tracker is co-located with the parsed output in the session's ``behavior_data`` directory,
-        while the raw per-module feathers remain in ``microcontroller_data``.
+        In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
+        (across a worker pool when more than one worker is available). In remote mode (job_id is provided) only the
+        single matching job runs in-process. The processing tracker is co-located with the parsed output in
+        ``behavior_data``.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -245,9 +238,10 @@ def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | 
     """Locates the raw log archive for a controller, if it is present under the log directory.
 
     Notes:
-        Searches recursively for the ``{controller_id}_log.npz`` archive, mirroring how the
-        ataraxis-communication-interface log reader resolves archives. Returns None when no archive is present so
-        the pipeline can skip controllers whose logs were not staged, rather than failing the whole session.
+        Searches recursively for the ``{controller_id}_log.npz`` archive (the same recursive glob the
+        ataraxis-communication-interface log reader uses). Unlike that reader, it returns None when no archive is
+        present so an unstaged controller is skipped rather than failing the session, and it takes the first match
+        when several exist.
 
     Args:
         log_directory: The session's raw behavior data directory holding the controller log archives.
@@ -281,7 +275,8 @@ def _extract_controller(
         Delegates to the acquisition library's ``execute_job`` binding, which reads the archive once, filters
         messages by the configured per-module event codes, writes a ``controller_{id}_module_{type}_{id}.feather``
         file per module that produced data, and manages this job's state on the passed-in tracker (start, complete,
-        or fail). The output directory is created if it does not exist.
+        or fail). When kernel extraction is configured it may also write a ``controller_{id}_kernel.feather``, which
+        this pipeline does not consume. The output directory is created if it does not exist.
 
     Args:
         archive_path: The path to the controller's ``{controller_id}_log.npz`` archive.

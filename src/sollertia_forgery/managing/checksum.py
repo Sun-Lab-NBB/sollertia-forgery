@@ -36,25 +36,19 @@ def resolve_checksum(
     workers: int = -1,
     display_progress: bool = False,
 ) -> None:
-    """Generates the checksum of the session's raw_data directory and either compares it against the checksum stored
-    in the ax_checksum.txt file or overwrites the stored checksum.
+    """Verifies the integrity of the session's raw_data directory by comparing its computed checksum against the
+    value stored in ax_checksum.txt, or regenerates that stored value.
 
-    Notes:
-        Initializes a processing tracker in the session's raw_data directory alongside the ax_checksum.txt file,
-        runs the checksum computation, and records the outcome. If the checksums match, the job is marked as
-        completed. If the checksums do not match (data corruption), the job is marked as failed. The tracker file
-        and its lock file are excluded from the checksum calculation to prevent the tracker presence from altering
-        the checksum value.
+    Records the outcome on a checksum processing tracker in the raw_data directory: completed on a match, failed on a
+    mismatch (indicating corruption).
 
     Args:
         session_path: The path to the root data directory of the session to be processed.
-        regenerate_checksum: Determines whether to update the checksum stored in the ax_checksum.txt file instead of
-            verifying its integrity.
-        workers: The number of processes to use for parallel checksum calculation. Setting this to a value less than
-            1 uses all available CPU cores (minus reserved cores). Setting this to 1 limits the calculation to a
-            single worker process (no parallelism).
-        display_progress: Determines whether to display console messages and a progress bar during checksum
-            calculation.
+        regenerate_checksum: When True, overwrites the stored ax_checksum.txt value with the freshly computed
+            checksum instead of verifying against it.
+        workers: The number of parallel worker processes. Values below 1 request all available cores minus reserved
+            cores; 1 disables parallelism.
+        display_progress: When True, emits console messages and a progress bar during calculation.
 
     Raises:
         FileNotFoundError: If the source path does not contain a valid session data hierarchy.
@@ -78,8 +72,8 @@ def resolve_checksum(
             )
 
         # Resolves the process count and calculates the checksum for the raw_data directory. If the
-        # 'save_checksum' flag is True, this guarantees that the check below succeeds as the function replaces
-        # the checksum in the ax_checksum.txt file with the newly calculated value.
+        # 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check below
+        # succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated value.
         resolved_workers = resolve_worker_count(requested_workers=workers)
         calculated_checksum = calculate_directory_checksum(
             directory=session_data.raw_data_path,

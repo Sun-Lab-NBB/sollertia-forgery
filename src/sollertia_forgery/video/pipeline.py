@@ -49,18 +49,12 @@ def run_video_processing_pipeline(
     """Discovers, validates, and executes the two-stage camera-timestamp processing pipeline for the target session.
 
     Notes:
-        The pipeline has two stages tracked by the session's camera processing tracker. Stage 1 (``parse``) creates
-        one job per camera whose raw ``{source_id}_log.npz`` archive is discovered on disk (the intersection of the
-        cameras registered in the session's camera manifest and the discovered archives); the full manifest
-        registration set defines only the job universe used for tracker alignment. Each job extracts the frame
-        acquisition timestamps from that camera's archive and writes a ``camera_{source_id}_timestamps.feather`` into
-        the camera timestamps directory that ataraxis-video-system owns. Stage 2 (``rename``) is a single job that
-        hardlinks every parsed feather under its canonical manifest
-        name (for example, ``face_camera_timestamps.feather``) into the behavior data directory, the aggregate of the
-        session's processed data that the downstream forging pipeline reads. When neither stage flag is requested,
-        both stages run in sequence, so a single local invocation performs the full pipeline. In remote mode (job_id
-        is provided), only the job matching the identifier is executed, which lets an external scheduler run each
-        parse job and the rename job independently.
+        Stage 1 (``parse``) runs one job per camera whose ``{source_id}_log.npz`` archive is discovered on disk,
+        extracting frame timestamps into the camera timestamps directory. Stage 2 (``rename``) is a single job that
+        publishes every parsed feather under its canonical manifest name into the behavior data directory. With no
+        stage flag set, both stages run in sequence (full local pipeline); in remote mode (``job_id`` provided) only
+        the matching job runs, so a scheduler can drive each parse job and the rename job independently. The full
+        manifest registration set defines the tracker-alignment universe.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -111,7 +105,8 @@ def run_video_processing_pipeline(
 
     # Stage 1 writes into the camera timestamps directory that ataraxis-video-system owns; stage 2 hardlinks the
     # parsed feathers under their canonical names into the behavior data directory. The processing tracker lives in
-    # the behavior data directory alongside the published data rather than next to the intermediate parsed feathers.
+    # the behavior data directory alongside the published data rather than next to the intermediate parsed feathers;
+    # this intentionally departs from SessionData.camera_tracker_path, which resolves under camera_timestamps_path.
     timestamps_directory = session.processed_data.camera_timestamps_path
     behavior_directory = session.processed_data.behavior_data_path
     timestamps_directory.mkdir(parents=True, exist_ok=True)

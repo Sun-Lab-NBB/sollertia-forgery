@@ -1,6 +1,7 @@
-"""Provides the system-agnostic dataset forging pipeline: the forged dataset data hierarchy, resolving and creating
-that hierarchy from processed sessions, running the optional cindra multi-day stage, dispatching the registered
-per-session assembly worker, and re-exporting the shared assets into the unified per-session dataset.
+"""Provides the system-agnostic dataset forging pipeline: the forged dataset data hierarchy, the ``resolve_dataset``
+entry point that resolves and creates that hierarchy from processed sessions, running the optional cindra multi-day
+stage, dispatching the registered per-session assembly worker, and re-exporting the shared assets into the unified
+per-session dataset.
 
 Notes:
     The forging batch/MCP adapters (prepare/verify/clean/overview, the per-session worker, and the concurrency

@@ -45,7 +45,8 @@ def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
 
     Args:
         feather_path: The path to the module feather file. The filename must follow the
-            ``controller_{controller_id}_module_{module_type}_{module_id}.feather`` naming convention.
+            ``controller_{controller_id}_module_{module_type}_{module_id}.feather`` naming convention, where the
+            leading field is the axci source id (the controller id for microcontroller archives).
 
     Returns:
         A tuple of three integers: (controller_id, module_type, module_id).
@@ -77,7 +78,7 @@ def partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
 
     Args:
         module_dataframe: The Polars DataFrame read from an axci module feather file with the standard 5-column
-            schema (timestamp_us, command, event, dtype, data).
+            schema (timestamp_us: UInt64, command: UInt8, event: UInt8, dtype: String, data: Binary).
 
     Returns:
         A dictionary mapping integer event codes to their corresponding sub-DataFrames.

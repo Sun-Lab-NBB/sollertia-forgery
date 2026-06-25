@@ -1,5 +1,6 @@
 """Provides the system-agnostic substrate shared across every acquisition system: the processing-tracker
-job-registry alignment helper, microcontroller feather primitives, and terminal utilities.
+job-registry alignment helper and tracked-job execution envelope, the DataLogger log-archive naming convention,
+the microcontroller feather discovery and parsing primitives, and terminal utilities.
 """
 
 from .tracking import tracked_job, prepare_tracker
