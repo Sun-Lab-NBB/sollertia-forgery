@@ -7,7 +7,7 @@ import sys
 
 from numba import config
 
-config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"
+config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"  # type: ignore[attr-defined]
 
 from ataraxis_base_utilities import console  # noqa: E402 - imported after numba config per ordering requirement.
 

@@ -1,12 +1,11 @@
-"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.shared_assets."""
+"""Contains tests for the DatasetData and DatasetSession dataclasses housed in sollertia_forgery.forging.dataset."""
 
 from pathlib import Path
 
 import pytest
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-from sollertia_forgery.shared_assets import DatasetData, DatasetSession
-
+from sollertia_forgery.forging.dataset import DatasetData, DatasetSession
 
 # Tests for DatasetSession dataclass
 
@@ -39,7 +38,7 @@ def test_dataset_session_is_frozen() -> None:
 
 
 def test_dataset_session_data_and_descriptor_paths() -> None:
-    """Verifies that data_path and descriptor_path resolve relative to session_path."""
+    """Verifies that data_path, descriptor_path, and vr_configuration_path resolve relative to session_path."""
     session_path = Path("/tmp/test_dataset/animal_a/2024-01-15-12-30-45-123456")
     dataset_session = DatasetSession(
         session="2024-01-15-12-30-45-123456",
@@ -49,6 +48,7 @@ def test_dataset_session_data_and_descriptor_paths() -> None:
 
     assert dataset_session.data_path == session_path / "data.feather"
     assert dataset_session.descriptor_path == session_path / "session_descriptor.yaml"
+    assert dataset_session.vr_configuration_path == session_path / "vr_configuration.yaml"
 
 
 # Tests for DatasetData dataclass
@@ -210,14 +210,10 @@ def test_dataset_data_animals_expose_per_animal_paths(tmp_path: Path) -> None:
 
     dataset_root = tmp_path / "test_dataset"
     surgery_paths = {animal.animal: animal.surgery_path for animal in dataset_data.animals}
-    bleaching_paths = {animal.animal: animal.bleaching_path for animal in dataset_data.animals}
-    bleaching_table_paths = {animal.animal: animal.bleaching_table_path for animal in dataset_data.animals}
 
     assert set(surgery_paths.keys()) == {"animal_a", "animal_b"}
     assert surgery_paths["animal_a"] == dataset_root / "animal_a" / "surgery_metadata.yaml"
     assert surgery_paths["animal_b"] == dataset_root / "animal_b" / "surgery_metadata.yaml"
-    assert bleaching_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.yaml"
-    assert bleaching_table_paths["animal_a"] == dataset_root / "animal_a" / "bleaching.feather"
 
 
 def test_dataset_data_animals_returns_unique_sorted_ids(tmp_path: Path) -> None:

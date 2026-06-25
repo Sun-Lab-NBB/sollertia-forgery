@@ -13,7 +13,6 @@ from concurrent.futures import Future, ProcessPoolExecutor
 import numpy as np
 import polars as pl
 from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
-from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import validate_directory
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
@@ -23,6 +22,26 @@ if TYPE_CHECKING:
 RESERVED_CORES: int = 2
 """The number of CPU cores reserved for system operations. Each package's ``execute_*_jobs_tool`` subtracts this
 value from the available core count when resolving the worker budget."""
+
+
+@dataclass(frozen=True, slots=True)
+class ConcurrencyDescriptor:
+    """Describes the per-pipeline concurrency policy consulted by the generic ``execute_jobs_tool``.
+
+    Notes:
+        ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes; the generic tool floors
+        the user-supplied parallel-job cap by ``worker_budget // cores_per_job``. ``default_max_parallel`` is the
+        fallback hard cap applied when the caller does not request an explicit parallel-job ceiling. This descriptor
+        is system-agnostic so both the system-specific batch adapters and the agnostic forging adapters can declare
+        their concurrency policy with one shared type.
+    """
+
+    cores_per_job: int
+    """The number of CPU cores a single worker subprocess of this pipeline consumes."""
+    default_max_parallel: int
+    """The default hard cap on concurrently executing jobs when the caller does not request one. A non-positive
+    value defers concurrency to the resolved worker budget alone."""
+
 
 _MINIMUM_ROWS_FOR_INTERVALS: int = 2
 """The minimum number of rows required in a feather file to compute inter-row timing intervals."""
@@ -56,6 +75,35 @@ class PendingJob:
         tracker path with the job ID.
         """
         return str(self.tracker_path), self.job_id
+
+
+@dataclass(slots=True)
+class GenericPendingJob(PendingJob):
+    """Describes a single batch processing job for the system-agnostic processing tools.
+
+    Notes:
+        Extends the shared ``PendingJob`` base with the small descriptor set shared by every registered
+        pipeline worker, so a single descriptor replaces the former per-pipeline ``PendingJob`` subclasses. The
+        picklable workers in the worker registry map these fields onto each pipeline's call convention (the
+        behavior worker uses ``unit_path``; the forging worker uses ``name`` and ``project_root``). Fields that
+        do not apply to a given pipeline are left at their defaults, and the processing tools assert the
+        required fields per pipeline before dispatch.
+    """
+
+    name: str = ""
+    """The human-readable unit name (the session name for behavior jobs or the dataset name for forging jobs)
+    used for logging and status reporting."""
+    unit_path: Path = field(default_factory=Path)
+    """The path to the processing unit this job operates on (the session root for behavior jobs)."""
+    job_name: str = ""
+    """The pipeline job type name registered in the ``ProcessingTracker`` (paired with ``specifier`` to derive
+    the job ID)."""
+    specifier: str = ""
+    """The job-specific specifier that differentiates jobs of the same type within a unit (the system ID, the
+    controller-type-id triple, or the session name for forging assembly jobs)."""
+    project_root: Path | None = None
+    """The project root directory passed to the forging worker. Unused by pipelines that resolve their output
+    location from the unit path alone."""
 
 
 @dataclass(slots=True)
@@ -104,56 +152,6 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """Background execution manager thread reference."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
-
-
-def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]]) -> None:
-    """Aligns a processing tracker's job registry with the expected set of ``(job_name, specifier)`` tuples.
-
-    Notes:
-        Applies a regeneration strategy that detects foreign or stale tracker entries and consistently resets them
-        instead of silently persisting across invocations. Foreign entries are treated as architectural drift (the
-        expected job set has changed since the tracker was last written) and surfaced through a warning before the
-        tracker is rebuilt.
-
-        If the tracker file does not yet exist on disk, the helper initializes it from scratch with the current
-        jobs. If the file exists and contains job IDs that are not part of the expected set, those entries are
-        classified as foreign and the helper emits a warning before resetting and reinitializing the tracker.
-        If the file already contains a strict subset of the expected IDs, the helper performs an additive
-        ``initialize_jobs`` call that registers the missing entries without clobbering any existing state for
-        previously-tracked jobs. If the file already contains exactly the expected ID set, the helper is a no-op,
-        which keeps ``initialize_jobs`` from emitting duplicate-entry warnings for the fully-aligned case.
-
-    Args:
-        tracker: The ProcessingTracker instance bound to the target directory.
-        jobs: The list of ``(job_name, specifier)`` tuples representing the expected job set.
-    """
-    expected_ids = {
-        ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier) for job_name, specifier in jobs
-    }
-
-    if not tracker.file_path.exists():
-        tracker.initialize_jobs(jobs=jobs)
-        return
-
-    existing_ids = set(tracker.find_jobs(job_name="").keys())
-    foreign_ids = existing_ids - expected_ids
-    missing_ids = expected_ids - existing_ids
-
-    if foreign_ids:
-        console.echo(
-            message=(
-                f"The processing tracker at '{tracker.file_path}' contains {len(foreign_ids)} job entries "
-                f"that are not part of the current job set. Resetting and reinitializing the tracker to "
-                f"match the discovered jobs. Foreign job IDs: {sorted(foreign_ids)}."
-            ),
-            level=LogLevel.WARNING,
-        )
-        tracker.reset()
-        tracker.initialize_jobs(jobs=jobs)
-        return
-
-    if missing_ids:
-        tracker.initialize_jobs(jobs=jobs)
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:

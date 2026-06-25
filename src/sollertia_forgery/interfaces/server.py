@@ -4,12 +4,7 @@ import click
 from tabulate import tabulate
 from ataraxis_base_utilities import LogLevel, console
 
-from ..server import (
-    Server,
-    discover_project_data,
-    get_server_configuration,
-    create_server_configuration_file,
-)
+from ..server import Server, discover_project_data, get_server_configuration, create_server_configuration_file
 
 # Ensures that displayed CLICK help messages are formatted according to the lab standard.
 CONTEXT_SETTINGS = {"max_content_width": 120}
@@ -126,9 +121,7 @@ def server_cli() -> None:
     """Provides commands for interacting with the remote Sollertia compute server.
 
     This CLI group provides commands for managing non-standardized server interactions, including authoring the
-    server access configuration, discovering project sessions, and viewing SLURM job information. All data
-    workflow interactions available through sl-project and sl-execute command groups must be carried out through those
-    groups, rather than the commands exposed by this CLI.
+    server access configuration, discovering project sessions, and viewing SLURM job information.
     """
 
 
@@ -163,11 +156,22 @@ def server_cli() -> None:
     required=True,
     help="The absolute path, on the remote server, to the root directory that stores all Sollertia data.",
 )
+@click.option(
+    "-e",
+    "--environment",
+    type=str,
+    required=True,
+    help=(
+        "The name of the shared conda environment, on the remote server, in which sollertia-forgery and all of its "
+        "processing dependencies are installed."
+    ),
+)
 def configure_server(
     username: str,
     password: str,
     host: str,
     root: str,
+    environment: str,
 ) -> None:  # pragma: no cover
     """Creates the remote compute server configuration file in the Sollertia platform working directory."""
     create_server_configuration_file(
@@ -175,6 +179,7 @@ def configure_server(
         password=password,
         host=host,
         root=root,
+        environment=environment,
     )
 
 

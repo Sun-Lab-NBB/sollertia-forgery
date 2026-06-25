@@ -1,99 +1,49 @@
-"""Provides CLIs for executing data management, processing, and dataset formation pipelines exposed by the library."""
+"""Provides the generic ``slf process`` CLI group that runs a system-agnostic processing pipeline on a single
+session.
+
+Notes:
+    Each command invokes one system-agnostic worker package's local processing pipeline directly. The acquisition
+    system is inferred from the target session by each pipeline internally (resolving its donated parsers/workers from
+    the registries), so these commands carry no system selector. The heavy acquisition-library bindings are imported
+    lazily inside each command callback so resolving ``slf process --help`` stays inexpensive.
+"""
 
 from pathlib import Path
 
 import click
 
-from ..forging import run_forging_pipeline
-from ..managing import resolve_checksum, generate_project_manifest
-from ..processing import run_behavior_processing_pipeline
-
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
 
-
-@click.group("process", context_settings=CONTEXT_SETTINGS)
-def process_cli() -> None:
-    """Executes data management, processing, or forging pipelines on the local machine."""
-
-
-@process_cli.command("manifest")
-@click.option(
-    "-pp",
-    "--project-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The absolute path to the project's root data directory.",
-)
-def generate_manifest(project_path: Path) -> None:
-    """Generates the manifest .feather file that captures the snapshot of the target project's state."""
-    generate_project_manifest(project_directory=project_path)
-
-
-@process_cli.command("checksum")
-@click.option(
-    "-sp",
-    "--session-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The absolute path to the processed session's root data directory.",
-)
-@click.option(
-    "-rc",
-    "--regenerate-checksum",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to recalculate and overwrite the cached session's checksum value. When "
-        "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
-    ),
-)
-def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -> None:
-    """Resolves the data integrity checksum for the target session's 'raw_data' directory.
-
-    This command can be used to either verify the integrity of the session's data or to update the session's data
-    integrity checksum to include expected changes.
-    """
-    resolve_checksum(
-        session_path=session_path,
-        regenerate_checksum=regenerate_checksum,
-    )
-
-
-@process_cli.command("behavior")
-@click.option(
+_SESSION_PATH_OPTION = click.option(
     "-sp",
     "--session-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
     help="The absolute path to the session root directory to process.",
 )
-@click.option(
+_JOB_ID_OPTION = click.option(
     "-id",
     "--job-id",
     type=str,
     default=None,
     help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching "
-        "job (remote mode). If not provided, discovers and runs every available job for the session "
-        "(local mode)."
+        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching job "
+        "(remote mode). If not provided, discovers and runs every available job for the session (local mode)."
     ),
 )
-@click.option(
+_WORKERS_OPTION = click.option(
     "-w",
     "--workers",
     type=int,
     default=-1,
     show_default=True,
     help=(
-        "The number of worker processes to use for parallel processing. Set to -1 for automatic "
-        "resolution via 'resolve_worker_count'. Set to 1 for sequential execution without spawning "
-        "worker processes. Ignored when '--job-id' is provided (remote mode runs the single job "
-        "in-process)."
+        "The number of worker processes to use for parallel processing. Set to -1 for automatic resolution. Set to "
+        "1 for sequential execution. Ignored when '--job-id' is provided (remote mode runs the single job in-process)."
     ),
 )
-@click.option(
+_PROGRESS_OPTION = click.option(
     "-pr",
     "--progress",
     is_flag=True,
@@ -101,15 +51,23 @@ def resolve_session_checksum(session_path: Path, *, regenerate_checksum: bool) -
     default=False,
     help="Determines whether to display a progress bar during processing. Only meaningful in local mode.",
 )
-def run_behavior_pipeline_command(
-    session_path: Path,
-    job_id: str | None,
-    workers: int,
-    *,
-    progress: bool,
-) -> None:
-    """Runs the behavior processing pipeline on the target session."""
-    run_behavior_processing_pipeline(
+
+
+@click.group("process", context_settings=CONTEXT_SETTINGS)
+def process_cli() -> None:
+    """Runs the system-agnostic, in-process data extraction pipelines on a single session."""
+
+
+@process_cli.command("video")
+@_SESSION_PATH_OPTION
+@_JOB_ID_OPTION
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def video_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+    """Extracts the camera frame acquisition timestamps from the raw VideoSystem log archives."""
+    from ..video import run_video_processing_pipeline  # noqa: PLC0415
+
+    run_video_processing_pipeline(
         session_path=session_path,
         job_id=job_id,
         workers=workers,
@@ -117,97 +75,89 @@ def run_behavior_pipeline_command(
     )
 
 
-@process_cli.command("forge")
-@click.option(
-    "-dn",
-    "--dataset-name",
-    type=str,
-    required=True,
-    help="The unique name for the dataset to create or use.",
-)
-@click.option(
-    "-pp",
-    "--project-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The path to the project's root data directory that stores the animal and session data directories.",
-)
-@click.option(
-    "-s",
-    "--session",
-    type=str,
-    multiple=True,
-    help=(
-        "The session name to include in the dataset. Can be specified multiple times. When the dataset already "
-        "exists and sessions are provided, the set is verified against the existing definition. Omit to work "
-        "with an already-defined dataset without triggering verification."
-    ),
-)
-@click.option(
-    "-id",
-    "--job-id",
-    type=str,
-    default=None,
-    help=(
-        "The unique hexadecimal identifier for this processing job. If provided, runs only the matching "
-        "job (remote mode). If not provided, discovers and runs every available job for the dataset "
-        "(local mode)."
-    ),
-)
-@click.option(
-    "-w",
-    "--workers",
-    type=int,
-    default=-1,
-    show_default=True,
-    help=(
-        "The number of worker processes to use for parallel processing. Set to -1 for automatic "
-        "resolution via 'resolve_worker_count'. Set to 1 for sequential execution without spawning "
-        "worker processes. Ignored when '--job-id' is provided (remote mode runs the single job "
-        "in-process)."
-    ),
-)
-@click.option(
-    "-pr",
-    "--progress",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help="Determines whether to display a progress bar during processing. Only meaningful in local mode.",
-)
-@click.option(
-    "-f",
-    "--force-recreate",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to delete any existing dataset hierarchy before creating it fresh. Use this flag when "
-        "extending, shrinking, or modifying the session set of an existing dataset. Any prior assembled data and "
-        "the existing processing tracker are discarded."
-    ),
-)
-def run_forging_pipeline_command(
-    dataset_name: str,
-    project_path: Path,
-    session: tuple[str, ...],
-    job_id: str | None,
-    workers: int,
-    *,
-    progress: bool,
-    force_recreate: bool,
-) -> None:
-    """Runs the forging (dataset assembly) pipeline on the target dataset.
+@process_cli.command("microcontroller")
+@_SESSION_PATH_OPTION
+@_JOB_ID_OPTION
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def microcontroller_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+    """Extracts the microcontroller module log archives and parses them into domain-specific behavior feathers."""
+    from ..microcontrollers import run_microcontroller_processing_pipeline  # noqa: PLC0415
 
-    Defines the dataset hierarchy if it does not exist, then executes per-session data assembly jobs. When
-    called with an existing dataset and no session list, reuses the on-disk definition.
-    """
-    run_forging_pipeline(
-        name=dataset_name,
-        session_names=session,
-        project_root=project_path,
+    run_microcontroller_processing_pipeline(
+        session_path=session_path,
         job_id=job_id,
         workers=workers,
         display_progress=progress,
-        force_recreate=force_recreate,
+    )
+
+
+@process_cli.command("runtime")
+@_SESSION_PATH_OPTION
+@_JOB_ID_OPTION
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def runtime_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+    """Decodes the acquisition runtime log archive and parses it into the session's runtime behavior feathers."""
+    from ..runtime import run_runtime_processing_pipeline  # noqa: PLC0415
+
+    run_runtime_processing_pipeline(
+        session_path=session_path,
+        job_id=job_id,
+        workers=workers,
+        display_progress=progress,
+    )
+
+
+@process_cli.command("two-photon")
+@_SESSION_PATH_OPTION
+@click.option(
+    "-c",
+    "--configuration-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="The path to the cindra single-recording configuration file supplying the processing parameters.",
+)
+@_JOB_ID_OPTION
+@click.option("-b", "--binarize", is_flag=True, default=False, help="Run the binarization stage.")
+@click.option("-p", "--process", is_flag=True, default=False, help="Run the per-plane processing stage.")
+@click.option("-cb", "--combine", is_flag=True, default=False, help="Run the multi-plane combination stage.")
+@click.option(
+    "-tp",
+    "--target-plane",
+    type=int,
+    default=-1,
+    show_default=True,
+    help="The imaging plane to process when running the processing stage. Set to -1 to process all planes.",
+)
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def two_photon_command(
+    session_path: Path,
+    configuration_path: Path,
+    job_id: str | None,
+    target_plane: int,
+    workers: int,
+    *,
+    binarize: bool,
+    process: bool,
+    combine: bool,
+    progress: bool,
+) -> None:
+    """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
+
+    When none of ``--binarize``, ``--process``, or ``--combine`` is requested, all three stages run in sequence.
+    """
+    from ..two_photon import run_two_photon_processing_pipeline  # noqa: PLC0415
+
+    run_two_photon_processing_pipeline(
+        session_path=session_path,
+        configuration_path=configuration_path,
+        job_id=job_id,
+        binarize=binarize,
+        process=process,
+        combine=combine,
+        target_plane=target_plane,
+        workers=workers,
+        display_progress=progress,
     )

@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from typing import Literal
+from pathlib import Path
+import importlib
 
-from ..forging import mcp_tools as _forging_mcp_tools  # noqa: F401
-from ..managing import mcp_tools as _managing_mcp_tools  # noqa: F401
-from ..processing import mcp_tools as _processing_mcp_tools  # noqa: F401
 from .mcp_instance import mcp
-from ..shared_assets import mcp_tools as _shared_mcp_tools  # noqa: F401
+
+__all__ = ["run_mcp_server", "run_server"]
 
 
 def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None:
@@ -31,3 +31,17 @@ def run_mcp_server() -> None:
     Claude Desktop integration.
     """
     run_server(transport="stdio")
+
+
+def _register_tool_modules() -> None:
+    """Imports every ``*_tools`` module in this package so its ``@mcp.tool()`` decorators register on import.
+
+    Tool modules register their MCP tools purely as an import side effect. Discovering them by the ``_tools`` filename
+    suffix means each tool module registers automatically, so adding a new tool module requires no edit here.
+    """
+    package_name = __name__.rpartition(".")[0]
+    for module_path in sorted(Path(__file__).parent.glob("*_tools.py")):
+        importlib.import_module(f"{package_name}.{module_path.stem}")
+
+
+_register_tool_modules()

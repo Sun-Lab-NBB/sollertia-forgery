@@ -1,58 +1,27 @@
-"""Provides shared assets that support multiple library packages and modules."""
+"""Provides the system-agnostic substrate shared across acquisition systems (tracking, timing, and feather parsing)."""
 
-from .metadata import (
-    DatasetFiles,
-    StimulusMode,
-    TrialGeometry,
-    ProjectManifest,
-    BehaviorDataFiles,
-    TrialGeometryEntry,
-    ProcessingPipelines,
-)
-from .utilities import delay_timer, delay_terminal
-from .dataset_data import (
-    DatasetData,
-    DatasetAnimal,
-    DatasetColumn,
-    DatasetSession,
-)
-from .mcp_orchestration import (
-    RESERVED_CORES,
-    ActiveJob,
-    PendingJob,
-    JobExecutionState,
-    prepare_tracker,
-    read_tracker_status,
-    analyze_feather_file,
-    derive_tracker_status,
-    group_jobs_by_tracker,
-    job_execution_manager,
-    clean_output_subdirectory,
+from .tracking import tracked_job, prepare_tracker
+from .utilities import DELAY_TIMER, delay_terminal
+from .datalogger import LOG_ARCHIVE_SUFFIX
+from .microcontroller import (
+    get_event_data,
+    partition_events,
+    merge_event_streams,
+    find_module_feathers,
+    get_event_timestamps,
+    parse_module_feather_name,
 )
 
 __all__ = [
-    "RESERVED_CORES",
-    "ActiveJob",
-    "BehaviorDataFiles",
-    "DatasetAnimal",
-    "DatasetColumn",
-    "DatasetData",
-    "DatasetFiles",
-    "DatasetSession",
-    "JobExecutionState",
-    "PendingJob",
-    "ProcessingPipelines",
-    "ProjectManifest",
-    "StimulusMode",
-    "TrialGeometry",
-    "TrialGeometryEntry",
-    "analyze_feather_file",
-    "clean_output_subdirectory",
+    "DELAY_TIMER",
+    "LOG_ARCHIVE_SUFFIX",
     "delay_terminal",
-    "delay_timer",
-    "derive_tracker_status",
-    "group_jobs_by_tracker",
-    "job_execution_manager",
+    "find_module_feathers",
+    "get_event_data",
+    "get_event_timestamps",
+    "merge_event_streams",
+    "parse_module_feather_name",
+    "partition_events",
     "prepare_tracker",
-    "read_tracker_status",
+    "tracked_job",
 ]

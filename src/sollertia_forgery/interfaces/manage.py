@@ -1,19 +1,37 @@
-"""Provides CLIs for interacting with Sollertia project manifest files."""
+"""Provides the system-agnostic management CLI commands exposed by the ``slf`` root group: project manifest
+generation and inspection, and session raw-data integrity checksum verification.
+"""
 
 from pathlib import Path
 
 import click
 from ataraxis_base_utilities import console
 
-from ..managing import generate_project_manifest
-from ..shared_assets import ProjectManifest
+from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
 
 
-@click.group("project", context_settings=CONTEXT_SETTINGS)
-@click.pass_context
+@click.group("manifest", context_settings=CONTEXT_SETTINGS)
+def manifest_cli() -> None:
+    """Generates and inspects the project manifest .feather file that snapshots a project's state."""
+
+
+@manifest_cli.command("generate")
+@click.option(
+    "-pp",
+    "--project-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The absolute path to the project's root data directory.",
+)
+def generate_manifest(project_path: Path) -> None:
+    """Generates the manifest .feather file that captures the snapshot of the target project's state."""
+    generate_project_manifest(project_directory=project_path)
+
+
+@manifest_cli.command("print")
 @click.option(
     "-pp",
     "--project-path",
@@ -21,13 +39,6 @@ CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     required=True,
     help="The path to the project's root data directory.",
 )
-def project_cli(ctx: click.Context, project_path: Path) -> None:
-    """Provides commands for working with Sollertia projects stored on local machine."""
-    ctx.ensure_object(dict)
-    ctx.obj["project_path"] = project_path
-
-
-@project_cli.command("print")
 @click.option(
     "-a",
     "--animal",
@@ -71,9 +82,8 @@ def project_cli(ctx: click.Context, project_path: Path) -> None:
         "reflects the latest state of the project's data."
     ),
 )
-@click.pass_context
 def print_project_manifest_data(
-    ctx: click.Context,
+    project_path: Path,
     *,
     animal: int | None,
     notes: bool,
@@ -81,8 +91,6 @@ def print_project_manifest_data(
     regenerate: bool,
 ) -> None:
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
-    project_path: Path = ctx.obj["project_path"]
-
     if not summary and not notes:
         message = (
             "No data display options were selected when calling the command. Pass either the 'notes' (-n), "
@@ -112,3 +120,31 @@ def print_project_manifest_data(
     # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
+
+
+@click.command("checksum", context_settings=CONTEXT_SETTINGS)
+@click.option(
+    "-sp",
+    "--session-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The absolute path to the processed session's root data directory.",
+)
+@click.option(
+    "-rc",
+    "--regenerate-checksum",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to recalculate and overwrite the cached session's checksum value. When "
+        "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
+    ),
+)
+def checksum_command(session_path: Path, *, regenerate_checksum: bool) -> None:
+    """Resolves the data integrity checksum for the target session's 'raw_data' directory.
+
+    This command can be used to either verify the integrity of the session's data or to update the session's data
+    integrity checksum to include expected changes.
+    """
+    resolve_checksum(session_path=session_path, regenerate_checksum=regenerate_checksum)

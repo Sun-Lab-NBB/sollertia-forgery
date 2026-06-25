@@ -15,8 +15,9 @@ from dataclasses import field, dataclass
 from ataraxis_base_utilities import console, ensure_directory_exists
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .server import Server, JobStatus
-from ..shared_assets import ProcessingPipelines, delay_timer
+from ..server import Server, JobStatus
+from .pipelines import ProcessingPipelines
+from ..shared_assets import DELAY_TIMER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -24,8 +25,8 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
     # noinspection PyUnusedImports
-    from .job import Job
-    from ..shared_assets import ProjectManifest
+    from ..server import Job
+    from ..managing import ProjectManifest
 
 # Type alias for the jobs' dictionary to improve readability. Each stage maps to a tuple of (Job, remote log directory,
 # tracker job ID) triples. The tracker job ID is the identifier the remote worker uses to update the shared tracker, so
@@ -321,9 +322,9 @@ def check_session_eligibility(
         supported_sessions: The session types that support this type of processing.
         allow_reprocessing: Determines whether to reprocess the session if it has already been processed with this
             pipeline.
-        configuration_path: The path to the pipeline's configuration file on the remote server. Required for the
-            single-day cindra, video, and multi-day cindra pipelines. If provided, the function verifies the file
-            exists on the remote server.
+        configuration_path: The path to the pipeline's configuration file on the remote server. Required for pipelines
+            that consume a server-side configuration file. If provided, the function verifies the file exists on the
+            remote server.
 
     Returns:
         None if the session is eligible for processing. Otherwise, returns a string describing why the session
@@ -343,23 +344,9 @@ def check_session_eligibility(
     # requires a configuration file or prior processing steps.
     requires_configuration = False
     requires_integrity = True
-    requires_cindra = False
     if pipeline == ProcessingPipelines.CHECKSUM:
         processed = integrity
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
-    elif pipeline == ProcessingPipelines.BEHAVIOR:
-        processed = bool(session_data["behavior"][0])
-    elif pipeline == ProcessingPipelines.VIDEO:
-        processed = bool(session_data["video"][0])
-        requires_configuration = True
-    elif pipeline == ProcessingPipelines.CINDRA_SINGLE_RECORDING:
-        processed = bool(session_data["cindra"][0])
-        requires_configuration = True
-    elif pipeline == ProcessingPipelines.CINDRA_MULTI_RECORDING:
-        # Multiday processing requires cindra to be completed first; uses tracker-based reprocessing check
-        processed = False  # Determined by the tracker check below
-        requires_configuration = True
-        requires_cindra = True
     elif pipeline == ProcessingPipelines.FORGING:
         # Forging pipeline performs internal checks for available data and adjusts its runtime accordingly
         processed = False  # Determined by the tracker check below
@@ -387,13 +374,6 @@ def check_session_eligibility(
         return (
             "The session has not been processed with the integrity verification pipeline. "
             "Run the CHECKSUM pipeline first to verify the session's data integrity."
-        )
-
-    # For the multi-day cindra pipeline, the session must have been processed with the single-day cindra pipeline first.
-    if requires_cindra and not bool(session_data["cindra"][0]):
-        return (
-            "The session has not been processed with the single-day cindra pipeline. "
-            "Run the single-day cindra pipeline first to extract calcium fluorescence data."
         )
 
     # If the session has already been processed and reprocessing is not allowed, skips processing the session.
@@ -476,6 +456,6 @@ def execute_pipelines(
 
                 # Delays between pipeline resolution cycles to avoid overwhelming the communication line
                 if not batch_complete:
-                    delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+                    DELAY_TIMER.delay(delay=poll_delay, allow_sleep=True, block=False)
 
     return successful_count, failed_count

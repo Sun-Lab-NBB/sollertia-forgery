@@ -47,36 +47,43 @@ dependencies = [
     "ataraxis-data-structures>=6,<7",
     "sollertia-shared-assets>=9,<10",
 
+    # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
+    "ataraxis-video-system>=4,<5",
+    "ataraxis-communication-interface>=6,<7",
+    "cindra>=1,<2",
+
+    # Machine Vision (GenICam runtime for ataraxis-video-system; sourced from TestPyPI via [tool.uv.sources])
+    "genicam==1.6.0",
+
     # Data Processing
     "polars>=1,<2",
     "numpy>=2,<3",
-    "numba>=0.63,<1",
+    "numba>=0.64,<1",
 
     # Remote Execution
-    "paramiko>=4,<5",
+    "paramiko>=5,<6",
 
     # Model Context Protocol
     "mcp[cli]>=1,<2",
 
     # Utilities
     "filelock>=3,<4",
-    "natsort-rs>=0,<1",
+    "natsort>=8,<9",
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
-    "tbb4py>=2023,<2024; sys_platform != 'darwin'",
-    "intel-cmplr-lib-rt>=2026,<2027; sys_platform != 'darwin'",
+    "tbb4py>=2022,<2024; sys_platform != 'darwin'",
+    "intel-cmplr-lib-rt>=2025,<2027; sys_platform != 'darwin'",
 ]
 
 [project.urls]
 Homepage = "https://github.com/Sun-Lab-NBB/sollertia-forgery"
 Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 
-# CLI interfaces.
+# CLI interface. A single root command exposes the system-agnostic management commands, the agentic MCP server,
+# the remote project-workflow orchestration group, and the system-specific 'mesoscope' command group.
 [project.scripts]
-sl-project = "sollertia_forgery.interfaces.project:project_cli"
-sl-process = "sollertia_forgery.interfaces.process:process_cli"
-sl-mcp = "sollertia_forgery.interfaces.mcp_server:run_mcp_server"
+slf = "sollertia_forgery.interfaces.entry_points:slf_cli"
 
 # Development dependencies (PEP 735). Not published to PyPI.
 [dependency-groups]
@@ -92,6 +99,7 @@ dev = [
     # Types
     "types-filelock>=3,<4",
     "types-tabulate>=0,<1",
+    "types-paramiko>=5,<6",
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
@@ -181,19 +189,21 @@ exclude = [
 ]
 
 [[tool.mypy.overrides]]
-module = ["sollertia_forgery.server.*"]
+module = [
+    "sollertia_forgery.server.server",
+    "sollertia_forgery.server.job",
+    "sollertia_forgery.server.server_configuration",
+    "sollertia_forgery.interfaces.server_tools",
+    "sollertia_forgery.orchestration.pipeline",
+    "sollertia_forgery.orchestration.managing",
+]
 ignore_errors = true
-
-# Suppresses missing-stub warnings for third-party libraries that do not ship type information.
-[[tool.mypy.overrides]]
-module = ["numba", "numba.*"]
-ignore_missing_imports = true
 
 # Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
 # inside a live MCP server or CLI invocation.
 [tool.coverage.run]
 omit = [
-    "*/mcp_tools.py",
+    "*mcp_tools.py",
     "*/interfaces/*.py",
 ]
 
@@ -217,4 +227,48 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
     "pass",
+]
+
+# Import-linter contracts that enforce the registry-hub architecture: the acquisition-system subpackages
+# (mesoscope_vr and its future siblings) are reachable only through the registries hub, and neither the
+# infrastructure cross-system layers nor the interface layer ever import a system package directly. The
+# system-agnostic worker packages (microcontrollers, runtime, two_photon, forging) are intentionally outside these
+# contracts: each resolves its system-specific assets through the registries hub, so it reaches mesoscope_vr
+# only indirectly through that sanctioned path.
+[tool.importlinter]
+root_package = "sollertia_forgery"
+
+[[tool.importlinter.contracts]]
+name = "Acquisition-system packages are reached only through the registry hub"
+type = "forbidden"
+source_modules = [
+    "sollertia_forgery.shared_assets",
+    "sollertia_forgery.server",
+    "sollertia_forgery.managing",
+    "sollertia_forgery.orchestration",
+    "sollertia_forgery.interfaces",
+]
+forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
+
+[[tool.importlinter.contracts]]
+name = "System packages never import the registry hub or the interface layer"
+type = "forbidden"
+source_modules = ["sollertia_forgery.mesoscope_vr"]
+forbidden_modules = [
+    "sollertia_forgery.registries",
+    "sollertia_forgery.interfaces",
+]
+
+[[tool.importlinter.contracts]]
+name = "Infrastructure cross-system layers never import the registry hub or the interface layer"
+type = "forbidden"
+source_modules = [
+    "sollertia_forgery.shared_assets",
+    "sollertia_forgery.server",
+    "sollertia_forgery.managing",
+    "sollertia_forgery.orchestration",
+]
+forbidden_modules = [
+    "sollertia_forgery.registries",
+    "sollertia_forgery.interfaces",
 ]
