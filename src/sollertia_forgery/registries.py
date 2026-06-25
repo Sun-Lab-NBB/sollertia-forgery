@@ -16,24 +16,18 @@ from sollertia_shared_assets import AcquisitionSystems
 
 from .pipelines import ProcessingPipelines
 from .mesoscope_vr import (
-    FORGING_CONCURRENCY,
     BEHAVIOR_CONCURRENCY,
-    forge_dataset,
-    run_forging_job,
     run_behavior_job,
-    clean_forging_unit,
     clean_behavior_unit,
-    verify_forging_unit,
-    prepare_forging_unit,
     process_project_data,
-    run_forging_pipeline,
     verify_behavior_unit,
     prepare_behavior_unit,
-    iterate_forging_overview,
     iterate_behavior_overview,
+    assemble_mesoscope_session,
     run_behavior_processing_pipeline,
     run_multidataset_processing_pipeline,
 )
+from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .mesoscope_vr.microcontrollers import (
     parse_lick,
     parse_brake,
@@ -49,31 +43,32 @@ if TYPE_CHECKING:
     from typing import Any
     from collections.abc import Callable, Iterator
 
-    from .orchestration import GenericPendingJob
-    from .mesoscope_vr.batch import ConcurrencyDescriptor
+    from .orchestration import GenericPendingJob, ConcurrencyDescriptor
 
 __all__ = [
     "AGNOSTIC_PIPELINES",
     "CLEAN_REGISTRY",
     "CONCURRENCY_REGISTRY",
+    "FORGING_ASSEMBLY_REGISTRY",
     "LOCAL_PIPELINE_REGISTRY",
     "MCP_BATCH_PIPELINES",
     "MICROCONTROLLER_PARSER_REGISTRY",
     "OVERVIEW_REGISTRY",
     "PREPARE_REGISTRY",
-    "REMOTE_FORGING_ORCHESTRATOR_REGISTRY",
     "REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY",
+    "RUNTIME_PARSER_REGISTRY",
     "SYSTEM_PIPELINES",
     "VERIFY_REGISTRY",
     "WORKER_REGISTRY",
     "resolve_clean",
     "resolve_concurrency",
+    "resolve_forging_assembly_worker",
     "resolve_local_pipeline",
     "resolve_microcontroller_parsers",
     "resolve_overview",
     "resolve_prepare",
-    "resolve_remote_forging_orchestrator",
     "resolve_remote_processing_orchestrator",
+    "resolve_runtime_binding",
     "resolve_verify",
     "resolve_worker",
 ]
@@ -83,18 +78,20 @@ AGNOSTIC_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
     {
         ProcessingPipelines.MANIFEST,
         ProcessingPipelines.CHECKSUM,
+        ProcessingPipelines.FORGING,
     }
 )
 """The pipelines that are platform-wide rather than acquisition-system-specific. Their entry points live in the
-system-agnostic ``managing`` layer and are invoked directly by the interface, so they are not dispatched through the
-per-system registries."""
+system-agnostic processing layer (the ``managing`` layer for manifest and checksum, the ``forging`` package for
+forging) and are invoked directly by the interface, so they are not dispatched through the per-system local-pipeline
+registry. The forging pipeline still resolves a system-specific data-assembly worker, but it does so through its own
+``FORGING_ASSEMBLY_REGISTRY`` rather than the ``(system, pipeline)`` local-pipeline registry."""
 
 SYSTEM_PIPELINES: dict[AcquisitionSystems, frozenset[ProcessingPipelines]] = {
     AcquisitionSystems.MESOSCOPE_VR: frozenset(
         {
             ProcessingPipelines.BEHAVIOR,
             ProcessingPipelines.CINDRA_MULTI_RECORDING,
-            ProcessingPipelines.FORGING,
         }
     ),
 }
@@ -106,13 +103,13 @@ LOCAL_PIPELINE_REGISTRY: dict[AcquisitionSystems, dict[ProcessingPipelines, Call
     AcquisitionSystems.MESOSCOPE_VR: {
         ProcessingPipelines.BEHAVIOR: run_behavior_processing_pipeline,
         ProcessingPipelines.CINDRA_MULTI_RECORDING: run_multidataset_processing_pipeline,
-        ProcessingPipelines.FORGING: run_forging_pipeline,
     },
 }
 """Maps each acquisition system and system-specific pipeline to the in-process entry point that runs that pipeline on
-a single session or dataset. The generic ``slf process``/``slf forge`` commands and the remote SLURM jobs both
-dispatch through this registry after inferring the session's acquisition system. Each pipeline defines its own call
-convention shared across every system that implements it."""
+a single session or dataset. The generic ``slf process`` command and the remote SLURM jobs both dispatch through this
+registry after inferring the session's acquisition system. Each pipeline defines its own call convention shared across
+every system that implements it. The forging pipeline is agnostic and is invoked directly by the interface, so it is
+not registered here; it resolves its system-specific data-assembly worker through ``FORGING_ASSEMBLY_REGISTRY``."""
 
 REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
     AcquisitionSystems.MESOSCOPE_VR: process_project_data,
@@ -121,17 +118,9 @@ REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY: dict[AcquisitionSystems, Callable[..., 
 the compute server. The generic ``slf execute process`` command dispatches through this registry after inferring the
 project's acquisition system from the manifest."""
 
-REMOTE_FORGING_ORCHESTRATOR_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
-    AcquisitionSystems.MESOSCOPE_VR: forge_dataset,
-}
-"""Maps each acquisition system to the orchestrator that resolves and submits its remote dataset-forging pipelines to
-the compute server. The generic ``slf execute forge`` command dispatches through this registry after inferring the
-project's acquisition system from the manifest."""
-
 MCP_BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
     {
         ProcessingPipelines.BEHAVIOR,
-        ProcessingPipelines.FORGING,
     }
 )
 """The pipelines exposed by the system-agnostic batch MCP tools in ``interfaces/processing_tools.py``. Only the
@@ -145,43 +134,37 @@ loads the session or dataset internally where it needs system specifics."""
 
 PREPARE_REGISTRY: dict[ProcessingPipelines, Callable[..., dict[str, Any]]] = {
     ProcessingPipelines.BEHAVIOR: prepare_behavior_unit,
-    ProcessingPipelines.FORGING: prepare_forging_unit,
 }
 """Maps each batch pipeline to its discover-and-prepare adapter. The behavior adapter discovers jobs for a single
-session and initializes its tracker; the forging adapter resolves a dataset hierarchy and initializes its tracker."""
+session and initializes its tracker."""
 
 VERIFY_REGISTRY: dict[ProcessingPipelines, Callable[..., dict[str, Any]]] = {
     ProcessingPipelines.BEHAVIOR: verify_behavior_unit,
-    ProcessingPipelines.FORGING: verify_forging_unit,
 }
 """Maps each batch pipeline to its output-verification adapter. Each adapter owns the full verification result,
 including the ``verified`` boolean and the tracker block, which the generic tool merges into its response envelope."""
 
 CLEAN_REGISTRY: dict[ProcessingPipelines, tuple[Callable[..., dict[str, Any]], bool]] = {
     ProcessingPipelines.BEHAVIOR: (clean_behavior_unit, False),
-    ProcessingPipelines.FORGING: (clean_forging_unit, True),
 }
 """Maps each batch pipeline to its ``(clean_fn, guard_on_active)`` pair. ``guard_on_active`` is True for pipelines
-whose cleanup must refuse to run while an execution session is still writing to the targeted files (forging deletes
-the entire dataset tree, so it guards; behavior only removes a per-session subdirectory)."""
+whose cleanup must refuse to run while an execution session is still writing to the targeted files (behavior removes
+a per-session subdirectory, so it does not guard)."""
 
 OVERVIEW_REGISTRY: dict[ProcessingPipelines, Callable[[str], Iterator[dict[str, Any]]]] = {
     ProcessingPipelines.BEHAVIOR: iterate_behavior_overview,
-    ProcessingPipelines.FORGING: iterate_forging_overview,
 }
 """Maps each batch pipeline to its overview iterator: a callable accepting a root directory and yielding per-unit
-status descriptors (per-session for behavior, per-dataset for forging)."""
+status descriptors (per-session for behavior)."""
 
 CONCURRENCY_REGISTRY: dict[ProcessingPipelines, ConcurrencyDescriptor] = {
     ProcessingPipelines.BEHAVIOR: BEHAVIOR_CONCURRENCY,
-    ProcessingPipelines.FORGING: FORGING_CONCURRENCY,
 }
 """Maps each batch pipeline to its concurrency descriptor (``cores_per_job`` and ``default_max_parallel``) used by
 the generic ``execute_jobs_tool`` to floor the parallel-job cap by the resolved worker budget."""
 
 WORKER_REGISTRY: dict[ProcessingPipelines, Callable[[GenericPendingJob], None]] = {
     ProcessingPipelines.BEHAVIOR: run_behavior_job,
-    ProcessingPipelines.FORGING: run_forging_job,
 }
 """Maps each batch pipeline to its picklable module-level worker, which maps the generic ``GenericPendingJob`` fields
 onto the pipeline's call convention and runs the single job in the worker subprocess."""
@@ -203,6 +186,29 @@ from the processed session and dispatches the matching function for every extrac
 for a system exactly when it appears here. Per-session hardware eligibility (whether the module's conversion parameters
 were configured for the session) is handled inside each function, which skips silently when its hardware was not
 configured rather than being gated by a separate predicate."""
+
+FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
+    AcquisitionSystems.MESOSCOPE_VR: assemble_mesoscope_session,
+}
+"""The single, fully-visible registry of per-session forging data-assembly workers, keyed by acquisition system. Each
+value is a plain module-level ``assemble(source_session_path, output_path, dataset_name)`` function that an
+acquisition-system package implements to assemble one session's ``data.feather`` and its system-specific data-format
+descriptor. The agnostic forging pipeline infers the system from the resolved dataset and dispatches the matching
+worker for every session, so the pipeline itself stays system-agnostic and never names a system-specific type. This is
+the only forging asset a system donates: dataset definition, the optional cindra multi-day stage, all job/tracker
+orchestration, and the re-export of the shared assets (the VR configuration and the session descriptor) are owned by
+the agnostic ``forging`` package."""
+
+RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {
+    AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
+}
+"""The single, fully-visible registry of runtime log parsers, keyed by acquisition system. Each value pairs the
+system's runtime DataLogger source id (which locates the ``{source_id}_log.npz`` archive) with a plain module-level
+``parse(decoded_messages, output_directory, session)`` function that interprets the decoded runtime payloads into the
+system's behavior feathers. The agnostic runtime pipeline infers the system from the processed session, decodes the
+archive into a raw ``(time_us, payload)`` table, and dispatches the matching parser, so the pipeline itself stays
+system-agnostic and never names a system-specific type. Per-session eligibility (such as experiment-only data) is
+handled inside the parser, which resolves its own configuration from the session."""
 
 
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
@@ -272,19 +278,21 @@ def resolve_remote_processing_orchestrator(system: str | AcquisitionSystems) -> 
     return REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY[_resolve_system(system)]
 
 
-def resolve_remote_forging_orchestrator(system: str | AcquisitionSystems) -> Callable[..., None]:
-    """Resolves the remote dataset-forging orchestrator for the target acquisition system.
+def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
+    """Resolves the per-session forging data-assembly worker registered for the target acquisition system.
 
     Args:
-        system: The acquisition system that recorded the project's sessions.
+        system: The acquisition system that recorded the dataset being forged, as an AcquisitionSystems member or its
+            string value (for example, the value carried by ``DatasetData.acquisition_system``).
 
     Returns:
-        The registered orchestrator callable for the acquisition system.
+        The registered assembly worker callable for the acquisition system. The agnostic forging pipeline invokes it
+        once per session to write that session's ``data.feather`` and data-format descriptor.
 
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return REMOTE_FORGING_ORCHESTRATOR_REGISTRY[_resolve_system(system)]
+    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)]
 
 
 def _resolve_batch_pipeline(pipeline: ProcessingPipelines) -> ProcessingPipelines:
@@ -423,14 +431,34 @@ def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tu
     }
 
 
+def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, Callable[..., None]]:
+    """Resolves the runtime source id and parser registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        A ``(source_id, parser)`` tuple. The source id locates the system's runtime DataLogger archive, and the parser
+        interprets the decoded runtime messages into the system's behavior feathers. The agnostic runtime pipeline uses
+        the source id to find the archive and dispatches the parser once the archive is decoded.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return RUNTIME_PARSER_REGISTRY[_resolve_system(system)]
+
+
 def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system is fully wired into the dispatch registries.
 
     Confirms that every ``AcquisitionSystems`` member declares its pipelines in ``SYSTEM_PIPELINES`` and has an entry
-    in both remote-orchestrator registries; that every pipeline a system declares has a registered local entry point
-    (and no extra entries); and that ``SYSTEM_PIPELINES`` together with ``AGNOSTIC_PIPELINES`` covers exactly the
-    ``ProcessingPipelines`` enum. With a single acquisition system these checks are structural scaffolding that
-    enforces full wiring; they begin catching cross-system gaps once a second system is added.
+    in the remote-processing orchestrator registry, the forging-assembly registry, and the runtime-parser registry;
+    that every pipeline a system declares has a registered local entry point (and no extra entries); and that
+    ``SYSTEM_PIPELINES`` together with
+    ``AGNOSTIC_PIPELINES`` covers exactly the ``ProcessingPipelines`` enum. With a single acquisition system these
+    checks are structural scaffolding that enforces full wiring; they begin catching cross-system gaps once a second
+    system is added.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a registry, declares a pipeline without a local entry
@@ -443,7 +471,8 @@ def _assert_registry_coverage() -> None:
         ("SYSTEM_PIPELINES", SYSTEM_PIPELINES),
         ("LOCAL_PIPELINE_REGISTRY", LOCAL_PIPELINE_REGISTRY),
         ("REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY", REMOTE_PROCESSING_ORCHESTRATOR_REGISTRY),
-        ("REMOTE_FORGING_ORCHESTRATOR_REGISTRY", REMOTE_FORGING_ORCHESTRATOR_REGISTRY),
+        ("FORGING_ASSEMBLY_REGISTRY", FORGING_ASSEMBLY_REGISTRY),
+        ("RUNTIME_PARSER_REGISTRY", RUNTIME_PARSER_REGISTRY),
     ):
         missing = systems - frozenset(registry)
         if missing:

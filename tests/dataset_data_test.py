@@ -38,7 +38,7 @@ def test_dataset_session_is_frozen() -> None:
 
 
 def test_dataset_session_data_and_descriptor_paths() -> None:
-    """Verifies that data_path and descriptor_path resolve relative to session_path."""
+    """Verifies that data_path, descriptor_path, and vr_configuration_path resolve relative to session_path."""
     session_path = Path("/tmp/test_dataset/animal_a/2024-01-15-12-30-45-123456")
     dataset_session = DatasetSession(
         session="2024-01-15-12-30-45-123456",
@@ -48,6 +48,7 @@ def test_dataset_session_data_and_descriptor_paths() -> None:
 
     assert dataset_session.data_path == session_path / "data.feather"
     assert dataset_session.descriptor_path == session_path / "session_descriptor.yaml"
+    assert dataset_session.vr_configuration_path == session_path / "vr_configuration.yaml"
 
 
 # Tests for DatasetData dataclass

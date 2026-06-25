@@ -14,18 +14,20 @@ from ataraxis_data_structures import YamlConfig
 
 
 class DatasetFiles(StrEnum):
-    """Enumerates the canonical filenames written into a forged dataset hierarchy at session granularity.
+    """Enumerates the canonical, system-agnostic filenames written into a forged dataset hierarchy at session
+    granularity.
 
     Notes:
         Centralizes the forging-pipeline filenames so new artifacts can be added in one place and referenced
-        symbolically from path-resolution properties on DatasetSession and DatasetAnimal.
+        symbolically from path-resolution properties on DatasetSession and DatasetAnimal. Only the universal output
+        contract lives here: every system's forged session writes a ``data.feather``. System-specific per-session
+        artifacts (for example a data-format/schema descriptor) are named by the donating acquisition-system package,
+        not here, while shared raw-data assets re-exported alongside the data (the VR configuration, the session
+        descriptor) keep their canonical ``RawDataFiles`` names.
     """
 
     DATA = "data.feather"
     """The assembled per-session data feather written by the forging pipeline."""
-    TRIAL_GEOMETRY = "trial_geometry.yaml"
-    """The per-session trial geometry data file written by the forging pipeline. Carries the canonical track
-    lengths and trigger-zone boundaries."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +58,14 @@ class DatasetSession:
         return self.session_path.joinpath(RawDataFiles.SESSION_DESCRIPTOR)
 
     @property
-    def geometry_path(self) -> Path:
-        """Returns the path to the session's ``trial_geometry.yaml`` data file within the dataset hierarchy."""
-        return self.session_path.joinpath(DatasetFiles.TRIAL_GEOMETRY)
+    def vr_configuration_path(self) -> Path:
+        """Returns the path to the session's ``vr_configuration.yaml`` file within the dataset hierarchy.
+
+        The forging pipeline re-exports the session's shared VR configuration (the task template carrying the cue
+        sequence, VR environment, and per-trial geometry) alongside ``data.feather`` so downstream consumers can
+        reconstruct canonical per-trial position without reaching back into the raw session.
+        """
+        return self.session_path.joinpath(RawDataFiles.VR_CONFIGURATION)
 
 
 @dataclass(frozen=True, slots=True)

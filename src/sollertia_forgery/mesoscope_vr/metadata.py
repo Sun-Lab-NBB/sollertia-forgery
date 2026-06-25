@@ -1,22 +1,18 @@
-"""Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and DatasetColumn enumerations, the
-StimulusMode enumeration, and the per-session TrialGeometry data file written by the forging pipeline.
+"""Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and DatasetColumn enumerations and the
+per-session SessionDataFormat schema descriptor written by the forging pipeline.
 """
 
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
-from dataclasses import dataclass
+from dataclasses import field, dataclass
 
-from ataraxis_base_utilities import console
-from sollertia_shared_assets import (
-    MesoscopeGasPuffTrial as GasPuffTrial,
-    MesoscopeWaterRewardTrial as WaterRewardTrial,
-)
 from ataraxis_data_structures import YamlConfig
 
-if TYPE_CHECKING:
-    from sollertia_shared_assets import MesoscopeExperimentConfiguration
+DATA_FORMAT_FILE: str = "data_format.yaml"
+"""The canonical filename of the per-session data-format descriptor written alongside ``data.feather`` by the
+Mesoscope-VR forging assembly worker. The descriptor is system-specific: it is named and produced by the donating
+acquisition-system package, not by the agnostic forging pipeline."""
 
 
 class BehaviorDataFiles(StrEnum):
@@ -134,95 +130,17 @@ class DatasetColumn(StrEnum):
     """Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days."""
 
 
-class StimulusMode(StrEnum):
-    """Defines the semantic meaning of the stimulus delivered when a trial's stimulus trigger zone fires.
-
-    Notes:
-        Projects each upstream trial-class type onto the axis of "what does the animal experience when the trigger
-        fires." Decoupled from TriggerType, which describes the activation mechanism rather than the resulting
-        outcome.
-    """
-
-    REWARD = "reward"
-    """Indicates an appetitive stimulus (e.g., water delivery in a WaterRewardTrial) delivered when the trigger
-    condition is met."""
-    AVERSIVE = "aversive"
-    """Indicates an aversive stimulus (e.g., gas puff in a GasPuffTrial) delivered when the trigger condition fails."""
-
-
-# noinspection PyUnhashable
-_TRIAL_CLASS_TO_STIMULUS_MODE: dict[type[WaterRewardTrial | GasPuffTrial], StimulusMode] = {
-    WaterRewardTrial: StimulusMode.REWARD,
-    GasPuffTrial: StimulusMode.AVERSIVE,
-}
-"""Maps each upstream trial class to the stimulus mode it delivers. Update this mapping when a new trial subclass is
-added to MesoscopeExperimentConfiguration; missing entries are surfaced as ValueError at forging time."""
-
-
-@dataclass(frozen=True, slots=True)
-class TrialGeometryEntry:
-    """Defines the canonical geometry for a single trial type used in a forged session."""
-
-    stimulus_mode: StimulusMode
-    """The semantic meaning of the stimulus delivered when the trigger zone fires (reward or aversive)."""
-    trial_length_cm: float
-    """The canonical track length for this trial type, in centimeters."""
-    stimulus_trigger_zone_start_cm: float
-    """The trial-relative start of the stimulus trigger zone, in centimeters."""
-    stimulus_trigger_zone_end_cm: float
-    """The trial-relative end of the stimulus trigger zone, in centimeters."""
-    stimulus_location_cm: float
-    """The trial-relative location of the stimulus boundary, in centimeters."""
-    cue_offset_cm: float = 0.0
-    """The offset between the runtime's trial start and the canonical start of the first cue in the cue sequence,
-    in centimeters. When non-zero, the runtime begins recording mid-cue, so downstream trial boundaries must be
-    re-aligned to the first-cue transition before cue zones (and the trigger zone) read at canonical positions."""
-
-
 @dataclass
-class TrialGeometry(YamlConfig):
-    """Maps each trial type name to its canonical geometry, written as a data file alongside data.feather.
+class SessionDataFormat(YamlConfig):
+    """Describes the schema of a forged session's ``data.feather``, written alongside it as ``data_format.yaml``.
 
     Notes:
-        Projects the canonical slice of MesoscopeExperimentConfiguration.trial_structures so that downstream
-        consumers can reconstruct canonical per-trial position without re-reading the upstream experiment
-        configuration. This decouples the forged dataset schema from the upstream configuration schema, limiting
-        migration impact when MesoscopeExperimentConfiguration evolves.
+        This is the per-session, system-specific data-format descriptor the Mesoscope-VR forging assembly worker
+        donates to the dataset (the agnostic forging pipeline never names or interprets it). It records the ordered
+        column-name-to-dtype mapping of the assembled feather so downstream consumers can introspect the columns that
+        are present in a given session (which varies, for example, when optional guidance columns were not recorded)
+        without reading the feather itself. The ``DatasetColumn`` enumeration documents the meaning of each column.
     """
 
-    entries: dict[str, TrialGeometryEntry]
-    """The mapping from trial type name (the key used in MesoscopeExperimentConfiguration.trial_structures and the
-    'trial_type' column in data.feather) to that trial type's canonical geometry."""
-
-    @classmethod
-    def from_experiment_configuration(cls, experiment_configuration: MesoscopeExperimentConfiguration) -> TrialGeometry:
-        """Projects the canonical trial geometry out of the provided experiment configuration.
-
-        Args:
-            experiment_configuration: The MesoscopeExperimentConfiguration loaded from the session's raw data.
-
-        Returns:
-            A TrialGeometry instance with one entry per trial type defined in the experiment configuration.
-
-        Raises:
-            ValueError: If any trial structure has a class that is not registered in _TRIAL_CLASS_TO_STIMULUS_MODE.
-        """
-        entries: dict[str, TrialGeometryEntry] = {}
-        for trial_type_name, trial in experiment_configuration.trial_structures.items():
-            stimulus_mode = _TRIAL_CLASS_TO_STIMULUS_MODE.get(type(trial))
-            if stimulus_mode is None:
-                message = (
-                    f"Unable to project trial '{trial_type_name}' into the trial geometry data file. The trial class "
-                    f"'{type(trial).__name__}' has no entry in _TRIAL_CLASS_TO_STIMULUS_MODE. Add a mapping for any "
-                    f"new trial subclass added to MesoscopeExperimentConfiguration."
-                )
-                console.error(message=message, error=ValueError)
-            entries[trial_type_name] = TrialGeometryEntry(
-                stimulus_mode=stimulus_mode,
-                trial_length_cm=trial.trial_length_cm,
-                stimulus_trigger_zone_start_cm=trial.stimulus_trigger_zone_start_cm,
-                stimulus_trigger_zone_end_cm=trial.stimulus_trigger_zone_end_cm,
-                stimulus_location_cm=trial.stimulus_location_cm,
-                cue_offset_cm=experiment_configuration.cue_offset_cm,
-            )
-        return cls(entries=entries)
+    columns: dict[str, str] = field(default_factory=dict)
+    """The ordered mapping from each column name in ``data.feather`` to its Polars dtype string."""

@@ -1,8 +1,12 @@
-"""Provides interface functions for dataset forging pipelines.
+"""Provides the remote dataset-forging orchestrator that submits forging pipelines to the compute server.
 
 Notes:
     The assets from this module forge (assemble) datasets from processed data stored on the remote compute server
-    and assume the server is properly configured to execute all forging tasks.
+    and assume the server is properly configured to execute all forging tasks. This is deployment/orchestration code:
+    it lives in the interface (CLI/MCP deployment) layer, which is permitted to import the agnostic ``forging``
+    pipeline, rather than in a system package. It is currently unwired pending the broader remote-orchestration
+    rework; it submits ``slf forge`` jobs whose per-session assembly job identifiers must match the ones the agnostic
+    forging pipeline derives from ``FORGING_JOB_NAME``.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from ..server import Job, Server, JobStatus, get_server_configuration, get_remote_job_work_directory
-from .forging import FORGING_JOB_NAME
+from ..forging import FORGING_JOB_NAME
 from ..managing import ProjectManifest
 from ..pipelines import ProcessingPipelines
 from ..orchestration import (

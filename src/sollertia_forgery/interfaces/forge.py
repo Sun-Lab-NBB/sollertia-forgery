@@ -1,9 +1,11 @@
-"""Provides the generic ``slf forge`` command that assembles a dataset from a project's processed sessions,
-dispatching to the forging entry points registered for the project's acquisition system.
+"""Provides the generic ``slf forge`` command that assembles a dataset from a project's processed sessions.
 
 Notes:
-    The acquisition system is always inferred from the data: from the supplied session paths for the multi-recording
-    cell-tracking stage, and from the project root for the assembly stage. The command carries no system selector.
+    The command runs up to two stages. When an activity configuration is supplied, the multi-recording cell-tracking
+    stage runs first, dispatched through the local-pipeline registry after inferring the acquisition system from the
+    supplied session paths. The assembly stage then invokes the system-agnostic forging pipeline directly; that
+    pipeline infers the acquisition system from the resolved dataset and resolves the system-specific assembly worker
+    internally through the forging-assembly registry. The command carries no system selector.
 """
 
 from pathlib import Path
@@ -11,7 +13,8 @@ from pathlib import Path
 import click
 from ataraxis_base_utilities import console
 
-from .dispatch import infer_system_from_project, infer_system_from_session
+from ..forging import run_forging_pipeline
+from .dispatch import infer_system_from_session
 from ..pipelines import ProcessingPipelines
 from ..registries import resolve_local_pipeline
 
@@ -137,8 +140,10 @@ def forge_command(
         )
 
     if dataset_name is not None and project_path is not None:
-        run_pipeline = resolve_local_pipeline(infer_system_from_project(project_path), ProcessingPipelines.FORGING)
-        run_pipeline(
+        # Forging is system-agnostic: the pipeline resolves the dataset's system-specific assembly worker internally
+        # from the central registry, so the interface invokes it directly rather than through the local-pipeline
+        # registry.
+        run_forging_pipeline(
             name=dataset_name,
             session_names=session,
             project_root=project_path,

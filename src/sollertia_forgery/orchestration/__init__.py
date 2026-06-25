@@ -8,6 +8,7 @@ from .local import (
     PendingJob,
     GenericPendingJob,
     JobExecutionState,
+    ConcurrencyDescriptor,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
@@ -21,6 +22,7 @@ from .tracking import prepare_tracker
 __all__ = [
     "RESERVED_CORES",
     "ActiveJob",
+    "ConcurrencyDescriptor",
     "GenericPendingJob",
     "JobExecutionState",
     "PendingJob",

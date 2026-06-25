@@ -72,8 +72,8 @@ dependencies = [
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
-    "tbb4py>=2023,<2024; sys_platform != 'darwin'",
-    "intel-cmplr-lib-rt>=2026,<2027; sys_platform != 'darwin'",
+    "tbb4py>=2022,<2024; sys_platform != 'darwin'",
+    "intel-cmplr-lib-rt>=2025,<2027; sys_platform != 'darwin'",
 ]
 
 [project.urls]
@@ -197,7 +197,7 @@ module = [
     "sollertia_forgery.orchestration.pipeline",
     "sollertia_forgery.orchestration.managing",
     "sollertia_forgery.mesoscope_vr.server_processing",
-    "sollertia_forgery.mesoscope_vr.server_forging",
+    "sollertia_forgery.interfaces.server_forging",
 ]
 ignore_errors = true
 
@@ -233,7 +233,10 @@ exclude_lines = [
 
 # Import-linter contracts that enforce the registry-hub architecture: the acquisition-system subpackages
 # (mesoscope_vr and its future siblings) are reachable only through the registries hub, and neither the
-# cross-system layers nor the interface layer ever import a system package directly.
+# infrastructure cross-system layers nor the interface layer ever import a system package directly. The
+# system-agnostic worker packages (microcontrollers, runtime, two_photon, forging) are intentionally outside these
+# contracts: each resolves its system-specific assets through the registries hub, so it reaches mesoscope_vr
+# only indirectly through that sanctioned path.
 [tool.importlinter]
 root_package = "sollertia_forgery"
 
@@ -244,7 +247,6 @@ source_modules = [
     "sollertia_forgery.pipelines",
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
-    "sollertia_forgery.forging",
     "sollertia_forgery.managing",
     "sollertia_forgery.orchestration",
     "sollertia_forgery.interfaces",
@@ -261,12 +263,11 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Cross-system layers never import the registry hub or the interface layer"
+name = "Infrastructure cross-system layers never import the registry hub or the interface layer"
 type = "forbidden"
 source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
-    "sollertia_forgery.forging",
     "sollertia_forgery.managing",
     "sollertia_forgery.orchestration",
 ]

@@ -23,6 +23,26 @@ RESERVED_CORES: int = 2
 """The number of CPU cores reserved for system operations. Each package's ``execute_*_jobs_tool`` subtracts this
 value from the available core count when resolving the worker budget."""
 
+
+@dataclass(frozen=True, slots=True)
+class ConcurrencyDescriptor:
+    """Describes the per-pipeline concurrency policy consulted by the generic ``execute_jobs_tool``.
+
+    Notes:
+        ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes; the generic tool floors
+        the user-supplied parallel-job cap by ``worker_budget // cores_per_job``. ``default_max_parallel`` is the
+        fallback hard cap applied when the caller does not request an explicit parallel-job ceiling. This descriptor
+        is system-agnostic so both the system-specific batch adapters and the agnostic forging adapters can declare
+        their concurrency policy with one shared type.
+    """
+
+    cores_per_job: int
+    """The number of CPU cores a single worker subprocess of this pipeline consumes."""
+    default_max_parallel: int
+    """The default hard cap on concurrently executing jobs when the caller does not request one. A non-positive
+    value defers concurrency to the resolved worker budget alone."""
+
+
 _MINIMUM_ROWS_FOR_INTERVALS: int = 2
 """The minimum number of rows required in a feather file to compute inter-row timing intervals."""
 
