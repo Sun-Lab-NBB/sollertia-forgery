@@ -2,7 +2,7 @@
 
 The pipeline is exercised through stub parser functions injected in place of the central
 ``resolve_microcontroller_parsers`` lookup, with real extraction configuration and manifest fixtures (so
-``resolve_controllers`` runs for real) and a faked Stage 1 extraction (so no real ``.npz`` archive or
+``_resolve_controllers`` runs for real) and a faked Stage 1 extraction (so no real ``.npz`` archive or
 acquisition-library extraction is required). Stage 2 parsing, the unified tracker, job discovery, and local/remote
 dispatch all run as production code.
 """
@@ -140,7 +140,7 @@ def _make_raw_module_dataframe() -> pl.DataFrame:
 
 
 def _fake_extract_factory(skip: set[tuple[int, int]] | None = None):
-    """Returns a stand-in for ``extract_controller`` that writes raw module feathers and drives the tracker."""
+    """Returns a stand-in for ``_extract_controller`` that writes raw module feathers and drives the tracker."""
     skipped = set(skip or set())
 
     def fake_extract(
@@ -171,7 +171,7 @@ def _fake_extract_factory(skip: set[tuple[int, int]] | None = None):
 
 
 def _fail_if_called(*args, **kwargs) -> None:  # noqa: ANN002, ANN003, ARG001
-    raise AssertionError("extract_controller must not be called for a remote parse job.")
+    raise AssertionError("_extract_controller must not be called for a remote parse job.")
 
 
 def _status(tracker_path: Path, job_name: str, specifier: str) -> ProcessingStatus:
@@ -260,7 +260,7 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
     output_directory = session.processed_data.behavior_data_path
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
     run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
@@ -286,7 +286,7 @@ def test_unregistered_module_produces_no_parse_job(tmp_path: Path, monkeypatch: 
     output_directory = session.processed_data.behavior_data_path
     _patch_parsers(monkeypatch, {(2, 1)})  # only (2, 1) is registered for this system
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
     run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
@@ -304,7 +304,7 @@ def test_missing_feather_completes_parse_job_without_output(tmp_path: Path, monk
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     # Extraction produces no feather for (4, 1), mimicking a configured module that logged no messages.
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory(skip={(4, 1)}))
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory(skip={(4, 1)}))
 
     run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
@@ -321,7 +321,7 @@ def test_no_parseable_controllers_raises(tmp_path: Path, monkeypatch: pytest.Mon
     _write_inputs(session)
     _patch_parsers(monkeypatch, set())  # nothing registered
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
     with pytest.raises(ValueError):
         run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
@@ -333,7 +333,7 @@ def test_remote_extraction_runs_single_controller(tmp_path: Path, monkeypatch: p
     output_directory = session.processed_data.behavior_data_path
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
     extraction_job_id = ProcessingTracker.generate_job_id(job_name=EXTRACTION_JOB_NAME, specifier="101")
     run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=extraction_job_id, workers=1)
@@ -359,7 +359,7 @@ def test_remote_parse_runs_single_module(tmp_path: Path, monkeypatch: pytest.Mon
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     # A remote parse job must not trigger extraction.
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fail_if_called)
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fail_if_called)
 
     parse_job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier="101-2-1")
     run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=parse_job_id, workers=1)
@@ -374,7 +374,7 @@ def test_invalid_job_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     _write_inputs(session)
     _patch_parsers(monkeypatch, {(2, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
-    monkeypatch.setattr(pipeline_module, "extract_controller", _fake_extract_factory())
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
     with pytest.raises(ValueError):
         run_microcontroller_processing_pipeline(session_path=tmp_path, job_id="deadbeef", workers=1)

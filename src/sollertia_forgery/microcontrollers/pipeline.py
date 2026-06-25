@@ -1,6 +1,6 @@
-"""Provides the end-to-end, two-stage microcontroller log processing pipeline: extracts raw per-module data from
-controller log archives via the acquisition library, then parses each module into a domain-specific feather using
-the parser function registered for the session's acquisition system in the central registry.
+"""Provides the two-stage microcontroller log processing pipeline that extracts raw per-module data from
+controller log archives and parses each module into a domain-specific feather using the parser function registered
+for the session's acquisition system.
 """
 
 from __future__ import annotations
@@ -14,9 +14,15 @@ from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
-from ataraxis_communication_interface.microcontroller import EXTRACTION_JOB_NAME
+from ataraxis_communication_interface.microcontroller import (
+    EXTRACTION_JOB_NAME,
+    EXTRACTION_CONFIGURATION_FILENAME,
+    MICROCONTROLLER_MANIFEST_FILENAME,
+    ExtractionConfig,
+    MicroControllerManifest,
+    execute_job,
+)
 
-from .extraction import extract_controller, resolve_controllers, find_controller_archive
 from ..registries import resolve_microcontroller_parsers
 from ..orchestration import prepare_tracker
 from ..shared_assets import partition_events, find_module_feathers, parse_module_feather_name
@@ -38,6 +44,11 @@ PARSE_JOB_NAME: str = "module_parsing"
 jobs reuse the acquisition library's own extraction job name so their tracker identifiers match the binding that
 records their state."""
 
+_LOG_ARCHIVE_SUFFIX: str = "_log.npz"
+"""The naming suffix of the raw controller log archives produced by the acquisition DataLogger. Matches the
+ataraxis-communication-interface ``LOG_ARCHIVE_SUFFIX`` convention; each archive is named
+``{controller_id}_log.npz``."""
+
 
 def run_microcontroller_processing_pipeline(
     session_path: Path,
@@ -58,7 +69,7 @@ def run_microcontroller_processing_pipeline(
         system-agnostic and never names a system-specific type.
 
         In local mode (job_id is None), Stage 1 runs for every configured controller whose archive is present
-        (sequentially, with message decoding parallelized within each archive), then Stage 2 parses all eligible
+        (sequentially, with message decoding parallelized within each archive). Then, Stage 2 parses all eligible
         modules (distributed across a worker pool when more than one worker is available). In remote mode (job_id
         is provided), only the single matching job runs in-process: an extraction job for one controller, or a
         parse job for one module (whose raw feather must already exist from a prior extraction run).
@@ -89,7 +100,7 @@ def run_microcontroller_processing_pipeline(
     parsers = resolve_microcontroller_parsers(session.acquisition_system)
 
     # Loads the per-controller extraction configurations (validated against the microcontroller manifest).
-    controllers = resolve_controllers(session=session)
+    controllers = _resolve_controllers(session=session)
 
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
@@ -139,8 +150,7 @@ def run_microcontroller_processing_pipeline(
     else:
         # Resolves the worker budget once and creates a single process pool that spans BOTH stages. The stages run
         # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
-        # parse stage (one future per module), avoiding a worker re-spawn between them -- a real cost under the spawn
-        # start method that macOS and Windows default to.
+        # parse stage (one future per module), avoiding a worker re-spawn between them.
         resolved_workers = resolve_worker_count(requested_workers=workers)
         shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
         try:
@@ -169,6 +179,135 @@ def run_microcontroller_processing_pipeline(
                 shared_executor.shutdown(wait=True)
 
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
+
+
+def _resolve_controllers(session: SessionData) -> dict[str, ControllerExtractionConfig]:
+    """Resolves the per-controller extraction configurations for the target session.
+
+    Notes:
+        Loads the acquisition-time extraction configuration (the source of truth for which controllers, modules,
+        and event codes to extract) from the session's raw behavior data directory, and validates every configured
+        controller ID against the microcontroller manifest written alongside the log archives. The manifest check
+        confirms the archives were produced by ataraxis-communication-interface, which also distinguishes the
+        microcontroller controllers from the runtime DataLogger archive that shares the same directory.
+
+    Args:
+        session: The loaded session whose microcontroller logs are being processed.
+
+    Returns:
+        An ordered mapping from each configured controller ID (as a string) to its ControllerExtractionConfig.
+
+    Raises:
+        FileNotFoundError: If the extraction configuration or the microcontroller manifest is not present at the
+            session's canonical raw behavior data location.
+        ValueError: If a configured controller ID is not registered in the microcontroller manifest.
+    """
+    log_directory = session.raw_data.behavior_data_path
+
+    config_path = log_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
+    if not config_path.is_file():
+        message = (
+            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No extraction "
+            f"configuration was found at '{config_path}'. The extraction configuration is authored during "
+            f"acquisition and defines the per-controller event codes the extraction stage processes."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    manifest_path = log_directory.joinpath(MICROCONTROLLER_MANIFEST_FILENAME)
+    if not manifest_path.is_file():
+        message = (
+            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No "
+            f"microcontroller manifest was found at '{manifest_path}'. The manifest is required to confirm the log "
+            f"archives were produced by ataraxis-communication-interface."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    config = ExtractionConfig.load(file_path=config_path)
+    manifest = MicroControllerManifest.load(file_path=manifest_path)
+    manifest_ids = {str(controller.id) for controller in manifest.controllers}
+
+    controllers = {str(controller.controller_id): controller for controller in config.controllers}
+
+    unregistered = natsorted(controller_id for controller_id in controllers if controller_id not in manifest_ids)
+    if unregistered:
+        message = (
+            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. The following "
+            f"configured controller IDs are not registered in the microcontroller manifest: "
+            f"{', '.join(unregistered)}. Registered IDs: {natsorted(manifest_ids)}."
+        )
+        console.error(message=message, error=ValueError)
+
+    return controllers
+
+
+def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | None:
+    """Locates the raw log archive for a controller, if it is present under the log directory.
+
+    Notes:
+        Searches recursively for the ``{controller_id}_log.npz`` archive, mirroring how the
+        ataraxis-communication-interface log reader resolves archives. Returns None when no archive is present so
+        the pipeline can skip controllers whose logs were not staged, rather than failing the whole session.
+
+    Args:
+        log_directory: The session's raw behavior data directory holding the controller log archives.
+        controller_id: The controller ID whose archive to locate.
+
+    Returns:
+        The path to the controller's log archive, or None if no matching archive exists.
+    """
+    if not log_directory.is_dir():
+        return None
+    matches = natsorted(log_directory.rglob(f"{controller_id}{_LOG_ARCHIVE_SUFFIX}"))
+    return matches[0] if matches else None
+
+
+def _extract_controller(
+    archive_path: Path,
+    output_directory: Path,
+    controller_id: str,
+    controller_config: ControllerExtractionConfig,
+    job_id: str,
+    tracker: ProcessingTracker,
+    *,
+    workers: int,
+    display_progress: bool,
+    executor: ProcessPoolExecutor | None = None,
+) -> None:
+    """Extracts the target controller's log archive into raw per-module feather files via
+    ataraxis-communication-interface.
+
+    Notes:
+        Delegates to the acquisition library's ``execute_job`` binding, which reads the archive once, filters
+        messages by the configured per-module event codes, writes a ``controller_{id}_module_{type}_{id}.feather``
+        file per module that produced data, and manages this job's state on the passed-in tracker (start, complete,
+        or fail). The output directory is created if it does not exist.
+
+    Args:
+        archive_path: The path to the controller's ``{controller_id}_log.npz`` archive.
+        output_directory: The directory where the raw per-module feather files are written (the session's
+            microcontroller data directory).
+        controller_id: The controller ID whose archive is being extracted.
+        controller_config: The controller's extraction configuration (its modules and per-module event codes).
+        job_id: The hexadecimal identifier of this extraction job in the shared processing tracker.
+        tracker: The shared processing tracker the extraction job records its state against.
+        workers: The number of worker processes the extraction may use to parallelize message decoding within the
+            archive. Set to a value less than 1 to use all available CPU cores (minus reserved cores).
+        display_progress: Determines whether to display a progress bar during extraction.
+        executor: An optional shared process pool to reuse for parallel message decoding, so a sequence of
+            controller extractions does not create and tear down a pool per controller.
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    execute_job(
+        log_path=archive_path,
+        output_directory=output_directory,
+        source_id=controller_id,
+        job_id=job_id,
+        workers=workers,
+        tracker=tracker,
+        controller_config=controller_config,
+        display_progress=display_progress,
+        executor=executor,
+    )
 
 
 def _discover_jobs(
@@ -217,7 +356,7 @@ def _discover_jobs(
         for module_type, module_id in eligible:
             universe.append((PARSE_JOB_NAME, f"{controller_id}-{module_type}-{module_id}"))
 
-        archive_path = find_controller_archive(log_directory=log_directory, controller_id=controller_id)
+        archive_path = _find_controller_archive(log_directory=log_directory, controller_id=controller_id)
         if archive_path is None:
             continue
 
@@ -242,7 +381,7 @@ def _run_extraction_stage(
     executor: ProcessPoolExecutor | None,
     display_progress: bool,
 ) -> None:
-    """Runs Stage 1: extracts each present controller's archive into raw per-module feathers.
+    """Runs Stage 1: extracts each present controller's log archive into raw per-module feathers.
 
     Notes:
         Controllers are extracted sequentially in the parent process because the acquisition binding manages each
@@ -280,7 +419,7 @@ def _run_extraction_stage(
                     f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
                 )
             )
-            extract_controller(
+            _extract_controller(
                 archive_path=archive_path,
                 output_directory=extraction_output,
                 controller_id=controller_id,
@@ -532,7 +671,7 @@ def _execute_remote_job(
 
     if job_name == extraction_job_name:
         controller_id = specifier
-        archive_path = find_controller_archive(log_directory=log_directory, controller_id=controller_id)
+        archive_path = _find_controller_archive(log_directory=log_directory, controller_id=controller_id)
         if archive_path is None:
             message = (
                 f"Unable to run the extraction job for controller '{controller_id}'. No log archive "
@@ -541,7 +680,7 @@ def _execute_remote_job(
             console.error(message=message, error=FileNotFoundError)
         resolved_workers = resolve_worker_count(requested_workers=workers)
         console.echo(message=f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {job_id})...")
-        extract_controller(
+        _extract_controller(
             archive_path=archive_path,
             output_directory=extraction_output,
             controller_id=controller_id,
@@ -587,8 +726,9 @@ def _run_parse(feather_path: Path, module_parser: ModuleParser, output_directory
     Notes:
         This is the atomic unit of work dispatched to worker processes by the parallel parse path, so it must
         remain importable at module level and accept only picklable arguments. It reads the raw module feather via
-        memory mapping, partitions it by event code in a single pass, and delegates to the registered parser, which
-        resolves any system configuration from the session and writes its feather into the output directory.
+        memory mapping, partitions it by event code in a single pass, and delegates to the registered parser. The
+        parser then resolves any system configuration from the session and writes its feather into the output
+        directory.
 
     Args:
         feather_path: The path to the raw per-module feather produced by the extraction stage.
