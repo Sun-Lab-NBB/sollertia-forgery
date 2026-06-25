@@ -16,7 +16,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
 
 from ..registries import resolve_runtime_binding
-from ..orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path

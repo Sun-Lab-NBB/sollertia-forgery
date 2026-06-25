@@ -1,18 +1,16 @@
-"""Provides the generic ``slf process`` CLI group that runs a system-specific processing pipeline on a single
-session, dispatching to the entry point registered for the session's acquisition system.
+"""Provides the generic ``slf process`` CLI group that runs a system-agnostic processing pipeline on a single
+session.
 
 Notes:
-    The acquisition system is always inferred from the target session's metadata, so these commands carry no system
-    selector. The system-agnostic ``video`` pipeline runs directly without registry dispatch.
+    Each command invokes one system-agnostic worker package's local processing pipeline directly. The acquisition
+    system is inferred from the target session by each pipeline internally (resolving its donated parsers/workers from
+    the registries), so these commands carry no system selector. The heavy acquisition-library bindings are imported
+    lazily inside each command callback so resolving ``slf process --help`` stays inexpensive.
 """
 
 from pathlib import Path
 
 import click
-
-from .dispatch import infer_system_from_session
-from ..pipelines import ProcessingPipelines
-from ..registries import resolve_local_pipeline
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the lab standard."""
@@ -57,23 +55,7 @@ _PROGRESS_OPTION = click.option(
 
 @click.group("process", context_settings=CONTEXT_SETTINGS)
 def process_cli() -> None:
-    """Runs the end-to-end, in-process data extraction pipelines on a single session."""
-
-
-@process_cli.command("behavior")
-@_SESSION_PATH_OPTION
-@_JOB_ID_OPTION
-@_WORKERS_OPTION
-@_PROGRESS_OPTION
-def behavior_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
-    """Extracts the microcontroller log archives and parses runtime and module data into behavior feathers."""
-    run_pipeline = resolve_local_pipeline(infer_system_from_session(session_path), ProcessingPipelines.BEHAVIOR)
-    run_pipeline(
-        session_path=session_path,
-        job_id=job_id,
-        workers=workers,
-        display_progress=progress,
-    )
+    """Runs the system-agnostic, in-process data extraction pipelines on a single session."""
 
 
 @process_cli.command("video")
@@ -88,6 +70,94 @@ def video_command(session_path: Path, job_id: str | None, workers: int, *, progr
     run_video_processing_pipeline(
         session_path=session_path,
         job_id=job_id,
+        workers=workers,
+        display_progress=progress,
+    )
+
+
+@process_cli.command("microcontroller")
+@_SESSION_PATH_OPTION
+@_JOB_ID_OPTION
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def microcontroller_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+    """Extracts the microcontroller module log archives and parses them into domain-specific behavior feathers."""
+    from ..microcontrollers import run_microcontroller_processing_pipeline  # noqa: PLC0415
+
+    run_microcontroller_processing_pipeline(
+        session_path=session_path,
+        job_id=job_id,
+        workers=workers,
+        display_progress=progress,
+    )
+
+
+@process_cli.command("runtime")
+@_SESSION_PATH_OPTION
+@_JOB_ID_OPTION
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def runtime_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+    """Decodes the acquisition runtime log archive and parses it into the session's runtime behavior feathers."""
+    from ..runtime import run_runtime_processing_pipeline  # noqa: PLC0415
+
+    run_runtime_processing_pipeline(
+        session_path=session_path,
+        job_id=job_id,
+        workers=workers,
+        display_progress=progress,
+    )
+
+
+@process_cli.command("two-photon")
+@_SESSION_PATH_OPTION
+@click.option(
+    "-c",
+    "--configuration-path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+    help="The path to the cindra single-recording configuration file supplying the processing parameters.",
+)
+@_JOB_ID_OPTION
+@click.option("-b", "--binarize", is_flag=True, default=False, help="Run the binarization stage.")
+@click.option("-p", "--process", is_flag=True, default=False, help="Run the per-plane processing stage.")
+@click.option("-cb", "--combine", is_flag=True, default=False, help="Run the multi-plane combination stage.")
+@click.option(
+    "-tp",
+    "--target-plane",
+    type=int,
+    default=-1,
+    show_default=True,
+    help="The imaging plane to process when running the processing stage. Set to -1 to process all planes.",
+)
+@_WORKERS_OPTION
+@_PROGRESS_OPTION
+def two_photon_command(
+    session_path: Path,
+    configuration_path: Path,
+    job_id: str | None,
+    target_plane: int,
+    workers: int,
+    *,
+    binarize: bool,
+    process: bool,
+    combine: bool,
+    progress: bool,
+) -> None:
+    """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
+
+    When none of ``--binarize``, ``--process``, or ``--combine`` is requested, all three stages run in sequence.
+    """
+    from ..two_photon import run_two_photon_processing_pipeline  # noqa: PLC0415
+
+    run_two_photon_processing_pipeline(
+        session_path=session_path,
+        configuration_path=configuration_path,
+        job_id=job_id,
+        binarize=binarize,
+        process=process,
+        combine=combine,
+        target_plane=target_plane,
         workers=workers,
         display_progress=progress,
     )

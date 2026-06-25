@@ -15,7 +15,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_video_system.video import TIMESTAMP_JOB_NAME, execute_job
 
-from ..orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path

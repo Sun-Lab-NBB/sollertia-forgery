@@ -322,8 +322,9 @@ def check_session_eligibility(
         supported_sessions: The session types that support this type of processing.
         allow_reprocessing: Determines whether to reprocess the session if it has already been processed with this
             pipeline.
-        configuration_path: The path to the pipeline's configuration file on the remote server. Required for the
-            multi-day cindra pipeline. If provided, the function verifies the file exists on the remote server.
+        configuration_path: The path to the pipeline's configuration file on the remote server. Required for pipelines
+            that consume a server-side configuration file. If provided, the function verifies the file exists on the
+            remote server.
 
     Returns:
         None if the session is eligible for processing. Otherwise, returns a string describing why the session
@@ -343,17 +344,9 @@ def check_session_eligibility(
     # requires a configuration file or prior processing steps.
     requires_configuration = False
     requires_integrity = True
-    requires_cindra = False
     if pipeline == ProcessingPipelines.CHECKSUM:
         processed = integrity
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
-    elif pipeline == ProcessingPipelines.BEHAVIOR:
-        processed = bool(session_data["behavior"][0])
-    elif pipeline == ProcessingPipelines.CINDRA_MULTI_RECORDING:
-        # Multiday processing requires cindra to be completed first; uses tracker-based reprocessing check
-        processed = False  # Determined by the tracker check below
-        requires_configuration = True
-        requires_cindra = True
     elif pipeline == ProcessingPipelines.FORGING:
         # Forging pipeline performs internal checks for available data and adjusts its runtime accordingly
         processed = False  # Determined by the tracker check below
@@ -381,13 +374,6 @@ def check_session_eligibility(
         return (
             "The session has not been processed with the integrity verification pipeline. "
             "Run the CHECKSUM pipeline first to verify the session's data integrity."
-        )
-
-    # For the multi-day cindra pipeline, the session must have been processed with the single-day cindra pipeline first.
-    if requires_cindra and not bool(session_data["cindra"][0]):
-        return (
-            "The session has not been processed with the single-day cindra pipeline. "
-            "Run the single-day cindra pipeline first to extract calcium fluorescence data."
         )
 
     # If the session has already been processed and reprocessing is not allowed, skips processing the session.

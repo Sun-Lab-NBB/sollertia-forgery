@@ -196,8 +196,6 @@ module = [
     "sollertia_forgery.interfaces.server_tools",
     "sollertia_forgery.orchestration.pipeline",
     "sollertia_forgery.orchestration.managing",
-    "sollertia_forgery.mesoscope_vr.server_processing",
-    "sollertia_forgery.interfaces.server_forging",
 ]
 ignore_errors = true
 

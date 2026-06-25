@@ -4,9 +4,12 @@ status overview, the concurrency descriptor, and the picklable per-session worke
 Notes:
     These adapters wrap the agnostic forging pipeline for batch/MCP-style execution. They operate only on the
     system-agnostic dataset hierarchy (``DatasetData``), the forging processing tracker, and the shared assets the
-    forging pipeline re-exports, so they carry no acquisition-system coupling. Like the pipeline itself, they live in
-    the agnostic ``forging`` package and resolve any system-specific behavior through the registry rather than
-    importing a system package.
+    forging pipeline re-exports, so they carry no acquisition-system coupling. They live in the shared
+    ``orchestration`` package alongside the generic batch engine they plug into (the concurrency descriptor, the
+    process-pool job manager, and the tracker helpers), and resolve any system-specific behavior through the registry
+    rather than importing a system package. They are imported on demand by the batch-registry wiring rather than from
+    ``orchestration/__init__`` so the generic engine's public surface stays decoupled from this forging-specific
+    adapter.
 """
 
 from __future__ import annotations
@@ -23,21 +26,20 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .dataset import resolve_dataset
-from .pipeline import FORGING_JOB_NAME, run_forging_pipeline
-from ..orchestration import (
+from .local import (
     ConcurrencyDescriptor,
-    prepare_tracker,
     read_tracker_status,
     analyze_feather_file,
     derive_tracker_status,
 )
-from ..shared_assets import DatasetData, DatasetFiles
+from ..forging.dataset import DatasetData, DatasetFiles, resolve_dataset
+from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from ..orchestration import GenericPendingJob
+    from .local import GenericPendingJob
 
 
 FORGING_CONCURRENCY: ConcurrencyDescriptor = ConcurrencyDescriptor(cores_per_job=3, default_max_parallel=10)

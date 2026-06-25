@@ -16,10 +16,8 @@ from ataraxis_data_structures import interpolate_data
 from .metadata import BehaviorDataFiles
 from ..shared_assets import (
     get_event_data,
-    partition_events,
     merge_event_streams,
     get_event_timestamps,
-    parse_module_feather_name,
 )
 
 if TYPE_CHECKING:
@@ -58,59 +56,6 @@ class _ModuleSpecification:
             if isinstance(value, bool) and not value:
                 return False
         return True
-
-
-def process_microcontroller_data(
-    feather_path: Path,
-    output_directory: Path,
-    hardware_state: MesoscopeHardwareState,
-) -> None:
-    """Reads a pre-extracted microcontroller module feather file and applies domain-specific data processing.
-
-    Notes:
-        Recovers the module type and ID by parsing the input feather filename, which already encodes them per the
-        ``controller_{id}_module_{type}_{id}.feather`` convention, then dispatches to the appropriate parse
-        function. The parse function transforms the raw event data from the axci feather format into a
-        domain-specific feather file with physically meaningful columns.
-
-    Args:
-        feather_path: The path to the input module feather file produced by ataraxis-communication-interface.
-        output_directory: The path to the output directory where the processed feather file will be written.
-        hardware_state: The MesoscopeHardwareState instance that stores the hardware configuration parameters
-            needed to convert raw sensor data into physical units.
-
-    Raises:
-        ValueError: If the (module_type, module_id) pair encoded in the feather filename does not match any
-            registered module specification.
-    """
-    _, module_type, module_id = parse_module_feather_name(feather_path=feather_path)
-    module_key = (module_type, module_id)
-    if module_key not in _MODULE_REGISTRY:
-        message = (
-            f"Unable to process microcontroller module data. The module type-ID pair ({module_type}, {module_id}) "
-            f"does not match any registered module specification."
-        )
-        console.error(message=message, error=ValueError)
-
-    specification = _MODULE_REGISTRY[module_key]
-
-    # Reads the pre-extracted module data via memory mapping (supported because all module feather writes use
-    # uncompressed IPC), so the file is backed by the OS page cache rather than a full copy in private RAM.
-    # Then partitions it by event code in a single pass, so parse functions can resolve their per-event lookups
-    # in O(1) without re-scanning the full DataFrame.
-    module_dataframe = pl.read_ipc(source=feather_path, memory_map=True)
-    event_partition = partition_events(module_dataframe=module_dataframe)
-
-    # Ensures the output directory exists.
-    output_directory.mkdir(parents=True, exist_ok=True)
-
-    # Resolves hardware parameters and calls the appropriate parse function.
-    output_file = output_directory / specification.output_filename
-    specification.parse_function(
-        event_partition=event_partition,
-        output_file=output_file,
-        hardware_state=hardware_state,
-    )
 
 
 def is_module_eligible(module_type: int, module_id: int, hardware_state: MesoscopeHardwareState) -> bool:
@@ -617,12 +562,11 @@ function, output filename, and required hardware state fields for a specific har
 # ----------------------------------------------------------------------------------------------------------------------
 # Agnostic-pipeline parser entry points
 #
-# The functions below are the public, system-agnostic parser entry points wired into the central
+# The functions below are the public, system-specific parser entry points wired into the central
 # MICROCONTROLLER_PARSER_REGISTRY in registries.py. Each takes the same uniform (event_partition, output_directory,
 # session) signature so the agnostic microcontroller pipeline can dispatch every registered module without naming a
 # Mesoscope-VR type. They load the hardware state from the session, skip silently when the module's hardware was not
-# configured for the session, and otherwise delegate to the private parsers above. They reuse the same per-module logic
-# as the legacy in-process behavior pipeline and subsume it once that pipeline is rewired onto the agnostic pipeline.
+# configured for the session, and otherwise delegate to the private parsers above.
 # ----------------------------------------------------------------------------------------------------------------------
 
 

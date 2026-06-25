@@ -35,13 +35,13 @@ from ataraxis_data_structures import ProcessingTracker
 
 from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker
-from ..orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
-    from ..shared_assets import DatasetSession
+    from .dataset import DatasetSession
 
 # The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY: a module-level
 # ``assemble(source_session_path, output_path, dataset_name) -> None`` function that writes one session's

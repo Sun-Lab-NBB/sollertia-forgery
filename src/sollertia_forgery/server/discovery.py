@@ -5,7 +5,8 @@ from __future__ import annotations
 from ataraxis_base_utilities import LogLevel, console
 
 from .server import Server
-from ..shared_assets import DatasetSession, delay_terminal
+from ..forging.dataset import DatasetSession
+from ..shared_assets import delay_terminal
 from .server_configuration import get_server_configuration
 
 

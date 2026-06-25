@@ -24,7 +24,7 @@ from ataraxis_communication_interface.microcontroller import (
 )
 
 from ..registries import resolve_microcontroller_parsers
-from ..orchestration import prepare_tracker
+from ..shared_assets import prepare_tracker
 from ..shared_assets import partition_events, find_module_feathers, parse_module_feather_name
 
 if TYPE_CHECKING:

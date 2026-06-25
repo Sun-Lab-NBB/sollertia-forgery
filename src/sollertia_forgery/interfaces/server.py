@@ -121,9 +121,7 @@ def server_cli() -> None:
     """Provides commands for interacting with the remote Sollertia compute server.
 
     This CLI group provides commands for managing non-standardized server interactions, including authoring the
-    server access configuration, discovering project sessions, and viewing SLURM job information. All data
-    workflow interactions available through the 'slf manifest' and 'slf execute' command groups must be carried out
-    through those groups, rather than the commands exposed by this CLI.
+    server access configuration, discovering project sessions, and viewing SLURM job information.
     """
 
 
