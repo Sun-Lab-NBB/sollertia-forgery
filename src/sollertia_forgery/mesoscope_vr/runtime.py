@@ -11,17 +11,19 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba type introspection
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import SessionTypes, MesoscopeExperimentConfiguration
 from ataraxis_data_structures import LogArchiveReader
 
 from .metadata import BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Iterable
 
     from sollertia_shared_assets import (
+        SessionData,
         MesoscopeGasPuffTrial as GasPuffTrial,
         MesoscopeWaterRewardTrial as WaterRewardTrial,
-        MesoscopeExperimentConfiguration,
     )
 
 RUNTIME_SOURCE_ID: str = "1"
@@ -81,9 +83,10 @@ def process_runtime_data(
     """Extracts acquisition system and runtime task data from a Mesoscope-VR .npz log archive.
 
     Notes:
-        Uses LogArchiveReader from ataraxis-data-structures to read the archive with automatic onset timestamp
-        resolution. The reader handles onset discovery and provides absolute UTC timestamps for each message,
-        eliminating the need for manual timestamp offset calculations.
+        Reads the archive with LogArchiveReader from ataraxis-data-structures, which resolves the onset timestamp and
+        yields absolute UTC timestamps for each message, then delegates the payload routing and feather export to the
+        shared runtime exporter. This is the archive-reading entry point used by the legacy combined behavior pipeline;
+        the agnostic runtime pipeline instead supplies a pre-decoded message table to ``parse_runtime``.
 
     Args:
         log_path: The path to the .npz archive containing the Mesoscope-VR acquisition system data to extract.
@@ -91,9 +94,62 @@ def process_runtime_data(
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
     """
-    # Creates a LogArchiveReader to efficiently iterate through the archive with automatic onset resolution.
     reader = LogArchiveReader(archive_path=log_path)
+    messages = ((message.timestamp_us, message.payload) for message in reader.iter_messages())
+    _export_runtime_data(
+        messages=messages, output_directory=output_directory, experiment_configuration=experiment_configuration
+    )
 
+
+def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None:
+    """Parses the decoded Mesoscope-VR runtime archive into the session's runtime behavior feathers.
+
+    Notes:
+        This is the system-agnostic runtime parser wired into the central ``RUNTIME_PARSER_REGISTRY``. The agnostic
+        runtime pipeline decodes the runtime DataLogger archive into a raw ``(time_us, payload)`` table and dispatches
+        this function with the session, from which the experiment configuration is resolved (experiment sessions only).
+        It reconstructs each message's payload bytes into a uint8 array and delegates the payload routing and feather
+        export to the same shared exporter the legacy archive-reading path uses, so both paths produce identical
+        behavior feathers.
+
+    Args:
+        decoded_messages: The decoded runtime messages as a Polars DataFrame with a ``time_us`` UInt64 column and a
+            ``payload`` Binary column, in archive order.
+        output_directory: The path to the session's behavior data directory where the runtime feathers are written.
+        session: The loaded session, from which the experiment configuration is resolved.
+    """
+    experiment_configuration = _resolve_experiment_configuration(session=session)
+    messages = (
+        (timestamp, np.frombuffer(payload, dtype=np.uint8))
+        for timestamp, payload in zip(
+            decoded_messages["time_us"].to_numpy(), decoded_messages["payload"].to_list(), strict=True
+        )
+    )
+    _export_runtime_data(
+        messages=messages, output_directory=output_directory, experiment_configuration=experiment_configuration
+    )
+
+
+def _export_runtime_data(
+    messages: Iterable[tuple[np.uint64, NDArray[np.uint8]]],
+    output_directory: Path,
+    experiment_configuration: MesoscopeExperimentConfiguration | None,
+) -> None:
+    """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
+
+    Notes:
+        This is the shared core of both runtime entry points. It consumes an iterable of ``(timestamp, payload)``
+        records (whether sourced from the archive reader or from a decoded message table), routes each payload by its
+        leading code (or by length for the VR wall cue sequences), and writes the system-state and runtime-state
+        feathers for every session plus the experiment-only guidance, cue, trigger-zone, and trial feathers when an
+        experiment configuration is supplied.
+
+    Args:
+        messages: An iterable of ``(timestamp, payload)`` records, where each payload is a uint8 byte array.
+        output_directory: The path to the directory where to save the extracted data as uncompressed .feather files.
+        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
+            required if the processed session is an experiment session.
+    """
     # Pre-creates the variables used to store extracted data.
     system_states: list[np.uint8] = []
     system_timestamps: list[np.uint64] = []
@@ -106,12 +162,8 @@ def process_runtime_data(
     cue_sequences: list[NDArray[np.uint8]] = []
     distance_snapshots: list[np.float64] = []
 
-    # Iterates through all messages in the archive. LogArchiveReader handles onset discovery and provides absolute
-    # UTC timestamps automatically.
-    for message in reader.iter_messages():
-        timestamp = message.timestamp_us
-        payload = message.payload
-
+    # Routes each message by its payload code. The timestamps are already absolute UTC values resolved during decoding.
+    for timestamp, payload in messages:
         # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences.
         if len(payload) > _CUE_SEQUENCE_MIN_LENGTH and experiment_configuration is not None:
             cue_sequences.append(payload.view(dtype=np.uint8).astype(np.uint8))
@@ -197,6 +249,34 @@ def process_runtime_data(
         # Exports trial type and start distance data.
         trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
         trial_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.TRIAL, compression="uncompressed")
+
+
+def _resolve_experiment_configuration(session: SessionData) -> MesoscopeExperimentConfiguration | None:
+    """Loads the MesoscopeExperimentConfiguration for experiment sessions or returns None otherwise.
+
+    Args:
+        session: The loaded session whose runtime data is being parsed.
+
+    Returns:
+        The loaded MesoscopeExperimentConfiguration instance for experiment sessions, or None for non-experiment
+        sessions.
+
+    Raises:
+        FileNotFoundError: If the session is an experiment session but no experiment configuration YAML file is present
+            at the session's canonical location.
+    """
+    if session.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
+        return None
+
+    experiment_configuration_path = session.raw_data.experiment_configuration_path
+    if not experiment_configuration_path.is_file():
+        message = (
+            f"Unable to load experiment configuration for session '{session.session_name}'. No experiment "
+            f"configuration YAML file was found at '{experiment_configuration_path}'."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    return MesoscopeExperimentConfiguration.from_yaml(file_path=experiment_configuration_path)
 
 
 def _decompose_multiple_cue_sequences_into_trials(
