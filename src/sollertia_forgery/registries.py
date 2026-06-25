@@ -31,7 +31,6 @@ from .mesoscope_vr import (
     prepare_behavior_unit,
     iterate_forging_overview,
     iterate_behavior_overview,
-    run_activity_processing_pipeline,
     run_behavior_processing_pipeline,
     run_multidataset_processing_pipeline,
 )
@@ -94,7 +93,6 @@ SYSTEM_PIPELINES: dict[AcquisitionSystems, frozenset[ProcessingPipelines]] = {
     AcquisitionSystems.MESOSCOPE_VR: frozenset(
         {
             ProcessingPipelines.BEHAVIOR,
-            ProcessingPipelines.CINDRA_SINGLE_RECORDING,
             ProcessingPipelines.CINDRA_MULTI_RECORDING,
             ProcessingPipelines.FORGING,
         }
@@ -107,7 +105,6 @@ declared pipeline has a registered local entry point."""
 LOCAL_PIPELINE_REGISTRY: dict[AcquisitionSystems, dict[ProcessingPipelines, Callable[..., None]]] = {
     AcquisitionSystems.MESOSCOPE_VR: {
         ProcessingPipelines.BEHAVIOR: run_behavior_processing_pipeline,
-        ProcessingPipelines.CINDRA_SINGLE_RECORDING: run_activity_processing_pipeline,
         ProcessingPipelines.CINDRA_MULTI_RECORDING: run_multidataset_processing_pipeline,
         ProcessingPipelines.FORGING: run_forging_pipeline,
     },

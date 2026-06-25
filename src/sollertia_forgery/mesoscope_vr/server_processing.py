@@ -31,11 +31,6 @@ from ..shared_assets import DatasetSession, delay_terminal
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SUITE2P_TRACKER_FILENAME: str = "cindra_processing_tracker.yaml"
-"""The filename for the cindra processing tracker YAML file. Distinct from the
-``ProcessingTrackers.CINDRA_SINGLE_RECORDING`` tracker — this is the server-side forgery-dispatch mirror, not the
-tracker cindra writes at the recording root. Pending server-package refactor to align with shared-assets."""
-
 
 def _construct_behavior_processing_pipeline(
     manifest: ProjectManifest,
@@ -193,174 +188,14 @@ def _construct_behavior_processing_pipeline(
     )
 
 
-def _construct_cindra_processing_pipeline(
-    manifest: ProjectManifest,
-    project: str,
-    session: str,
-    server: Server,
-    *,
-    configuration_file: str = "GCaMP6f_CA1_SD.yaml",
-    plane_count: int = 3,
-    reprocess: bool = False,
-    keep_job_logs: bool = False,
-) -> ProcessingPipeline | str:
-    """Generates and returns the ProcessingPipeline instance used to execute the single-day cindra processing pipeline
-    for the target session.
-
-    Args:
-        manifest: The initialized ProjectManifest instance that stores the session's project metadata.
-        project: The name of the project for which to execute the target processing pipeline.
-        session: The name of the session to process with the target processing pipeline.
-        server: The Server class instance that manages access to the remote server that executes the pipeline and
-            stores the target session's data.
-        configuration_file: The name of the configuration file stored on the remote compute server that contains the
-            data-specific processing parameters for the cindra single-day pipeline.
-        plane_count: The number of imaging planes in the processed cell activity movie.
-        reprocess: Determines whether to reprocess the session if it has already been processed with the target
-            processing pipeline.
-        keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
-            runtime. If any job of the pipeline fails, the logs for all jobs are kept regardless of this argument's
-            value.
-
-    Returns:
-        The configured ProcessingPipeline instance if the target session can be processed with this pipeline.
-        Otherwise, returns a string describing why the session was excluded from processing.
-    """
-    # Resolves the path to the local Sollertia working directory
-    local_working_directory = get_working_directory()
-
-    # Extracts additional metadata about the processed session.
-    animal = manifest.get_animal_for_session(session=session)
-
-    # Parses the path to the session directory on the remote server.
-    remote_session_path = server.root.joinpath(project, animal, session)
-
-    # Determines whether the session is eligible for processing.
-    configuration_path = server.cindra_configurations_directory.joinpath(configuration_file)
-    exclusion_reason = check_session_eligibility(
-        manifest=manifest,
-        session=session,
-        pipeline=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
-        server=server,
-        supported_systems={AcquisitionSystems.MESOSCOPE_VR},
-        supported_sessions={SessionTypes.MESOSCOPE_EXPERIMENT},
-        allow_reprocessing=reprocess,
-        configuration_path=configuration_path,
-    )
-    if exclusion_reason is not None:
-        return exclusion_reason
-
-    # Resolves additional shared flags for the processing CLI.
-    configuration_command = f"-i {server.cindra_configurations_directory.joinpath(configuration_file)}"
-
-    # Precreates the iterables to store stage jobs
-    stage_1 = []
-    stage_2 = []
-    stage_3 = []
-
-    # Stage 1: Binarization
-    job_name = f"{session}_cindra_binarization"
-    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
-    working_directory = get_remote_job_work_directory(
-        server=server,
-        job_name=job_name,
-        pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
-        base_path=remote_session_path,
-    )
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath("output.txt"),
-        error_log=working_directory.joinpath("errors.txt"),
-        working_directory=working_directory,
-        conda_environment=server.environment,
-        cpu_threads=1,
-        ram=10,
-        time=180,
-    )
-    job.add_command(f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -b")
-    stage_1.append((job, working_directory, job_id))
-
-    # Stage 2: Plane processing
-    for plane in range(plane_count):
-        job_name = f"{session}_cindra_processing_plane_{plane}"
-        job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
-        working_directory = get_remote_job_work_directory(
-            server=server,
-            job_name=job_name,
-            pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
-            base_path=remote_session_path,
-        )
-        server.create(remote_path=working_directory, is_dir=True)
-        job = Job(
-            job_name=job_name,
-            output_log=working_directory.joinpath("output.txt"),
-            error_log=working_directory.joinpath("errors.txt"),
-            working_directory=working_directory,
-            conda_environment=server.environment,
-            cpu_threads=30,
-            ram=80,
-            time=180,
-        )
-        job.add_command(
-            f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -p -t {plane}"
-        )
-        stage_2.append((job, working_directory, job_id))
-
-    # Stage 3: Combination
-    job_name = f"{session}_cindra_combination"
-    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=str(remote_session_path))
-    working_directory = get_remote_job_work_directory(
-        server=server,
-        job_name=job_name,
-        pipeline_name=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
-        base_path=remote_session_path,
-    )
-    server.create(remote_path=working_directory, is_dir=True)
-    job = Job(
-        job_name=job_name,
-        output_log=working_directory.joinpath("output.txt"),
-        error_log=working_directory.joinpath("errors.txt"),
-        working_directory=working_directory,
-        conda_environment=server.environment,
-        cpu_threads=1,
-        ram=30,
-        time=180,
-    )
-    job.add_command(f"slf process activity {configuration_command} -sp {remote_session_path} -id {job_id} -c")
-    stage_3.append((job, working_directory, job_id))
-
-    # Resolves the paths to the local and remote job tracker files.
-    remote_tracker_path = server.root.joinpath(project, animal, session, "tracking_data", _SUITE2P_TRACKER_FILENAME)
-    local_tracker_path = local_working_directory.joinpath(
-        project, f"{session}_cindra_sd_processing", _SUITE2P_TRACKER_FILENAME
-    )
-
-    # Packages job data into a ProcessingPipeline object and returns it to the caller.
-    return ProcessingPipeline(
-        pipeline=ProcessingPipelines.CINDRA_SINGLE_RECORDING,
-        server=server,
-        data_path=remote_session_path,
-        jobs={1: tuple(stage_1), 2: tuple(stage_2), 3: tuple(stage_3)},
-        remote_tracker_path=remote_tracker_path,
-        local_tracker_path=local_tracker_path,
-        session=session,
-        animal=animal,
-        project=project,
-        keep_job_logs=keep_job_logs,
-    )
-
-
 def process_project_data(
     manifest_path: Path,
     project: str,
     sessions: tuple[DatasetSession, ...],
     *,
     process_behavior: bool = False,
-    process_cindra: bool = False,
     reprocess: bool = False,
     keep_job_logs: bool = False,
-    cindra_configuration_file: str = "GCaMP6f_CA1_SD.yaml",
-    plane_count: int = 3,
     processing_batch_size: int = 4,
 ) -> None:
     """Resolves and executes the necessary data processing pipelines for the target project.
@@ -375,29 +210,21 @@ def process_project_data(
         project: The name of the project whose data to process.
         sessions: A tuple of DatasetSession instances defining the project's sessions to process.
         process_behavior: Determines whether to execute the behavior data processing pipeline.
-        process_cindra: Determines whether to execute the single-day cindra data processing pipeline.
         reprocess: Determines whether to reprocess the sessions that have already been processed. This setting applies
             to all requested processing pipelines.
         keep_job_logs: Determines whether to keep completed job logs on the server or (default) remove them after
             each processing pipeline completes successfully. If the pipeline fails, the job logs are kept regardless
             of the value of this argument.
-        cindra_configuration_file: Specifies the name of the configuration file for the single-day cindra processing
-            pipeline. This argument is only used if the 'process_cindra' argument is set to True. The configuration
-            file with the specified name must be present in the shared cindra configuration directory on the remote
-            compute server.
-        plane_count: Specifies the number of planes in the session's data to be processed with the single-day cindra
-            pipeline. Note; for mesoscope recordings this number is equal to the number of ROI(s) (stripes) * the number
-            of z-planes. This argument is only used if the 'process_cindra' argument is set to True.
         processing_batch_size: The number of processing pipelines that can be submitted to the remote compute server at
             the same time.
     """
     # Ensures that the caller has specified the processing pipeline to execute.
-    if not process_behavior and not process_cindra:
+    if not process_behavior:
         console.error(
             message=(
                 f"Unable to process the '{project}' project's data, as no processing pipeline was selected. "
-                f"Call the data processing CLI command with --behavior (-b) or --cindra (-s) flag to execute "
-                f"the desired processing pipeline."
+                f"Call the data processing CLI command with the --behavior (-b) flag to execute the desired "
+                f"processing pipeline."
             ),
             error=RuntimeError,
         )
@@ -430,24 +257,6 @@ def process_project_data(
                 project=project,
                 session=session_metadata.session,
                 server=server,
-                reprocess=reprocess,
-                keep_job_logs=keep_job_logs,
-            )
-            if isinstance(result, str):
-                processing_exclusions[session_metadata.session] = (session_metadata, result)
-            else:
-                processing_pipelines.append(result)
-                all_pipelines.append(result)
-
-        # Suite2p pipeline
-        if process_cindra:
-            result = _construct_cindra_processing_pipeline(
-                manifest=manifest,
-                project=project,
-                session=session_metadata.session,
-                server=server,
-                configuration_file=cindra_configuration_file,
-                plane_count=plane_count,
                 reprocess=reprocess,
                 keep_job_logs=keep_job_logs,
             )

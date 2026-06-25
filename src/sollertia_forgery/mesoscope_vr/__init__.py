@@ -26,10 +26,7 @@ from .forging import (
     FORGING_JOB_NAME,
     run_forging_pipeline,
 )
-from .activity import (
-    run_activity_processing_pipeline,
-    run_multidataset_processing_pipeline,
-)
+from .activity import run_multidataset_processing_pipeline
 from .metadata import (
     StimulusMode,
     DatasetColumn,
@@ -64,7 +61,6 @@ __all__ = [
     "prepare_behavior_unit",
     "prepare_forging_unit",
     "process_project_data",
-    "run_activity_processing_pipeline",
     "run_behavior_job",
     "run_behavior_processing_pipeline",
     "run_forging_job",

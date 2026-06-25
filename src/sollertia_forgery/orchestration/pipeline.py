@@ -323,8 +323,7 @@ def check_session_eligibility(
         allow_reprocessing: Determines whether to reprocess the session if it has already been processed with this
             pipeline.
         configuration_path: The path to the pipeline's configuration file on the remote server. Required for the
-            single-day cindra, video, and multi-day cindra pipelines. If provided, the function verifies the file
-            exists on the remote server.
+            multi-day cindra pipeline. If provided, the function verifies the file exists on the remote server.
 
     Returns:
         None if the session is eligible for processing. Otherwise, returns a string describing why the session
@@ -350,9 +349,6 @@ def check_session_eligibility(
         requires_integrity = False  # Checksum pipeline does not require prior integrity verification
     elif pipeline == ProcessingPipelines.BEHAVIOR:
         processed = bool(session_data["behavior"][0])
-    elif pipeline == ProcessingPipelines.CINDRA_SINGLE_RECORDING:
-        processed = bool(session_data["cindra"][0])
-        requires_configuration = True
     elif pipeline == ProcessingPipelines.CINDRA_MULTI_RECORDING:
         # Multiday processing requires cindra to be completed first; uses tracker-based reprocessing check
         processed = False  # Determined by the tracker check below

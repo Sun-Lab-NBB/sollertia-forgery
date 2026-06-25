@@ -83,63 +83,11 @@ def behavior_command(session_path: Path, job_id: str | None, workers: int, *, pr
 @_PROGRESS_OPTION
 def video_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
     """Extracts the camera frame acquisition timestamps from the raw VideoSystem log archives."""
-    from ..processing import run_video_processing_pipeline  # noqa: PLC0415
+    from ..video import run_video_processing_pipeline  # noqa: PLC0415
 
     run_video_processing_pipeline(
         session_path=session_path,
         job_id=job_id,
         workers=workers,
         display_progress=progress,
-    )
-
-
-@process_cli.command("activity")
-@click.option(
-    "-i",
-    "--configuration",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help="The path to the cindra single-recording configuration file describing the recording to process.",
-)
-@_SESSION_PATH_OPTION
-@_JOB_ID_OPTION
-@click.option("-b", "--binarize", is_flag=True, default=False, help="Run the binarization stage.")
-@click.option(
-    "-p", "--process", "process_stage", is_flag=True, default=False, help="Run the per-plane processing stage."
-)
-@click.option("-c", "--combine", is_flag=True, default=False, help="Run the multi-plane combination stage.")
-@click.option(
-    "-t",
-    "--target-plane",
-    type=int,
-    default=-1,
-    show_default=True,
-    help="The imaging plane to process when running the processing stage. Set to -1 to process all planes.",
-)
-def activity_command(
-    configuration: Path,
-    session_path: Path,
-    job_id: str | None,
-    target_plane: int,
-    *,
-    binarize: bool,
-    process_stage: bool,
-    combine: bool,
-) -> None:
-    """Runs the single-recording cell-activity processing pipeline for the configured recording.
-
-    When no stage flag is passed, all stages run in sequence (a full local single-recording pipeline). Passing
-    individual stage flags runs only the requested stages, mirroring the remote per-plane job decomposition. The
-    acquisition system is inferred from the session the recording belongs to.
-    """
-    run_pipeline = resolve_local_pipeline(
-        infer_system_from_session(session_path), ProcessingPipelines.CINDRA_SINGLE_RECORDING
-    )
-    run_pipeline(
-        configuration_path=configuration,
-        job_id=job_id,
-        binarize=binarize,
-        process=process_stage,
-        combine=combine,
-        target_plane=target_plane,
     )
