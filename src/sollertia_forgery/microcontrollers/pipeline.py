@@ -24,8 +24,14 @@ from ataraxis_communication_interface.microcontroller import (
 )
 
 from ..registries import resolve_microcontroller_parsers
-from ..shared_assets import prepare_tracker
-from ..shared_assets import partition_events, find_module_feathers, parse_module_feather_name
+from ..shared_assets import (
+    LOG_ARCHIVE_SUFFIX,
+    tracked_job,
+    prepare_tracker,
+    partition_events,
+    find_module_feathers,
+    parse_module_feather_name,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,11 +49,6 @@ PARSE_JOB_NAME: str = "module_parsing"
 """The job name identifying per-module parsing jobs in the microcontroller processing tracker. Stage 1 extraction
 jobs reuse the acquisition library's own extraction job name so their tracker identifiers match the binding that
 records their state."""
-
-_LOG_ARCHIVE_SUFFIX: str = "_log.npz"
-"""The naming suffix of the raw controller log archives produced by the acquisition DataLogger. Matches the
-ataraxis-communication-interface ``LOG_ARCHIVE_SUFFIX`` convention; each archive is named
-``{controller_id}_log.npz``."""
 
 
 def run_microcontroller_processing_pipeline(
@@ -257,7 +258,7 @@ def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | 
     """
     if not log_directory.is_dir():
         return None
-    matches = natsorted(log_directory.rglob(f"{controller_id}{_LOG_ARCHIVE_SUFFIX}"))
+    matches = natsorted(log_directory.rglob(f"{controller_id}{LOG_ARCHIVE_SUFFIX}"))
     return matches[0] if matches else None
 
 
@@ -539,18 +540,13 @@ def _execute_parse_jobs_sequential(
         for specifier, (feather_path, module_parser) in runnable.items():
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
-            tracker.start_job(job_id=job_id)
-            try:
+            with tracked_job(tracker=tracker, job_id=job_id):
                 _run_parse(
                     feather_path=feather_path,
                     module_parser=module_parser,
                     output_directory=parse_output,
                     session=session,
                 )
-                tracker.complete_job(job_id=job_id)
-            except Exception as exception:
-                tracker.fail_job(job_id=job_id, error_message=str(exception))
-                raise
             if progress_bar is not None:
                 progress_bar.update(1)
 

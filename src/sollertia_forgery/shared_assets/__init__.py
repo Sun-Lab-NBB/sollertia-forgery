@@ -2,8 +2,9 @@
 job-registry alignment helper, microcontroller feather primitives, and terminal utilities.
 """
 
-from .tracking import prepare_tracker
+from .tracking import tracked_job, prepare_tracker
 from .utilities import delay_timer, delay_terminal
+from .datalogger import LOG_ARCHIVE_SUFFIX
 from .microcontroller import (
     get_event_data,
     partition_events,
@@ -14,6 +15,7 @@ from .microcontroller import (
 )
 
 __all__ = [
+    "LOG_ARCHIVE_SUFFIX",
     "delay_terminal",
     "delay_timer",
     "find_module_feathers",
@@ -23,4 +25,5 @@ __all__ = [
     "parse_module_feather_name",
     "partition_events",
     "prepare_tracker",
+    "tracked_job",
 ]

@@ -35,7 +35,7 @@ from ataraxis_data_structures import ProcessingTracker
 
 from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker
-from ..shared_assets import prepare_tracker
+from ..shared_assets import tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -364,8 +364,7 @@ def _execute_job(
         worker: The registered per-session assembly worker.
     """
     console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
-    tracker.start_job(job_id=job_id)
-    try:
+    with tracked_job(tracker=tracker, job_id=job_id):
         session_metadata = session_lookup[session_name]
         source_session_path = project_root.joinpath(session_metadata.animal, session_name)
         _forge_session(
@@ -374,11 +373,7 @@ def _execute_job(
             dataset_name=dataset_name,
             worker=worker,
         )
-        tracker.complete_job(job_id=job_id)
-        console.echo(message=f"Session '{session_name}' data assembly: Complete.", level=LogLevel.SUCCESS)
-    except Exception as exception:
-        tracker.fail_job(job_id=job_id, error_message=str(exception))
-        raise
+    console.echo(message=f"Session '{session_name}' data assembly: Complete.", level=LogLevel.SUCCESS)
 
 
 def _forge_session(

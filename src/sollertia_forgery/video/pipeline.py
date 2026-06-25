@@ -15,7 +15,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_video_system.video import TIMESTAMP_JOB_NAME, execute_job
 
-from ..shared_assets import prepare_tracker
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,10 +23,6 @@ if TYPE_CHECKING:
 RENAME_JOB_NAME: str = "camera_timestamp_rename"
 """The job name used to identify the single timestamp renaming job (stage 2) in the camera processing tracker. The
 job uses an empty specifier because it publishes every camera's parsed feather in one pass."""
-
-_RAW_CAMERA_LOG_PATTERN: str = "*_log.npz"
-"""The glob pattern used to discover raw VideoSystem camera log archives. Each archive is named
-``{source_id}_log.npz``, matching the DataLogger source-ID naming convention shared across the Sollertia stack."""
 
 _RAW_CAMERA_LOG_PART_COUNT: int = 2
 """The expected number of underscore-delimited components in a ``{source_id}_log`` archive stem."""
@@ -263,7 +259,7 @@ def _find_camera_logs(data_directory: Path) -> list[Path]:
     """
     if not data_directory.is_dir():
         return []
-    return natsorted(data_directory.glob(_RAW_CAMERA_LOG_PATTERN))
+    return natsorted(data_directory.glob(f"*{LOG_ARCHIVE_SUFFIX}"))
 
 
 def _extract_camera_source_id(log_path: Path) -> int:
@@ -371,9 +367,7 @@ def _link_parsed_timestamps(
         job_id: The unique hexadecimal identifier for the rename job.
         tracker: The camera ProcessingTracker instance for recording job state transitions.
     """
-    tracker.start_job(job_id=job_id)
-
-    try:
+    with tracked_job(tracker=tracker, job_id=job_id):
         published = 0
         for source_id, output_name in output_names.items():
             parsed_path = timestamps_directory.joinpath(_PARSED_TIMESTAMP_TEMPLATE.format(source_id=source_id))
@@ -389,7 +383,3 @@ def _link_parsed_timestamps(
                 shutil.copy2(parsed_path, canonical_path)
             published += 1
         console.echo(message=f"Published {published} parsed camera timestamp feather(s) under their canonical names.")
-        tracker.complete_job(job_id=job_id)
-    except Exception as exception:
-        tracker.fail_job(job_id=job_id, error_message=str(exception))
-        raise

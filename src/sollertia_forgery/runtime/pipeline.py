@@ -16,7 +16,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
 
 from ..registries import resolve_runtime_binding
-from ..shared_assets import prepare_tracker
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -33,11 +33,6 @@ RUNTIME_JOB_NAME: str = "runtime_processing"
 """The job name identifying the runtime processing job in the behavior processing tracker. The string matches the
 runtime job name used by the legacy combined behavior pipeline, so the job identifier this pipeline derives aligns
 with the binding that records its state."""
-
-_LOG_ARCHIVE_SUFFIX: str = "_log.npz"
-"""The naming suffix of the raw runtime log archive produced by the acquisition DataLogger. Matches the DataLogger
-``{source_id}_log.npz`` convention shared across the Sollertia stack; the runtime source id is donated per acquisition
-system through the registry."""
 
 
 def run_runtime_processing_pipeline(
@@ -100,7 +95,7 @@ def run_runtime_processing_pipeline(
     if archive_path is None:
         message = (
             f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
-            f"'{source_id}{_LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
+            f"'{source_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
             f"one archive per session under its fixed source id."
         )
         console.error(message=message, error=FileNotFoundError)
@@ -122,16 +117,11 @@ def run_runtime_processing_pipeline(
     prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
-    tracker.start_job(job_id=job_identifier)
-    try:
+    with tracked_job(tracker=tracker, job_id=job_identifier):
         decoded_messages = _decode_archive(
             archive_path=archive_path, workers=workers, display_progress=display_progress
         )
         parser(decoded_messages, output_directory, session)
-        tracker.complete_job(job_id=job_identifier)
-    except Exception as exception:
-        tracker.fail_job(job_id=job_identifier, error_message=str(exception))
-        raise
 
     console.echo(
         message=f"Runtime processing for session '{session.session_name}' completed successfully.",
@@ -156,7 +146,7 @@ def _find_runtime_archive(log_directory: Path, source_id: str) -> Path | None:
     """
     if not log_directory.is_dir():
         return None
-    archive_path = log_directory.joinpath(f"{source_id}{_LOG_ARCHIVE_SUFFIX}")
+    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
     return archive_path if archive_path.is_file() else None
 
 

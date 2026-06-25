@@ -1,9 +1,17 @@
-"""Provides the processing-tracker job-registry alignment helper shared across library pipelines."""
+"""Provides the processing-tracker job-registry alignment helper and the tracked-job execution envelope shared
+across library pipelines.
+"""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+from contextlib import contextmanager
+
 from ataraxis_base_utilities import LogLevel, console
 from ataraxis_data_structures import ProcessingTracker
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]], universe: list[tuple[str, str]]) -> None:
@@ -56,3 +64,40 @@ def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]], uni
 
     if not requested_ids.issubset(existing_ids):
         tracker.initialize_jobs(jobs=jobs)
+
+
+@contextmanager
+def tracked_job(tracker: ProcessingTracker, job_id: str) -> Iterator[None]:
+    """Runs a single tracked processing job, recording its start, completion, or failure on the processing tracker.
+
+    Notes:
+        This is the library's system-agnostic equivalent of the acquisition libraries' ``execute_job`` bindings
+        (such as ataraxis-video-system's and ataraxis-communication-interface's): it owns the tracker state machine
+        (start, then complete on success or fail on error) while leaving the job's actual work to the caller. Those
+        donor bindings expose this envelope as a callable because each wraps a single library entry point; the
+        library's own pipeline stages run multi-statement bodies, so the envelope is a context manager that keeps the
+        work visible at the call site rather than hidden behind a dispatched callable::
+
+            with tracked_job(tracker=tracker, job_id=job_id):
+                ...  # run the stage's work
+
+        The job is marked complete only when the wrapped block returns normally. Any exception raised inside the block
+        marks the job failed (recording the exception's message) and is re-raised unchanged, so each caller's
+        fail-fast behavior and error propagation are preserved exactly as if the transitions were inlined.
+
+    Args:
+        tracker: The processing tracker that records this job's state transitions.
+        job_id: The unique hexadecimal identifier of the job to run, as produced by
+            ``ProcessingTracker.generate_job_id``.
+
+    Raises:
+        Exception: Re-raises any exception raised inside the wrapped block, after marking the job failed.
+    """
+    tracker.start_job(job_id=job_id)
+    try:
+        yield
+    except Exception as exception:
+        tracker.fail_job(job_id=job_id, error_message=str(exception))
+        raise
+    else:
+        tracker.complete_job(job_id=job_id)
