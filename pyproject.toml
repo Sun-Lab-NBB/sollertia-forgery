@@ -242,7 +242,6 @@ root_package = "sollertia_forgery"
 name = "Acquisition-system packages are reached only through the registry hub"
 type = "forbidden"
 source_modules = [
-    "sollertia_forgery.pipelines",
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",

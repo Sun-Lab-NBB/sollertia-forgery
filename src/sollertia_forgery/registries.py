@@ -5,8 +5,9 @@ library. It is the only module that imports the per-system subpackages (``mesosc
 binds their donated assets (microcontroller module parsers, the runtime log parser, and the per-session forging
 data-assembly worker) into the dispatch registries, so the system-agnostic worker packages and the interface layer
 never import a system subpackage directly; they resolve a system's assets through the ``resolve_*`` helpers below. The
-keying enumerations live in the leaf ``pipelines`` module and in sollertia-shared-assets, which keeps this module
-importable by every registry consumer without circular imports.
+registries are keyed by acquisition system (from sollertia-shared-assets) and, for microcontroller parsers, by
+hardware ``(module type, module id)``, which keeps this module importable by every registry consumer without circular
+imports.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from typing import TYPE_CHECKING
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems
 
-from .pipelines import ProcessingPipelines
 from .mesoscope_vr import assemble_mesoscope_session
 from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .mesoscope_vr.microcontrollers import (
@@ -34,38 +34,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
-    "AGNOSTIC_PIPELINES",
     "FORGING_ASSEMBLY_REGISTRY",
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
-    "SYSTEM_PIPELINES",
     "resolve_forging_assembly_worker",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
 ]
 
-
-AGNOSTIC_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
-    {
-        ProcessingPipelines.MANIFEST,
-        ProcessingPipelines.CHECKSUM,
-        ProcessingPipelines.FORGING,
-    }
-)
-"""The pipelines that are platform-wide rather than acquisition-system-specific. Their entry points live in the
-system-agnostic processing layer (the ``managing`` layer for manifest and checksum, the ``forging`` package for
-forging) and are invoked directly by the interface. The forging pipeline still resolves a system-specific data-assembly
-worker, but it does so through its own ``FORGING_ASSEMBLY_REGISTRY`` keyed by acquisition system."""
-
-SYSTEM_PIPELINES: dict[AcquisitionSystems, frozenset[ProcessingPipelines]] = {
-    AcquisitionSystems.MESOSCOPE_VR: frozenset(),
-}
-"""Maps each acquisition system to the set of system-specific pipelines it dispatches through the remote compute
-server. Every per-asset processing pipeline (microcontroller, runtime, video, two-photon) is now owned by a
-system-agnostic worker package that resolves the system's donated assets through the registries below, so no
-acquisition system declares a system-specific dispatched pipeline; the set is empty. The structure is retained so the
-import-time checks verify the pipeline partition and so a future system can declare a genuinely system-specific
-pipeline here."""
 
 MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Callable[..., None]] = {
     (AcquisitionSystems.MESOSCOPE_VR, 1, 1): parse_mesoscope_frame,
@@ -192,27 +168,26 @@ def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, Call
 
 
 def _assert_registry_coverage() -> None:
-    """Verifies at import time that every acquisition system is fully wired into the dispatch registries.
+    """Verifies at import time that every acquisition system has registered every donated asset.
 
-    Confirms that every ``AcquisitionSystems`` member declares its pipelines in ``SYSTEM_PIPELINES`` and has an entry
-    in the forging-assembly registry and the runtime-parser registry, and that ``SYSTEM_PIPELINES`` together with
-    ``AGNOSTIC_PIPELINES`` covers exactly the ``ProcessingPipelines`` enum. With a single acquisition system these
-    checks are structural scaffolding that enforces full wiring; they begin catching cross-system gaps once a second
-    system is added.
+    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry and the
+    runtime-parser registry, and registers at least one microcontroller module parser. With a single acquisition
+    system these checks are structural scaffolding that enforces full wiring; they begin catching cross-system gaps
+    once a second system is added.
 
     Raises:
-        RuntimeError: If any acquisition system is missing from a registry or if the pipeline partition does not cover
-            the ``ProcessingPipelines`` enum. The error names the offending members so extenders can immediately locate
-            the unwired touch point.
+        RuntimeError: If any acquisition system is missing from a donor registry. The error names the offending
+            members so extenders can immediately locate the unwired touch point.
     """
     systems = frozenset(AcquisitionSystems)
+    microcontroller_systems = frozenset(system for system, _, _ in MICROCONTROLLER_PARSER_REGISTRY)
 
-    for registry_name, registry in (
-        ("SYSTEM_PIPELINES", SYSTEM_PIPELINES),
-        ("FORGING_ASSEMBLY_REGISTRY", FORGING_ASSEMBLY_REGISTRY),
-        ("RUNTIME_PARSER_REGISTRY", RUNTIME_PARSER_REGISTRY),
+    for registry_name, registered_systems in (
+        ("FORGING_ASSEMBLY_REGISTRY", frozenset(FORGING_ASSEMBLY_REGISTRY)),
+        ("RUNTIME_PARSER_REGISTRY", frozenset(RUNTIME_PARSER_REGISTRY)),
+        ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
-        missing = systems - frozenset(registry)
+        missing = systems - registered_systems
         if missing:
             missing_names = ", ".join(sorted(member.name for member in missing))
             message = (
@@ -220,17 +195,6 @@ def _assert_registry_coverage() -> None:
                 f"donated processing and forging assets. See the README's 'Adding New Acquisition Systems' section."
             )
             console.error(message=message, error=RuntimeError)
-
-    claimed = frozenset().union(*SYSTEM_PIPELINES.values()) if SYSTEM_PIPELINES else frozenset()
-    covered = claimed | AGNOSTIC_PIPELINES
-    uncovered = frozenset(ProcessingPipelines) - covered
-    if uncovered:
-        uncovered_names = ", ".join(sorted(member.name for member in uncovered))
-        message = (
-            f"The pipeline partition does not cover {uncovered_names}. Every ProcessingPipelines member must be "
-            f"either declared in SYSTEM_PIPELINES for at least one acquisition system or listed in AGNOSTIC_PIPELINES."
-        )
-        console.error(message=message, error=RuntimeError)
 
 
 _assert_registry_coverage()
