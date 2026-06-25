@@ -1,5 +1,5 @@
 """Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and DatasetColumn enumerations and the
-per-session SessionDataFormat schema descriptor written by the forging pipeline.
+per-session SessionDataFormat schema descriptor written by the Mesoscope-VR forging assembly worker.
 """
 
 from __future__ import annotations
@@ -11,19 +11,17 @@ from ataraxis_data_structures import YamlConfig
 
 DATA_FORMAT_FILE: str = "data_format.yaml"
 """The canonical filename of the per-session data-format descriptor written alongside ``data.feather`` by the
-Mesoscope-VR forging assembly worker. The descriptor is system-specific: it is named and produced by the donating
-acquisition-system package, not by the agnostic forging pipeline."""
+Mesoscope-VR forging assembly worker."""
 
 
 class BehaviorDataFiles(StrEnum):
     """Enumerates the canonical filenames of the behavior feather files written into the session's
-    ``processed_data/behavior_data`` directory by the Mesoscope-VR processing pipeline and consumed by the
-    Mesoscope-VR dataset forging pipeline.
+    ``processed_data/behavior_data`` directory by the donated Mesoscope-VR parsers and read back by the donated
+    assembly worker.
 
     Notes:
-        This is the contract between the Mesoscope-VR processing and forging assets: the processing pipeline writes
-        each file under these exact names, and the forging pipeline reads them back by the same names. All entries
-        are forgery-internal and must not be referenced from outside the library.
+        These names are the file-naming contract shared between the donated parsers (writers) and the assembly worker
+        (reader); all entries are forgery-internal and must not be referenced from outside the library.
     """
 
     ENCODER = "encoder_data.feather"
@@ -66,9 +64,11 @@ class DatasetColumn(StrEnum):
     """Defines every column that can appear in the assembled session data feather produced by the forging pipeline.
 
     Notes:
-        Members covering optional columns (`REINFORCING_GUIDED`, `AVERSIVE_GUIDED`) are present in the feather only
-        when the corresponding upstream events were recorded. All other members are guaranteed to exist in every
-        forged session.
+        Several columns are conditional: ``REINFORCING_GUIDED`` and ``AVERSIVE_GUIDED`` are present only when the
+        corresponding guidance events were recorded; ``BRAKE`` and ``SCREENS`` only for mesoscope experiments;
+        ``TORQUE_N_CM`` is absent for run training; and ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
+        training.
+        The remaining members are present in every forged session.
     """
 
     # Behavior alignment columns (from forging behavior assembly).
@@ -77,15 +77,16 @@ class DatasetColumn(StrEnum):
     ELAPSED_MINUTES = "elapsed_minutes"
     """Elapsed session time in minutes since the first sample."""
     BRAKE = "brake"
-    """Wheel brake engagement at each sample."""
+    """Optional. Wheel brake engagement at each sample. Present only for mesoscope experiments."""
     SCREENS = "screens"
-    """Display panel state at each sample."""
+    """Optional. Display panel state at each sample. Present only for mesoscope experiments."""
     TORQUE_N_CM = "torque_N_cm"
-    """Wheel torque in N·cm at each sample. Forced to zero during 'run' periods upstream."""
+    """Optional. Wheel torque in N·cm at each sample, forced to zero during 'run' periods upstream. Absent for run
+    training."""
     DISTANCE_CM = "distance_cm"
-    """Cumulative distance traveled by the animal in centimeters at each sample."""
+    """Optional. Cumulative distance traveled by the animal in centimeters at each sample. Absent for lick training."""
     SPEED_CM_S = "speed_cm_s"
-    """Animal running speed in cm/s at each sample."""
+    """Optional. Animal running speed in cm/s at each sample. Absent for lick training."""
     LICK = "lick"
     """Lick sensor state at each sample."""
     WATER_UL = "water_uL"
@@ -101,7 +102,7 @@ class DatasetColumn(StrEnum):
     TRIAL_TYPE = "trial_type"
     """Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."""
     CUE = "cue"
-    """Active virtual reality cue identifier at each sample."""
+    """Active virtual reality cue identifier at each sample. 255 marks samples outside the run state."""
     IN_TRIGGER_ZONE = "in_trigger_zone"
     """Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."""
     RUNTIME_STATE = "runtime_state"
@@ -135,11 +136,8 @@ class SessionDataFormat(YamlConfig):
     """Describes the schema of a forged session's ``data.feather``, written alongside it as ``data_format.yaml``.
 
     Notes:
-        This is the per-session, system-specific data-format descriptor the Mesoscope-VR forging assembly worker
-        donates to the dataset (the agnostic forging pipeline never names or interprets it). It records the ordered
-        column-name-to-dtype mapping of the assembled feather so downstream consumers can introspect the columns that
-        are present in a given session (which varies, for example, when optional guidance columns were not recorded)
-        without reading the feather itself. The ``DatasetColumn`` enumeration documents the meaning of each column.
+        Records the ordered column-name-to-dtype mapping of the assembled feather (the set of present columns varies
+        per session). See ``DatasetColumn`` for the meaning of each column.
     """
 
     columns: dict[str, str] = field(default_factory=dict)

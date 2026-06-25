@@ -36,33 +36,27 @@ _SCAN_PULSE_TOLERANCE_MS: int = 20
 """The tolerance, in milliseconds, applied around the expected scan pulse duration when filtering logged pulses."""
 
 _FRAME_VARIANT_METADATA_FILENAME: str = "frame_variant_metadata.npz"
-"""The filename of the ScanImage per-frame metadata archive written into each session's raw mesoscope_data
-directory by the sollertia-experiment preprocessing pipeline. Stores one entry per acquired TIFF frame and is
-used by the ScanImage-based fallback alignment path."""
+"""The filename of the ScanImage per-frame metadata archive (one entry per acquired TIFF frame) in each session's
+raw mesoscope_data directory."""
 
 _SI_FRAME_NUMBER_KEY: str = "frameNumberAcquisition"
-"""The key name of the strictly monotonic per-frame counter inside the ScanImage frame_variant_metadata archive.
-The archive is stored in TIFF-page concatenation order, which can interleave frames across stack files, so this
-counter is used to recover the chronological frame ordering before timestamps are read."""
+"""The key name of the strictly monotonic per-frame counter inside the ScanImage frame_variant_metadata archive."""
 
 _SI_FRAME_TIMESTAMP_KEY: str = "frameTimestamps_sec"
 """The key name of the per-frame ScanImage clock timestamps (seconds) inside the frame_variant_metadata archive."""
 
 _SI_MATCH_TOLERANCE_US: int = 50_000
 """The tolerance, in microseconds, applied when matching microcontroller-logged TTL pulse rising edges to
-ScanImage-recorded frame timestamps in the fallback alignment path. Set generously to absorb both pulse-edge
-jitter and the small clock drift between ScanImage and the microcontroller, observed in production data up to
-~15 ms over a one-hour session."""
+ScanImage-recorded frame timestamps in the fallback alignment path."""
 
 _SI_ANCHOR_SEARCH_LIMIT: int = 10
-"""The maximum number of leading TTL pulses considered as candidate anchors when estimating the clock offset
-between ScanImage and the microcontroller in the fallback alignment path. Front-of-session noise is typically
-two short pulses, so the default leaves headroom for unusual setups."""
+"""The maximum number of leading TTL pulses considered as candidate clock-offset anchors in the fallback alignment
+path."""
 
 
 class FluorescenceColumn(StrEnum):
-    """Defines the neuropil-subtracted, baseline-corrected dF/F0 fluorescence columns produced by the forging
-    pipeline.
+    """Defines the neuropil-subtracted, baseline-corrected dF/F0 fluorescence columns produced by the Mesoscope-VR
+    data-assembly worker.
     """
 
     SINGLE_DAY_SUBTRACTED = "single_day_subtracted_fluorescence"
@@ -92,6 +86,11 @@ def assemble_cindra_dataset(
 
     Returns:
         The Polars DataFrame that contains the assembled single-recording and multi-recording cell fluorescence data.
+
+    Raises:
+        ValueError: If the ScanImage-based fallback alignment is triggered and the per-frame metadata archive is
+            missing, its frame count disagrees with the cindra frame count, or the produced alignment does not
+            contain exactly the expected number of rows.
     """
     # Queries the number of frames processed by cindra via a memory-mapped header read. This handles rare cases where
     # the log has more frame stamps than recorded frames (typically when the user manually triggers mesoscope scanning
@@ -112,7 +111,8 @@ def assemble_cindra_dataset(
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during the
     # session's data acquisition.
     mesoscope_frame_data = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.MESOSCOPE_FRAME), memory_map=True
+        source=behavior_data_path.joinpath(BehaviorDataFiles.MESOSCOPE_FRAME),
+        memory_map=True,
     )
 
     # Sorts by time to ensure the correct order and computes TTL state transitions once.
@@ -128,10 +128,12 @@ def assemble_cindra_dataset(
     # backward_fill over groups). Pulses missing either edge are excluded by the inner join, matching the prior
     # is_not_null filter on pulse duration.
     rising_edges = mesoscope_frame_data.filter(pl.col("ttl_diff") == 1).select(
-        "pulse_id", pl.col("time_us").alias("pulse_start")
+        "pulse_id",
+        pl.col("time_us").alias("pulse_start"),
     )
     falling_edges = mesoscope_frame_data.filter(pl.col("ttl_diff") == -1).select(
-        "pulse_id", pl.col("time_us").alias("pulse_end")
+        "pulse_id",
+        pl.col("time_us").alias("pulse_end"),
     )
 
     # Builds the chronologically-ordered table of paired pulses with a duration column. The unfiltered table is
@@ -158,7 +160,7 @@ def assemble_cindra_dataset(
     # When the log has more in-window pulses than the cindra fluorescence frame count, the front of the log is
     # clipped because aberrant frames must come from a period before the main experiment runtime. When the log has
     # fewer in-window pulses than the cindra frame count, the duration filter has rejected real frames whose TTL
-    # signal briefly fell outside the tolerance window — the ScanImage-based fallback recovers them by matching
+    # signal briefly fell outside the tolerance window. The ScanImage-based fallback recovers them by matching
     # each logged TTL rising edge to its nearest ScanImage-recorded frame timestamp.
     if len(frame_aligned_data) > frames:
         frame_aligned_data = frame_aligned_data.tail(frames)
@@ -247,13 +249,7 @@ def _align_pulses_to_scanimage(
     archive. This is the fallback path used when the duration-tolerance filter on TTL pulses produces fewer rows
     than the cindra fluorescence frame count.
 
-    The mesoscope hardware can briefly hold a TTL signal outside the expected pulse-duration window even when the
-    corresponding scan was acquired (typically when one frame's TTL is delayed and clips the next frame's TTL
-    onset). ScanImage writes one entry per acquired TIFF to ``frame_variant_metadata.npz``, so its per-frame
-    timestamps are the authoritative record of which TTL rising edges correspond to real frames. Pulses that do
-    not match any ScanImage frame within the configured tolerance window are dropped as electrical noise, which
-    is typically clustered at the session's start (mesoscope arming glitches) and end (extra emissions after
-    ScanImage stopped acquiring).
+    Pulses with no ScanImage frame inside the tolerance window are dropped as noise.
 
     Args:
         paired_pulses: The DataFrame of unfiltered paired rising/falling TTL edges with the columns ``pulse_id``,

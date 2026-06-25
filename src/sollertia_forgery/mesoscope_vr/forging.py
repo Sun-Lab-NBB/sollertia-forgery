@@ -1,15 +1,11 @@
 """Provides the Mesoscope-VR data-assembly worker donated to the system-agnostic forging pipeline.
 
 Notes:
-    This module's sole public entry point, ``assemble_mesoscope_session``, is the system-specific "data assembly"
-    asset the Mesoscope-VR package contributes to the central ``FORGING_ASSEMBLY_REGISTRY``. The agnostic forging
-    pipeline (``sollertia_forgery.forging``) resolves this worker by the session's acquisition system and invokes it
-    once per session inside its worker pool to produce that session's ``data.feather`` together with the
-    system-specific ``data_format.yaml`` schema descriptor. The pipeline owns dataset definition, the optional cindra
-    multi-day stage, all job/tracker orchestration, and the re-export of shared assets (the VR configuration and the
-    session descriptor); this worker owns only the assembly of the Mesoscope-VR data. It therefore imports nothing
-    from the agnostic ``forging`` package: the dependency is strictly one-way, from the pipeline to the donated
-    worker, so a system package never reaches back into an agnostic processor.
+    This module's sole public entry point, ``assemble_mesoscope_session``, is the Mesoscope-VR "data assembly" asset
+    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``; the agnostic forging pipeline resolves it by acquisition
+    system and invokes it once per session to produce that session's ``data.feather`` and ``data_format.yaml``
+    descriptor. The pipeline owns dataset definition, the cindra multi-day stage, tracker orchestration, and
+    shared-asset re-export; this worker owns only the assembly of the Mesoscope-VR data.
 """
 
 from __future__ import annotations
@@ -39,20 +35,14 @@ if TYPE_CHECKING:
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
     """Assembles a single Mesoscope-VR session's unified data feather and writes its data-format descriptor.
 
-    Extracts, post-processes, and combines the session's fluorescence, behavior, and runtime sub-datasets into a
-    single, time-aligned Polars DataFrame and saves it to an uncompressed ``data.feather`` at ``output_path``. The
-    fluorescence sub-dataset is assembled first because it produces the reference time vector that the behavior and
-    runtime sub-datasets align to; behavior and runtime are then assembled in parallel and concatenated horizontally
-    with the fluorescence data. Cue, trial, and trial-type columns are masked for non-run experiment states. After
-    writing the feather, the system-specific ``data_format.yaml`` schema descriptor is written alongside it.
+    Combines the session's fluorescence, behavior, and runtime sub-datasets into a single time-aligned Polars
+    DataFrame, written as an uncompressed ``data.feather`` at ``output_path`` with the ``data_format.yaml`` schema
+    descriptor alongside it. The fluorescence sub-dataset is assembled first because its ``time_us`` column is the
+    reference clock the behavior and runtime sub-datasets align to.
 
     Notes:
-        This is the atomic unit of work the agnostic forging pipeline dispatches to its worker pool, so it is a
-        module-level function accepting only picklable arguments. It performs pure computation and writes its
-        outputs; the calling pipeline owns the processing-tracker state transitions and the re-export of shared
-        assets (the VR configuration and the session descriptor). The worker validates and assembles only the data
-        the Mesoscope-VR system produces, so it implicitly requires a fully processed mesoscope experiment session
-        (the experiment configuration and the single- and multi-recording cindra outputs must be present on disk).
+        Requires a fully processed mesoscope experiment session: the experiment configuration and the single- and
+        multi-recording cindra outputs must be present on disk.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
@@ -64,6 +54,8 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     Raises:
         FileNotFoundError: If the session's processed behavior data directory or single-recording cindra output
             directory is missing.
+        ValueError: If a sub-dataset cannot be assembled (for example, the ScanImage fallback alignment cannot
+            recover the expected frame count, or a required hardware-state field is missing).
     """
     session = SessionData.load(session_path=source_session_path)
 

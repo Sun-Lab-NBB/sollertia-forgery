@@ -1,14 +1,10 @@
 """Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline.
 
 Notes:
-    This module's sole public entry point, ``parse_runtime``, is the system-specific runtime parser the Mesoscope-VR
-    package contributes to the central ``RUNTIME_PARSER_REGISTRY`` (paired with ``RUNTIME_SOURCE_ID``, the DataLogger
-    source id that locates the runtime archive). The agnostic runtime pipeline (``sollertia_forgery.runtime``) decodes
-    the runtime DataLogger archive into a raw ``(time_us, payload)`` message table and dispatches this parser, which
-    interprets the system-specific payloads into the session's behavior feathers (system and runtime state, guidance
-    states, and the experiment-only VR cue, trigger-zone, and per-trial data). The pipeline owns archive discovery,
-    decoding, and tracker orchestration; this module owns only the payload interpretation, so the dependency is
-    strictly one-way and this module imports nothing from the agnostic ``runtime`` package.
+    This module's sole public entry point, ``parse_runtime``, is the Mesoscope-VR runtime parser contributed to the
+    central ``RUNTIME_PARSER_REGISTRY`` (paired with ``RUNTIME_SOURCE_ID``, the DataLogger source id that locates the
+    runtime archive). It interprets the decoded runtime payloads into the session's behavior feathers: system and
+    runtime state, guidance states, and the experiment-only VR cue, trigger-zone, and per-trial data.
 """
 
 from __future__ import annotations
@@ -36,11 +32,10 @@ if TYPE_CHECKING:
 
 RUNTIME_SOURCE_ID: str = "1"
 """The source ID used by the Mesoscope-VR runtime DataLogger for its log archive. Every processable session
-contains exactly one runtime archive, and it always uses this ID. The agnostic runtime pipeline pairs this id with
-``parse_runtime`` in the ``RUNTIME_PARSER_REGISTRY`` to locate and interpret the archive."""
+contains exactly one runtime archive, and it always uses this ID."""
 
 _CUE_SEQUENCE_MIN_LENGTH: int = 500
-"""The minimum length, in bytes, of a valid VR wall cue sequence message."""
+"""The exclusive byte-length threshold above which a runtime payload is treated as a VR wall cue sequence message."""
 
 _SYSTEM_STATE_CODE: int = 1
 """The message code for VR system state data."""
@@ -57,22 +52,27 @@ _AVERSIVE_GUIDANCE_STATE_CODE: int = 4
 _DISTANCE_SNAPSHOT_CODE: int = 5
 """The message code for distance snapshot data logged when VR wall cue sequence changes."""
 
+_ERROR_CONTEXT_CUE_COUNT: int = 20
+"""The number of subsequent cues included in the error context when a cue sequence fails to decompose."""
+
 
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None:
     """Parses the decoded Mesoscope-VR runtime archive into the session's runtime behavior feathers.
 
     Notes:
-        This is the system-specific runtime parser wired into the central ``RUNTIME_PARSER_REGISTRY``. The agnostic
-        runtime pipeline decodes the runtime DataLogger archive into a raw ``(time_us, payload)`` table and dispatches
-        this function with the session, from which the experiment configuration is resolved (experiment sessions only).
-        It reconstructs each message's payload bytes into a uint8 array, routes each payload by its leading code, and
-        exports the resulting behavior feathers.
+        Routes each decoded payload by its leading code (or by length for VR wall cue sequences) and writes the
+        resulting behavior feathers; the experiment-only feathers are written only for experiment sessions.
 
     Args:
         decoded_messages: The decoded runtime messages as a Polars DataFrame with a ``time_us`` UInt64 column and a
             ``payload`` Binary column, in archive order.
         output_directory: The path to the session's behavior data directory where the runtime feathers are written.
         session: The loaded session, from which the experiment configuration is resolved.
+
+    Raises:
+        FileNotFoundError: If the session is an experiment session but its experiment configuration YAML is missing.
+        ValueError: If the recorded VR wall cue sequences are absent or their distance breakpoints are inconsistent.
+        RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
     experiment_configuration = _resolve_experiment_configuration(session=session)
     messages = (
@@ -94,10 +94,9 @@ def _export_runtime_data(
     """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
 
     Notes:
-        This is the core of ``parse_runtime``. It consumes an iterable of ``(timestamp, payload)`` records sourced
-        from the decoded message table, routes each payload by its leading code (or by length for the VR wall cue
-        sequences), and writes the system-state and runtime-state feathers for every session plus the experiment-only
-        guidance, cue, trigger-zone, and trial feathers when an experiment configuration is supplied.
+        Writes the system-state and runtime-state feathers for every session; for experiment sessions it also writes
+        the cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events
+        were recorded.
 
     Args:
         messages: An iterable of ``(timestamp, payload)`` records, where each payload is a uint8 byte array.
@@ -105,7 +104,6 @@ def _export_runtime_data(
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
     """
-    # Pre-creates the variables used to store extracted data.
     system_states: list[np.uint8] = []
     system_timestamps: list[np.uint64] = []
     runtime_states: list[np.uint8] = []
@@ -144,20 +142,16 @@ def _export_runtime_data(
             traveled_distance = np.float64(distance_bytes.view(dtype="<f8")[0])
             distance_snapshots.append(traveled_distance)
 
-    # Ensures the output directory exists.
     output_directory.mkdir(parents=True, exist_ok=True)
 
-    # Exports system state data.
     system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
     system_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.SYSTEM_STATE, compression="uncompressed")
 
-    # Exports runtime state data.
     runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
     runtime_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.RUNTIME_STATE, compression="uncompressed")
 
     # Exports experiment-specific data only for experiment sessions.
     if experiment_configuration is not None:
-        # Exports reinforcing guidance state data if present.
         if reinforcing_guidance_states:
             reinforcing_dataframe = pl.DataFrame(
                 {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
@@ -166,7 +160,6 @@ def _export_runtime_data(
                 file=output_directory / BehaviorDataFiles.REINFORCING_GUIDANCE, compression="uncompressed"
             )
 
-        # Exports aversive guidance state data if present.
         if aversive_guidance_states:
             aversive_dataframe = pl.DataFrame(
                 {"time_us": aversive_guidance_timestamps, "aversive_guidance_state": aversive_guidance_states}
@@ -189,11 +182,9 @@ def _export_runtime_data(
             trial_distances=trial_distances,
         )
 
-        # Exports VR cue-distance mapping.
         cue_dataframe = pl.DataFrame({"vr_cue": cue_sequence, "traveled_distance_cm": distance_sequence})
         cue_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.VR_CUE, compression="uncompressed")
 
-        # Exports trigger zone boundaries.
         trigger_zone_dataframe = pl.DataFrame(
             {"trigger_zone_start_cm": trigger_start, "trigger_zone_end_cm": trigger_end}
         )
@@ -201,7 +192,6 @@ def _export_runtime_data(
             file=output_directory / BehaviorDataFiles.VR_TRIGGER_ZONE, compression="uncompressed"
         )
 
-        # Exports trial type and start distance data.
         trial_dataframe = pl.DataFrame({"trial_type_index": trial_types, "traveled_distance_cm": trial_start})
         trial_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.TRIAL, compression="uncompressed")
 
@@ -274,11 +264,9 @@ def _decompose_multiple_cue_sequences_into_trials(
         )
         console.error(message=message, error=ValueError)
 
-    # Extracts the list of trial structures supported by the processed experiment runtime.
     trials: list[WaterRewardTrial | GasPuffTrial] = list(experiment_configuration.trial_structures.values())
 
     # Extracts trial motifs and their corresponding distances in centimeters.
-    # noinspection PyTypeChecker
     trial_motifs: list[NDArray[np.uint8]] = [np.asarray(trial.cue_sequence).astype(np.uint8) for trial in trials]
     trial_distances: list[float] = [float(trial.trial_length_cm) for trial in trials]
 
@@ -318,11 +306,11 @@ def _decompose_multiple_cue_sequences_into_trials(
                     break
                 sequence_position += len(trial_motifs[trial_index])
 
-            remaining_sequence = cue_sequence[sequence_position : sequence_position + 20]
+            remaining_sequence = cue_sequence[sequence_position : sequence_position + _ERROR_CONTEXT_CUE_COUNT]
             message = (
                 f"Unable to decompose VR wall cue sequence {sequence_index + 1} of {len(cue_sequences)} into a "
                 f"sequence of trial distances. No trial motif matched at position {sequence_position}. The next "
-                f"20 cues: {remaining_sequence.tolist()}"
+                f"{_ERROR_CONTEXT_CUE_COUNT} cues: {remaining_sequence.tolist()}"
             )
             console.error(message=message, error=RuntimeError)
 
@@ -375,7 +363,7 @@ def _prepare_motif_data(
     """
     # Sorts motifs by length (longest first) for greedy matching optimization.
     motif_data: list[tuple[int, NDArray[np.uint8], int]] = [
-        (i, motif, len(motif)) for i, motif in enumerate(trial_motifs)
+        (index, motif, len(motif)) for index, motif in enumerate(trial_motifs)
     ]
     motif_data.sort(key=lambda x: x[2], reverse=True)
 
@@ -383,20 +371,18 @@ def _prepare_motif_data(
     total_size: int = sum(len(motif) for motif in trial_motifs)
     motif_count: int = len(trial_motifs)
 
-    # Creates arrays with specified dtypes.
     motifs_flat: NDArray[np.uint8] = np.zeros(total_size, dtype=np.uint8).astype(np.uint8)
     motif_starts: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
     motif_lengths: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
     motif_indices: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
 
-    # Fills the arrays with sorted motif data.
     current_position: int = 0
-    for i, (original_index, motif, length) in enumerate(motif_data):
+    for index, (original_index, motif, length) in enumerate(motif_data):
         motif_uint8 = motif.astype(np.uint8) if motif.dtype != np.uint8 else motif
         motifs_flat[current_position : current_position + length] = motif_uint8
-        motif_starts[i] = current_position
-        motif_lengths[i] = length
-        motif_indices[i] = original_index
+        motif_starts[index] = current_position
+        motif_lengths[index] = length
+        motif_indices[index] = original_index
         current_position += length
 
     distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32).astype(np.float32)
@@ -431,18 +417,17 @@ def _decompose_sequence_numba_flat(
         A tuple of two elements. The first element is the array of trial-type indices decoded from the cue
         sequence. The second element is the total number of trials extracted, or -1 if decomposition failed.
     """
-    # noinspection PyTypeChecker
     trial_indices: NDArray[np.int32] = np.zeros(max_trials, dtype=np.int32)
     trial_count = 0
     sequence_position = 0
     sequence_length = len(cue_sequence)
-    num_motifs = len(motif_lengths)
+    motif_count = len(motif_lengths)
 
     # Decomposes the sequence into trial motifs using greedy matching.
     while sequence_position < sequence_length and trial_count < max_trials:
         motif_found = False
 
-        for i in range(num_motifs):
+        for i in range(motif_count):
             motif_length = motif_lengths[i]
 
             if sequence_position + motif_length <= sequence_length:
@@ -492,14 +477,12 @@ def _process_trial_sequence(
         traveled by the animal when it left each trial's trigger zone. The fifth array stores the cumulative
         distance traveled by the animal at the start of each trial.
     """
-    # Extracts the list of trial type objects from experiment configuration data.
     trials: list[WaterRewardTrial | GasPuffTrial] = list(experiment_configuration.trial_structures.values())
 
     # Extracts the cue-to-length mapping and the starting position offset.
     cue_offset = experiment_configuration.cue_offset_cm
     cue_map = {cue.code: cue.length_cm for cue in experiment_configuration.cues}
 
-    # Pre-initializes output lists.
     distances_list: list[np.float64] = []
     cues_list: list[np.uint8] = []
     trigger_zone_starts_list: list[np.float64] = []
@@ -550,11 +533,9 @@ def _process_trial_sequence(
         trigger_end_absolute = previous_trial_end_distance + trigger_end_relative
 
         if trigger_start_absolute <= trial_distances[index]:
-            # noinspection PyTypeChecker
             trigger_zone_starts_list.append(trigger_start_absolute)
 
             if trigger_end_absolute <= trial_distances[index]:
-                # noinspection PyTypeChecker
                 trigger_zone_ends_list.append(trigger_end_absolute)
             else:
                 trigger_zone_ends_list.append(np.float64(trial_distances[index]))

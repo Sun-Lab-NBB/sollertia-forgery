@@ -1,13 +1,9 @@
 """Collects every sollertia-forgery dispatch registry in one place and runs the import-time checks that guard them.
 
-This module is the single canonical surface for wiring an acquisition system's donated processing assets into the
-library. It is the only module that imports the per-system subpackages (``mesoscope_vr`` and its future siblings) and
-binds their donated assets (microcontroller module parsers, the runtime log parser, and the per-session forging
-data-assembly worker) into the dispatch registries, so the system-agnostic worker packages and the interface layer
-never import a system subpackage directly; they resolve a system's assets through the ``resolve_*`` helpers below. The
-registries are keyed by acquisition system (from sollertia-shared-assets) and, for microcontroller parsers, by
-hardware ``(module type, module id)``, which keeps this module importable by every registry consumer without circular
-imports.
+This module binds each acquisition system's donated assets (microcontroller module parsers, the runtime log parser,
+and the per-session forging data-assembly worker) into the dispatch registries and exposes the ``resolve_*`` helpers
+that consumers use to look them up. The registries are keyed by acquisition system (from sollertia-shared-assets) and,
+for microcontroller parsers, by hardware ``(module type, module id)``.
 """
 
 from __future__ import annotations
@@ -55,11 +51,8 @@ MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Calla
 }
 """The single, fully-visible registry of microcontroller module parsers, keyed by ``(acquisition system, module type,
 module id)``. Each value is a plain module-level ``parse(event_partition, output_directory, session)`` function that an
-acquisition-system package implements for one hardware module. The agnostic microcontroller pipeline infers the system
-from the processed session and dispatches the matching function for every extracted module, so a module is parseable
-for a system exactly when it appears here. Per-session hardware eligibility (whether the module's conversion parameters
-were configured for the session) is handled inside each function, which skips silently when its hardware was not
-configured rather than being gated by a separate predicate."""
+acquisition-system package implements for one hardware module; a module is parseable for a system exactly when it
+appears here."""
 
 FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
     AcquisitionSystems.MESOSCOPE_VR: assemble_mesoscope_session,
@@ -67,11 +60,8 @@ FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
 """The single, fully-visible registry of per-session forging data-assembly workers, keyed by acquisition system. Each
 value is a plain module-level ``assemble(source_session_path, output_path, dataset_name)`` function that an
 acquisition-system package implements to assemble one session's ``data.feather`` and its system-specific data-format
-descriptor. The agnostic forging pipeline infers the system from the resolved dataset and dispatches the matching
-worker for every session, so the pipeline itself stays system-agnostic and never names a system-specific type. This is
-the only forging asset a system donates: dataset definition, the optional cindra multi-day stage, all job/tracker
-orchestration, and the re-export of the shared assets (the VR configuration and the session descriptor) are owned by
-the agnostic ``forging`` package."""
+descriptor. This worker is the only forging asset a system donates; dataset definition, the cindra multi-day stage,
+job/tracker orchestration, and shared-asset re-export are owned by the agnostic ``forging`` package."""
 
 RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
@@ -79,35 +69,7 @@ RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]
 """The single, fully-visible registry of runtime log parsers, keyed by acquisition system. Each value pairs the
 system's runtime DataLogger source id (which locates the ``{source_id}_log.npz`` archive) with a plain module-level
 ``parse(decoded_messages, output_directory, session)`` function that interprets the decoded runtime payloads into the
-system's behavior feathers. The agnostic runtime pipeline infers the system from the processed session, decodes the
-archive into a raw ``(time_us, payload)`` table, and dispatches the matching parser, so the pipeline itself stays
-system-agnostic and never names a system-specific type. Per-session eligibility (such as experiment-only data) is
-handled inside the parser, which resolves its own configuration from the session."""
-
-
-def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
-    """Validates and normalizes an acquisition-system identifier to an AcquisitionSystems member.
-
-    Args:
-        system: An AcquisitionSystems member or its string value (e.g., ``"mesoscope-vr"``).
-
-    Returns:
-        The corresponding AcquisitionSystems member.
-
-    Raises:
-        ValueError: If the identifier is not a valid AcquisitionSystems member.
-    """
-    if system not in AcquisitionSystems:
-        valid = ", ".join(member.value for member in AcquisitionSystems)
-        message = (
-            f"Unable to resolve the acquisition system '{system}'. Expected one of the supported AcquisitionSystems "
-            f"members: {valid}."
-        )
-        console.error(message=message, error=ValueError)
-        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        raise ValueError(message)  # pragma: no cover
-
-    return AcquisitionSystems(system)
+system's behavior feathers."""
 
 
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
@@ -167,13 +129,36 @@ def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, Call
     return RUNTIME_PARSER_REGISTRY[_resolve_system(system)]
 
 
+def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
+    """Validates and normalizes an acquisition-system identifier to an AcquisitionSystems member.
+
+    Args:
+        system: An AcquisitionSystems member or its string value (e.g., ``"mesoscope"``).
+
+    Returns:
+        The corresponding AcquisitionSystems member.
+
+    Raises:
+        ValueError: If the identifier is not a valid AcquisitionSystems member.
+    """
+    if system not in AcquisitionSystems:
+        valid = ", ".join(member.value for member in AcquisitionSystems)
+        message = (
+            f"Unable to resolve the acquisition system. The system must be one of the supported AcquisitionSystems "
+            f"members ({valid}), but got '{system}'."
+        )
+        console.error(message=message, error=ValueError)
+        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+        raise ValueError(message)  # pragma: no cover
+
+    return AcquisitionSystems(system)
+
+
 def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry and the
-    runtime-parser registry, and registers at least one microcontroller module parser. With a single acquisition
-    system these checks are structural scaffolding that enforces full wiring; they begin catching cross-system gaps
-    once a second system is added.
+    runtime-parser registry, and registers at least one microcontroller module parser.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry. The error names the offending
@@ -191,8 +176,9 @@ def _assert_registry_coverage() -> None:
         if missing:
             missing_names = ", ".join(sorted(member.name for member in missing))
             message = (
-                f"{registry_name} is missing entries for {missing_names}. Every acquisition system must register its "
-                f"donated processing and forging assets. See the README's 'Adding New Acquisition Systems' section."
+                f"Unable to validate donor-registry coverage for {registry_name}. Every acquisition system must "
+                f"register its donated processing and forging assets in this module ('registries.py'), but entries "
+                f"are missing for {missing_names}."
             )
             console.error(message=message, error=RuntimeError)
 
