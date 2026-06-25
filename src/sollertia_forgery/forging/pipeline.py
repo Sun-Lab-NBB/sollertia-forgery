@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
-    from .dataset import DatasetSession
+    from sollertia_shared_assets import DatasetSession
 
 # The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY. The PEP 695 alias
 # is evaluated lazily, so its annotation-only operands need not exist at runtime.

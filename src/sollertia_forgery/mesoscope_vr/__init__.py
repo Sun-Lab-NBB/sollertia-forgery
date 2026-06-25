@@ -2,16 +2,16 @@
 
 from .forging import assemble_mesoscope_session
 from .metadata import (
+    MESOSCOPE_COLUMN_DESCRIPTIONS,
     DatasetColumn,
     BehaviorDataFiles,
-    SessionDataFormat,
 )
 from .fluorescence import FluorescenceColumn
 
 __all__ = [
+    "MESOSCOPE_COLUMN_DESCRIPTIONS",
     "BehaviorDataFiles",
     "DatasetColumn",
     "FluorescenceColumn",
-    "SessionDataFormat",
     "assemble_mesoscope_session",
 ]

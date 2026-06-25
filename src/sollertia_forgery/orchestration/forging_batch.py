@@ -20,7 +20,9 @@ from pathlib import Path
 from natsort import natsorted
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
+    DatasetData,
     SurgeryData,
+    DatasetFiles,
     RawDataFiles,
     ProcessingTrackers,
 )
@@ -32,9 +34,9 @@ from .local import (
     analyze_feather_file,
     derive_tracker_status,
 )
-from ..forging.dataset import DatasetData, DatasetFiles, resolve_dataset
-from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
+from ..forging import resolve_dataset
 from ..shared_assets import prepare_tracker
+from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

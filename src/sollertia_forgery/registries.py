@@ -10,11 +10,12 @@ acquisition system (from sollertia-shared-assets) and, for microcontroller parse
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems
 
-from .mesoscope_vr import assemble_mesoscope_session
+from .mesoscope_vr import MESOSCOPE_COLUMN_DESCRIPTIONS, assemble_mesoscope_session
 from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .mesoscope_vr.two_photon import locate_two_photon_data
 from .mesoscope_vr.microcontrollers import (
@@ -37,11 +38,32 @@ __all__ = [
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
     "TWO_PHOTON_DATA_REGISTRY",
+    "ForgingAssemblyAsset",
     "resolve_forging_assembly_worker",
+    "resolve_forging_column_descriptions",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
     "resolve_two_photon_data_locator",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class ForgingAssemblyAsset:
+    """Bundles an acquisition system's donated forging assets: the per-session assembly worker and the dataset-level
+    column descriptions.
+
+    Notes:
+        A system donates both as a single unit because the descriptions document exactly the columns the assembler
+        emits into ``data.feather``. The agnostic forging pipeline invokes ``assembler`` once per session and writes
+        ``column_descriptions`` once per dataset into the dataset's ``data_descriptions.feather``.
+    """
+
+    assembler: Callable[[Path, Path, str], None]
+    """The picklable, module-level ``assemble(source_session_path, output_path, dataset_name)`` worker that assembles
+    one session's ``data.feather``."""
+    column_descriptions: dict[str, str]
+    """The mapping from each column name the assembler can emit into ``data.feather`` to its human-readable
+    description, baked into the forged dataset's per-dataset ``data_descriptions.feather``."""
 
 
 MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Callable[..., None]] = {
@@ -59,14 +81,17 @@ module id)``. Each value is a plain module-level ``parse(event_partition, output
 acquisition-system package implements for one hardware module; a module is parseable for a system exactly when it
 appears here."""
 
-FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
-    AcquisitionSystems.MESOSCOPE_VR: assemble_mesoscope_session,
+FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, ForgingAssemblyAsset] = {
+    AcquisitionSystems.MESOSCOPE_VR: ForgingAssemblyAsset(
+        assembler=assemble_mesoscope_session,
+        column_descriptions=MESOSCOPE_COLUMN_DESCRIPTIONS,
+    ),
 }
-"""The single, fully-visible registry of per-session forging data-assembly workers, keyed by acquisition system. Each
-value is a plain module-level ``assemble(source_session_path, output_path, dataset_name)`` function that an
-acquisition-system package implements to assemble one session's ``data.feather`` and its system-specific data-format
-descriptor. This worker is the only forging asset a system donates; dataset definition, the cindra multi-day stage,
-job/tracker orchestration, and shared-asset re-export are owned by the agnostic ``forging`` package."""
+"""The single, fully-visible registry of per-session forging assets, keyed by acquisition system. Each value is a
+``ForgingAssemblyAsset`` bundling the system's per-session ``assemble(source_session_path, output_path,
+dataset_name)`` worker with its column-description mapping. These are the only forging assets a system donates;
+dataset definition, the cindra multi-day stage, job/tracker orchestration, the per-dataset column-description
+binding, and shared-asset re-export are owned by the agnostic ``forging`` package."""
 
 RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
@@ -94,12 +119,30 @@ def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callabl
 
     Returns:
         The registered assembly worker callable for the acquisition system. The agnostic forging pipeline invokes it
-        once per session to write that session's ``data.feather`` and data-format descriptor.
+        once per session to write that session's ``data.feather``.
 
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)]
+    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)].assembler
+
+
+def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dict[str, str]:
+    """Resolves the dataset column-description mapping registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the dataset being forged, as an AcquisitionSystems member or its
+            string value (for example, the value carried by ``DatasetData.acquisition_system``).
+
+    Returns:
+        The mapping from each column name the system's assembly worker can emit into ``data.feather`` to its
+        human-readable description. The agnostic forging pipeline bakes it into the dataset's
+        ``data_descriptions.feather`` at dataset-definition time.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)].column_descriptions
 
 
 def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tuple[int, int], Callable[..., None]]:

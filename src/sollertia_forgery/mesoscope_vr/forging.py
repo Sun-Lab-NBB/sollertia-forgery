@@ -3,8 +3,8 @@
 Notes:
     This module's sole public entry point, ``assemble_mesoscope_session``, is the Mesoscope-VR "data assembly" asset
     contributed to the central ``FORGING_ASSEMBLY_REGISTRY``; the agnostic forging pipeline resolves it by acquisition
-    system and invokes it once per session to produce that session's ``data.feather`` and ``data_format.yaml``
-    descriptor. The pipeline owns dataset definition, the cindra multi-day stage, tracker orchestration, and
+    system and invokes it once per session to produce that session's ``data.feather``. The pipeline owns dataset
+    definition, the cindra multi-day stage, tracker orchestration, the per-dataset column-description binding, and
     shared-asset re-export; this worker owns only the assembly of the Mesoscope-VR data.
 """
 
@@ -23,7 +23,6 @@ from sollertia_shared_assets import (
     MesoscopeExperimentConfiguration,
 )
 
-from .metadata import DATA_FORMAT_FILE, SessionDataFormat
 from .fluorescence import assemble_cindra_dataset
 from .runtime_dataset import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
@@ -33,12 +32,13 @@ if TYPE_CHECKING:
 
 
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
-    """Assembles a single Mesoscope-VR session's unified data feather and writes its data-format descriptor.
+    """Assembles a single Mesoscope-VR session's unified data feather.
 
     Combines the session's fluorescence, behavior, and runtime sub-datasets into a single time-aligned Polars
-    DataFrame, written as an uncompressed ``data.feather`` at ``output_path`` with the ``data_format.yaml`` schema
-    descriptor alongside it. The fluorescence sub-dataset is assembled first because its ``time_us`` column is the
-    reference clock the behavior and runtime sub-datasets align to.
+    DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The fluorescence sub-dataset is
+    assembled first because its ``time_us`` column is the reference clock the behavior and runtime sub-datasets align
+    to. The meaning of each emitted column is documented by ``DatasetColumn`` and donated to the dataset's
+    ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
     Notes:
         Requires a fully processed mesoscope experiment session: the experiment configuration and the single- and
@@ -46,8 +46,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
-        output_path: The path to the ``data.feather`` file to write inside the forged dataset hierarchy. The
-            data-format descriptor is written into the same directory.
+        output_path: The path to the ``data.feather`` file to write inside the forged dataset hierarchy.
         dataset_name: The unqualified dataset name, combined with the animal identifier to resolve the cindra
             multi-recording output directory.
 
@@ -129,17 +128,3 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     result = pl.concat([fluorescence_data, results["behavior"], results["runtime"]], how="horizontal")
     result = _mask_non_run_experiment_data(experiment_data=result)
     result.write_ipc(file=output_path)
-
-    # Writes the system-specific data-format descriptor describing the assembled feather's columns.
-    _write_data_format(result=result, output_directory=output_path.parent)
-
-
-def _write_data_format(result: pl.DataFrame, output_directory: Path) -> None:
-    """Writes the per-session ``data_format.yaml`` schema descriptor for the assembled feather.
-
-    Args:
-        result: The assembled session DataFrame whose schema is recorded in the descriptor.
-        output_directory: The directory the descriptor is written into (the directory holding ``data.feather``).
-    """
-    data_format = SessionDataFormat(columns={name: str(dtype) for name, dtype in result.schema.items()})
-    data_format.to_yaml(file_path=output_directory.joinpath(DATA_FORMAT_FILE))
