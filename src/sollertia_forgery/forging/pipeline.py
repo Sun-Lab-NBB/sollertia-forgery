@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from contextlib import nullcontext
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 
+from cindra import run_multi_recording_pipeline
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
@@ -182,16 +183,12 @@ def _run_activity_stage(configuration_path: Path) -> None:
         Runs both the cross-recording cell-discovery and the per-recording aligned-fluorescence extraction stages in
         sequence so a single local invocation performs the full multi-day pipeline. cindra owns its own per-plane /
         per-stage job decomposition and writes its own processing trackers at the recording root resolved from the
-        configuration file. The cindra import is deferred to call time so importing the forging package does not
-        require the (optional, heavy) calcium-imaging binding to be installed -- the same convention every Sollertia
-        package follows for the acquisition-library bindings.
+        configuration file.
 
     Args:
         configuration_path: The path to the cindra multi-recording configuration file. The configuration encodes the
             recordings to process and the per-dataset processing parameters.
     """
-    from cindra import run_multi_recording_pipeline  # noqa: PLC0415
-
     console.echo(
         message=f"Stage 2: running multi-day cell-activity processing for '{configuration_path}'...",
         level=LogLevel.INFO,

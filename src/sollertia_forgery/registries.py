@@ -1,9 +1,10 @@
 """Collects every sollertia-forgery dispatch registry in one place and runs the import-time checks that guard them.
 
 This module binds each acquisition system's donated assets (microcontroller module parsers, the runtime log parser,
-and the per-session forging data-assembly worker) into the dispatch registries and exposes the ``resolve_*`` helpers
-that consumers use to look them up. The registries are keyed by acquisition system (from sollertia-shared-assets) and,
-for microcontroller parsers, by hardware ``(module type, module id)``.
+the per-session forging data-assembly worker, and the raw two-photon imaging directory locator) into the dispatch
+registries and exposes the ``resolve_*`` helpers that consumers use to look them up. The registries are keyed by
+acquisition system (from sollertia-shared-assets) and, for microcontroller parsers, by hardware
+``(module type, module id)``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from sollertia_shared_assets import AcquisitionSystems
 
 from .mesoscope_vr import assemble_mesoscope_session
 from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
+from .mesoscope_vr.two_photon import locate_two_photon_data
 from .mesoscope_vr.microcontrollers import (
     parse_lick,
     parse_brake,
@@ -27,15 +29,18 @@ from .mesoscope_vr.microcontrollers import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Callable
 
 __all__ = [
     "FORGING_ASSEMBLY_REGISTRY",
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
+    "TWO_PHOTON_DATA_REGISTRY",
     "resolve_forging_assembly_worker",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
+    "resolve_two_photon_data_locator",
 ]
 
 
@@ -70,6 +75,14 @@ RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]
 system's runtime DataLogger source id (which locates the ``{source_id}_log.npz`` archive) with a plain module-level
 ``parse(decoded_messages, output_directory, session)`` function that interprets the decoded runtime payloads into the
 system's behavior feathers."""
+
+TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, Callable[..., Path]] = {
+    AcquisitionSystems.MESOSCOPE_VR: locate_two_photon_data,
+}
+"""The single, fully-visible registry of raw two-photon imaging directory locators, keyed by acquisition system. Each
+value is a plain module-level ``locate(session)`` function that an acquisition-system package implements to resolve
+the loaded session's raw two-photon (calcium-imaging) directory, which the agnostic two-photon worker hands to the
+cindra single-recording pipeline as its input. A system donates a locator exactly when it produces two-photon data."""
 
 
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
@@ -129,6 +142,23 @@ def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, Call
     return RUNTIME_PARSER_REGISTRY[_resolve_system(system)]
 
 
+def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> Callable[..., Path]:
+    """Resolves the raw two-photon imaging directory locator registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        The registered locator callable for the acquisition system. The agnostic two-photon pipeline invokes it with
+        the loaded session to obtain that session's raw two-photon imaging directory (cindra's input).
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return TWO_PHOTON_DATA_REGISTRY[_resolve_system(system)]
+
+
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
     """Validates and normalizes an acquisition-system identifier to an AcquisitionSystems member.
 
@@ -157,8 +187,9 @@ def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
 def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
-    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry and the
-    runtime-parser registry, and registers at least one microcontroller module parser.
+    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry, the
+    runtime-parser registry, and the two-photon-data registry, and registers at least one microcontroller module
+    parser.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry. The error names the offending
@@ -170,6 +201,7 @@ def _assert_registry_coverage() -> None:
     for registry_name, registered_systems in (
         ("FORGING_ASSEMBLY_REGISTRY", frozenset(FORGING_ASSEMBLY_REGISTRY)),
         ("RUNTIME_PARSER_REGISTRY", frozenset(RUNTIME_PARSER_REGISTRY)),
+        ("TWO_PHOTON_DATA_REGISTRY", frozenset(TWO_PHOTON_DATA_REGISTRY)),
         ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing = systems - registered_systems

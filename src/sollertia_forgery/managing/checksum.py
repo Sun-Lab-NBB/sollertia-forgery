@@ -44,11 +44,11 @@ def resolve_checksum(
 
     Args:
         session_path: The path to the root data directory of the session to be processed.
-        regenerate_checksum: When True, overwrites the stored ax_checksum.txt value with the freshly computed
-            checksum instead of verifying against it.
+        regenerate_checksum: Determines whether to overwrite the stored ax_checksum.txt value with the freshly
+            computed checksum instead of verifying against it.
         workers: The number of parallel worker processes. Values below 1 request all available cores minus reserved
             cores; 1 disables parallelism.
-        display_progress: When True, emits console messages and a progress bar during calculation.
+        display_progress: Determines whether to emit console messages and a progress bar during calculation.
 
     Raises:
         FileNotFoundError: If the source path does not contain a valid session data hierarchy.

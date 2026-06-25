@@ -312,7 +312,6 @@ class DatasetData(YamlConfig):
         )
         console.error(message=message, error=ValueError)
         # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        # noinspection PyUnreachableCode
         raise ValueError(message)  # pragma: no cover
 
     def get_sessions_for_animal(self, animal: str) -> tuple[DatasetSession, ...]:
@@ -350,7 +349,6 @@ class DatasetData(YamlConfig):
         )
         console.error(message=message, error=ValueError)
         # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        # noinspection PyUnreachableCode
         raise ValueError(message)  # pragma: no cover
 
 

@@ -12,6 +12,8 @@ from cindra.io import PARAMETERS_FILENAME
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 
+from ..registries import resolve_two_photon_data_locator
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -39,15 +41,17 @@ def run_two_photon_processing_pipeline(
 ) -> None:
     """Materializes a session-bound cindra configuration and runs the single-recording two-photon processing pipeline.
 
-    Resolves the session's raw imaging directory (cindra input) and processed-data root (cindra output) from the
-    session hierarchy, overrides the supplied configuration template's data path, output path, worker count, and
-    progress flag with these session-resolved values, writes the result as the session's cindra ``configuration.yaml``,
-    and delegates the binarization, per-plane processing, and combination stages to cindra. When none of ``binarize``,
-    ``process``, or ``combine`` is requested, all three stages run in sequence.
+    Resolves the session's raw imaging directory (cindra input) through the two-photon data registry and its
+    processed-data root (cindra output) from the session hierarchy. Overrides the supplied configuration template's
+    data path, output path, worker count, and progress flag with these session-resolved values, then writes the
+    result as the session's cindra ``configuration.yaml`` and delegates the binarization, per-plane processing, and
+    combination stages to cindra. When none of ``binarize``, ``process``, or ``combine`` is requested, all three
+    stages run in sequence.
 
     Notes:
-        The raw-imaging input is read from the session's system-specific raw-data record and currently resolves only
-        for Mesoscope-VR sessions. cindra owns the heavy work and records the run on a single per-recording tracker
+        The raw-imaging input directory is resolved through the system-agnostic two-photon data registry, which
+        dispatches to the acquisition system's donated locator; only systems that produce two-photon data donate one
+        (currently only Mesoscope-VR). cindra owns the heavy work and records the run on a single per-recording tracker
         (``single_recording_tracker.yaml``) inside its output subdirectory
         (``session.processed_data.cindra_data_path``); the stage flags map directly onto its stages. Additional
         ``FileNotFoundError``/``ValueError`` conditions may propagate from the underlying cindra pipeline.
@@ -81,11 +85,13 @@ def run_two_photon_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Resolves the recording's raw two-photon imaging directory (cindra input) and the session's processed-data root
-    # (cindra output) from the shared session hierarchy. cindra creates its 'cindra' output subdirectory under the
+    # Resolves the recording's raw two-photon imaging directory (cindra input) through the two-photon data registry,
+    # which dispatches to the acquisition system's donated locator, and the session's processed-data root (cindra
+    # output) from the shared session hierarchy. cindra creates its 'cindra' output subdirectory under the
     # processed-data root, which is exactly the session's canonical processed cindra directory, so downstream tools
     # find the outputs where they expect them.
-    data_path = session.system_raw_data.mesoscope_data_path
+    locate_two_photon_data = resolve_two_photon_data_locator(session.acquisition_system)
+    data_path = locate_two_photon_data(session)
     output_path = session.processed_data_path
     cindra_directory = session.processed_data.cindra_data_path
 
@@ -108,7 +114,7 @@ def run_two_photon_processing_pipeline(
         console.error(message=message, error=FileNotFoundError)
 
     # Confirms the cindra acquisition parameters file is available. Every system producing two-photon data is expected
-    # to write 'cindra_parameters.json' alongside the raw imaging data at acquisition time; once a recording has been
+    # to write 'cindra_parameters.json' alongside the raw imaging data at acquisition time. Once a recording has been
     # processed, cindra also persists the same metadata as 'acquisition_parameters.yaml' next to its outputs, which is
     # accepted here so a re-run can proceed even if the raw data has since been relocated.
     acquisition_parameters_available = (

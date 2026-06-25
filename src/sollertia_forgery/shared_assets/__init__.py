@@ -1,10 +1,7 @@
-"""Provides the system-agnostic substrate shared across every acquisition system: the processing-tracker
-job-registry alignment helper and tracked-job execution envelope, the DataLogger log-archive naming convention,
-the microcontroller feather discovery and parsing primitives, and terminal utilities.
-"""
+"""Provides the system-agnostic substrate shared across acquisition systems (tracking, timing, and feather parsing)."""
 
 from .tracking import tracked_job, prepare_tracker
-from .utilities import delay_timer, delay_terminal
+from .utilities import DELAY_TIMER, delay_terminal
 from .datalogger import LOG_ARCHIVE_SUFFIX
 from .microcontroller import (
     get_event_data,
@@ -16,9 +13,9 @@ from .microcontroller import (
 )
 
 __all__ = [
+    "DELAY_TIMER",
     "LOG_ARCHIVE_SUFFIX",
     "delay_terminal",
-    "delay_timer",
     "find_module_feathers",
     "get_event_data",
     "get_event_timestamps",

@@ -111,7 +111,7 @@ def run_runtime_processing_pipeline(
         decoded_messages = _decode_archive(
             archive_path=archive_path, workers=workers, display_progress=display_progress
         )
-        parser(decoded_messages, output_directory, session)
+        parser(decoded_messages=decoded_messages, output_directory=output_directory, session=session)
 
     console.echo(
         message=f"Runtime processing for session '{session.session_name}' completed successfully.",

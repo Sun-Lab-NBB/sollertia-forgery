@@ -31,10 +31,6 @@ _CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
 """The suffix appended to each camera's manifest name to form its canonical timestamp feather filename within the
 behavior data directory (e.g., the ``face_camera`` source produces ``face_camera_timestamps.feather``)."""
 
-_PARSED_TIMESTAMP_TEMPLATE: str = "camera_{source_id}_timestamps.feather"
-"""The timestamp feather name written by the parsing stage (via the ataraxis-video-system extraction binding) into
-the camera timestamps directory, before the renaming stage hardlinks it under its canonical name."""
-
 
 def run_video_processing_pipeline(
     session_path: Path,
@@ -365,7 +361,9 @@ def _link_parsed_timestamps(
     with tracked_job(tracker=tracker, job_id=job_id):
         published = 0
         for source_id, output_name in output_names.items():
-            parsed_path = timestamps_directory.joinpath(_PARSED_TIMESTAMP_TEMPLATE.format(source_id=source_id))
+            # The parsing stage (ataraxis-video-system extraction binding) writes each camera's feather under this
+            # name into the timestamps directory; the rename stage then hardlinks it under its canonical name.
+            parsed_path = timestamps_directory.joinpath(f"camera_{source_id}_timestamps.feather")
             if not parsed_path.is_file():
                 continue
             canonical_path = behavior_directory.joinpath(output_name)

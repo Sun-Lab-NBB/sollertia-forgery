@@ -91,7 +91,7 @@ def run_microcontroller_processing_pipeline(
 
     # Looks up the parser function for every module this session's acquisition system can parse from the central
     # registry, inferring the system from the session.
-    parsers = resolve_microcontroller_parsers(session.acquisition_system)
+    parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
 
     # Loads the per-controller extraction configurations (validated against the microcontroller manifest).
     controllers = _resolve_controllers(session=session)

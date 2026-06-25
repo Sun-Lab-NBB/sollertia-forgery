@@ -9,8 +9,8 @@ dispatch all run as production code.
 
 from __future__ import annotations
 
-import pickle
 from types import SimpleNamespace
+import pickle
 from pathlib import Path
 
 import polars as pl
@@ -19,19 +19,27 @@ from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 from ataraxis_communication_interface.microcontroller import (
     EXTRACTION_JOB_NAME,
-    ModuleSourceData,
+    EXTRACTION_CONFIGURATION_FILENAME,
+    MICROCONTROLLER_MANIFEST_FILENAME,
     ExtractionConfig,
+    ModuleSourceData,
     ModuleExtractionConfig,
     MicroControllerManifest,
     MicroControllerSourceData,
     ControllerExtractionConfig,
-    EXTRACTION_CONFIGURATION_FILENAME,
-    MICROCONTROLLER_MANIFEST_FILENAME,
 )
 
-from sollertia_forgery.registries import MICROCONTROLLER_PARSER_REGISTRY, resolve_microcontroller_parsers
-from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, run_microcontroller_processing_pipeline
-from sollertia_forgery.microcontrollers import pipeline as pipeline_module
+from sollertia_forgery.registries import (
+    MICROCONTROLLER_PARSER_REGISTRY,
+    resolve_microcontroller_parsers,
+    resolve_two_photon_data_locator,
+)
+from sollertia_forgery.microcontrollers import (
+    PARSE_JOB_NAME,
+    pipeline as pipeline_module,
+    run_microcontroller_processing_pipeline,
+)
+from sollertia_forgery.mesoscope_vr.two_photon import locate_two_photon_data
 
 # Module-level stub parsers so the parallel parse path can pickle them by reference. Each writes a trivial domain
 # feather, named for its module, recording which event codes the partition carried. Their signature matches the
@@ -56,7 +64,11 @@ def _stub_parse_6_1(event_partition: dict[int, pl.DataFrame], output_directory: 
     )
 
 
-_STUB_PARSERS: dict[tuple[int, int], object] = {(2, 1): _stub_parse_2_1, (4, 1): _stub_parse_4_1, (6, 1): _stub_parse_6_1}
+_STUB_PARSERS: dict[tuple[int, int], object] = {
+    (2, 1): _stub_parse_2_1,
+    (4, 1): _stub_parse_4_1,
+    (6, 1): _stub_parse_6_1,
+}
 
 
 def _patch_parsers(monkeypatch: pytest.MonkeyPatch, eligible: set[tuple[int, int]]) -> None:
@@ -201,6 +213,25 @@ def test_resolve_microcontroller_parsers_returns_mesoscope_callables() -> None:
 def test_resolve_microcontroller_parsers_invalid_system_raises() -> None:
     with pytest.raises(ValueError):
         resolve_microcontroller_parsers("not_a_real_system")
+
+
+def test_resolve_two_photon_data_locator_returns_mesoscope_callable() -> None:
+    locator = resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR)
+    assert callable(locator)
+    # The session stores the acquisition system as a string; resolution must accept that form too.
+    assert resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR.value) is locator
+
+
+def test_resolve_two_photon_data_locator_invalid_system_raises() -> None:
+    with pytest.raises(ValueError):
+        resolve_two_photon_data_locator("not_a_real_system")
+
+
+def test_locate_two_photon_data_resolves_mesoscope_data_directory(tmp_path: Path) -> None:
+    # The Mesoscope-VR locator places the raw two-photon imaging data in the 'mesoscope_data' directory under the
+    # session's raw-data root.
+    session = SimpleNamespace(raw_data_path=tmp_path)
+    assert locate_two_photon_data(session) == tmp_path / "mesoscope_data"
 
 
 def test_registered_parsers_are_picklable() -> None:

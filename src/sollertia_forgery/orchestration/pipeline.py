@@ -17,7 +17,7 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from ..server import Server, JobStatus
 from .pipelines import ProcessingPipelines
-from ..shared_assets import delay_timer
+from ..shared_assets import DELAY_TIMER
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -456,6 +456,6 @@ def execute_pipelines(
 
                 # Delays between pipeline resolution cycles to avoid overwhelming the communication line
                 if not batch_complete:
-                    delay_timer.delay(delay=poll_delay, allow_sleep=True, block=False)
+                    DELAY_TIMER.delay(delay=poll_delay, allow_sleep=True, block=False)
 
     return successful_count, failed_count

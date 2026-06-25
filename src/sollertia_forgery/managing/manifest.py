@@ -169,9 +169,9 @@ def generate_project_manifest(project_directory: Path) -> None:
                 descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
                 if descriptor_class is None:
                     message = (
-                        f"Unsupported session type '{session_data.session_type}' encountered for session "
-                        f"'{session_data.session_name}' when generating the manifest file for the project "
-                        f"{project_directory.stem}. Currently, only the following session types are supported: "
+                        f"Unable to generate the manifest file for the '{project_directory.stem}' project. An "
+                        f"unsupported session type '{session_data.session_type}' was encountered for session "
+                        f"'{session_data.session_name}'. Currently, only the following session types are supported: "
                         f"{tuple(SessionTypes)}."
                     )
                     console.error(message=message, error=ValueError)
@@ -241,7 +241,7 @@ def generate_project_manifest(project_directory: Path) -> None:
             # Converts animal IDs from strings to integers for proper numeric sorting.
             manifest["animal"] = [int(animal) for animal in manifest["animal"]]
 
-            # Converts the manifest dictionary to a Polars Dataframe.
+            # Converts the manifest dictionary to a Polars DataFrame.
             schema: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
                 "animal": pl.UInt64,
                 "date": pl.Datetime,
@@ -271,7 +271,7 @@ def generate_project_manifest(project_directory: Path) -> None:
             tracker.complete_job(job_id=job_id)
 
         except Exception:
-            # If the code reaches this section, this means the runtime encountered an error.
+            # Records the manifest job as failed before re-raising so the tracker reflects the aborted run.
             tracker.fail_job(job_id=job_id)
             raise
 
@@ -441,8 +441,9 @@ class ProjectManifest:
 
         if data_frame.is_empty():
             message = (
-                f"Session ID '{session}' not found in the project manifest. "
-                f"Available sessions: {self.get_sessions(animal=None, exclude_incomplete=False)}."
+                f"Unable to look up the participating animal using session ID '{session}'. The session is not "
+                f"found in the project manifest. Available sessions: "
+                f"{self.get_sessions(animal=None, exclude_incomplete=False)}."
             )
             console.error(message=message, error=ValueError)
 
@@ -465,8 +466,9 @@ class ProjectManifest:
 
         if data_frame.is_empty():
             message = (
-                f"Session ID '{session}' not found in the project manifest. "
-                f"Available sessions: {self.get_sessions(animal=None, exclude_incomplete=False)}."
+                f"Unable to look up the acquisition system using session ID '{session}'. The session is not "
+                f"found in the project manifest. Available sessions: "
+                f"{self.get_sessions(animal=None, exclude_incomplete=False)}."
             )
             console.error(message=message, error=ValueError)
 
@@ -584,7 +586,10 @@ class ProjectManifest:
         # Filters by animal if specified.
         if animal is not None:
             if animal not in self.animals:
-                message = f"Animal ID '{animal}' not found in the project manifest. Available animals: {self.animals}."
+                message = (
+                    f"Unable to filter sessions using animal ID '{animal}'. The animal is not found in the "
+                    f"project manifest. Available animals: {self.animals}."
+                )
                 console.error(message=message, error=ValueError)
 
             data = data.filter(pl.col("animal") == animal)
