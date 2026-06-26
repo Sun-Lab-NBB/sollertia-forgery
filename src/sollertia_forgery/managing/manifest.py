@@ -99,10 +99,10 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "complete": [],
                 # Determines whether the session's data integrity has been verified.
                 "integrity": [],
-                # Determines whether the session has been processed with the cindra single-recording pipeline.
-                "cindra": [],
-                # Determines whether the session has been processed with the behavior extraction pipeline.
-                "behavior": [],
+                # Determines whether the session has been processed with the two-photon (cindra) processing pipeline.
+                "two_photon": [],
+                # Determines whether the session has been processed with the runtime processing pipeline.
+                "runtime": [],
                 # Determines whether the session has been processed with the DeepLabCut (video tracking) pipeline.
                 "video": [],
                 # Stores the cindra multi-recording dataset names the session belongs to (empty list if none).
@@ -198,24 +198,24 @@ def generate_project_manifest(project_directory: Path) -> None:
                 # If the session is incomplete or unverified, marks all processing steps as FALSE, as automatic
                 # processing is disabled for incomplete sessions and, therefore, it could not have been processed.
                 if not is_complete or not is_verified:
-                    manifest["cindra"].append(False)
-                    manifest["behavior"].append(False)
+                    manifest["two_photon"].append(False)
+                    manifest["runtime"].append(False)
                     manifest["video"].append(False)
                     manifest["multi_recording_datasets"].append([])
                     manifest["multi_recording_complete"].append([])
                     continue
 
-                # Resolves cindra single-recording, behavior, and DeepLabCut (video) processing status from
-                # canonical tracker paths exposed by SessionData.
-                cindra_tracker = _load_tracker_if_exists(
-                    tracker_path=session_data.processed_data.cindra_single_recording_tracker_path
+                # Resolves two-photon, runtime, and DeepLabCut (video) processing status from canonical tracker paths
+                # exposed by SessionData.
+                two_photon_tracker = _load_tracker_if_exists(
+                    tracker_path=session_data.processed_data.two_photon_tracker_path
                 )
-                manifest["cindra"].append(cindra_tracker.complete if cindra_tracker is not None else False)
+                manifest["two_photon"].append(two_photon_tracker.complete if two_photon_tracker is not None else False)
 
-                behavior_tracker = _load_tracker_if_exists(
-                    tracker_path=session_data.processed_data.behavior_tracker_path
+                runtime_tracker = _load_tracker_if_exists(
+                    tracker_path=session_data.processed_data.runtime_tracker_path
                 )
-                manifest["behavior"].append(behavior_tracker.complete if behavior_tracker is not None else False)
+                manifest["runtime"].append(runtime_tracker.complete if runtime_tracker is not None else False)
 
                 video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)
                 manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
@@ -251,8 +251,8 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "notes": pl.String,
                 "complete": pl.UInt8,
                 "integrity": pl.UInt8,
-                "cindra": pl.UInt8,
-                "behavior": pl.UInt8,
+                "two_photon": pl.UInt8,
+                "runtime": pl.UInt8,
                 "video": pl.UInt8,
                 "multi_recording_datasets": pl.List(pl.String),
                 "multi_recording_complete": pl.List(pl.UInt8),
@@ -329,8 +329,8 @@ class ProjectManifest:
             "system",
             "complete",
             "integrity",
-            "cindra",
-            "behavior",
+            "two_photon",
+            "runtime",
             "video",
             "multi_recording_datasets",
             "multi_recording_complete",
@@ -419,7 +419,7 @@ class ProjectManifest:
 
         Returns:
             A Polars DataFrame containing all manifest columns for the specified session, including 'animal', 'date',
-            'session', 'type', 'system', 'notes', 'complete', 'integrity', 'cindra', 'behavior', 'video',
+            'session', 'type', 'system', 'notes', 'complete', 'integrity', 'two_photon', 'runtime', 'video',
             'multi_recording_datasets', and 'multi_recording_complete'.
         """
         return self._data.filter(pl.col("session").eq(session))
@@ -492,8 +492,8 @@ class ProjectManifest:
         # Computes per-pipeline completion counts from the boolean (UInt8) status columns.
         complete_count = int(data.filter(pl.col("complete") == 1).height)
         integrity_count = int(data.filter(pl.col("integrity") == 1).height)
-        cindra_count = int(data.filter(pl.col("cindra") == 1).height)
-        behavior_count = int(data.filter(pl.col("behavior") == 1).height)
+        two_photon_count = int(data.filter(pl.col("two_photon") == 1).height)
+        runtime_count = int(data.filter(pl.col("runtime") == 1).height)
         video_count = int(data.filter(pl.col("video") == 1).height)
 
         # Computes session type distribution.
@@ -546,8 +546,8 @@ class ProjectManifest:
             "acquisition_systems": acquisition_systems,
             "complete_count": complete_count,
             "integrity_verified_count": integrity_count,
-            "cindra_processed_count": cindra_count,
-            "behavior_processed_count": behavior_count,
+            "two_photon_processed_count": two_photon_count,
+            "runtime_processed_count": runtime_count,
             "video_processed_count": video_count,
             "multi_recording_datasets": dataset_summary,
             "columns": data.columns,

@@ -30,14 +30,18 @@ value of UInt16 so it sits outside the expected trial ID range for any realistic
 
 
 def assemble_runtime_dataset(
-    behavior_data_path: Path,
+    microcontroller_data_path: Path,
+    runtime_data_path: Path,
     experiment_configuration: MesoscopeExperimentConfiguration,
     reference_time: NDArray[np.uint64],
 ) -> pl.DataFrame:
     """Assembles the target session's runtime and experiment dataset and aligns it to the reference time vector.
 
     Args:
-        behavior_data_path: The path to the behavior data directory containing the processed feather files.
+        microcontroller_data_path: The path to the processed microcontroller-data directory holding the module-parsed
+            encoder feather (the wheel-distance source for interpolation).
+        runtime_data_path: The path to the processed runtime-data directory holding the runtime-parsed feathers (VR
+            cue, trigger zone, trial, runtime state, and the optional guidance feathers).
         experiment_configuration: Provides the mappings from integer trial type and runtime state codes to descriptive
             names, loaded from the session's raw data.
         reference_time: The reference time vector to which to align the assembled dataset.
@@ -61,13 +65,13 @@ def assemble_runtime_dataset(
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True)
+    encoder_df = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True)
     trigger_zones_df = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
+        source=runtime_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
     )
-    cue_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
-    trial_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
-    runtime_state_df = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True)
+    cue_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
+    trial_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
+    runtime_state_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True)
 
     # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
     # intermediate Polars DataFrame since both are only consumed by interpolate_data.
@@ -84,8 +88,8 @@ def assemble_runtime_dataset(
 
     # Loads guidance state data. The processing pipeline produces separate reinforcing and aversive guidance files,
     # each conditional on whether the corresponding events were recorded during the session.
-    reinforcing_guidance_file = behavior_data_path.joinpath(BehaviorDataFiles.REINFORCING_GUIDANCE)
-    aversive_guidance_file = behavior_data_path.joinpath(BehaviorDataFiles.AVERSIVE_GUIDANCE)
+    reinforcing_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.REINFORCING_GUIDANCE)
+    aversive_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.AVERSIVE_GUIDANCE)
 
     # Aligns all data sources to the reference time (or distance) and builds an aligned data dictionary.
     aligned_data: dict[str, NDArray[np.number]] = {

@@ -51,29 +51,39 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
             multi-recording output directory.
 
     Raises:
-        FileNotFoundError: If the session's processed behavior data directory or single-recording cindra output
-            directory is missing.
+        FileNotFoundError: If the session's processed microcontroller-data, runtime-data, or single-recording cindra
+            output directory is missing.
         ValueError: If a sub-dataset cannot be assembled (for example, the ScanImage fallback alignment cannot
             recover the expected frame count, or a required hardware-state field is missing).
     """
     session = SessionData.load(session_path=source_session_path)
 
-    behavior_data_path = session.processed_data.behavior_data_path
+    microcontroller_data_path = session.processed_data.microcontroller_data_path
+    runtime_data_path = session.processed_data.runtime_data_path
     cindra_data_path = session.processed_data.cindra_data_path
     raw_data_path = session.raw_data_path
 
-    # Validates that the canonical behavior and single-recording cindra outputs exist before any expensive work.
-    if not behavior_data_path.is_dir():
+    # Validates that the processed microcontroller, runtime, and single-recording cindra outputs exist before any
+    # expensive work. The parsed behavior feathers are split across the per-worker ``microcontroller_data`` (module
+    # parsing) and ``runtime_data`` (runtime decode) directories.
+    if not microcontroller_data_path.is_dir():
         message = (
-            f"Unable to assemble the data for session '{source_session_path.name}'. Expected the processed behavior "
-            f"data directory '{behavior_data_path}' to exist and contain '{ProcessingTrackers.BEHAVIOR}'."
+            f"Unable to assemble the data for session '{source_session_path.name}'. Expected the processed "
+            f"microcontroller data directory '{microcontroller_data_path}' to exist and contain "
+            f"'{ProcessingTrackers.MICROCONTROLLER}'."
+        )
+        console.error(message=message, error=FileNotFoundError)
+    if not runtime_data_path.is_dir():
+        message = (
+            f"Unable to assemble the data for session '{source_session_path.name}'. Expected the processed runtime "
+            f"data directory '{runtime_data_path}' to exist and contain '{ProcessingTrackers.RUNTIME}'."
         )
         console.error(message=message, error=FileNotFoundError)
     if not cindra_data_path.is_dir():
         message = (
             f"Unable to assemble the data for session '{source_session_path.name}'. Expected the single-recording "
             f"cindra output directory '{cindra_data_path}' to exist and contain "
-            f"'{ProcessingTrackers.CINDRA_SINGLE_RECORDING}'."
+            f"'{ProcessingTrackers.TWO_PHOTON}'."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -95,7 +105,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     # Assembles the fluorescence sub-dataset first; its ``time_us`` column is the reference clock for the other two.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
-        behavior_data_path=behavior_data_path,
+        microcontroller_data_path=microcontroller_data_path,
         multiday_data_path=multiday_data_path,
         raw_data_path=raw_data_path,
     )
@@ -105,14 +115,16 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     tasks = {
         "behavior": partial(
             assemble_behavior_dataset,
-            behavior_data_path=behavior_data_path,
+            microcontroller_data_path=microcontroller_data_path,
+            runtime_data_path=runtime_data_path,
             raw_data_path=raw_data_path,
             reference_time=reference_time,
             drop_time_columns=True,
         ),
         "runtime": partial(
             assemble_runtime_dataset,
-            behavior_data_path=behavior_data_path,
+            microcontroller_data_path=microcontroller_data_path,
+            runtime_data_path=runtime_data_path,
             experiment_configuration=experiment_configuration,
             reference_time=reference_time,
         ),

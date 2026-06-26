@@ -51,8 +51,8 @@ def run_two_photon_processing_pipeline(
     Notes:
         The raw-imaging input directory is resolved through the system-agnostic two-photon data registry, which
         dispatches to the acquisition system's donated locator; only systems that produce two-photon data donate one
-        (currently only Mesoscope-VR). cindra owns the heavy work and records the run on a single per-recording tracker
-        (``single_recording_tracker.yaml``) inside its output subdirectory
+        (currently only Mesoscope-VR). cindra owns the heavy work and records the run on the two-photon processing
+        tracker (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
         (``session.processed_data.cindra_data_path``); the stage flags map directly onto its stages. Additional
         ``FileNotFoundError``/``ValueError`` conditions may propagate from the underlying cindra pipeline.
 

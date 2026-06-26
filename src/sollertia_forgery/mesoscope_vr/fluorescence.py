@@ -67,7 +67,7 @@ class FluorescenceColumn(StrEnum):
 
 def assemble_cindra_dataset(
     cindra_data_path: Path,
-    behavior_data_path: Path,
+    microcontroller_data_path: Path,
     multiday_data_path: Path,
     raw_data_path: Path,
 ) -> pl.DataFrame:
@@ -77,7 +77,8 @@ def assemble_cindra_dataset(
     Args:
         cindra_data_path: The path to the single-recording cindra output directory containing the combined
             (multi-plane merged) fluorescence traces, cell classification, and metadata files.
-        behavior_data_path: The path to the behavior data directory containing the mesoscope frame TTL timestamps.
+        microcontroller_data_path: The path to the processed microcontroller-data directory containing the mesoscope
+            frame TTL timestamps.
         multiday_data_path: The path to the session's multi-recording cindra output directory (the directory that
             directly contains ``cell_fluorescence.npy`` and its companions).
         raw_data_path: The path to the session's raw_data directory. Used by the ScanImage-based fallback alignment
@@ -111,7 +112,7 @@ def assemble_cindra_dataset(
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during the
     # session's data acquisition.
     mesoscope_frame_data = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.MESOSCOPE_FRAME),
+        source=microcontroller_data_path.joinpath(BehaviorDataFiles.MESOSCOPE_FRAME),
         memory_map=True,
     )
 

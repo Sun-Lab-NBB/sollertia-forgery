@@ -9,9 +9,10 @@ from typing import Self
 
 
 class BehaviorDataFiles(StrEnum):
-    """Enumerates the canonical filenames of the behavior feather files written into the session's
-    ``processed_data/behavior_data`` directory by the donated Mesoscope-VR parsers and read back by the donated
-    assembly worker.
+    """Enumerates the canonical filenames of the behavior feather files written by the donated Mesoscope-VR parsers and
+    read back by the donated assembly worker. The microcontroller parsers write the module feathers into the session's
+    ``processed_data/microcontroller_data`` directory, while the runtime parser writes the runtime feathers into
+    ``processed_data/runtime_data``.
 
     Notes:
         These names are the file-naming contract shared between the donated parsers (writers) and the assembly worker

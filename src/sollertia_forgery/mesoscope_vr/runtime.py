@@ -66,7 +66,8 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
     Args:
         decoded_messages: The decoded runtime messages as a Polars DataFrame with a ``time_us`` UInt64 column and a
             ``payload`` Binary column, in archive order.
-        output_directory: The path to the session's behavior data directory where the runtime feathers are written.
+        output_directory: The path to the session's processed runtime-data directory where the runtime feathers are
+            written.
         session: The loaded session, from which the experiment configuration is resolved.
 
     Raises:

@@ -93,7 +93,6 @@ def _make_session(
         raw_data=SimpleNamespace(behavior_data_path=raw_behavior),
         processed_data=SimpleNamespace(
             microcontroller_data_path=tmp_path / "processed_data" / "microcontroller_data",
-            behavior_data_path=tmp_path / "processed_data" / "behavior_data",
         ),
     )
 
@@ -288,7 +287,7 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
 def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.microcontroller_data_path
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
@@ -299,13 +298,12 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
     # Stage 1 wrote the raw per-module feathers into microcontroller_data.
     assert (microcontroller_data / "controller_101_module_2_1.feather").is_file()
     assert (microcontroller_data / "controller_101_module_4_1.feather").is_file()
-    # Stage 2 wrote one domain feather per parseable module into behavior_data.
+    # Stage 2 wrote one domain feather per parseable module into microcontroller_data.
     assert (output_directory / "module_2_1.feather").is_file()
     assert (output_directory / "module_4_1.feather").is_file()
-    # The unified tracker lives in behavior_data, not microcontroller_data.
+    # The unified tracker lives in microcontroller_data alongside the extracted and parsed feathers.
     tracker_path = output_directory / ProcessingTrackers.MICROCONTROLLER
     assert tracker_path.is_file()
-    assert not (microcontroller_data / ProcessingTrackers.MICROCONTROLLER).exists()
     counts = _count_by_status(tracker_path)
     assert sum(counts.values()) == 3  # one extraction job + two parse jobs
     assert counts[ProcessingStatus.SUCCEEDED] == 3
@@ -314,7 +312,7 @@ def test_local_pipeline_runs_both_stages(tmp_path: Path, monkeypatch: pytest.Mon
 def test_unregistered_module_produces_no_parse_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.microcontroller_data_path
     _patch_parsers(monkeypatch, {(2, 1)})  # only (2, 1) is registered for this system
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
@@ -331,7 +329,7 @@ def test_unregistered_module_produces_no_parse_job(tmp_path: Path, monkeypatch: 
 def test_missing_feather_completes_parse_job_without_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.microcontroller_data_path
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     # Extraction produces no feather for (4, 1), mimicking a configured module that logged no messages.
@@ -361,7 +359,7 @@ def test_no_parseable_controllers_raises(tmp_path: Path, monkeypatch: pytest.Mon
 def test_remote_extraction_runs_single_controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.microcontroller_data_path
     _patch_parsers(monkeypatch, {(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
@@ -380,7 +378,7 @@ def test_remote_extraction_runs_single_controller(tmp_path: Path, monkeypatch: p
 def test_remote_parse_runs_single_module(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     session = _make_session(tmp_path)
     _write_inputs(session)
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.microcontroller_data_path
     microcontroller_data = session.processed_data.microcontroller_data_path
     microcontroller_data.mkdir(parents=True)
     # A prior extraction run already produced the raw module feather.
