@@ -24,8 +24,8 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 RUNTIME_JOB_NAME: str = "runtime_processing"
-"""The job name identifying the runtime processing job in the shared behavior processing tracker
-(``ProcessingTrackers.BEHAVIOR``), where this pipeline records the runtime job's state."""
+"""The job name identifying the runtime processing job in the runtime processing tracker
+(``ProcessingTrackers.RUNTIME``), where this pipeline records the runtime job's state."""
 
 
 def run_runtime_processing_pipeline(
@@ -41,14 +41,14 @@ def run_runtime_processing_pipeline(
         This is a single-stage pipeline. It locates the runtime DataLogger archive (``{source_id}_log.npz``) in the
         session's raw behavior-data directory, decodes it into a raw ``(time_us, payload)`` message table, and hands
         that table to the registered runtime parser, which writes the system's behavior feathers into the session's
-        processed behavior-data directory (``processed_data.behavior_data_path``). The runtime source id and parser
+        processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and parser
         are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
         system-agnostic.
 
         The decode is the only stage that benefits from parallelism: when the reader splits the archive into more
         than one batch and more than one worker is available, the batches are decoded across a worker pool; otherwise
         the archive is read in a single in-process pass. The parse always runs in-process, so the whole pipeline is
-        one tracked job recorded against the shared ``behavior`` tracker.
+        one tracked job recorded against the ``runtime`` tracker.
 
         In local mode (job_id is None) the runtime job runs unconditionally; in remote mode the provided job_id must
         match this session's single runtime job. The registered parser may additionally raise system-specific errors
@@ -79,7 +79,7 @@ def run_runtime_processing_pipeline(
     source_id, parser = resolve_runtime_binding(session.acquisition_system)
 
     log_directory = session.raw_data.behavior_data_path
-    output_directory = session.processed_data.behavior_data_path
+    output_directory = session.processed_data.runtime_data_path
 
     archive_path = _find_runtime_archive(log_directory=log_directory, source_id=source_id)
     if archive_path is None:
@@ -100,10 +100,10 @@ def run_runtime_processing_pipeline(
         )
         console.error(message=message, error=ValueError)
 
-    # The tracker co-locates with the parsed output in ``behavior_data``. The runtime job is the sole entry in its
+    # The tracker co-locates with the parsed output in ``runtime_data``. The runtime job is the sole entry in its
     # universe, so a re-run aligns the tracker against exactly that job.
     output_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.BEHAVIOR))
+    tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
     prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")

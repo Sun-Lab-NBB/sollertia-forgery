@@ -64,12 +64,12 @@ def run_microcontroller_processing_pipeline(
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
         parser registered for the session's acquisition system (in ``MICROCONTROLLER_PARSER_REGISTRY``), writing the
-        domain-specific feather into ``behavior_data``; the pipeline stays system-agnostic.
+        domain-specific feather into ``microcontroller_data``; the pipeline stays system-agnostic.
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
         (across a worker pool when more than one worker is available). In remote mode (job_id is provided) only the
-        single matching job runs in-process. The processing tracker is co-located with the parsed output in
-        ``behavior_data``.
+        single matching job runs in-process. The processing tracker is co-located with the extracted and parsed output
+        in ``microcontroller_data``.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -98,7 +98,7 @@ def run_microcontroller_processing_pipeline(
 
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
-    parse_output = session.processed_data.behavior_data_path
+    parse_output = session.processed_data.microcontroller_data_path
 
     universe, requested, extraction_archives, parse_specifiers = _discover_jobs(
         controllers=controllers, parsers=parsers, log_directory=log_directory, extraction_job_name=EXTRACTION_JOB_NAME
@@ -118,10 +118,10 @@ def run_microcontroller_processing_pipeline(
         )
     )
 
-    # The tracker lives with the final parsed data in ``behavior_data``, not with the raw intermediates in
-    # ``microcontroller_data``. The same job universe drives foreign-entry detection in both local and remote modes,
-    # so a single concurrent remote job aligns the tracker without resetting its sibling jobs.
-    tracker_directory = session.processed_data.behavior_data_path
+    # The tracker lives alongside the extracted and parsed data in ``microcontroller_data``. The same job universe
+    # drives foreign-entry detection in both local and remote modes, so a single concurrent remote job aligns the
+    # tracker without resetting its sibling jobs.
+    tracker_directory = session.processed_data.microcontroller_data_path
     tracker_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=tracker_directory / ProcessingTrackers.MICROCONTROLLER)
     prepare_tracker(tracker=tracker, jobs=requested, universe=universe)
@@ -458,7 +458,7 @@ def _run_parse_stage(
         session: The loaded session, passed through to each parser so it can resolve its own system configuration.
         extraction_output: The directory holding the raw per-module feathers.
         parse_output: The directory the parsers write their domain-specific feathers into (the session's
-            ``behavior_data`` directory).
+            ``microcontroller_data`` directory).
         tracker: The shared processing tracker.
         executor: The shared process pool spanning both pipeline stages, or None for sequential processing.
         display_progress: Determines whether to display a per-module progress bar.

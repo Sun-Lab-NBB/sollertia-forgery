@@ -1,5 +1,5 @@
 """Provides the two-stage camera-timestamp processing pipeline that parses raw VideoSystem log archives into the
-camera timestamps directory and hardlinks them under their canonical names into the behavior data directory.
+session's processed video-data directory and hardlinks each parsed feather there under its canonical manifest name.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 RENAME_JOB_NAME: str = "camera_timestamp_rename"
-"""The job name used to identify the single timestamp renaming job (stage 2) in the camera processing tracker. The
+"""The job name used to identify the single timestamp renaming job (stage 2) in the video processing tracker. The
 job uses an empty specifier because it publishes every camera's parsed feather in one pass."""
 
 _RAW_CAMERA_LOG_PART_COUNT: int = 2
@@ -29,7 +29,7 @@ _RAW_CAMERA_LOG_PART_COUNT: int = 2
 
 _CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
 """The suffix appended to each camera's manifest name to form its canonical timestamp feather filename within the
-behavior data directory (e.g., the ``face_camera`` source produces ``face_camera_timestamps.feather``)."""
+video data directory (e.g., the ``face_camera`` source produces ``face_camera_timestamps.feather``)."""
 
 
 def run_video_processing_pipeline(
@@ -46,8 +46,8 @@ def run_video_processing_pipeline(
 
     Notes:
         Stage 1 (``parse``) runs one job per camera whose ``{source_id}_log.npz`` archive is discovered on disk,
-        extracting frame timestamps into the camera timestamps directory. Stage 2 (``rename``) is a single job that
-        publishes every parsed feather under its canonical manifest name into the behavior data directory. With no
+        extracting frame timestamps into the session's processed video-data directory. Stage 2 (``rename``) is a
+        single job that publishes every parsed feather there under its canonical manifest name. With no
         stage flag set, both stages run in sequence (full local pipeline); in remote mode (``job_id`` provided) only
         the matching job runs, so a scheduler can drive each parse job and the rename job independently. The full
         manifest registration set defines the tracker-alignment universe.
@@ -99,15 +99,12 @@ def run_video_processing_pipeline(
         if source_id in output_names:
             log_paths[source_id] = log_path
 
-    # Stage 1 writes into the camera timestamps directory that ataraxis-video-system owns; stage 2 hardlinks the
-    # parsed feathers under their canonical names into the behavior data directory. The processing tracker lives in
-    # the behavior data directory alongside the published data rather than next to the intermediate parsed feathers;
-    # this intentionally departs from SessionData.camera_tracker_path, which resolves under camera_timestamps_path.
-    timestamps_directory = session.processed_data.camera_timestamps_path
-    behavior_directory = session.processed_data.behavior_data_path
-    timestamps_directory.mkdir(parents=True, exist_ok=True)
-    behavior_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=behavior_directory.joinpath(ProcessingTrackers.CAMERA))
+    # Both pipeline stages write into the single processed video-data directory: stage 1 parses each camera's frame
+    # timestamps there, and stage 2 hardlinks every parsed feather under its canonical manifest name in the same
+    # directory. The processing tracker lives there too, matching SessionData.video_tracker_path.
+    video_data_directory = session.processed_data.video_data_path
+    video_data_directory.mkdir(parents=True, exist_ok=True)
+    tracker = ProcessingTracker(file_path=video_data_directory.joinpath(ProcessingTrackers.VIDEO))
 
     if job_id is not None:
         # Remote mode: aligns the tracker against the full universe so that the partial (single-job) invocation does
@@ -138,8 +135,7 @@ def run_video_processing_pipeline(
             specifier=specifier,
             log_paths=log_paths,
             output_names=output_names,
-            timestamps_directory=timestamps_directory,
-            behavior_directory=behavior_directory,
+            video_data_directory=video_data_directory,
             tracker=tracker,
             workers=workers,
             display_progress=display_progress,
@@ -192,8 +188,7 @@ def run_video_processing_pipeline(
                 specifier=specifier,
                 log_paths=log_paths,
                 output_names=output_names,
-                timestamps_directory=timestamps_directory,
-                behavior_directory=behavior_directory,
+                video_data_directory=video_data_directory,
                 tracker=tracker,
                 workers=resolved_workers,
                 display_progress=display_progress,
@@ -284,8 +279,7 @@ def _dispatch_job(
     specifier: str,
     log_paths: dict[int, Path],
     output_names: dict[int, str],
-    timestamps_directory: Path,
-    behavior_directory: Path,
+    video_data_directory: Path,
     tracker: ProcessingTracker,
     *,
     workers: int,
@@ -299,9 +293,9 @@ def _dispatch_job(
         specifier: The job specifier. For a parse job this is the camera source ID; for the rename job it is empty.
         log_paths: The mapping of discovered camera source IDs to their raw log archive paths.
         output_names: The mapping of camera source IDs to their canonical timestamp feather filenames.
-        timestamps_directory: The camera timestamps directory where parsed feathers are written.
-        behavior_directory: The behavior data directory where canonical hardlinks are published.
-        tracker: The camera ProcessingTracker instance for recording job state transitions.
+        video_data_directory: The processed video-data directory where parsed feathers and their canonical hardlinks
+            are both written.
+        tracker: The video ProcessingTracker instance for recording job state transitions.
         workers: The number of worker processes the extraction binding may use.
         display_progress: Determines whether the extraction binding displays a progress bar.
         executor: An optional process pool shared across parse jobs so the extraction binding reuses it instead of
@@ -312,11 +306,11 @@ def _dispatch_job(
 
     if job_name == TIMESTAMP_JOB_NAME:
         # The ataraxis-video-system binding extracts the timestamps, writes the
-        # 'camera_{source_id}_timestamps.feather' into the camera timestamps directory, and records this job's start,
+        # 'camera_{source_id}_timestamps.feather' into the video data directory, and records this job's start,
         # completion, or failure on the tracker.
         execute_job(
             log_path=log_paths[int(specifier)],
-            output_directory=timestamps_directory,
+            output_directory=video_data_directory,
             source_id=specifier,
             job_id=job_id,
             workers=workers,
@@ -326,8 +320,7 @@ def _dispatch_job(
         )
     else:
         _link_parsed_timestamps(
-            timestamps_directory=timestamps_directory,
-            behavior_directory=behavior_directory,
+            video_data_directory=video_data_directory,
             output_names=output_names,
             job_id=job_id,
             tracker=tracker,
@@ -335,44 +328,42 @@ def _dispatch_job(
 
 
 def _link_parsed_timestamps(
-    timestamps_directory: Path,
-    behavior_directory: Path,
+    video_data_directory: Path,
     output_names: dict[int, str],
     job_id: str,
     tracker: ProcessingTracker,
 ) -> None:
-    """Hardlinks every parsed feather under its canonical name into the behavior data directory as one tracked job.
+    """Hardlinks every parsed feather under its canonical name within the video data directory as one tracked job.
 
-    Each ``camera_{source_id}_timestamps.feather`` the parsing stage wrote into the camera timestamps directory is
-    hardlinked to its canonical ``{name}_timestamps.feather`` in the behavior data directory. The hardlink shares the
-    parsed feather's inode, so the canonical copy adds no extra bytes and stays in sync, while the parsed feather
-    remains in the camera timestamps directory that ataraxis-video-system owns. If the two directories live on
-    different filesystems, where hardlinking is impossible, the feather is copied instead. Cameras whose parsed
-    feather is absent (for example, because their parse job has not run) are skipped, and any stale canonical link is
-    replaced, so the job is safe to re-run.
+    Each ``camera_{source_id}_timestamps.feather`` the parsing stage wrote into the video data directory is hardlinked
+    to its canonical ``{name}_timestamps.feather`` in the same directory. The hardlink shares the parsed feather's
+    inode, so the canonical copy adds no extra bytes and stays in sync while the original parsed feather is preserved.
+    Should hardlinking be unavailable, the feather is copied instead. Cameras whose parsed feather is absent (for
+    example, because their parse job has not run) are skipped, and any stale canonical link is replaced, so the job is
+    safe to re-run.
 
     Args:
-        timestamps_directory: The camera timestamps directory holding the parsed feathers.
-        behavior_directory: The behavior data directory where the canonical hardlinks are published.
+        video_data_directory: The processed video-data directory holding the parsed feathers and receiving their
+            canonical hardlinks.
         output_names: The mapping of camera source IDs to their canonical timestamp feather filenames.
         job_id: The unique hexadecimal identifier for the rename job.
-        tracker: The camera ProcessingTracker instance for recording job state transitions.
+        tracker: The video ProcessingTracker instance for recording job state transitions.
     """
     with tracked_job(tracker=tracker, job_id=job_id):
         published = 0
         for source_id, output_name in output_names.items():
             # The parsing stage (ataraxis-video-system extraction binding) writes each camera's feather under this
-            # name into the timestamps directory; the rename stage then hardlinks it under its canonical name.
-            parsed_path = timestamps_directory.joinpath(f"camera_{source_id}_timestamps.feather")
+            # name into the video data directory; the rename stage then hardlinks it under its canonical name.
+            parsed_path = video_data_directory.joinpath(f"camera_{source_id}_timestamps.feather")
             if not parsed_path.is_file():
                 continue
-            canonical_path = behavior_directory.joinpath(output_name)
+            canonical_path = video_data_directory.joinpath(output_name)
             # Replaces any stale link so a re-run re-points the canonical name at the freshly parsed feather.
             canonical_path.unlink(missing_ok=True)
             try:
                 canonical_path.hardlink_to(parsed_path)
             except OSError:
-                # Hardlinking fails when the directories live on different filesystems; fall back to a full copy.
+                # Hardlinking can fail in some environments; fall back to a copy so the canonical name is published.
                 shutil.copy2(parsed_path, canonical_path)
             published += 1
         console.echo(message=f"Published {published} parsed camera timestamp feather(s) under their canonical names.")

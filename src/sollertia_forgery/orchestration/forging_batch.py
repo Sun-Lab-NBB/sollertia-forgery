@@ -20,7 +20,9 @@ from pathlib import Path
 from natsort import natsorted
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
+    DatasetData,
     SurgeryData,
+    DatasetFiles,
     RawDataFiles,
     ProcessingTrackers,
 )
@@ -32,9 +34,9 @@ from .local import (
     analyze_feather_file,
     derive_tracker_status,
 )
-from ..forging.dataset import DatasetData, DatasetFiles, resolve_dataset
-from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
+from ..forging import resolve_dataset
 from ..shared_assets import prepare_tracker
+from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -142,10 +144,12 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
     """Verifies the completeness of forged data output for a single dataset.
 
     Loads the dataset's ``DatasetData`` marker and checks each session's ``data.feather`` (existence and
-    readability), the re-exported shared assets (``vr_configuration.yaml`` and ``session_descriptor.yaml``), and each
-    animal's ``surgery_metadata.yaml``. Reads the forging processing tracker. Owns the full verification result,
-    including the ``verified`` boolean and the ``tracker`` block. The check is system-agnostic: it validates only the
-    universal output contract and the shared assets, not any system-specific per-session artifact.
+    readability), the re-exported shared assets, and each animal's ``surgery_metadata.yaml``. The
+    ``session_descriptor.yaml`` is required for every session; the optional ``vr_configuration.yaml`` and
+    ``experiment_configuration.yaml`` are reported per session but do not fail verification when absent, since only
+    some session types carry them. Reads the forging processing tracker. Owns the full verification result, including
+    the ``verified`` boolean and the ``tracker`` block. The check is system-agnostic: it validates only the universal
+    output contract and the shared assets, not any system-specific per-session artifact.
 
     Args:
         unit_path: The path to the dataset root directory (containing ``dataset.yaml``).
@@ -188,16 +192,20 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
                 entry["columns"] = summary.get("columns", [])
                 entry["row_count"] = summary.get("total_rows", 0)
 
-        # Verifies the re-exported shared assets exist alongside the assembled feather.
+        # Verifies the re-exported shared assets alongside the assembled feather. The session descriptor is part of
+        # the universal output contract and is required for every session; the VR and experiment configurations are
+        # re-exported only for the session types that carry them, so they are reported per session but never fail
+        # verification when absent.
         shared_results: dict[str, Any] = {}
+        descriptor_present = session_entry.descriptor_path.is_file()
+        shared_results[str(RawDataFiles.SESSION_DESCRIPTOR)] = descriptor_present
+        if not descriptor_present:
+            session_valid = False
         for filename, asset_path in (
             (RawDataFiles.VR_CONFIGURATION, session_entry.vr_configuration_path),
-            (RawDataFiles.SESSION_DESCRIPTOR, session_entry.descriptor_path),
+            (RawDataFiles.EXPERIMENT_CONFIGURATION, session_entry.experiment_configuration_path),
         ):
-            asset_present = asset_path.is_file()
-            shared_results[str(filename)] = asset_present
-            if not asset_present:
-                session_valid = False
+            shared_results[str(filename)] = asset_path.is_file()
         entry["shared_assets"] = shared_results
 
         if not session_valid:

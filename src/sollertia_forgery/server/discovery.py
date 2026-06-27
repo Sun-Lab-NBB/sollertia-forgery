@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import DatasetSession
 
 from .server import Server
-from ..forging.dataset import DatasetSession
 from ..shared_assets import delay_terminal
 from .server_configuration import get_server_configuration
 

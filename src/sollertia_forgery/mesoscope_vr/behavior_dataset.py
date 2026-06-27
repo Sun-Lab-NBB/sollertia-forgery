@@ -32,7 +32,8 @@ _RUNNING_SPEED_WINDOW_US: int = 100_000
 
 
 def assemble_behavior_dataset(
-    behavior_data_path: Path,
+    microcontroller_data_path: Path,
+    runtime_data_path: Path,
     raw_data_path: Path,
     reference_time: NDArray[np.uint64],
     *,
@@ -41,7 +42,10 @@ def assemble_behavior_dataset(
     """Assembles the target session's behavior dataset and aligns it to the reference time vector.
 
     Args:
-        behavior_data_path: The path to the behavior data directory containing the processed feather files.
+        microcontroller_data_path: The path to the processed microcontroller-data directory holding the module-parsed
+            feathers (valve, lick, encoder, screen, brake, torque).
+        runtime_data_path: The path to the processed runtime-data directory holding the runtime-parsed feathers
+            (system state).
         raw_data_path: The path to the session's raw data directory containing the hardware state configuration.
         reference_time: The reference time vector to which to align the assembled dataset.
         drop_time_columns: Determines whether to drop the 'time_us' and 'elapsed_minutes' columns from the assembled
@@ -70,11 +74,13 @@ def assemble_behavior_dataset(
     state_enum = pl.Enum(list(state_mapping.keys()))
 
     # Loads the core behavior data present for all session types.
-    valve_data_frame = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
-    system_state_data_frame = pl.read_ipc(
-        source=behavior_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
+    valve_data_frame = pl.read_ipc(
+        source=microcontroller_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True
     )
-    lick_data_frame = pl.read_ipc(source=behavior_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
+    system_state_data_frame = pl.read_ipc(
+        source=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
+    )
+    lick_data_frame = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.LICK), memory_map=True)
     valve_time = valve_data_frame["time_us"].to_numpy()
 
     # Creates the aligned data dictionary using the reference time vector and interpolating all other data sources to
@@ -111,7 +117,7 @@ def assemble_behavior_dataset(
     }
 
     # Encoder data is not present for lick training.
-    encoder_file = behavior_data_path.joinpath(BehaviorDataFiles.ENCODER)
+    encoder_file = microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER)
     if encoder_file.exists():
         encoder_data_frame = pl.read_ipc(source=encoder_file, memory_map=True)
         encoder_time = encoder_data_frame["time_us"].to_numpy()
@@ -135,7 +141,7 @@ def assemble_behavior_dataset(
         ).astype(np.float32)
 
     # Screen data is only present for mesoscope experiments.
-    screen_file = behavior_data_path.joinpath(BehaviorDataFiles.SCREEN)
+    screen_file = microcontroller_data_path.joinpath(BehaviorDataFiles.SCREEN)
     if screen_file.exists():
         screen_data_frame = pl.read_ipc(source=screen_file, memory_map=True)
         aligned_data["screens"] = interpolate_data(
@@ -146,7 +152,7 @@ def assemble_behavior_dataset(
         )
 
     # Brake data is only present for mesoscope experiments.
-    brake_file = behavior_data_path.joinpath(BehaviorDataFiles.BRAKE)
+    brake_file = microcontroller_data_path.joinpath(BehaviorDataFiles.BRAKE)
     if brake_file.exists():
         brake_data_frame = pl.read_ipc(source=brake_file, memory_map=True)
         brake_torque = interpolate_data(
@@ -165,7 +171,7 @@ def assemble_behavior_dataset(
         aligned_data["brake"] = np.asarray(brake_torque > minimum_brake_strength, dtype=np.uint8)
 
     # Torque data is not present for run training.
-    torque_file = behavior_data_path.joinpath(BehaviorDataFiles.TORQUE)
+    torque_file = microcontroller_data_path.joinpath(BehaviorDataFiles.TORQUE)
     if torque_file.exists():
         torque_data_frame = pl.read_ipc(source=torque_file, memory_map=True)
         aligned_data["torque_N_cm"] = interpolate_data(

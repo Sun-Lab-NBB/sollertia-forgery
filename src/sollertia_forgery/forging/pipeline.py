@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
-    from .dataset import DatasetSession
+    from sollertia_shared_assets import DatasetSession
 
 # The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY. The PEP 695 alias
 # is evaluated lazily, so its annotation-only operands need not exist at runtime.
@@ -366,9 +366,14 @@ def _forge_session(
 
     Notes:
         The atomic unit dispatched to worker processes by the parallel path, so it must stay importable at module
-        level and accept only picklable arguments. The shared system-agnostic assets (VR configuration, session
-        descriptor) are validated before any expensive work so a session missing a required asset fails fast, and are
-        re-exported alongside the assembled feather so the forged session is self-contained.
+        level and accept only picklable arguments. These shared assets are system-agnostic, so the pipeline
+        hard-defines their handling rather than delegating it to the system worker. The session descriptor is written
+        by every acquisition runtime, but the VR and experiment configurations are present only for the session types
+        that carry them (sessions that use VR and experiment sessions, respectively). The session's own required-asset
+        policy decides which of them are mandatory, so a session missing a required asset (e.g., a session that uses VR
+        without its VR configuration) fails fast before any expensive work, while session types that carry neither
+        configuration still forge into a self-contained session. Whichever assets the session actually holds are
+        re-exported alongside the assembled feather.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
@@ -377,17 +382,22 @@ def _forge_session(
         worker: The registered per-session assembly worker for the dataset's acquisition system.
 
     Raises:
-        FileNotFoundError: If the VR configuration or the session descriptor is missing from the source session.
+        FileNotFoundError: If a shared asset the session is required to carry is missing from the source session.
     """
-    # Resolves and validates the shared assets before any expensive work. These assets are shared across acquisition
-    # systems, so the agnostic pipeline hard-defines their handling rather than delegating it to the system worker.
+    # Resolves the shared assets the forged session re-exports. The session descriptor is universal; the VR and
+    # experiment configurations are present only for some session types, so each is re-exported only when present.
     session = SessionData.load(session_path=source_session_path)
-    shared_assets = {
-        RawDataFiles.VR_CONFIGURATION: session.raw_data.vr_configuration_path,
+    reexported_assets = {
         RawDataFiles.SESSION_DESCRIPTOR: session.raw_data.session_descriptor_path,
+        RawDataFiles.VR_CONFIGURATION: session.raw_data.vr_configuration_path,
+        RawDataFiles.EXPERIMENT_CONFIGURATION: session.raw_data.experiment_configuration_path,
     }
-    for filename, source_path in shared_assets.items():
-        if not source_path.is_file():
+
+    # Validates the assets this session is required to carry before any expensive work. The session's required-asset
+    # policy is the single source of truth for which re-exported assets are mandatory for its session type.
+    required_filenames = {filename for filename, _ in session.required_raw_assets()}
+    for filename, source_path in reexported_assets.items():
+        if filename in required_filenames and not source_path.is_file():
             message = (
                 f"Unable to assemble session '{source_session_path.name}'. The session's raw data directory does not "
                 f"contain the required shared asset '{filename}' at '{source_path}'."
@@ -397,8 +407,10 @@ def _forge_session(
     # Stage 3: assembles the session data (data.feather + the system data-format descriptor).
     worker(source_session_path, output_path, dataset_name)
 
-    # Stage 4: re-exports the validated shared assets alongside the assembled feather.
+    # Stage 4: re-exports each shared asset the session actually carries alongside the assembled feather, so session
+    # types that do not run an experiment or use VR still forge into a self-contained session directory.
     output_directory = output_path.parent
     output_directory.mkdir(parents=True, exist_ok=True)
-    for filename, source_path in shared_assets.items():
-        shutil.copy2(src=source_path, dst=output_directory.joinpath(filename))
+    for filename, source_path in reexported_assets.items():
+        if source_path.is_file():
+            shutil.copy2(src=source_path, dst=output_directory.joinpath(filename))
