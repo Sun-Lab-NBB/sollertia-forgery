@@ -45,7 +45,7 @@ dependencies = [
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
-    "sollertia-shared-assets>=9.1,<10",
+    "sollertia-shared-assets>=9.1.0rc1,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
     "ataraxis-video-system>=4,<5",
@@ -72,8 +72,8 @@ dependencies = [
     "tabulate>=0,<1",
 
     # Platform-Specific Acceleration
-    "tbb4py>=2022,<2024; sys_platform != 'darwin'",
-    "intel-cmplr-lib-rt>=2025,<2027; sys_platform != 'darwin'",
+    "tbb4py>=2023,<2024; sys_platform != 'darwin'",
+    "intel-cmplr-lib-rt>=2026,<2027; sys_platform != 'darwin'",
 ]
 
 [project.urls]

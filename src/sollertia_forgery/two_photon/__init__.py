@@ -1,4 +1,4 @@
-"""Provides the single-recording two-photon (calcium-imaging) processing pipeline."""
+"""Provides the single-recording two-photon (calcium-imaging) processing pipeline based on cindra."""
 
 from cindra import SingleRecordingJobNames
 

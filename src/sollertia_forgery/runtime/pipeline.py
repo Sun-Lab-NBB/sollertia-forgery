@@ -1,6 +1,6 @@
-"""Provides the single-stage runtime log processing pipeline that decodes the acquisition runtime's DataLogger archive
-into a raw message table and parses it into domain-specific behavior feathers using the parser registered for the
-session's acquisition system.
+"""Provides the single-stage runtime log processing pipeline that decodes the acquisition system's runtime
+DataLogger archive into a raw message table and parses it into domain-specific behavior feathers using the parser
+registered for the session's acquisition system.
 """
 
 from __future__ import annotations
