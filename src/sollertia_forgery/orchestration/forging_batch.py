@@ -144,28 +144,40 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
     """Verifies the completeness of forged data output for a single dataset.
 
     Loads the dataset's ``DatasetData`` marker and checks each session's ``data.feather`` (existence and
-    readability), the re-exported shared assets, and each animal's ``surgery_metadata.yaml``. The
-    ``session_descriptor.yaml`` is required for every session; the optional ``vr_configuration.yaml`` and
-    ``experiment_configuration.yaml`` are reported per session but do not fail verification when absent, since only
-    some session types carry them. Reads the forging processing tracker. Owns the full verification result, including
-    the ``verified`` boolean and the ``tracker`` block. The check is system-agnostic: it validates only the universal
-    output contract and the shared assets, not any system-specific per-session artifact.
+    readability), confirms every column it writes is described in the dataset's ``data_descriptions.feather``, the
+    re-exported shared assets, and each animal's ``surgery_metadata.yaml``. The ``session_descriptor.yaml`` is
+    required for every session; the optional ``vr_configuration.yaml`` and ``experiment_configuration.yaml`` are
+    reported per session but do not fail verification when absent, since only some session types carry them. Reads
+    the forging processing tracker. Owns the full verification result, including the ``verified`` boolean and the
+    ``tracker`` block. The check is system-agnostic: it validates only the universal output contract, the
+    column-description coverage, and the shared assets, not any system-specific per-session artifact.
 
     Args:
         unit_path: The path to the dataset root directory (containing ``dataset.yaml``).
 
     Returns:
-        A dictionary containing a ``verified`` flag, per-session results in ``files``, per-animal surgery results in
-        ``animals``, tracker status in ``tracker``, and aggregate counts. On failure, returns a dictionary with an
-        ``error`` key.
+        A dictionary containing a ``verified`` flag, a ``descriptions_present`` flag, per-session results in
+        ``files`` (each carrying an ``undescribed_columns`` list when a session writes columns absent from the
+        dataset's ``data_descriptions.feather``), per-animal surgery results in ``animals``, tracker status in
+        ``tracker``, and aggregate counts. On failure, returns a dictionary with an ``error`` key.
     """
     try:
         dataset = DatasetData.load(dataset_path=unit_path)
     except Exception as load_error:
         return {"error": f"Unable to load dataset: {load_error}"}
 
+    # Resolves the per-dataset column-description mapping once so each session's columns can be checked for
+    # description coverage. A missing companion feather is a dataset-level defect surfaced here rather than per
+    # session, and disables (without crashing) the per-session coverage check below.
+    descriptions_present = True
+    described_columns: set[str] = set()
+    try:
+        described_columns = set(dataset.column_descriptions())
+    except Exception:
+        descriptions_present = False
+
     file_results: list[dict[str, Any]] = []
-    all_valid = True
+    all_valid = descriptions_present
 
     for session_entry in dataset.sessions:
         data_path = session_entry.data_path
@@ -188,9 +200,20 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
                 session_valid = False
             else:
                 summary = analysis.get("summary", {})
+                columns = summary.get("columns", [])
                 entry["valid"] = True
-                entry["columns"] = summary.get("columns", [])
+                entry["columns"] = columns
                 entry["row_count"] = summary.get("total_rows", 0)
+
+                # Enforces the dataset's data-description contract for this session: every column written into the
+                # session's data.feather must have an entry in the dataset's data_descriptions.feather. Undescribed
+                # columns mark the session (and the dataset) invalid. Skipped when the descriptions feather is
+                # absent, which is already recorded as a dataset-level defect.
+                if descriptions_present:
+                    undescribed_columns = sorted(set(columns) - described_columns)
+                    if undescribed_columns:
+                        entry["undescribed_columns"] = undescribed_columns
+                        session_valid = False
 
         # Verifies the re-exported shared assets alongside the assembled feather. The session descriptor is part of
         # the universal output contract and is required for every session; the VR and experiment configurations are
@@ -244,6 +267,7 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
         "verified": all_valid and bool(file_results) and bool(animal_results),
         "dataset_path": str(unit_path),
         "dataset_name": dataset.name,
+        "descriptions_present": descriptions_present,
         "files": file_results,
         "total_files": len(file_results),
         "animals": animal_results,
