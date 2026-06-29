@@ -173,6 +173,14 @@ def run_forging_pipeline(
                 display_progress=display_progress,
             )
 
+        # Every session's data.feather now exists, so the dataset's data-description contract can be enforced against
+        # the fully composed dataset: every column any session actually wrote must be described in the dataset's
+        # data_descriptions.feather. A violation means the acquisition system emitted an undescribed column. Remote
+        # mode skips this because the other sessions are not yet present; the batch verifier enforces it once the full
+        # set has been assembled.
+        console.echo(message="Verifying assembled-data column descriptions...", level=LogLevel.INFO)
+        dataset.verify_data_descriptions()
+
     console.echo(message="All forging jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
