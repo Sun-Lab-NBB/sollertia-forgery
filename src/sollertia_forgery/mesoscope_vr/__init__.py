@@ -7,6 +7,7 @@ from .metadata import (
     BehaviorDataFiles,
 )
 from .fluorescence import FluorescenceColumn
+from .video_tracking import process_mesoscope_video_tracking
 
 __all__ = [
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
@@ -14,4 +15,5 @@ __all__ = [
     "DatasetColumn",
     "FluorescenceColumn",
     "assemble_mesoscope_session",
+    "process_mesoscope_video_tracking",
 ]

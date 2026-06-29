@@ -45,12 +45,12 @@ dependencies = [
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6,<7",
     "ataraxis-data-structures>=6,<7",
-    "sollertia-shared-assets>=9.1.0rc1,<10",
+    "sollertia-shared-assets>=9.1.0rc2,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
     "ataraxis-video-system>=4,<5",
     "ataraxis-communication-interface>=6,<7",
-    "cindra>=1,<2",
+    "cindra>=1.1.0,<2",
 
     # Machine Vision (GenICam runtime for ataraxis-video-system; sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
@@ -59,6 +59,7 @@ dependencies = [
     "polars>=1,<2",
     "numpy>=2,<3",
     "numba>=0.64,<1",
+    "h5py>=3,<4",
 
     # Remote Execution
     "paramiko>=5,<6",
@@ -93,13 +94,14 @@ dev = [
     "uv>=0,<1",
     "tox-uv>=1,<2",
 
-    # Development Automation
-    "ataraxis-automation>=8,<9",
+    # Development Automation (>=8.1.1 required alongside cindra>=1.1.0, which needs importlib-metadata>=9)
+    "ataraxis-automation>=8.1.1,<9",
 
     # Types
     "types-filelock>=3,<4",
     "types-tabulate>=0,<1",
     "types-paramiko>=5,<6",
+    "h5py-stubs>=0.1,<1",
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.

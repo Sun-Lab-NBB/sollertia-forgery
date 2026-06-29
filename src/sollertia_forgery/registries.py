@@ -15,7 +15,11 @@ from dataclasses import dataclass
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems
 
-from .mesoscope_vr import MESOSCOPE_COLUMN_DESCRIPTIONS, assemble_mesoscope_session
+from .mesoscope_vr import (
+    MESOSCOPE_COLUMN_DESCRIPTIONS,
+    assemble_mesoscope_session,
+    process_mesoscope_video_tracking,
+)
 from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .mesoscope_vr.two_photon import locate_two_photon_data
 from .mesoscope_vr.microcontrollers import (
@@ -38,12 +42,14 @@ __all__ = [
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
     "TWO_PHOTON_DATA_REGISTRY",
+    "VIDEO_TRACKING_REGISTRY",
     "ForgingAssemblyAsset",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
     "resolve_two_photon_data_locator",
+    "resolve_video_tracking",
 ]
 
 
@@ -108,6 +114,16 @@ TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, Callable[..., Path]] = {
 value is a plain module-level ``locate(session)`` function that an acquisition-system package implements to resolve
 the loaded session's raw two-photon (calcium-imaging) directory, which the agnostic two-photon worker hands to the
 cindra single-recording pipeline as its input. A system donates a locator exactly when it produces two-photon data."""
+
+VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, Callable[..., None]] = {
+    AcquisitionSystems.MESOSCOPE_VR: process_mesoscope_video_tracking,
+}
+"""The single, fully-visible registry of video-tracking functions, keyed by acquisition system. Each value is a plain
+module-level ``process(session, output_directory)`` function that an acquisition-system package implements to do all
+of that system's video tracking: it locates its own externally-produced DeepLabCut ``.h5`` predictions, hardcodes the
+bodyparts it wants, parses them, and writes its outputs into the session's processed video-data directory. The
+agnostic video pipeline simply runs it (no-op when no predictions are present), like the per-session forging
+assembler. A system donates a no-op function when it performs no video tracking."""
 
 
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
@@ -202,6 +218,24 @@ def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> Callabl
     return TWO_PHOTON_DATA_REGISTRY[_resolve_system(system)]
 
 
+def resolve_video_tracking(system: str | AcquisitionSystems) -> Callable[..., None]:
+    """Resolves the video-tracking function registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        The registered ``process(session, output_directory)`` function for the acquisition system. The agnostic video
+        pipeline runs it once per session, expecting it to perform all of that system's video tracking and to no-op
+        when no DeepLabCut predictions are present.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return VIDEO_TRACKING_REGISTRY[_resolve_system(system)]
+
+
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
     """Validates and normalizes an acquisition-system identifier to an AcquisitionSystems member.
 
@@ -245,6 +279,7 @@ def _assert_registry_coverage() -> None:
         ("FORGING_ASSEMBLY_REGISTRY", frozenset(FORGING_ASSEMBLY_REGISTRY)),
         ("RUNTIME_PARSER_REGISTRY", frozenset(RUNTIME_PARSER_REGISTRY)),
         ("TWO_PHOTON_DATA_REGISTRY", frozenset(TWO_PHOTON_DATA_REGISTRY)),
+        ("VIDEO_TRACKING_REGISTRY", frozenset(VIDEO_TRACKING_REGISTRY)),
         ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing = systems - registered_systems
