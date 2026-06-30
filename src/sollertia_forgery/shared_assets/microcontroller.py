@@ -26,7 +26,7 @@ def find_module_feathers(data_directory: Path) -> list[Path]:
     Searches ``data_directory`` non-recursively for feather files matching the ``controller_*_module_*.feather``
     naming convention used by ataraxis-communication-interface. The directory is expected to be the session's
     canonical ``processed_data/microcontroller_data`` location exposed by
-    ``SessionData.microcontroller_data_path``.
+    ``SessionData.processed_data.microcontroller_data_path``.
 
     Args:
         data_directory: The path to the session's microcontroller data directory.

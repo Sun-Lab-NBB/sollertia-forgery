@@ -110,16 +110,14 @@ def microcontroller_command(session_path: Path, job_id: str | None, workers: int
 
 @process_cli.command("runtime")
 @_SESSION_PATH_OPTION
-@_JOB_ID_OPTION
 @_WORKERS_OPTION
 @_PROGRESS_OPTION
-def runtime_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+def runtime_command(session_path: Path, workers: int, *, progress: bool) -> None:
     """Decodes the acquisition runtime log archive and parses it into the session's runtime behavior feathers."""
     from ..runtime import run_runtime_processing_pipeline  # noqa: PLC0415
 
     run_runtime_processing_pipeline(
         session_path=session_path,
-        job_id=job_id,
         workers=workers,
         display_progress=progress,
     )

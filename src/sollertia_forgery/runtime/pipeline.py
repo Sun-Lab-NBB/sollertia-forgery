@@ -16,7 +16,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
 
 from ..registries import resolve_runtime_binding
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,7 +30,6 @@ RUNTIME_JOB_NAME: str = "runtime_processing"
 
 def run_runtime_processing_pipeline(
     session_path: Path,
-    job_id: str | None = None,
     *,
     workers: int = -1,
     display_progress: bool = False,
@@ -45,19 +44,12 @@ def run_runtime_processing_pipeline(
         are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
         system-agnostic.
 
-        The decode is the only stage that benefits from parallelism: when the reader splits the archive into more
-        than one batch and more than one worker is available, the batches are decoded across a worker pool; otherwise
-        the archive is read in a single in-process pass. The parse always runs in-process, so the whole pipeline is
-        one tracked job recorded against the ``runtime`` tracker.
-
-        In local mode (job_id is None) the runtime job runs unconditionally; in remote mode the provided job_id must
-        match this session's single runtime job. The registered parser may additionally raise system-specific errors
-        (for example ``ValueError`` or ``RuntimeError``) that propagate unchanged.
+        The runtime job is the only job this pipeline produces, so it always runs and its processing tracker is reset
+        and reinitialized from scratch on every invocation. The registered parser may additionally raise
+        system-specific errors (for example ``ValueError`` or ``RuntimeError``) that propagate unchanged.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
-        job_id: The hexadecimal identifier of the runtime job to execute (remote mode). If not provided, the pipeline
-            runs the runtime job directly (local mode).
         workers: The number of worker processes the decode stage may use. A value less than 1 uses all available CPU
             cores (minus reserved cores); 1 forces a single in-process decode.
         display_progress: Determines whether to display a progress bar while decoding a multi-batch archive.
@@ -65,8 +57,7 @@ def run_runtime_processing_pipeline(
     Raises:
         FileNotFoundError: If the session's runtime log archive is not present at its canonical raw behavior data
             location.
-        ValueError: If the session's acquisition system has no runtime binding registered, or if the provided job_id
-            does not match the runtime job available for this session.
+        ValueError: If the session's acquisition system has no runtime binding registered.
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -93,18 +84,12 @@ def run_runtime_processing_pipeline(
     jobs = [(RUNTIME_JOB_NAME, source_id)]
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
-    if job_id is not None and job_id != job_identifier:
-        message = (
-            f"Unable to execute the requested job with ID '{job_id}'. The identifier does not match the runtime "
-            f"processing job available for this session. Valid job ID: '{job_identifier}'."
-        )
-        console.error(message=message, error=ValueError)
-
-    # The tracker co-locates with the parsed output in ``runtime_data``. The runtime job is the sole entry in its
-    # universe, so a re-run aligns the tracker against exactly that job.
+    # The tracker co-locates with the parsed output in ``runtime_data``. The runtime job is the only job this pipeline
+    # produces, so the tracker is reset and reinitialized from scratch on every run.
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
+    tracker.reset()
+    tracker.initialize_jobs(jobs=jobs)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
     with tracked_job(tracker=tracker, job_id=job_identifier):
