@@ -46,7 +46,8 @@ def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
     Args:
         feather_path: The path to the module feather file. The filename must follow the
             ``controller_{controller_id}_module_{module_type}_{module_id}.feather`` naming convention, where the
-            leading field is the axci source id (the controller id for microcontroller archives).
+            leading field is the ataraxis-communication-interface source id (the controller id for microcontroller
+            archives).
 
     Returns:
         A tuple of three integers: (controller_id, module_type, module_id).
@@ -77,8 +78,9 @@ def partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
         and returns the groups keyed by event code, allowing subsequent lookups to be O(1).
 
     Args:
-        module_dataframe: The Polars DataFrame read from an axci module feather file with the standard 5-column
-            schema (timestamp_us: UInt64, command: UInt8, event: UInt8, dtype: String, data: Binary).
+        module_dataframe: The Polars DataFrame read from an ataraxis-communication-interface module feather file with
+            the standard 5-column schema (timestamp_us: UInt64, command: UInt8, event: UInt8, dtype: String,
+            data: Binary).
 
     Returns:
         A dictionary mapping integer event codes to their corresponding sub-DataFrames.
@@ -116,9 +118,9 @@ def get_event_data[ScalarT: np.generic](
     """Returns timestamps and vectorized-reconstructed data values for a given event code.
 
     Notes:
-        Relies on the axci protocol guarantee that all messages sharing an event code also share a payload
-        dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call instead
-        of a per-row Python loop. The reconstructed values are then cast to the requested output dtype for
+        Relies on the ataraxis-communication-interface protocol guarantee that all messages sharing an event code also
+        share a payload dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call
+        instead of a per-row Python loop. The reconstructed values are then cast to the requested output dtype for
         uniform downstream handling.
 
     Args:
@@ -153,9 +155,9 @@ def merge_event_streams[ScalarT: np.generic](
     """Merges two chronologically-sorted event streams into a single timestamp-sorted stream.
 
     Notes:
-        Consolidates the allocate-empty-arrays / fill-halves / argsort pattern that was previously duplicated
-        across every parse function. Uses NumPy's stable mergesort, which is near-linear on the already-sorted
-        runs produced by the axci log format.
+        Consolidates the allocate-empty-arrays / fill-halves / argsort pattern used by most parsing functions to
+        align message streams (event codes). Uses NumPy's stable mergesort, which is near-linear on the already-sorted
+        runs produced by the ataraxis-communication-interface log format.
 
     Args:
         timestamps_a: The uint64 timestamp array for the first event stream.
