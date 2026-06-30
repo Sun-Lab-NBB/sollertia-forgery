@@ -38,10 +38,10 @@ def run_runtime_processing_pipeline(
 
     Notes:
         This is a single-stage pipeline. It locates the runtime DataLogger archive (``{source_id}_log.npz``) in the
-        session's raw behavior-data directory, decodes it into a raw ``(time_us, payload)`` message table, and hands
-        that table to the registered runtime parser, which writes the system's behavior feathers into the session's
-        processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and parser
-        are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
+        session's raw behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. It then
+        hands that table to the registered runtime parser, which writes the system's behavior feathers into the
+        session's processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and
+        parser are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
         system-agnostic.
 
         The runtime job is the only job this pipeline produces, so it always runs and its processing tracker is reset
@@ -57,7 +57,7 @@ def run_runtime_processing_pipeline(
     Raises:
         FileNotFoundError: If the session's runtime log archive is not present at its canonical raw behavior data
             location.
-        ValueError: If the session's acquisition system has no runtime binding registered.
+        ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -132,7 +132,7 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
         This is the system-agnostic decode stage. It reads the DataLogger archive via ``LogArchiveReader``, which
         resolves the onset timestamp and yields each message's absolute timestamp and raw payload bytes. When the
         reader splits the archive into more than one batch and more than one worker is available, the batches are
-        decoded across a worker pool (each worker reuses the pre-discovered onset timestamp); otherwise the archive
+        decoded across a worker pool (each worker reuses the pre-discovered onset timestamp). Otherwise, the archive
         is read in a single in-process bulk pass. The returned table carries the timestamps unchanged and the
         payloads as opaque bytes, leaving every system-specific interpretation to the registered parser.
 
