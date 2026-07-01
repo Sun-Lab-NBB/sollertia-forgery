@@ -22,7 +22,7 @@ _MATERIALIZED_CONFIGURATION_FILENAME: str = "configuration.yaml"
 caller's template under this name in the session's cindra directory (``session.processed_data.cindra_data_path``)."""
 
 _SAVED_ACQUISITION_PARAMETERS_FILENAME: str = "acquisition_parameters.yaml"
-"""The filename cindra persists acquisition parameters under in its output directory after the first run. The
+"""The filename under which cindra persists acquisition parameters in its output directory after the first run. The
 pipeline accepts its presence as an alternative to the raw-side ``cindra_parameters.json`` when validating that the
 recording is processable."""
 
@@ -42,19 +42,21 @@ def run_two_photon_processing_pipeline(
     """Materializes a session-bound cindra configuration and runs the single-recording two-photon processing pipeline.
 
     Resolves the session's raw imaging directory (cindra input) through the two-photon data registry and its
-    processed-data root (cindra output) from the session hierarchy. Overrides the supplied configuration template's
-    data path, output path, worker count, and progress flag with these session-resolved values, then writes the
-    result as the session's cindra ``configuration.yaml`` and delegates the binarization, per-plane processing, and
-    combination stages to cindra. When none of ``binarize``, ``process``, or ``combine`` is requested, all three
-    stages run in sequence.
+    processed-data root (cindra output) from the session hierarchy. It overrides the configuration template's data
+    path and output path with these session-resolved locations, and its worker count and progress flag with the
+    supplied ``workers`` and ``display_progress`` arguments. It then writes the result as the session's cindra
+    ``configuration.yaml`` and delegates the binarization, per-plane processing, and combination stages to cindra. When
+    none of ``binarize``, ``process``, or ``combine`` is requested, all three stages run in sequence (local mode); a
+    supplied ``job_id`` instead runs only the matching job.
 
     Notes:
         The raw-imaging input directory is resolved through the system-agnostic two-photon data registry, which
-        dispatches to the acquisition system's donated locator; only systems that produce two-photon data donate one
-        (currently only Mesoscope-VR). cindra owns the heavy work and records the run on the two-photon processing
-        tracker (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
-        (``session.processed_data.cindra_data_path``); the stage flags map directly onto its stages. Additional
-        ``FileNotFoundError``/``ValueError`` conditions may propagate from the underlying cindra pipeline.
+        dispatches to the acquisition system's donated locator. If the registry holds no locator for the session's
+        acquisition system, the lookup raises and the pipeline fails before any cindra work begins. cindra owns the
+        heavy work and records the run on the two-photon processing tracker (``single_recording_tracker.yaml``,
+        ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory (``session.processed_data.cindra_data_path``);
+        the stage flags map directly onto its stages. Additional ``FileNotFoundError``/``ValueError`` conditions may
+        propagate from the underlying cindra pipeline.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -71,6 +73,7 @@ def run_two_photon_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
+        KeyError: If the two-photon data registry holds no locator for the session's acquisition system.
         FileNotFoundError: If the configuration file does not exist or is not a YAML file, if the session's raw
             two-photon imaging directory does not exist, or if no cindra acquisition parameters file is available for
             the recording.
@@ -87,10 +90,11 @@ def run_two_photon_processing_pipeline(
 
     # Resolves the recording's raw two-photon imaging directory (cindra input) through the two-photon data registry,
     # which dispatches to the acquisition system's donated locator, and the session's processed-data root (cindra
-    # output) from the shared session hierarchy. cindra creates its 'cindra' output subdirectory under the
-    # processed-data root, which is exactly the session's canonical processed cindra directory, so downstream tools
-    # find the outputs where they expect them.
-    locate_two_photon_data = resolve_two_photon_data_locator(session.acquisition_system)
+    # output) from the shared session hierarchy. If the registry holds no locator for the session's acquisition system,
+    # this lookup raises, failing the pipeline before any cindra work. cindra creates its 'cindra' output subdirectory
+    # under the processed-data root, which is exactly the session's canonical processed cindra directory, so downstream
+    # tools find the outputs where they expect them.
+    locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
     data_path = locate_two_photon_data(session)
     output_path = session.processed_data_path
     cindra_directory = session.processed_data.cindra_data_path
@@ -154,8 +158,8 @@ def run_two_photon_processing_pipeline(
     materialized_configuration_path = cindra_directory.joinpath(_MATERIALIZED_CONFIGURATION_FILENAME)
     configuration.save(file_path=materialized_configuration_path)
 
-    # A local "run everything" invocation requests all stages when the caller did not select any specific stage,
-    # mirroring the cindra single-recording binding's own default.
+    # Requests all stages when the caller selected none (a local "run everything" invocation), mirroring the cindra
+    # single-recording binding's own default.
     if not (binarize or process or combine):
         binarize = process = combine = True
 

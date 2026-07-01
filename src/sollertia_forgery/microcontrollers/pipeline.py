@@ -67,9 +67,9 @@ def run_microcontroller_processing_pipeline(
         domain-specific feather into ``microcontroller_data``; the pipeline stays system-agnostic.
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
-        (across a worker pool when more than one worker is available). In remote mode (job_id is provided) only the
-        single matching job runs in-process. The processing tracker is co-located with the extracted and parsed output
-        in ``microcontroller_data``.
+        (across a worker pool when more than one worker is available and more than one module is runnable). In
+        remote mode (job_id is provided) only the single matching job runs in-process. The processing tracker is
+        co-located with the extracted and parsed output in ``microcontroller_data``.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -80,8 +80,11 @@ def run_microcontroller_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        ValueError: If the session's acquisition system has no parsers registered in the central registry, if no
-            processable controllers are discovered, or if the provided job_id does not match any available job.
+        FileNotFoundError: If the session's extraction configuration or microcontroller manifest is missing, or,
+            in remote mode, if a requested extraction job's log archive is not present.
+        ValueError: If the session's acquisition system is unknown, if a configured controller ID is not registered
+            in the microcontroller manifest, if no processable controllers are discovered, or if the provided
+            job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -272,11 +275,12 @@ def _extract_controller(
     ataraxis-communication-interface.
 
     Notes:
-        Delegates to the acquisition library's ``execute_job`` binding, which reads the archive once, filters
-        messages by the configured per-module event codes, writes a ``controller_{id}_module_{type}_{id}.feather``
-        file per module that produced data, and manages this job's state on the passed-in tracker (start, complete,
-        or fail). When kernel extraction is configured it may also write a ``controller_{id}_kernel.feather``, which
-        this pipeline does not consume. The output directory is created if it does not exist.
+        Delegates to the acquisition library's ``execute_job`` binding, which reads the archive once and filters
+        messages by the configured per-module event codes. The binding writes a
+        ``controller_{id}_module_{type}_{id}.feather`` file per module that produced data and manages this job's
+        state on the passed-in tracker (start, complete, or fail). When kernel extraction is configured it may also
+        write a ``controller_{id}_kernel.feather``, which this pipeline does not consume. The output directory is
+        created if it does not exist.
 
     Args:
         archive_path: The path to the controller's ``{controller_id}_log.npz`` archive.
@@ -380,11 +384,14 @@ def _run_extraction_stage(
     """Runs Stage 1: extracts each present controller's log archive into raw per-module feathers.
 
     Notes:
-        Controllers are extracted sequentially in the parent process because the acquisition binding manages each
-        extraction job's tracker state internally; running the bindings concurrently would race on the shared
-        tracker file. Parallelism instead stays inside each archive via the shared process pool that decodes message
-        batches, matching how the acquisition library orchestrates a multi-controller directory. The pool is owned by
-        the caller and shared with the parse stage, so this helper neither creates nor shuts it down.
+        Controllers are extracted one at a time within a session. Each archive already fans its message decoding across
+        the shared process pool, so a single controller saturates the session's worker budget, matching how the
+        acquisition library orchestrates a multi-controller directory. Parallelism across sessions is handled by the
+        orchestration layer, which runs independent sessions concurrently under a per-session worker cap; extracting a
+        session's controllers sequentially therefore avoids oversubscribing cores across those concurrent sessions. The
+        shared tracker is file-lock guarded and safe under concurrent access, so this ordering is a throughput choice
+        rather than a correctness constraint. The pool is owned by the caller and shared with the parse stage, so this
+        helper neither creates nor shuts it down.
 
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
