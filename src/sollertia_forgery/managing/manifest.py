@@ -30,6 +30,21 @@ MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
 
+def project_manifest_path(project_directory: Path) -> Path:
+    """Resolves the path to the project manifest .feather file under the target project's root directory.
+
+    This is the single source of truth for the manifest filename, so both the manifest writer and any consumer that
+    locates the manifest (such as the project mirror) derive the same path.
+
+    Args:
+        project_directory: The path to the project's root directory.
+
+    Returns:
+        The path to the project manifest .feather file.
+    """
+    return project_directory.joinpath(f"{project_directory.stem}_manifest.feather")
+
+
 def generate_project_manifest(project_directory: Path) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
@@ -67,7 +82,7 @@ def generate_project_manifest(project_directory: Path) -> None:
 
     # Resolves the path to the manifest .feather file to be created and the .lock file used to ensure only a single
     # process can be working on the manifest file at the same time.
-    manifest_path = project_directory.joinpath(f"{project_directory.stem}_manifest.feather")
+    manifest_path = project_manifest_path(project_directory=project_directory)
     manifest_lock = manifest_path.with_suffix(manifest_path.suffix + ".lock")
 
     # Initializes the processing tracker in the project directory alongside the manifest output. Applies stale

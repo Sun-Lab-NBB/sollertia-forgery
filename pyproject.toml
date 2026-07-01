@@ -247,6 +247,7 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
+    "sollertia_forgery.mirror",
     "sollertia_forgery.orchestration",
     "sollertia_forgery.interfaces",
 ]
@@ -268,6 +269,7 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
+    "sollertia_forgery.mirror",
     "sollertia_forgery.orchestration",
 ]
 forbidden_modules = [
