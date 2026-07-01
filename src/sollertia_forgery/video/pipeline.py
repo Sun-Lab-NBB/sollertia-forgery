@@ -1,5 +1,6 @@
-"""Provides the two-stage camera-timestamp processing pipeline that parses raw VideoSystem log archives into the
-session's processed video-data directory and hardlinks each parsed feather there under its canonical manifest name.
+"""Provides the three-stage camera-timestamp processing pipeline. The pipeline parses raw VideoSystem log archives
+into the session's processed video-data directory, hardlinks each parsed feather there under its canonical manifest
+name, then runs the acquisition system's donated video-tracking function over externally-produced pose predictions.
 """
 
 from __future__ import annotations
@@ -57,10 +58,10 @@ def run_video_processing_pipeline(
         single job that publishes every parsed feather there under its canonical manifest name. Stage 3 (``track``) is
         a single job that runs the acquisition system's donated video-tracking function, which post-processes any
         externally-produced pose predictions (e.g. DeepLabCut ``.h5`` files) into tracking feathers in the same
-        directory; it is a no-op when no predictions are present. With no stage flag set, all three stages run in
+        directory. It is a no-op when no predictions are present. With no stage flag set, all three stages run in
         sequence (full local pipeline); in remote mode (``job_id`` provided) only the matching job runs, so a
-        scheduler can drive each parse job, the rename job, and the tracking job independently. The full manifest
-        registration set plus the single tracking job define the tracker-alignment universe.
+        scheduler can drive each parse job, the rename job, and the tracking job independently. The per-camera parse
+        jobs, the single rename job, and the single tracking job together define the tracker-alignment universe.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -113,9 +114,10 @@ def run_video_processing_pipeline(
         if source_id in output_names:
             log_paths[source_id] = log_path
 
-    # Both pipeline stages write into the single processed video-data directory: stage 1 parses each camera's frame
-    # timestamps there, and stage 2 hardlinks every parsed feather under its canonical manifest name in the same
-    # directory. The processing tracker lives there too, matching SessionData.video_tracker_path.
+    # All three pipeline stages write into the single processed video-data directory. Stage 1 parses each camera's
+    # frame timestamps there, stage 2 hardlinks every parsed feather under its canonical manifest name, and stage 3
+    # writes the donated tracking function's pose outputs. The processing tracker lives there too, matching
+    # SessionData.video_tracker_path.
     video_data_directory = session.processed_data.video_data_path
     video_data_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=video_data_directory.joinpath(ProcessingTrackers.VIDEO))
@@ -193,7 +195,7 @@ def run_video_processing_pipeline(
     console.echo(message=f"Running {len(jobs)} camera-timestamp processing job(s).")
 
     # Resolves the worker count once and creates a single ProcessPoolExecutor shared across every parse job, mirroring
-    # the ataraxis-video-system pipeline. This amortizes the cost of spawning and tearing down worker processes across
+    # the ataraxis-video-system pipeline. Amortizes the cost of spawning and tearing down worker processes across
     # all cameras instead of paying it once per camera. The shared pool requires a positive, pre-resolved worker count
     # because the extraction binding sizes its batch submissions to match the pool. The renaming stage ignores it.
     resolved_workers = resolve_worker_count(requested_workers=workers)
@@ -365,11 +367,11 @@ def _run_pose_tracking(
 ) -> None:
     """Runs the acquisition system's donated video-tracking function as one tracked job.
 
-    Resolves the function registered for the session's acquisition system from the registry hub and runs it, expecting
-    it to perform all of that system's video tracking: locate its own externally-produced pose predictions, parse
-    them, and write its outputs into the video data directory. The function no-ops when no predictions are present, so
-    this job is safe to run on every session. The tracking output shares the video data directory and the video
-    processing tracker with the timestamp stages.
+    Resolves the function registered for the session's acquisition system from the registry hub and runs it. The
+    function is expected to perform all of that system's video tracking: it locates its own externally-produced
+    pose predictions, parses them, and writes its outputs into the video data directory. The function no-ops when no
+    predictions are present, so this job is safe to run on every session. The tracking output shares the video data
+    directory and the video processing tracker with the timestamp stages.
 
     Args:
         session: The loaded session whose acquisition system selects the tracking function.
@@ -378,7 +380,7 @@ def _run_pose_tracking(
         tracker: The video ProcessingTracker instance for recording job state transitions.
     """
     with tracked_job(tracker=tracker, job_id=job_id):
-        resolve_video_tracking(session.acquisition_system)(session, video_data_directory)
+        resolve_video_tracking(session.acquisition_system)(session=session, output_directory=video_data_directory)
 
 
 def _link_parsed_timestamps(
@@ -418,6 +420,6 @@ def _link_parsed_timestamps(
                 canonical_path.hardlink_to(parsed_path)
             except OSError:
                 # Hardlinking can fail in some environments; fall back to a copy so the canonical name is published.
-                shutil.copy2(parsed_path, canonical_path)
+                shutil.copy2(src=parsed_path, dst=canonical_path)
             published += 1
         console.echo(message=f"Published {published} parsed camera timestamp feather(s) under their canonical names.")

@@ -384,11 +384,14 @@ def _run_extraction_stage(
     """Runs Stage 1: extracts each present controller's log archive into raw per-module feathers.
 
     Notes:
-        Controllers are extracted sequentially in the parent process because the acquisition binding manages each
-        extraction job's tracker state internally; running the bindings concurrently would race on the shared
-        tracker file. Parallelism instead stays inside each archive via the shared process pool that decodes message
-        batches, matching how the acquisition library orchestrates a multi-controller directory. The pool is owned by
-        the caller and shared with the parse stage, so this helper neither creates nor shuts it down.
+        Controllers are extracted one at a time within a session. Each archive already fans its message decoding across
+        the shared process pool, so a single controller saturates the session's worker budget, matching how the
+        acquisition library orchestrates a multi-controller directory. Parallelism across sessions is handled by the
+        orchestration layer, which runs independent sessions concurrently under a per-session worker cap; extracting a
+        session's controllers sequentially therefore avoids oversubscribing cores across those concurrent sessions. The
+        shared tracker is file-lock guarded and safe under concurrent access, so this ordering is a throughput choice
+        rather than a correctness constraint. The pool is owned by the caller and shared with the parse stage, so this
+        helper neither creates nor shuts it down.
 
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
