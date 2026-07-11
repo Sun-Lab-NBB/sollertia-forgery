@@ -7,10 +7,16 @@ from .metadata import (
     BehaviorDataFiles,
 )
 from .fluorescence import FluorescenceColumn
-from .video_tracking import process_mesoscope_video_tracking
+from .video_tracking import (
+    PUPIL_CAMERA_NAME,
+    EYE_TRACKING_PROJECT_NAME,
+    process_mesoscope_video_tracking,
+)
 
 __all__ = [
+    "EYE_TRACKING_PROJECT_NAME",
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
+    "PUPIL_CAMERA_NAME",
     "BehaviorDataFiles",
     "DatasetColumn",
     "FluorescenceColumn",

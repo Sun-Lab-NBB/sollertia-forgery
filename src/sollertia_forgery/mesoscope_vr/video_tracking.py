@@ -40,15 +40,16 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
 
-_DLC_PROJECT_NAME: str = "eye_tracking"
+EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
 """The DeepLabCut project (task) name baked into the prediction filename, used to identify this pipeline's ``.h5``
-among any predictions DeepLabCut writes into the processed video-data directory. This decouples the donor from the
-model and the raw camera data: the contract is simply that a matching ``.h5`` is present. (Placeholder name; align
-with the actual DeepLabCut pupil project.)"""
+among any predictions written into the processed video-data directory. It is donated to the video-inference registry to
+select the model whose predictions this donor consumes, keeping the donor a pure reader while the pipeline drives the
+inference that produces the ``.h5``."""
 
-_PUPIL_CAMERA_NAME: str = "face_camera"
+PUPIL_CAMERA_NAME: str = "face_camera"
 """The colloquial camera name whose recordings carry the eye. Used to locate the camera's per-frame timestamp feather
-(for attaching ``time_us``) and to name this function's output feather (``{camera}_{target}.feather``)."""
+(for attaching ``time_us``) and to name this function's output feather (``{camera}_{target}.feather``). It is donated
+to the video-inference registry to select the raw video the pose model runs on."""
 
 _PUPIL_TARGET: str = "pupil"
 """The tracking-target label used to name this function's output feather (``{camera}_{target}.feather``)."""
@@ -121,8 +122,8 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     if h5_path is None:
         console.echo(
             message=(
-                f"No DeepLabCut '{_DLC_PROJECT_NAME}' '.h5' prediction file was found in the processed video-data "
-                f"directory of session '{session.session_name}'. Skipping pupil tracking."
+                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found in the processed "
+                f"video-data directory of session '{session.session_name}'. Skipping pupil tracking."
             ),
             level=LogLevel.INFO,
         )
@@ -144,7 +145,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
         columns["time_us"] = frame_times
     columns.update(pupil_metrics)
 
-    output_path = output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}.feather")
+    output_path = output_directory.joinpath(f"{PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}.feather")
     pl.DataFrame(columns).write_ipc(file=output_path)
 
     _PupilTrackingProvenance(
@@ -153,7 +154,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
         frame_count=frame_count,
         likelihood_threshold=_LIKELIHOOD_THRESHOLD,
         blink_fraction=_BLINK_FRACTION,
-    ).to_yaml(file_path=output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}_provenance.yaml"))
+    ).to_yaml(file_path=output_directory.joinpath(f"{PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}_provenance.yaml"))
 
     console.echo(
         message=f"Wrote pupil tracking for {frame_count} frame(s) to '{output_path.name}'.",
@@ -176,7 +177,7 @@ def _locate_pupil_h5(output_directory: Path) -> Path | None:
         The path to the discovered ``.h5`` file, or None if no matching prediction file is present (meaning there is
         nothing to process).
     """
-    matches = natsorted(output_directory.glob(f"*{_DLC_PROJECT_NAME}*.h5"))
+    matches = natsorted(output_directory.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
     return matches[0] if matches else None
 
 
@@ -536,7 +537,7 @@ def _load_frame_times(output_directory: Path, frame_count: int) -> NDArray[np.ge
         The per-frame timestamp array when a matching, equal-length timestamp feather exists, otherwise None (so the
         output carries only the frame index).
     """
-    timestamp_path = output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}{_CAMERA_TIMESTAMP_SUFFIX}")
+    timestamp_path = output_directory.joinpath(f"{PUPIL_CAMERA_NAME}{_CAMERA_TIMESTAMP_SUFFIX}")
     if not timestamp_path.is_file():
         return None
 
@@ -544,7 +545,7 @@ def _load_frame_times(output_directory: Path, frame_count: int) -> NDArray[np.ge
     if frame.height != frame_count:
         console.echo(
             message=(
-                f"The '{_PUPIL_CAMERA_NAME}' timestamp feather has {frame.height} row(s) but the DeepLabCut "
+                f"The '{PUPIL_CAMERA_NAME}' timestamp feather has {frame.height} row(s) but the DeepLabCut "
                 f"predictions have {frame_count} frame(s); writing pupil tracking without 'time_us'."
             ),
             level=LogLevel.WARNING,

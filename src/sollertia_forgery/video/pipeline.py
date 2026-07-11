@@ -1,6 +1,7 @@
 """Provides the three-stage camera-timestamp processing pipeline. The pipeline parses raw VideoSystem log archives
 into the session's processed video-data directory, hardlinks each parsed feather there under its canonical manifest
-name, then runs the acquisition system's donated video-tracking function over externally-produced pose predictions.
+name, then runs the acquisition system's donated video-tracking function over the session's pose predictions. The
+pipeline can also produce those predictions itself by driving DeepLabCut inference over the raw video.
 """
 
 from __future__ import annotations
@@ -16,7 +17,9 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_video_system.video import TIMESTAMP_JOB_NAME, execute_job
 
-from ..registries import resolve_video_tracking
+from .inference import run_slvt_inference, cleanup_slvt_artifacts
+from ..registries import resolve_video_tracking, resolve_video_inference
+from .configuration import get_video_tracking_configuration
 from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
@@ -56,12 +59,14 @@ def run_video_processing_pipeline(
         Stage 1 (``parse``) runs one job per camera whose ``{source_id}_log.npz`` archive is discovered on disk,
         extracting frame timestamps into the session's processed video-data directory. Stage 2 (``rename``) is a
         single job that publishes every parsed feather there under its canonical manifest name. Stage 3 (``track``) is
-        a single job that runs the acquisition system's donated video-tracking function, which post-processes any
-        externally-produced pose predictions (e.g. DeepLabCut ``.h5`` files) into tracking feathers in the same
-        directory. It is a no-op when no predictions are present. With no stage flag set, all three stages run in
-        sequence (full local pipeline); in remote mode (``job_id`` provided) only the matching job runs, so a
-        scheduler can drive each parse job, the rename job, and the tracking job independently. The per-camera parse
-        jobs, the single rename job, and the single tracking job together define the tracker-alignment universe.
+        a single job that optionally drives DeepLabCut inference over the raw video, when the system donates a
+        video-inference descriptor and the host is configured for it. It then runs the acquisition system's donated
+        video-tracking function, which post-processes the pose predictions (DeepLabCut ``.h5`` files) into tracking
+        feathers in the same directory. It is a no-op when no predictions are present. With no stage flag set, all
+        three stages run in sequence (full local pipeline); in remote mode (``job_id`` provided) only the matching
+        job runs, so a scheduler can drive each parse job, the rename job, and the tracking job independently. The
+        per-camera parse jobs, the single rename job, and the single tracking job together define the
+        tracker-alignment universe.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -365,22 +370,44 @@ def _run_pose_tracking(
     job_id: str,
     tracker: ProcessingTracker,
 ) -> None:
-    """Runs the acquisition system's donated video-tracking function as one tracked job.
+    """Optionally drives DeepLabCut inference, then runs the acquisition system's donated tracking function, as one job.
 
-    Resolves the function registered for the session's acquisition system from the registry hub and runs it. The
-    function is expected to perform all of that system's video tracking: it locates its own externally-produced
-    pose predictions, parses them, and writes its outputs into the video data directory. The function no-ops when no
-    predictions are present, so this job is safe to run on every session. The tracking output shares the video data
-    directory and the video processing tracker with the timestamp stages.
+    When the session's acquisition system donates a video-inference descriptor and the processing host carries a
+    video-tracking configuration, this first runs DeepLabCut inference over the session's raw camera video through the
+    isolated ``slvt`` command-line interface. That run writes the native ``.h5`` prediction file into the video data
+    directory, and the system's donated tracking function then locates it, parses it, and writes its tracking outputs
+    into the same directory. The function no-ops when no prediction file is present, so this job is safe to run on
+    every session. When inference was driven, its prediction artifacts are removed once the tracking function has
+    consumed them, so only the tracking outputs remain. When the system donates no descriptor or the host is
+    unconfigured, no inference is driven and the tracking function reads predictions produced out of band.
 
     Args:
-        session: The loaded session whose acquisition system selects the tracking function.
-        video_data_directory: The processed video-data directory the tracking function writes its outputs into.
+        session: The loaded session whose acquisition system selects the inference descriptor and tracking function.
+        video_data_directory: The processed video-data directory the prediction file and tracking outputs are written
+            into.
         job_id: The unique hexadecimal identifier for the tracking job.
         tracker: The video ProcessingTracker instance for recording job state transitions.
     """
     with tracked_job(tracker=tracker, job_id=job_id):
-        resolve_video_tracking(session.acquisition_system)(session=session, output_directory=video_data_directory)
+        # Only a system that donates an inference descriptor consults the host configuration, so a host that is
+        # unconfigured (or misconfigured) never affects the tracking job of a system that produces predictions
+        # out of band.
+        inferred_stem: str | None = None
+        descriptor = resolve_video_inference(session.acquisition_system)
+        if descriptor is not None:
+            configuration = get_video_tracking_configuration()
+            if configuration is not None:
+                inferred_stem = run_slvt_inference(
+                    session=session,
+                    descriptor=descriptor,
+                    configuration=configuration,
+                    output_directory=video_data_directory,
+                )
+        try:
+            resolve_video_tracking(session.acquisition_system)(session=session, output_directory=video_data_directory)
+        finally:
+            if inferred_stem is not None:
+                cleanup_slvt_artifacts(output_directory=video_data_directory, video_stem=inferred_stem)
 
 
 def _link_parsed_timestamps(
