@@ -16,8 +16,6 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems
 
 from .mesoscope_vr import (
-    PUPIL_CAMERA_NAME,
-    EYE_TRACKING_PROJECT_NAME,
     MESOSCOPE_COLUMN_DESCRIPTIONS,
     assemble_mesoscope_session,
     process_mesoscope_video_tracking,
@@ -44,16 +42,13 @@ __all__ = [
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
     "TWO_PHOTON_DATA_REGISTRY",
-    "VIDEO_INFERENCE_REGISTRY",
     "VIDEO_TRACKING_REGISTRY",
     "ForgingAssemblyAsset",
-    "VideoInferenceDescriptor",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
     "resolve_two_photon_data_locator",
-    "resolve_video_inference",
     "resolve_video_tracking",
 ]
 
@@ -75,27 +70,6 @@ class ForgingAssemblyAsset:
     column_descriptions: dict[str, str]
     """The mapping from each column name the assembler can emit into ``data.feather`` to its human-readable
     description, baked into the forged dataset's per-dataset ``data_descriptions.feather``."""
-
-
-@dataclass(frozen=True, slots=True)
-class VideoInferenceDescriptor:
-    """Bundles an acquisition system's video-inference selectors: the camera whose recording the pose model analyzes
-    and the DeepLabCut project name that identifies the model.
-
-    Notes:
-        A system donates a descriptor exactly when the video pipeline should drive DeepLabCut inference to produce its
-        pose predictions, rather than reading predictions produced out of band. The agnostic video pipeline uses
-        ``camera_name`` to resolve the raw video from the session's camera manifest, and ``dlc_project_name`` to
-        confirm the model's prediction file was produced, matching the name the tracking donor uses to locate it.
-    """
-
-    camera_name: str
-    """The colloquial camera name, as recorded in the acquisition-time camera manifest, whose raw recording the pose
-    model analyzes (for example, ``"face_camera"``)."""
-    dlc_project_name: str
-    """The DeepLabCut project (task) name identifying the trained model that produces this system's predictions. The
-    pipeline uses it to confirm the model's prediction file was produced and to match the name the tracking donor uses
-    to locate that file."""
 
 
 MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Callable[..., None]] = {
@@ -150,20 +124,6 @@ of that system's video tracking: it locates its own externally-produced DeepLabC
 bodyparts it wants, parses them, and writes its outputs into the session's processed video-data directory. The
 agnostic video pipeline simply runs it (no-op when no predictions are present), like the per-session forging
 assembler. A system donates a no-op function when it performs no video tracking."""
-
-VIDEO_INFERENCE_REGISTRY: dict[AcquisitionSystems, VideoInferenceDescriptor] = {
-    AcquisitionSystems.MESOSCOPE_VR: VideoInferenceDescriptor(
-        camera_name=PUPIL_CAMERA_NAME,
-        dlc_project_name=EYE_TRACKING_PROJECT_NAME,
-    ),
-}
-"""The registry of video-inference selectors, keyed by acquisition system. Each value is a ``VideoInferenceDescriptor``
-naming the camera the pose model analyzes and the DeepLabCut project that produces the system's predictions. Unlike the
-coverage-checked donor registries, this registry is optional: a system appears here exactly when the video pipeline
-should drive DeepLabCut inference for it (producing the ``.h5`` its tracking donor consumes) rather than reading
-predictions produced out of band. A system that performs no inference simply donates no entry, so this registry is not
-part of the import-time coverage check."""
-
 
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
     """Resolves the per-session forging data-assembly worker registered for the target acquisition system.
@@ -273,24 +233,6 @@ def resolve_video_tracking(system: str | AcquisitionSystems) -> Callable[..., No
         ValueError: If the acquisition system is unknown.
     """
     return VIDEO_TRACKING_REGISTRY[_resolve_system(system)]
-
-
-def resolve_video_inference(system: str | AcquisitionSystems) -> VideoInferenceDescriptor | None:
-    """Resolves the video-inference descriptor registered for the target acquisition system, if any.
-
-    Args:
-        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
-            its string value (for example, the value carried by ``SessionData.acquisition_system``).
-
-    Returns:
-        The registered ``VideoInferenceDescriptor`` for the acquisition system, or None when the system donates none.
-        The agnostic video pipeline drives DeepLabCut inference for the session exactly when a descriptor is returned
-        and the host is configured for video tracking; otherwise it leaves prediction production to an out-of-band run.
-
-    Raises:
-        ValueError: If the acquisition system is unknown.
-    """
-    return VIDEO_INFERENCE_REGISTRY.get(_resolve_system(system))
 
 
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:

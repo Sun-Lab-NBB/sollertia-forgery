@@ -91,69 +91,6 @@ def video_command(session_path: Path, job_id: str | None, workers: int, *, track
     )
 
 
-@process_cli.command("configure-video-tracking")
-@click.option(
-    "-e",
-    "--environment",
-    type=str,
-    required=True,
-    help=(
-        "The name of the conda environment, on this host, in which the isolated 'slvt' command-line interface is "
-        "installed. The video pipeline runs DeepLabCut inference through 'conda run -n <environment> slvt'."
-    ),
-)
-@click.option(
-    "-pc",
-    "--project-configuration-path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help=(
-        "The absolute path to the trained DeepLabCut project's 'config.yaml' the pipeline runs over each session's "
-        "raw video."
-    ),
-)
-@click.option(
-    "-cr",
-    "--crop",
-    type=str,
-    default="",
-    help=(
-        "The 'x1,x2,y1,y2' crop rectangle applied during inference, decoupling the analyzed region from the project's "
-        "configuration so a de-novo video that is not registered in the project can be analyzed. Omit to use the "
-        "project's configured crop."
-    ),
-)
-@click.option(
-    "-s",
-    "--shuffle",
-    type=int,
-    default=1,
-    show_default=True,
-    help="The shuffle index whose trained model the pipeline runs.",
-)
-@click.option(
-    "-si",
-    "--snapshot-index",
-    type=int,
-    default=-1,
-    show_default=True,
-    help="The pose snapshot index to run. Set to a negative value to use the project's configured snapshot.",
-)
-def configure_video_tracking_command(
-    environment: str, project_configuration_path: Path, crop: str, shuffle: int, snapshot_index: int
-) -> None:
-    """Creates the video-tracking configuration that enables pipeline-driven DeepLabCut inference on this host."""
-    from ..video import create_video_tracking_configuration_file  # noqa: PLC0415
-
-    create_video_tracking_configuration_file(
-        environment=environment,
-        project_configuration_path=str(project_configuration_path),
-        crop=crop,
-        shuffle=shuffle,
-        snapshot_index=snapshot_index,
-    )
-
-
 @process_cli.command("microcontroller")
 @_SESSION_PATH_OPTION
 @_JOB_ID_OPTION

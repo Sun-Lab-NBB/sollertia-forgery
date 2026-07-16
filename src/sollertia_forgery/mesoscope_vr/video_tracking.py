@@ -42,14 +42,13 @@ if TYPE_CHECKING:
 
 EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
 """The DeepLabCut project (task) name baked into the prediction filename, used to identify this pipeline's ``.h5``
-among any predictions written into the processed video-data directory. It is donated to the video-inference registry to
-select the model whose predictions this donor consumes, keeping the donor a pure reader while the pipeline drives the
-inference that produces the ``.h5``."""
+among any predictions written beside the face-camera video in the session's raw camera_data directory. The donor is a
+pure reader: the ``.h5`` is produced upstream on the acquisition rig, and this name selects which model's predictions
+it consumes."""
 
 PUPIL_CAMERA_NAME: str = "face_camera"
 """The colloquial camera name whose recordings carry the eye. Used to locate the camera's per-frame timestamp feather
-(for attaching ``time_us``) and to name this function's output feather (``{camera}_{target}.feather``). It is donated
-to the video-inference registry to select the raw video the pose model runs on."""
+(for attaching ``time_us``) and to name this function's output feather (``{camera}_{target}.feather``)."""
 
 _PUPIL_TARGET: str = "pupil"
 """The tracking-target label used to name this function's output feather (``{camera}_{target}.feather``)."""
@@ -100,30 +99,30 @@ class _PupilTrackingProvenance(YamlConfig):
 def process_mesoscope_video_tracking(session: SessionData, output_directory: Path) -> None:
     """Post-processes the Mesoscope-VR face-camera DLC predictions into per-frame pupil and eye metrics.
 
-    Locates the pupil project's externally-produced DLC ``.h5`` in the processed video-data directory (where
-    DeepLabCut writes it, the same well-defined location the timestamp stage writes to); if none is present, returns
-    without doing anything (the stage is optional and gated on detecting the prediction file). Otherwise reads the
-    nine canonical bodyparts, fits an ellipse to the pupil and to the eye each frame, derives a blink flag from the
-    variation in eye shape, derives motion-robust eye-position signals from the pupil relative to the eye and the
-    corneal reflection, and writes the results into a ``{camera}_pupil.feather`` (plus a provenance sidecar) in the
-    same directory.
+    Locates the pupil project's externally-produced DLC ``.h5`` beside the face-camera video in the session's raw
+    camera_data directory (where the acquisition rig writes it during preprocessing, so it travels with the raw data);
+    if none is present, returns without doing anything (the stage is optional and gated on detecting the prediction
+    file). Otherwise reads the nine canonical bodyparts, fits an ellipse to the pupil and to the eye each frame,
+    derives a blink flag from the variation in eye shape, derives motion-robust eye-position signals from the pupil
+    relative to the eye and the corneal reflection, and writes the results into a ``{camera}_pupil.feather`` (plus a
+    provenance sidecar) in the processed video-data directory.
 
     Args:
-        session: The loaded session whose pupil DLC predictions are post-processed (used for status reporting).
+        session: The loaded session whose pupil DLC predictions are post-processed. Its raw camera_data directory
+            supplies the DLC ``.h5``.
         output_directory: The processed video-data directory (``session.processed_data.video_data_path``) where the
-            DLC ``.h5`` predictions are read from, where the pupil feather and its provenance sidecar are written, and
-            where the camera-timestamp feather (if already produced by the timestamp stage) is read to attach
-            per-frame ``time_us``.
+            pupil feather and its provenance sidecar are written, and where the camera-timestamp feather (if already
+            produced by the timestamp stage) is read to attach per-frame ``time_us``.
 
     Raises:
         ValueError: If a DLC ``.h5`` is present but is missing a canonical bodypart or has an unrecognized layout.
     """
-    h5_path = _locate_pupil_h5(output_directory=output_directory)
+    h5_path = _locate_pupil_h5(camera_data_directory=session.raw_data.camera_data_path)
     if h5_path is None:
         console.echo(
             message=(
-                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found in the processed "
-                f"video-data directory of session '{session.session_name}'. Skipping pupil tracking."
+                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
+                f"video in the raw camera_data directory of session '{session.session_name}'. Skipping pupil tracking."
             ),
             level=LogLevel.INFO,
         )
@@ -162,22 +161,23 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     )
 
 
-def _locate_pupil_h5(output_directory: Path) -> Path | None:
-    """Resolves the pupil project's externally-produced DLC ``.h5`` within the processed video-data directory.
+def _locate_pupil_h5(camera_data_directory: Path) -> Path | None:
+    """Resolves the pupil project's externally-produced DLC ``.h5`` within the session's raw camera_data directory.
 
-    DeepLabCut runs out-of-band and writes its predictions straight into the session's processed video-data directory
-    (the same well-defined location the timestamp stage writes to), so the donor never touches the raw camera data or
-    the model. The pupil pipeline's file is identified by the DeepLabCut project name baked into its filename.
+    DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in the
+    session's raw camera_data directory during preprocessing, so the predictions travel with the raw data and this
+    donor only reads them. The pupil pipeline's file is identified by the DeepLabCut project name baked into its
+    filename.
 
     Args:
-        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) where the
-            DLC predictions are expected.
+        camera_data_directory: The session's raw camera_data directory (``session.raw_data.camera_data_path``) where
+            the DLC predictions are expected, beside the face-camera video.
 
     Returns:
         The path to the discovered ``.h5`` file, or None if no matching prediction file is present (meaning there is
         nothing to process).
     """
-    matches = natsorted(output_directory.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
+    matches = natsorted(camera_data_directory.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
     return matches[0] if matches else None
 
 
