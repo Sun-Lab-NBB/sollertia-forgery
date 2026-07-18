@@ -91,13 +91,16 @@ def run_video_processing_pipeline(
     )
 
     # Resolves the canonical output name for every camera registered in the acquisition-time manifest. The manifest
-    # defines the full job universe, decoupling tracker alignment from whichever archives are currently on disk.
-    camera_data_directory = session.raw_data.camera_data_path
-    output_names = _resolve_camera_output_names(data_directory=camera_data_directory)
+    # defines the full job universe, decoupling tracker alignment from whichever archives are currently on disk. Both
+    # the manifest and the archives it describes live in the raw behavior-data directory, which collects the messages
+    # every DataLogger-backed source emits during acquisition; the raw camera-data directory holds the recordings
+    # themselves, which this pipeline's tracking stage reads instead.
+    log_directory = session.raw_data.behavior_data_path
+    output_names = _resolve_camera_output_names(data_directory=log_directory)
     if not output_names:
         message = (
             f"Unable to process camera timestamps for session '{session.session_name}'. The camera manifest in "
-            f"'{camera_data_directory}' does not register any cameras."
+            f"'{log_directory}' does not register any cameras."
         )
         console.error(message=message, error=ValueError)
 
@@ -110,7 +113,7 @@ def run_video_processing_pipeline(
 
     # Discovers the raw log archive backing each registered camera.
     log_paths: dict[int, Path] = {}
-    for log_path in _find_camera_logs(data_directory=camera_data_directory):
+    for log_path in _find_camera_logs(data_directory=log_directory):
         source_id = _extract_camera_source_id(log_path=log_path)
         if source_id in output_names:
             log_paths[source_id] = log_path
@@ -143,7 +146,7 @@ def run_video_processing_pipeline(
         if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
             message = (
                 f"Unable to execute the requested timestamp parsing job with ID '{job_id}'. No raw log archive was "
-                f"discovered for camera source ID {specifier} in '{camera_data_directory}'."
+                f"discovered for camera source ID {specifier} in '{log_directory}'."
             )
             console.error(message=message, error=FileNotFoundError)
 
@@ -170,7 +173,7 @@ def run_video_processing_pipeline(
         if not log_paths:
             message = (
                 f"Unable to parse camera timestamps for session '{session.session_name}'. No registered camera log "
-                f"archives were discovered in '{camera_data_directory}'."
+                f"archives were discovered in '{log_directory}'."
             )
             console.error(message=message, error=ValueError)
         if target_camera == -1:
@@ -179,7 +182,7 @@ def run_video_processing_pipeline(
             if target_camera not in log_paths:
                 message = (
                     f"Unable to parse camera timestamps for the requested camera source ID {target_camera}. No "
-                    f"registered camera log archive was discovered for it in '{camera_data_directory}'."
+                    f"registered camera log archive was discovered for it in '{log_directory}'."
                 )
                 console.error(message=message, error=ValueError)
             jobs.append((TIMESTAMP_JOB_NAME, str(target_camera)))
@@ -232,8 +235,9 @@ def _resolve_camera_output_names(data_directory: Path) -> dict[int, str]:
     source names recorded at acquisition time (for example, ``face_camera``) directly determine the output names.
 
     Args:
-        data_directory: The path to the session's raw camera data directory (``session.raw_data.camera_data_path``),
-            which holds the camera log archives and their shared camera manifest.
+        data_directory: The path to the session's raw behavior data directory
+            (``session.raw_data.behavior_data_path``), which holds the camera log archives and their shared camera
+            manifest alongside every other DataLogger-backed source's archives.
 
     Returns:
         A dictionary mapping each registered camera source ID to its canonical timestamp feather filename.
@@ -245,7 +249,7 @@ def _resolve_camera_output_names(data_directory: Path) -> dict[int, str]:
     if not manifest_path.is_file():
         message = (
             f"Unable to resolve camera-timestamp output names. No camera manifest ('{CAMERA_MANIFEST_FILENAME}') "
-            f"was found in the raw camera data directory '{data_directory}'."
+            f"was found in the raw behavior data directory '{data_directory}'."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -256,10 +260,11 @@ def _resolve_camera_output_names(data_directory: Path) -> dict[int, str]:
 
 
 def _find_camera_logs(data_directory: Path) -> list[Path]:
-    """Discovers raw VideoSystem camera log archives inside the canonical raw camera data directory.
+    """Discovers raw VideoSystem camera log archives inside the canonical raw behavior data directory.
 
     Args:
-        data_directory: The path to the session's raw camera data directory (``session.raw_data.camera_data_path``).
+        data_directory: The path to the session's raw behavior data directory
+            (``session.raw_data.behavior_data_path``).
 
     Returns:
         A naturally sorted list of paths to the discovered ``{source_id}_log.npz`` archives. Returns an empty list if
