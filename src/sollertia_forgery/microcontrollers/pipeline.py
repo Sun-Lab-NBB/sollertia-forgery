@@ -64,7 +64,7 @@ def run_microcontroller_processing_pipeline(
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
         parser registered for the session's acquisition system (in ``MICROCONTROLLER_PARSER_REGISTRY``), writing the
-        domain-specific feather into ``microcontroller_data``; the pipeline stays system-agnostic.
+        domain-specific feather into ``microcontroller_data``. The pipeline is system-agnostic.
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
         (across a worker pool when more than one worker is available and more than one module is runnable). In

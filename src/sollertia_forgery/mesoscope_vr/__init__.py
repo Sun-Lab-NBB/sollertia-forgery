@@ -10,6 +10,7 @@ from .fluorescence import FluorescenceColumn
 from .video_tracking import (
     PUPIL_CAMERA_NAME,
     EYE_TRACKING_PROJECT_NAME,
+    PupilColumn,
     process_mesoscope_video_tracking,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "BehaviorDataFiles",
     "DatasetColumn",
     "FluorescenceColumn",
+    "PupilColumn",
     "assemble_mesoscope_session",
     "process_mesoscope_video_tracking",
 ]
