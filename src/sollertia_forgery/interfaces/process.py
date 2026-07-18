@@ -71,21 +71,34 @@ def process_cli() -> None:
         "present. Ignored when '--job-id' is provided (remote mode selects the job by ID)."
     ),
 )
+@click.option(
+    "--energy/--no-energy",
+    default=True,
+    show_default=True,
+    help=(
+        "Determines whether to run the motion-energy stage, which measures each camera's recording into a per-frame "
+        "movement signal. It is a no-op for a camera whose recording is absent. Ignored when '--job-id' is provided "
+        "(remote mode selects the job by ID)."
+    ),
+)
 @_WORKERS_OPTION
 @_PROGRESS_OPTION
-def video_command(session_path: Path, job_id: str | None, workers: int, *, track: bool, progress: bool) -> None:
-    """Extracts camera frame timestamps from the raw VideoSystem log archives and post-processes pose predictions."""
+def video_command(
+    session_path: Path, job_id: str | None, workers: int, *, track: bool, energy: bool, progress: bool
+) -> None:
+    """Extracts camera frame timestamps, post-processes pose predictions, and measures per-camera motion energy."""
     from ..video import run_video_processing_pipeline  # noqa: PLC0415
 
-    # Runs the full pipeline (parse + rename), with the tracking stage toggled by --track/--no-track. The stages are
-    # passed explicitly so disabling tracking does not suppress the timestamp stages. In remote mode (job_id set) the
-    # stage flags are ignored and the job is selected by ID.
+    # Runs the full pipeline (parse + rename), with the tracking and motion-energy stages toggled by their own flags.
+    # The stages are passed explicitly so disabling either does not suppress the timestamp stages. In remote mode
+    # (job_id set) the stage flags are ignored and the job is selected by ID.
     run_video_processing_pipeline(
         session_path=session_path,
         job_id=job_id,
         parse=True,
         rename=True,
         track=track,
+        energy=energy,
         workers=workers,
         display_progress=progress,
     )

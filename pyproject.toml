@@ -55,6 +55,11 @@ dependencies = [
     # Machine Vision (GenICam runtime for ataraxis-video-system; sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
 
+    # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage). Declared directly rather than
+    # inherited from ataraxis-video-system so that installing this library on a processing server always provides it.
+    # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
+    "opencv-python>=4.13,<5",
+
     # Data Processing
     "polars>=1,<2",
     "numpy>=2,<3",
