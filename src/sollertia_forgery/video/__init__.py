@@ -12,8 +12,10 @@ from .motion_energy import (
     SPATIAL_BIN_SIZE,
     MINIMUM_CHUNK_FRAMES,
     MOTION_ENERGY_SUFFIX,
+    WORKER_THREAD_VARIABLES,
     MotionEnergyColumn,
     resolve_camera_video,
+    pinned_worker_threads,
     compute_camera_motion_energy,
 )
 
@@ -26,8 +28,10 @@ __all__ = [
     "TIMESTAMP_JOB_NAME",
     "TRACKING_JOB_NAME",
     "VIDEO_SUFFIX",
+    "WORKER_THREAD_VARIABLES",
     "MotionEnergyColumn",
     "compute_camera_motion_energy",
+    "pinned_worker_threads",
     "resolve_camera_video",
     "run_video_processing_pipeline",
 ]

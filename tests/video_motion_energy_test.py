@@ -12,6 +12,7 @@ Notes:
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -28,12 +29,14 @@ from sollertia_forgery.video import (
     SPATIAL_BIN_SIZE,
     MINIMUM_CHUNK_FRAMES,
     MOTION_ENERGY_SUFFIX,
+    WORKER_THREAD_VARIABLES,
     MotionEnergyColumn,
+    pipeline as pipeline_module,
     resolve_camera_video,
+    pinned_worker_threads,
     compute_camera_motion_energy,
     run_video_processing_pipeline,
 )
-from sollertia_forgery.video import pipeline as pipeline_module
 from sollertia_forgery.video.motion_energy import _bin_frame, _plan_chunks, _energy_chunk
 
 _FRAME_HEIGHT: int = 100
@@ -192,8 +195,10 @@ def test_energy_matches_the_decoded_frame_difference(tmp_path: Path, moving_vide
 def test_luminance_tracks_a_global_brightness_step(tmp_path: Path) -> None:
     """Verifies the luminance column reproduces a whole-field brightness step and flags it as the energy peak.
 
-    This pins the artifact-diagnostic contract: a display or illuminator changing lands on every pixel at once, and
-    the luminance column is what lets a consumer separate that from real movement.
+    This pins the mechanism only: a brightness change that lands on every pixel at once does register in both
+    columns. It does not license the converse. On real head-fixed footage this column's frame-to-frame changes are
+    dominated by the animal displacing bright structure within the frame, so a per-frame excursion here is far more
+    often movement than illumination -- see the column's own documentation before using it to reject frames.
     """
     frames = np.full((40, _FRAME_HEIGHT, _FRAME_WIDTH), 60, dtype=np.uint8)
     frames[20:] = 180
@@ -402,6 +407,37 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, monk
     for source_id in (51, 62):
         job_id = ProcessingTracker.generate_job_id(job_name=ENERGY_JOB_NAME, specifier=str(source_id))
         assert tracker.get_job_status(job_id=job_id) is not None
+
+
+def test_pinned_worker_threads_caps_and_restores_the_environment() -> None:
+    """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
+
+    The caps must not leak past the pool they were set for: the analysis package deliberately runs multi-threaded
+    numba kernels, and a leaked cap would silently serialize them.
+    """
+    sentinel = "OMP_NUM_THREADS"
+    previous = os.environ.get(sentinel)
+    os.environ[sentinel] = "13"
+    try:
+        with pinned_worker_threads():
+            assert all(os.environ[variable] == "1" for variable in WORKER_THREAD_VARIABLES)
+        assert os.environ[sentinel] == "13"
+    finally:
+        if previous is None:
+            os.environ.pop(sentinel, None)
+        else:
+            os.environ[sentinel] = previous
+
+
+def test_pinned_worker_threads_removes_variables_it_introduced() -> None:
+    """Verifies a variable absent before the block is absent again after it, rather than left set to one."""
+    unset = [variable for variable in WORKER_THREAD_VARIABLES if variable not in os.environ]
+    if not unset:
+        pytest.skip("every thread variable is already set in this environment")
+
+    with pinned_worker_threads():
+        assert os.environ[unset[0]] == "1"
+    assert unset[0] not in os.environ
 
 
 def test_unreadable_recording_errors(tmp_path: Path) -> None:

@@ -6,10 +6,11 @@ acquisition-system-specific content, so it lives here rather than being donated 
 already names every camera, and the same computation applies to all of them.
 
 Notes:
-    "Motion energy" here means frame-differencing motion energy -- the mean absolute inter-frame intensity change --
-    following Stringer et al. 2019, Musall et al. 2019, and the Facemap reference implementation. It is NOT
-    Adelson-Bergen spatiotemporal energy, an unrelated oriented-filter model of motion perception that shares the
-    name. Nothing here filters for direction or speed; the measure is undirected and unsigned.
+    Methodological references are attached to the top-level function that implements the measure.
+
+    "Motion energy" here means frame-differencing motion energy -- the mean absolute inter-frame intensity change.
+    It is NOT Adelson-Bergen spatiotemporal energy, an unrelated oriented-filter model of motion perception that
+    shares the name. Nothing here filters for direction or speed; the measure is undirected and unsigned.
 
     Each frame is mean-binned over 3x3 pixel blocks before differencing. Binning first is load-bearing: the absolute
     difference rectifies per-pixel sensor and codec noise into a positive bias, so binning afterwards would not
@@ -33,6 +34,7 @@ from __future__ import annotations
 import os
 from enum import StrEnum
 from typing import TYPE_CHECKING
+from contextlib import contextmanager
 from concurrent.futures import ProcessPoolExecutor
 
 import cv2
@@ -42,6 +44,7 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Iterator
 
     from numpy.typing import NDArray
 
@@ -63,6 +66,52 @@ MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
 preceding keyframe, so each chunk discards up to one group of pictures worth of decoded frames; at roughly sixteen
 times the typical keyframe interval, that waste stays under seven percent of the chunk."""
+
+WORKER_THREAD_VARIABLES: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+    "POLARS_MAX_THREADS",
+    "OPENCV_FFMPEG_THREADS",
+)
+"""The environment variables that cap each threading layer a worker process can start a pool for. Every scientific
+library in this pipeline's import graph sizes its own pool to the machine's core count on first import, so a worker
+that inherits the defaults reserves far more of the machine than the one core it was budgeted."""
+
+
+@contextmanager
+def pinned_worker_threads() -> Iterator[None]:
+    """Caps every threading layer to a single thread for the duration of the block, then restores the environment.
+
+    Worker processes are started with the environment they inherit at spawn time, and each scientific library sizes
+    its thread pool when it is first imported -- which, because a worker re-imports rather than inheriting the
+    parent's modules, happens before any code in the worker runs. Setting the caps inside the worker is therefore too
+    late; they have to be in place in the parent before the pool starts its children. Wrapping only the pool's
+    lifetime, rather than setting the caps at import, keeps the restriction off the rest of the library: the analysis
+    package deliberately runs multi-threaded numba kernels, and a process-wide cap set here would silently serialize
+    them.
+
+    The caps make a worker cost the one core it was budgeted. They do not measurably change this pipeline's runtime,
+    because the pools a worker would otherwise start sit idle -- it never calls into a threaded kernel. What they buy
+    is that a run given N workers occupies N cores rather than advertising several thousand threads to every other
+    tenant of the machine.
+
+    Yields:
+        None. The caps are in effect for the duration of the block.
+    """
+    previous = {variable: os.environ.get(variable) for variable in WORKER_THREAD_VARIABLES}
+    os.environ.update(dict.fromkeys(WORKER_THREAD_VARIABLES, "1"))
+    try:
+        yield
+    finally:
+        for variable, value in previous.items():
+            if value is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = value
+
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count of a decoded frame the decoder handed back as a single image plane, which needs no plane
@@ -91,6 +140,20 @@ class MotionEnergyColumn(StrEnum):
         The same property makes the measure unsuitable as a graded speed estimate on a camera that images the running
         wheel, where it is partly an optical tachometer and saturates once the frame decorrelates.
 
+        Whole-frame coverage also means that a camera imaging the eye folds pupil motion and blinks into its movement
+        signal, and those are not facial movement. Controlling for them collapsed the apparent fraction of
+        movement-modulated units from roughly two thirds to a twentieth in Talluri et al., and most blinks do not
+        coincide with movement at all (Turner et al.), so the leak is neither small nor self-cancelling. This column
+        remains the right primary product for movement-frame rejection, where an eye event is a frame worth
+        rejecting anyway. But an analysis that claims to measure FACIAL movement from an eye-bearing camera must
+        exclude the eye region and say so, and must not treat this column as independent of the pupil feather
+        extracted from the same recording.
+
+        The absolute difference is a full-wave rectifier, so a movement that oscillates appears in this signal at
+        TWICE its true frequency: an eight-hertz rhythm reads as a sixteen-hertz peak. Any frequency-domain analysis
+        of this column must halve the observed peak before naming a behavioral rhythm. Amplitude-domain uses --
+        thresholding, frame rejection, regression against a slow signal -- are unaffected.
+
         The feather is strictly a frame index and the metrics keyed to it. It carries no timestamps: aligning frames
         to the acquisition clock belongs to dataset assembly, which owns every other stream's alignment too. Three
         obligations follow for any consumer that joins this to a time base. It must verify this feather's row count
@@ -112,13 +175,28 @@ class MotionEnergyColumn(StrEnum):
     arousal signal: high during running and stereotyped behavior, low during idleness. NaN at frame 1, which has no
     predecessor, and nowhere else. See the class notes on why it is neither normalized nor interval-corrected here."""
     FRAME_LUMINANCE = "frame_luminance"
-    """Mean intensity of this frame in gray levels, taken over the same binned frame. Not a behavioral signal: it is
-    the illumination-artifact diagnostic for ``motion_energy``. A whole-field brightness step -- a task display
-    changing, an infrared illuminator switching, room lights -- lands on every pixel at once and produces a large
-    spurious energy transient, and because such steps are typically time-locked to trial and cue events the artifact
-    correlates with the experimental design rather than averaging out. The absolute difference of this column between
-    consecutive frames flags exactly those frames, and can be regressed out. Defined at every frame, including
-    frame 1."""
+    """Mean intensity of this frame in gray levels, taken over the same binned frame. Its purpose is to separate a
+    change in scene illumination from a change in the animal's posture, since a whole-field brightness shift lands on
+    every pixel at once and inflates ``motion_energy`` without anything having moved. Defined at every frame,
+    including frame 1.
+
+    Read it at the session timescale, not per frame. On a head-fixed face recording its frame-to-frame changes track
+    movement rather than illumination: they correlate with ``motion_energy`` at about 0.7, and that correlation
+    survives almost undiminished when the largest brightness jumps are excluded, because a moving animal displaces
+    bright structure within the frame and drags the mean along with it. Large single-frame excursions were checked
+    for and behave like movement rather than like switching: they are embedded in sustained activity rather than
+    isolated, and most revert instead of holding a new level. Treating a per-frame jump in this column as evidence of
+    an illumination artifact will therefore reject real movement.
+
+    What does survive as illumination is slow. After the movement-explained part is regressed out, a drift of a few
+    gray levels remains across a session -- around an order of magnitude larger than the energy floor -- and it is
+    not attributable to the animal. That drift is what this column is for: detrending or including a slow luminance
+    regressor when comparing energy across the length of a session, and confirming that a change in energy level
+    between the start and end of a recording is behavioral rather than a lamp warming up.
+
+    These figures come from one face recording on one rig. The balance between the two regimes depends on how much
+    of the frame the animal fills and on what else in the scene emits or reflects light, so re-measure both the
+    correlation and the residual drift before relying on either on a different camera."""
 
 
 def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_name: str) -> Path | None:
@@ -162,6 +240,26 @@ def compute_camera_motion_energy(
     boundary is computed rather than lost, which makes the chunked result bit-identical to a sequential pass and the
     chunk count a pure performance knob.
 
+    References:
+        The measure and its use as a behavioral-state regressor:
+            Stringer, C., et al. (2019). Spontaneous behaviors drive multidimensional, brainwide activity. Science,
+                364(6437), eaav7893.
+            Musall, S., et al. (2019). Single-trial neural dynamics are dominated by richly varied movements. Nature
+                Neuroscience, 22(10), 1677-1686.
+            Steinmetz, N. A., et al. (2019). Distributed coding of choice, action and engagement across the mouse
+                brain. Nature, 576(7786), 266-273.
+        The reference implementation this module's spatial binning follows:
+            Syeda, A., et al. (2024). Facemap: a framework for modeling neural activity based on orofacial tracking.
+                Nature Neuroscience, 27(1), 187-195.
+        Why an eye-bearing camera must exclude the eye before its energy is called facial movement:
+            Talluri, B. C., et al. (2023). Activity in primate visual cortex is minimally driven by spontaneous
+                movements. Nature Neuroscience, 26(11), 1953-1959.
+            Turner, K. L., Gheres, K. W., & Drew, P. J. (2023). Relating pupil diameter and blinking to cortical
+                activity and hemodynamics across arousal states. Journal of Neuroscience, 43(6), 949-964.
+        The unrelated oriented-filter model that shares the name, disclaimed in the module notes:
+            Adelson, E. H., & Bergen, J. R. (1985). Spatiotemporal energy models for the perception of motion.
+                Journal of the Optical Society of America A, 2(2), 284-299.
+
     Args:
         video_path: The path to the camera recording to analyze.
         output_path: The path of the motion-energy feather to write.
@@ -193,7 +291,13 @@ def compute_camera_motion_energy(
     elif executor is not None:
         results = _submit_chunks(executor=executor, video_path=video_path, chunks=chunks, display=display_progress)
     else:
-        with ProcessPoolExecutor(max_workers=min(resolved_workers, len(chunks))) as own_executor:
+        # Caps the worker threading layers before the pool starts its children, so each of them costs the single
+        # core it was budgeted. A shared pool is instead capped by whoever created it, since its children may
+        # already exist by the time this runs.
+        with (
+            pinned_worker_threads(),
+            ProcessPoolExecutor(max_workers=min(resolved_workers, len(chunks))) as own_executor,
+        ):
             results = _submit_chunks(
                 executor=own_executor, video_path=video_path, chunks=chunks, display=display_progress
             )

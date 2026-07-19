@@ -18,7 +18,12 @@ from ataraxis_data_structures import ProcessingTracker
 from ataraxis_video_system.video import TIMESTAMP_JOB_NAME, execute_job
 
 from ..registries import resolve_video_tracking
-from .motion_energy import MOTION_ENERGY_SUFFIX, resolve_camera_video, compute_camera_motion_energy
+from .motion_energy import (
+    MOTION_ENERGY_SUFFIX,
+    resolve_camera_video,
+    pinned_worker_threads,
+    compute_camera_motion_energy,
+)
 from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
 
 if TYPE_CHECKING:
@@ -235,25 +240,31 @@ def run_video_processing_pipeline(
     # pre-resolved worker count because the extraction binding sizes its batch submissions to match the pool. Jobs run
     # one at a time, so each in turn has the whole pool to itself. The renaming and tracking stages ignore it.
     resolved_workers = resolve_worker_count(requested_workers=workers)
-    shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
 
-    try:
-        for job_name, specifier in jobs:
-            _dispatch_job(
-                job_name=job_name,
-                specifier=specifier,
-                session=session,
-                log_paths=log_paths,
-                camera_names=camera_names,
-                video_data_directory=video_data_directory,
-                tracker=tracker,
-                workers=resolved_workers,
-                display_progress=display_progress,
-                executor=shared_executor,
-            )
-    finally:
-        if shared_executor is not None:
-            shared_executor.shutdown(wait=True)
+    # Caps the worker threading layers for the whole life of the shared pool, so a run given N workers occupies N
+    # cores. The pool starts its children on demand and each child sizes its library thread pools while importing,
+    # before any job code of ours runs, so the caps have to be in place here rather than inside the workers. Scoping
+    # them to the pool rather than setting them at import keeps the rest of the library multi-threaded.
+    with pinned_worker_threads():
+        shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
+
+        try:
+            for job_name, specifier in jobs:
+                _dispatch_job(
+                    job_name=job_name,
+                    specifier=specifier,
+                    session=session,
+                    log_paths=log_paths,
+                    camera_names=camera_names,
+                    video_data_directory=video_data_directory,
+                    tracker=tracker,
+                    workers=resolved_workers,
+                    display_progress=display_progress,
+                    executor=shared_executor,
+                )
+        finally:
+            if shared_executor is not None:
+                shared_executor.shutdown(wait=True)
 
     console.echo(message="All camera video-processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
