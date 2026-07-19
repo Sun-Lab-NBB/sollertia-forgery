@@ -1,10 +1,10 @@
 """Collects every sollertia-forgery dispatch registry in one place and runs the import-time checks that guard them.
 
-This module binds each acquisition system's donated assets (microcontroller module parsers, the runtime log parser,
-the per-session forging data-assembly worker, and the raw two-photon imaging directory locator) into the dispatch
-registries and exposes the ``resolve_*`` helpers that consumers use to look them up. The registries are keyed by
-acquisition system (from sollertia-shared-assets) and, for microcontroller parsers, by hardware
-``(module type, module id)``.
+Each acquisition system donates a set of assets to this module. The donated assets are the microcontroller module
+parsers and the event codes they read, the runtime log parser, the per-session forging data-assembly worker, and the
+raw two-photon imaging directory locator. This module binds those assets into the dispatch registries and exposes the
+``resolve_*`` helpers that consumers use to look them up. The registries are keyed by acquisition system (from
+sollertia-shared-assets) and, for microcontroller parsers, by hardware ``(module type, module id)``.
 """
 
 from __future__ import annotations
@@ -16,21 +16,21 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems
 
 from .mesoscope_vr import (
+    RUNTIME_SOURCE_ID,
     MESOSCOPE_COLUMN_DESCRIPTIONS,
-    assemble_mesoscope_session,
-    process_mesoscope_video_tracking,
-)
-from .mesoscope_vr.runtime import RUNTIME_SOURCE_ID, parse_runtime
-from .mesoscope_vr.two_photon import locate_two_photon_data
-from .mesoscope_vr.microcontrollers import (
     parse_lick,
     parse_brake,
     parse_valve,
     parse_screen,
     parse_torque,
     parse_encoder,
+    parse_runtime,
     parse_gas_puff,
     parse_mesoscope_frame,
+    get_module_event_codes,
+    locate_two_photon_data,
+    assemble_mesoscope_session,
+    process_mesoscope_video_tracking,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "FORGING_ASSEMBLY_REGISTRY",
+    "MICROCONTROLLER_EVENT_CODE_REGISTRY",
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
     "TWO_PHOTON_DATA_REGISTRY",
@@ -46,6 +47,7 @@ __all__ = [
     "ForgingAssemblyAsset",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
+    "resolve_microcontroller_event_codes",
     "resolve_microcontroller_parsers",
     "resolve_runtime_binding",
     "resolve_two_photon_data_locator",
@@ -87,6 +89,15 @@ module id)``. Each value is a plain module-level ``parse(event_partition, output
 acquisition-system package implements for one hardware module; a module is parseable for a system exactly when it
 appears here."""
 
+MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict[tuple[int, int], tuple[int, ...]]]] = {
+    AcquisitionSystems.MESOSCOPE_VR: get_module_event_codes,
+}
+"""The single, fully-visible registry of microcontroller event-code accessors, keyed by acquisition system. Each value
+is a plain module-level ``get_module_event_codes()`` function returning the ``(module type, module id) -> event codes``
+mapping for every module the system parses. The agnostic microcontroller pipeline derives each controller's extraction
+filter from this mapping, so a system's event codes live next to the parsers that read them rather than in an
+acquisition-time configuration file."""
+
 FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, ForgingAssemblyAsset] = {
     AcquisitionSystems.MESOSCOPE_VR: ForgingAssemblyAsset(
         assembler=assemble_mesoscope_session,
@@ -125,6 +136,7 @@ bodyparts it wants, parses them, and writes its outputs into the session's proce
 agnostic video pipeline simply runs it (no-op when no predictions are present), like the per-session forging
 assembler. A system donates a no-op function when it performs no video tracking."""
 
+
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Callable[..., None]:
     """Resolves the per-session forging data-assembly worker registered for the target acquisition system.
 
@@ -158,6 +170,23 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
         ValueError: If the acquisition system is unknown.
     """
     return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)].column_descriptions
+
+
+def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dict[tuple[int, int], tuple[int, ...]]:
+    """Resolves the microcontroller module event codes registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        A mapping from each ``(module_type, module_id)`` pair the system parses to the tuple of event codes its parser
+        reads. The agnostic microcontroller pipeline builds every controller's extraction filter from this mapping.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return MICROCONTROLLER_EVENT_CODE_REGISTRY[_resolve_system(system)]()
 
 
 def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tuple[int, int], Callable[..., None]]:
@@ -264,12 +293,14 @@ def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry, the
-    runtime-parser registry, and the two-photon-data registry, and registers at least one microcontroller module
-    parser.
+    runtime-parser registry, the two-photon-data registry, and the microcontroller event-code registry, and registers
+    at least one microcontroller module parser. Additionally confirms that every parseable microcontroller module
+    declares the event codes its parser reads.
 
     Raises:
-        RuntimeError: If any acquisition system is missing from a donor registry. The error names the offending
-            members so extenders can immediately locate the unwired touch point.
+        RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable microcontroller
+            module does not declare its event codes. The error names the offending members so extenders can
+            immediately locate the unwired touch point.
     """
     systems = frozenset(AcquisitionSystems)
     microcontroller_systems = frozenset(system for system, _, _ in MICROCONTROLLER_PARSER_REGISTRY)
@@ -279,6 +310,7 @@ def _assert_registry_coverage() -> None:
         ("RUNTIME_PARSER_REGISTRY", frozenset(RUNTIME_PARSER_REGISTRY)),
         ("TWO_PHOTON_DATA_REGISTRY", frozenset(TWO_PHOTON_DATA_REGISTRY)),
         ("VIDEO_TRACKING_REGISTRY", frozenset(VIDEO_TRACKING_REGISTRY)),
+        ("MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(MICROCONTROLLER_EVENT_CODE_REGISTRY)),
         ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing = systems - registered_systems
@@ -288,6 +320,25 @@ def _assert_registry_coverage() -> None:
                 f"Unable to validate donor-registry coverage for {registry_name}. Every acquisition system must "
                 f"register its donated processing and forging assets in this module ('registries.py'), but entries "
                 f"are missing for {missing_names}."
+            )
+            console.error(message=message, error=RuntimeError)
+
+    # Every parseable module must also declare its event codes, because the extraction stage filters each module by
+    # the codes resolved from MICROCONTROLLER_EVENT_CODE_REGISTRY. A parseable module missing from that registry
+    # would be dropped from its controller's extraction configuration, and its parse job would never be discovered.
+    for registered_system in sorted(microcontroller_systems, key=lambda member: member.name):
+        parseable = {
+            (module_type, module_id)
+            for (system, module_type, module_id) in MICROCONTROLLER_PARSER_REGISTRY
+            if system == registered_system
+        }
+        uncoded = sorted(parseable - set(MICROCONTROLLER_EVENT_CODE_REGISTRY[registered_system]()))
+        if uncoded:
+            module_names = ", ".join(f"({module_type}, {module_id})" for module_type, module_id in uncoded)
+            message = (
+                f"Unable to validate donor-registry coverage for MICROCONTROLLER_EVENT_CODE_REGISTRY. Every module "
+                f"registered in MICROCONTROLLER_PARSER_REGISTRY must also declare the event codes its parser reads, "
+                f"but {registered_system.name} does not declare codes for the following modules: {module_names}."
             )
             console.error(message=message, error=RuntimeError)
 

@@ -16,14 +16,14 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_communication_interface.microcontroller import (
     EXTRACTION_JOB_NAME,
-    EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
-    ExtractionConfig,
+    ModuleExtractionConfig,
     MicroControllerManifest,
+    ControllerExtractionConfig,
     execute_job,
 )
 
-from ..registries import resolve_microcontroller_parsers
+from ..registries import resolve_microcontroller_parsers, resolve_microcontroller_event_codes
 from ..shared_assets import (
     LOG_ARCHIVE_SUFFIX,
     tracked_job,
@@ -37,8 +37,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Mapping, Callable
     from concurrent.futures import Future
-
-    from ataraxis_communication_interface.microcontroller import ControllerExtractionConfig
 
 # The registered parser for a single module, resolved from the central MICROCONTROLLER_PARSER_REGISTRY: a plain
 # module-level function ``parse(event_partition, output_directory, session) -> None``. The PEP 695 alias is evaluated
@@ -80,10 +78,10 @@ def run_microcontroller_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the session's extraction configuration or microcontroller manifest is missing, or,
-            in remote mode, if a requested extraction job's log archive is not present.
-        ValueError: If the session's acquisition system is unknown, if a configured controller ID is not registered
-            in the microcontroller manifest, if no processable controllers are discovered, or if the provided
+        FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
+            extraction job's log archive is not present.
+        ValueError: If the session's acquisition system is unknown, if no manifest controller declares a module the
+            session's acquisition system extracts, if no processable controllers are discovered, or if the provided
             job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
@@ -92,12 +90,13 @@ def run_microcontroller_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Looks up the parser function for every module this session's acquisition system can parse from the central
-    # registry, inferring the system from the session.
+    # Looks up the parser function and the extracted event codes for every module this session's acquisition system
+    # can parse from the central registries, inferring the system from the session.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
+    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
 
-    # Loads the per-controller extraction configurations (validated against the microcontroller manifest).
-    controllers = _resolve_controllers(session=session)
+    # Derives the per-controller extraction configurations from the microcontroller manifest and the event codes.
+    controllers = _resolve_controllers(session=session, event_codes=event_codes)
 
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
@@ -178,59 +177,69 @@ def run_microcontroller_processing_pipeline(
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
-def _resolve_controllers(session: SessionData) -> dict[str, ControllerExtractionConfig]:
-    """Resolves the per-controller extraction configurations for the target session.
+def _resolve_controllers(
+    session: SessionData, event_codes: Mapping[tuple[int, int], tuple[int, ...]]
+) -> dict[str, ControllerExtractionConfig]:
+    """Derives the per-controller extraction configurations for the target session.
 
     Notes:
-        Loads the acquisition-time extraction configuration (the source of truth for which controllers, modules,
-        and event codes to extract) from the session's raw behavior data directory, and validates every configured
-        controller ID against the microcontroller manifest written alongside the log archives. The manifest check
-        confirms the archives were produced by ataraxis-communication-interface, which also distinguishes the
-        microcontroller controllers from the runtime DataLogger archive that shares the same directory.
+        The configurations are built in memory. The microcontroller manifest written alongside the log archives
+        supplies the controller and module topology, and the session's acquisition system supplies the event codes
+        each module's parser reads (from the central MICROCONTROLLER_EVENT_CODE_REGISTRY). A manifest module the
+        system does not parse is excluded, since extracting it would produce an intermediate feather nothing consumes,
+        and a controller left with no such module contributes no configuration at all. Requiring the manifest also
+        confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
+        microcontroller controllers from the runtime DataLogger archive that shares the same directory. Kernel
+        extraction is never configured, because this pipeline does not consume the kernel feather.
 
     Args:
         session: The loaded session whose microcontroller logs are being processed.
+        event_codes: The event codes registered for the session's acquisition system, keyed by
+            ``(module_type, module_id)``.
 
     Returns:
-        An ordered mapping from each configured controller ID (as a string) to its ControllerExtractionConfig.
+        An ordered mapping from each manifest controller ID (as a string) to its derived ControllerExtractionConfig.
 
     Raises:
-        FileNotFoundError: If the extraction configuration or the microcontroller manifest is not present at the
-            session's canonical raw behavior data location.
-        ValueError: If a configured controller ID is not registered in the microcontroller manifest.
+        FileNotFoundError: If the microcontroller manifest is not present at the session's canonical raw behavior
+            data location.
+        ValueError: If no manifest controller declares a module the session's acquisition system extracts.
     """
     log_directory = session.raw_data.behavior_data_path
-
-    config_path = log_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
-    if not config_path.is_file():
-        message = (
-            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No extraction "
-            f"configuration was found at '{config_path}'. The extraction configuration is authored during "
-            f"acquisition and defines the per-controller event codes the extraction stage processes."
-        )
-        console.error(message=message, error=FileNotFoundError)
 
     manifest_path = log_directory.joinpath(MICROCONTROLLER_MANIFEST_FILENAME)
     if not manifest_path.is_file():
         message = (
             f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No "
-            f"microcontroller manifest was found at '{manifest_path}'. The manifest is required to confirm the log "
-            f"archives were produced by ataraxis-communication-interface."
+            f"microcontroller manifest was found at '{manifest_path}'. The manifest enumerates the controllers and "
+            f"modules to extract and confirms the log archives were produced by ataraxis-communication-interface."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    config = ExtractionConfig.load(file_path=config_path)
     manifest = MicroControllerManifest.load(file_path=manifest_path)
-    manifest_ids = {str(controller.id) for controller in manifest.controllers}
 
-    controllers = {str(controller.controller_id): controller for controller in config.controllers}
+    controllers: dict[str, ControllerExtractionConfig] = {}
+    for controller in manifest.controllers:
+        modules = tuple(
+            ModuleExtractionConfig(
+                module_type=module.module_type,
+                module_id=module.module_id,
+                event_codes=event_codes[(module.module_type, module.module_id)],
+            )
+            for module in controller.modules
+            if (module.module_type, module.module_id) in event_codes
+        )
+        if not modules:
+            continue
+        controllers[str(controller.id)] = ControllerExtractionConfig(
+            controller_id=controller.id, modules=modules, kernel=None
+        )
 
-    unregistered = natsorted(controller_id for controller_id in controllers if controller_id not in manifest_ids)
-    if unregistered:
+    if not controllers:
         message = (
-            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. The following "
-            f"configured controller IDs are not registered in the microcontroller manifest: "
-            f"{', '.join(unregistered)}. Registered IDs: {natsorted(manifest_ids)}."
+            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. None of the "
+            f"controllers registered in the microcontroller manifest at '{manifest_path}' declares a module the "
+            f"'{session.acquisition_system}' acquisition system extracts."
         )
         console.error(message=message, error=ValueError)
 

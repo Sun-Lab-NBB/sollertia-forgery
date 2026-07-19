@@ -16,7 +16,7 @@ class BehaviorDataFiles(StrEnum):
 
     Notes:
         These names are the file-naming contract shared between the donated parsers (writers) and the assembly worker
-        (reader); all entries are forgery-internal and must not be referenced from outside the library.
+        (reader). All entries are forgery-internal and must not be referenced from outside the library.
     """
 
     ENCODER = "encoder_data.feather"
@@ -91,22 +91,22 @@ class DatasetColumn(StrEnum):
 
     # Behavior alignment columns (from forging behavior assembly).
     TIME_US = ("time_us", "Microsecond-precision sample timestamps from the acquisition reference clock.")
-    ELAPSED_MINUTES = ("elapsed_minutes", "Elapsed session time in minutes since the first sample.")
-    BRAKE = ("brake", "Optional. Wheel brake engagement at each sample. Present only for mesoscope experiments.")
-    SCREENS = ("screens", "Optional. Display panel state at each sample. Present only for mesoscope experiments.")
+    ELAPSED_MINUTES = ("elapsed_minutes", "Elapsed session time in minutes since the session's onset.")
+    BRAKE = ("brake", "The running wheel brake engagement at each sample.")
+    SCREENS = ("screens", "The Virtual Reality displays state at each sample.")
     TORQUE_N_CM = (
         "torque_N_cm",
-        "Optional. Wheel torque in N·cm at each sample, forced to zero during 'run' periods upstream. Absent for run "
-        "training.",
+        "The torque applied by the animal to the running wheel in N·cm at each sample, forced to zero during "
+        "'run' periods upstream.",
     )
     DISTANCE_CM = (
         "distance_cm",
-        "Optional. Cumulative distance traveled by the animal in centimeters at each sample. Absent for lick training.",
+        "Cumulative distance traveled by the animal in centimeters at each sample.",
     )
-    SPEED_CM_S = ("speed_cm_s", "Optional. Animal running speed in cm/s at each sample. Absent for lick training.")
-    LICK = ("lick", "Lick sensor state at each sample.")
-    WATER_UL = ("water_uL", "Per-sample water reward delivery in microliters.")
-    REWARD = ("reward", "Reward event flag at each sample.")
+    SPEED_CM_S = ("speed_cm_s", "Animal's running speed in cm/s at each sample.")
+    LICK = ("lick", "Lick sensor engagement state at each sample.")
+    WATER_UL = ("water_uL", "The cumulative water reward volume delivered to the animal at each sample in microliters.")
+    REWARD = ("reward", "The reward delivery state (on / off) at each sample.")
     SYSTEM_STATE = ("system_state", "Acquisition system state at each sample (idle, rest, run).")
 
     # Runtime/experiment columns (from forging runtime assembly).
@@ -123,11 +123,11 @@ class DatasetColumn(StrEnum):
     RUNTIME_STATE = ("runtime_state", "Experiment runtime state label at each sample.")
     REINFORCING_GUIDED = (
         "reinforcing_guided",
-        "Optional. Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded.",
+        "Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded.",
     )
     AVERSIVE_GUIDED = (
         "aversive_guided",
-        "Optional. Aversive guidance state at each sample. Present only when aversive guidance was recorded.",
+        "Aversive guidance state at each sample. Present only when aversive guidance was recorded.",
     )
 
     # Cindra fluorescence columns (from forging fluorescence assembly).
