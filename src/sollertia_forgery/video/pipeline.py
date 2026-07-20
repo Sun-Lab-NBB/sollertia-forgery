@@ -59,8 +59,7 @@ def run_video_processing_pipeline(
     session_path: Path,
     job_id: str | None = None,
     *,
-    parse: bool = False,
-    rename: bool = False,
+    timestamp: bool = False,
     track: bool = False,
     energy: bool = False,
     target_camera: int = -1,
@@ -70,37 +69,37 @@ def run_video_processing_pipeline(
     """Discovers, validates, and executes the camera video-processing pipeline for the target session.
 
     Notes:
-        The pipeline runs four independent job kinds sharing one processing tracker. ``parse`` runs one job per camera
-        whose ``{source_id}_log.npz`` archive is on disk, extracting that camera's frame timestamps. ``rename`` is a
-        single job that republishes those parsed feathers under their canonical manifest names, and it alone must
-        follow another job since it links what ``parse`` writes. ``track`` is a single job that runs the acquisition
-        system's donated tracking function over the session's DeepLabCut pose predictions, and no-ops when none are
-        present. ``energy`` runs one job per camera, measuring its recording into a motion-energy feather, and no-ops
-        when the recording is absent.
+        The pipeline runs four jobs sharing one processing tracker, grouped under three flags. The ``timestamp`` flag
+        runs one parse job per camera whose ``{source_id}_log.npz`` archive is on disk, each extracting that camera's
+        frame timestamps, then the single rename job that republishes every parsed feather under its canonical manifest
+        name. The ``track`` flag runs the single job that applies the acquisition system's donated tracking function to
+        the session's DeepLabCut pose predictions, which no-ops when none are present. The ``energy`` flag runs one job
+        per camera, measuring its recording into a motion-energy feather, and no-ops when the recording is absent.
 
         The camera manifest defines the full job universe, one parse and one energy job per registered camera plus the
         single rename and tracking jobs, so tracker alignment does not depend on which archives are on disk.
 
-        Two runtimes select which of those jobs execute. In local mode (``job_id`` is None) the pipeline runs every
-        job whose flag is set, defaulting to all four kinds when no flag is set, sequentially over one shared worker
-        pool. The ``parse`` and ``energy`` jobs honor ``target_camera`` to narrow that pass to a single camera. In
-        remote mode (a ``job_id`` is provided) only the single job matching that identifier runs, chosen entirely by
-        the identifier, so the flags and ``target_camera`` are ignored. This lets an external scheduler drive cross-job
-        parallelism by dispatching each job identifier concurrently. Either way each parse or energy job fans its
-        per-recording decoding across the worker pool, while the rename and tracking jobs run single-core.
+        Two runtimes select which jobs execute. In local mode (``job_id`` is None) the pipeline runs each requested
+        stage sequentially over one shared worker pool, and runs every stage when no flag is set or all three are set,
+        mirroring the cindra pipeline's resolution. The parse and energy jobs honor ``target_camera`` to narrow that
+        pass to a single camera. In remote mode (a ``job_id`` is provided) only the single job matching that identifier
+        runs, chosen entirely by the identifier, so the flags and ``target_camera`` are ignored. This lets an external
+        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way each parse or
+        energy job fans its per-recording decoding across the worker pool, while the rename and tracking jobs run
+        single-core.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         job_id: The unique hexadecimal identifier for the job to execute. If provided, only the matching job is
             executed (remote mode). If not provided, all requested jobs are executed (local mode).
-        parse: Determines whether to run the per-camera timestamp parsing job.
-        rename: Determines whether to run the timestamp renaming job.
+        timestamp: Determines whether to run the timestamp stage, which parses each camera's log archive into a
+            frame-timestamp feather and republishes it under its canonical manifest name.
         track: Determines whether to run the video-tracking job (the system's donated tracking function).
         energy: Determines whether to run the per-camera motion-energy job.
-        target_camera: The numeric source ID of the single camera to process when running the parsing or motion-energy
-            jobs. Set to -1 to process every camera with a discovered log archive for the parsing job, and every camera
-            registered in the manifest for the motion-energy job. Ignored by the renaming and tracking jobs, and in
-            remote mode (when job_id is provided), where the job to run is selected entirely by job_id.
+        target_camera: The numeric source ID of the single camera to process when running the timestamp or
+            motion-energy stages. Set to -1 to process every camera with a discovered log archive for the timestamp
+            stage, and every camera registered in the manifest for the motion-energy stage. Ignored by the tracking
+            job, and in remote mode (when job_id is provided), where the job to run is selected entirely by job_id.
         workers: The number of worker processes the extraction binding may use per archive, and that the motion-energy
             job decodes each recording with. Set to -1 to use all available CPU cores (minus reserved cores).
         display_progress: Determines whether to display progress during each archive's parsing and each recording's
@@ -108,7 +107,7 @@ def run_video_processing_pipeline(
 
     Raises:
         ValueError: If the camera manifest registers no cameras, if no camera log archives are discovered for the
-            parsing job, if target_camera is not a discovered camera, or if job_id does not match an available job.
+            timestamp stage, if target_camera is not a discovered camera, or if job_id does not match an available job.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
     """
@@ -198,14 +197,13 @@ def run_video_processing_pipeline(
         console.echo(message="Camera video-processing job completed successfully.", level=LogLevel.SUCCESS)
         return
 
-    # Local mode: runs the requested jobs sequentially over one shared pool. When no flag is set, all four kinds run.
-    requested = parse or rename or track or energy
-    run_parse, run_rename, run_track, run_energy = (
-        (parse, rename, track, energy) if requested else (True, True, True, True)
-    )
+    # Local mode: runs the requested stages sequentially over one shared pool. Mirrors the cindra resolution, running
+    # every stage when the flags share one state (all off or all on).
+    if not (timestamp or track or energy):
+        timestamp = track = energy = True
 
     jobs: list[tuple[str, str]] = []
-    if run_parse:
+    if timestamp:
         if not log_paths:
             message = (
                 f"Unable to parse camera timestamps for session '{session.session_name}'. No registered camera log "
@@ -222,15 +220,16 @@ def run_video_processing_pipeline(
                 )
                 console.error(message=message, error=ValueError)
             jobs.append((TIMESTAMP_JOB_NAME, str(target_camera)))
-    if run_rename:
+        # The rename job republishes every parsed feather under its canonical name, so it belongs to the timestamp
+        # stage and always follows the parse jobs that write those feathers.
         jobs.append((RENAME_JOB_NAME, ""))
-    if run_track:
+    if track:
         # Reads only the raw pose predictions and does not consume the parsed timestamp feathers, so its position in
         # the local sequence is arbitrary. It is listed here only for a stable, readable order.
         jobs.append((TRACKING_JOB_NAME, ""))
-    if run_energy:
+    if energy:
         # Reads only each camera's recording, so it is independent of every other job. Its position in the local
-        # sequence is arbitrary. Honors target_camera exactly as the parsing job does, and covers every registered
+        # sequence is arbitrary. Honors target_camera exactly as the timestamp stage does, and covers every registered
         # camera rather than only those with a discovered log archive, since a recording can be measured without its
         # archive.
         if target_camera == -1:

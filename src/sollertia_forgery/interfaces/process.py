@@ -6,8 +6,8 @@ workers from the registries, so each command needs only the target session.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 from pathlib import Path
+from dataclasses import dataclass
 
 import click
 
@@ -16,23 +16,55 @@ from ..runtime import run_runtime_processing_pipeline
 from ..two_photon import run_two_photon_processing_pipeline
 from ..microcontrollers import run_microcontroller_processing_pipeline
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from click.decorators import FC
-
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
-_SESSION_PATH_OPTION: Callable[[FC], FC] = click.option(
+
+@dataclass(frozen=True, slots=True)
+class _SharedProcessingParameters:
+    """Bundles the options parsed on the ``process`` group and shared across its ``video``, ``microcontroller``,
+    ``runtime``, and ``two-photon`` subcommands.
+
+    The group callback builds one of these from its options and stores it on the Click context, and each subcommand
+    reads it back through the ``_pass_shared_parameters`` decorator. The ``runtime`` subcommand uses only
+    ``session_path``, ``workers``, and ``display_progress``, since its single-job pipeline has no remote-dispatch job.
+    """
+
+    session_path: Path | None
+    """The path to the session root directory every subcommand processes."""
+
+    job_id: str | None
+    """The unique hexadecimal identifier selecting a single processing job (remote mode), or None to run every
+    available job for the session (local mode)."""
+
+    workers: int
+    """The parallel worker budget for the pipeline. -1 resolves the available CPU cores automatically, and 1 forces
+    sequential execution."""
+
+    display_progress: bool
+    """Determines whether the pipeline displays a progress bar during processing."""
+
+    def require_session_path(self) -> Path:
+        """Returns the session root path, raising a Click usage error when ``--session-path`` was not supplied."""
+        if self.session_path is None:
+            message = "Missing option '-sp' / '--session-path'."
+            raise click.UsageError(message=message)
+        return self.session_path
+
+
+_pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
+"""Injects the ``process`` group's ``_SharedProcessingParameters`` as each subcommand's first argument."""
+
+
+@click.group("process", context_settings=CONTEXT_SETTINGS)
+@click.option(
     "-sp",
     "--session-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
+    default=None,
     help="The absolute path to the session root directory to process.",
 )
-"""Defines the shared session-path option that supplies the session root directory to process."""
-_JOB_ID_OPTION: Callable[[FC], FC] = click.option(
+@click.option(
     "-id",
     "--job-id",
     type=str,
@@ -42,8 +74,7 @@ _JOB_ID_OPTION: Callable[[FC], FC] = click.option(
         "(remote mode). If not provided, discovers and runs every available job for the session (local mode)."
     ),
 )
-"""Defines the shared job-id option that selects a single processing job or, when omitted, every available job."""
-_WORKERS_OPTION: Callable[[FC], FC] = click.option(
+@click.option(
     "-w",
     "--workers",
     type=int,
@@ -55,8 +86,7 @@ _WORKERS_OPTION: Callable[[FC], FC] = click.option(
         "allotment, and single-core jobs treat it as a no-op."
     ),
 )
-"""Defines the shared workers option that sets the parallel worker budget for a processing command."""
-_PROGRESS_OPTION: Callable[[FC], FC] = click.option(
+@click.option(
     "-pr",
     "--progress",
     is_flag=True,
@@ -64,22 +94,40 @@ _PROGRESS_OPTION: Callable[[FC], FC] = click.option(
     default=False,
     help="Determines whether to display a progress bar during processing.",
 )
-"""Defines the shared progress option that toggles the processing progress bar."""
+@click.pass_context
+def process_cli(
+    context: click.Context, session_path: Path | None, job_id: str | None, workers: int, *, progress: bool
+) -> None:
+    """Runs the requested data extraction pipelines on a single session.
+
+    The session path, job id, worker budget, and progress flag are parsed on this group and shared by every
+    subcommand, so they must be given before the subcommand name.
+    """
+    context.obj = _SharedProcessingParameters(
+        session_path=session_path,
+        job_id=job_id,
+        workers=workers,
+        display_progress=progress,
+    )
 
 
-@click.group("process", context_settings=CONTEXT_SETTINGS)
-def process_cli() -> None:
-    """Runs the requested data extraction pipelines on a single session."""
-
-
-@process_cli.command("video")
-@_SESSION_PATH_OPTION
-@_JOB_ID_OPTION
+@process_cli.command("video", context_settings=CONTEXT_SETTINGS)
 @click.option(
-    "-tr/-nt",
-    "--track/--no-track",
-    default=True,
-    show_default=True,
+    "-ts",
+    "--timestamp",
+    is_flag=True,
+    default=False,
+    help=(
+        "Determines whether to run the timestamp stage, which parses each camera's log archive into a frame-timestamp "
+        "feather and republishes it under its canonical manifest name. Ignored when '--job-id' is provided (remote "
+        "mode selects the job by ID)."
+    ),
+)
+@click.option(
+    "-tr",
+    "--track",
+    is_flag=True,
+    default=False,
     help=(
         "Determines whether to run the video-tracking stage, which post-processes externally-produced pose "
         "predictions (e.g. DeepLabCut '.h5' files) into tracking feathers. It is a no-op when no predictions are "
@@ -87,67 +135,77 @@ def process_cli() -> None:
     ),
 )
 @click.option(
-    "-en/-ne",
-    "--energy/--no-energy",
-    default=True,
-    show_default=True,
+    "-en",
+    "--energy",
+    is_flag=True,
+    default=False,
     help=(
         "Determines whether to run the motion-energy stage, which measures each camera's recording into a per-frame "
         "movement signal. It is a no-op for a camera whose recording is absent. Ignored when '--job-id' is provided "
         "(remote mode selects the job by ID)."
     ),
 )
-@_WORKERS_OPTION
-@_PROGRESS_OPTION
+@click.option(
+    "-tc",
+    "--target-camera",
+    type=int,
+    default=-1,
+    show_default=True,
+    help=(
+        "The numeric source ID of the single camera to process for the timestamp and motion-energy stages. Set to -1 "
+        "to process every camera. Ignored when '--job-id' is provided (remote mode selects the job by ID)."
+    ),
+)
+@_pass_shared_parameters
 def video_command(
-    session_path: Path, job_id: str | None, workers: int, *, track: bool, energy: bool, progress: bool
+    shared: _SharedProcessingParameters,
+    target_camera: int,
+    *,
+    timestamp: bool,
+    track: bool,
+    energy: bool,
 ) -> None:
-    """Extracts camera frame timestamps, post-processes pose predictions, and measures per-camera motion energy."""
-    # Runs the full pipeline (parse + rename), with the tracking and motion-energy stages toggled by their own flags.
-    # The stages are passed explicitly so disabling either does not suppress the timestamp stages. In remote mode
-    # (job_id set) the stage flags are ignored and the job is selected by ID.
+    """Extracts camera frame timestamps, post-processes pose predictions, and measures per-camera motion energy.
+
+    When none of ``--timestamp``, ``--track``, or ``--energy`` is requested, all three stages run (local mode).
+    Supplying ``--job-id`` instead runs only the matching job.
+    """
     run_video_processing_pipeline(
-        session_path=session_path,
-        job_id=job_id,
-        parse=True,
-        rename=True,
+        session_path=shared.require_session_path(),
+        job_id=shared.job_id,
+        timestamp=timestamp,
         track=track,
         energy=energy,
-        workers=workers,
-        display_progress=progress,
+        target_camera=target_camera,
+        workers=shared.workers,
+        display_progress=shared.display_progress,
     )
 
 
-@process_cli.command("microcontroller")
-@_SESSION_PATH_OPTION
-@_JOB_ID_OPTION
-@_WORKERS_OPTION
-@_PROGRESS_OPTION
-def microcontroller_command(session_path: Path, job_id: str | None, workers: int, *, progress: bool) -> None:
+@process_cli.command("microcontroller", context_settings=CONTEXT_SETTINGS)
+@_pass_shared_parameters
+def microcontroller_command(shared: _SharedProcessingParameters) -> None:
     """Extracts the microcontroller module log archives and parses them into domain-specific behavior feathers."""
     run_microcontroller_processing_pipeline(
-        session_path=session_path,
-        job_id=job_id,
-        workers=workers,
-        display_progress=progress,
+        session_path=shared.require_session_path(),
+        job_id=shared.job_id,
+        workers=shared.workers,
+        display_progress=shared.display_progress,
     )
 
 
-@process_cli.command("runtime")
-@_SESSION_PATH_OPTION
-@_WORKERS_OPTION
-@_PROGRESS_OPTION
-def runtime_command(session_path: Path, workers: int, *, progress: bool) -> None:
+@process_cli.command("runtime", context_settings=CONTEXT_SETTINGS)
+@_pass_shared_parameters
+def runtime_command(shared: _SharedProcessingParameters) -> None:
     """Decodes the acquisition runtime log archive and parses it into the session's runtime behavior feathers."""
     run_runtime_processing_pipeline(
-        session_path=session_path,
-        workers=workers,
-        display_progress=progress,
+        session_path=shared.require_session_path(),
+        workers=shared.workers,
+        display_progress=shared.display_progress,
     )
 
 
-@process_cli.command("two-photon")
-@_SESSION_PATH_OPTION
+@process_cli.command("two-photon", context_settings=CONTEXT_SETTINGS)
 @click.option(
     "-c",
     "--configuration-path",
@@ -155,7 +213,6 @@ def runtime_command(session_path: Path, workers: int, *, progress: bool) -> None
     required=True,
     help="The path to the cindra single-recording configuration file supplying the processing parameters.",
 )
-@_JOB_ID_OPTION
 @click.option(
     "-b",
     "--binarize",
@@ -185,19 +242,15 @@ def runtime_command(session_path: Path, workers: int, *, progress: bool) -> None
     show_default=True,
     help="The imaging plane to process when running the processing stage. Set to -1 to process all planes.",
 )
-@_WORKERS_OPTION
-@_PROGRESS_OPTION
+@_pass_shared_parameters
 def two_photon_command(
-    session_path: Path,
+    shared: _SharedProcessingParameters,
     configuration_path: Path,
-    job_id: str | None,
     target_plane: int,
-    workers: int,
     *,
     binarize: bool,
     process: bool,
     combine: bool,
-    progress: bool,
 ) -> None:
     """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
 
@@ -205,13 +258,13 @@ def two_photon_command(
     (local mode). Supplying ``--job-id`` instead runs only the matching job.
     """
     run_two_photon_processing_pipeline(
-        session_path=session_path,
+        session_path=shared.require_session_path(),
         configuration_path=configuration_path,
-        job_id=job_id,
+        job_id=shared.job_id,
         binarize=binarize,
         process=process,
         combine=combine,
         target_plane=target_plane,
-        workers=workers,
-        display_progress=progress,
+        workers=shared.workers,
+        display_progress=shared.display_progress,
     )
