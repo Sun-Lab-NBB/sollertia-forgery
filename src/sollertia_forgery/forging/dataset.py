@@ -46,7 +46,7 @@ def resolve_dataset(
     the dataset already exists, loads it and, when a session list is provided, verifies that the provided set matches
     the existing definition. A mismatch surfaces as an error unless ``force_recreate`` is True, which unlocks
     deletion and fresh recreation from the provided session names. When the dataset does not exist, creates it from
-    the provided session names; a non-empty session list is required in that case.
+    the provided session names. A non-empty session list is required in that case.
 
     Args:
         name: The unique name of the dataset.
@@ -172,7 +172,7 @@ def _create_dataset(
         console.error(message=message, error=ValueError)
 
     # Verifies that every remaining session shares the first session's type and acquisition system. A dataset
-    # must contain only sessions of the same type acquired by the same acquisition system; the assembly logic
+    # must contain only sessions of the same type acquired by the same acquisition system. The assembly logic
     # downstream assumes this invariant when deriving the dataset-level metadata from the first session.
     for session_path in session_paths[1:]:
         session_data = SessionData.load(session_path=session_path)

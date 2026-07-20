@@ -198,7 +198,7 @@ def test_luminance_tracks_a_global_brightness_step(tmp_path: Path) -> None:
     This pins the mechanism only: a brightness change that lands on every pixel at once does register in both
     columns. It does not license the converse. On real head-fixed footage this column's frame-to-frame changes are
     dominated by the animal displacing bright structure within the frame, so a per-frame excursion here is far more
-    often movement than illumination -- see the column's own documentation before using it to reject frames.
+    often movement than illumination. See the column's own documentation before using it to reject frames.
     """
     frames = np.full((40, _FRAME_HEIGHT, _FRAME_WIDTH), 60, dtype=np.uint8)
     frames[20:] = 180

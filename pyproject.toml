@@ -52,7 +52,7 @@ dependencies = [
     "ataraxis-communication-interface>=6,<7",
     "cindra>=1.1.0,<2",
 
-    # Machine Vision (GenICam runtime for ataraxis-video-system; sourced from TestPyPI via [tool.uv.sources])
+    # Machine Vision (GenICam runtime for ataraxis-video-system, sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
@@ -64,7 +64,7 @@ dependencies = [
     "numpy>=2,<3",
     "numba>=0.64,<1",
     # pandas and PyTables read DeepLabCut's 'table'-format HDF5 pose predictions in the video-tracking stage. The
-    # predictions are written upstream by slvt/DeepLabCut on pandas 2 (numpy<2); pandas 3 reads them bit-identically.
+    # predictions are written upstream by slvt/DeepLabCut on pandas 2 (numpy<2). Pandas 3 reads them bit-identically.
     "pandas>=3,<4",
     "tables>=3,<4",
 

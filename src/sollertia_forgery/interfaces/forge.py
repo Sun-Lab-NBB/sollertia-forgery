@@ -1,7 +1,7 @@
 """Provides the generic ``slf forge`` command that assembles a dataset from a project's processed sessions.
 
 Notes:
-    The assembly stage invokes the system-agnostic forging pipeline directly; that pipeline infers the acquisition
+    The assembly stage invokes the system-agnostic forging pipeline directly. That pipeline infers the acquisition
     system from the resolved dataset and resolves the system-specific assembly worker internally through the
     forging-assembly registry. The command carries no system selector.
 """

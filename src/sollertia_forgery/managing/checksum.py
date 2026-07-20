@@ -47,7 +47,7 @@ def resolve_checksum(
         regenerate_checksum: Determines whether to overwrite the stored ax_checksum.txt value with the freshly
             computed checksum instead of verifying against it.
         workers: The number of parallel worker processes. Values below 1 request all available cores minus reserved
-            cores; 1 disables parallelism.
+            cores. A value of 1 disables parallelism.
         display_progress: Determines whether to emit console messages and a progress bar during calculation.
 
     Raises:

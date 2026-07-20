@@ -74,7 +74,7 @@ def run_microcontroller_processing_pipeline(
         job_id: The hexadecimal identifier of the single job to execute (remote mode). If not provided, the whole
             pipeline runs (local mode).
         workers: The number of worker processes to use. A value less than 1 uses all available CPU cores (minus
-            reserved cores); 1 forces sequential processing.
+            reserved cores), and 1 forces sequential processing.
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
@@ -329,7 +329,7 @@ def _discover_jobs(
 
     Notes:
         A controller contributes jobs only if at least one of its configured modules is eligible (present in the
-        resolved parser mapping); extracting a controller with no parseable modules would produce intermediate
+        resolved parser mapping). Extracting a controller with no parseable modules would produce intermediate
         feathers that nothing consumes. The universe enumerates every job the configuration could produce (one
         extraction job per such controller plus one parse job per eligible module), which stays stable across
         invocations for foreign-entry detection and remote-job validation. The requested set narrows the universe
@@ -396,7 +396,7 @@ def _run_extraction_stage(
         Controllers are extracted one at a time within a session. Each archive already fans its message decoding across
         the shared process pool, so a single controller saturates the session's worker budget, matching how the
         acquisition library orchestrates a multi-controller directory. Parallelism across sessions is handled by the
-        orchestration layer, which runs independent sessions concurrently under a per-session worker cap; extracting a
+        orchestration layer, which runs independent sessions concurrently under a per-session worker cap. Extracting a
         session's controllers sequentially therefore avoids oversubscribing cores across those concurrent sessions. The
         shared tracker is file-lock guarded and safe under concurrent access, so this ordering is a throughput choice
         rather than a correctness constraint. The pool is owned by the caller and shared with the parse stage, so this
@@ -463,7 +463,7 @@ def _run_parse_stage(
         The extraction outputs are indexed once up front, so each parse job resolves its input feather with an O(1)
         lookup rather than re-globbing and re-scanning the output directory per module. The acquisition binding
         writes a raw feather only for modules that produced at least one message, so a configured, eligible module
-        can legitimately have no feather; such a parse job is completed with no output rather than left unresolved.
+        can legitimately have no feather. Such a parse job is completed with no output rather than left unresolved.
         Modules with a feather are dispatched to the shared process pool when one is available and more than one
         module is runnable, with the parent owning all tracker state transitions.
 
@@ -493,7 +493,7 @@ def _run_parse_stage(
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(
                 message=(
-                    f"No extracted data was found for module '{specifier}'; completing its parse job with no output."
+                    f"No extracted data was found for module '{specifier}'. Completing its parse job with no output."
                 ),
                 level=LogLevel.WARNING,
             )
@@ -577,15 +577,15 @@ def _execute_parse_jobs_parallel(
         The pool is the one shared with the extraction stage and is owned by the caller, so this helper submits to
         it without shutting it down. Each job's tracker state is advanced to running immediately before its future
         is submitted, then resolved as the future completes. In-flight futures are allowed to finish on failure so
-        the tracker stays accurate for every dispatched job; the first captured exception is re-raised after all
+        the tracker stays accurate for every dispatched job. The first captured exception is re-raised after all
         futures resolve.
 
     Args:
         runnable: The parse jobs mapping each specifier to its ``(feather_path, module_parser)`` pair.
         tracker: The shared processing tracker.
-        session: The loaded session, passed through to each parser; must be picklable for the worker processes.
+        session: The loaded session, passed through to each parser. Must be picklable for the worker processes.
         parse_output: The directory the parsers write their domain-specific feathers into.
-        executor: The shared process pool to submit the parse jobs to. Owned by the caller; not shut down here.
+        executor: The shared process pool to submit the parse jobs to. Owned by the caller. Not shut down here.
         display_progress: Determines whether to display a per-module progress bar.
     """
     first_exception: Exception | None = None
@@ -710,7 +710,7 @@ def _execute_remote_job(
     if feather_path is None:
         console.echo(
             message=(
-                f"No extracted data was found for module '{specifier}'; completing its parse job with no output. "
+                f"No extracted data was found for module '{specifier}'. Completing its parse job with no output. "
                 f"Ensure the controller's extraction job has run first."
             ),
             level=LogLevel.WARNING,

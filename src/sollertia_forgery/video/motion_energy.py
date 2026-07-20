@@ -1,32 +1,7 @@
 """Provides the system-agnostic per-camera motion-energy analysis run by the video-processing pipeline.
 
-The analysis reduces each camera recording to a per-frame scalar measuring how much the image changed since the
-previous frame, which indexes how much the animal moved. It is a pure function of pixels and carries no
-acquisition-system-specific content, so it lives here rather than being donated per system: the camera manifest
-already names every camera, and the same computation applies to all of them.
-
-Notes:
-    Methodological references are attached to the top-level function that implements the measure.
-
-    "Motion energy" here means frame-differencing motion energy -- the mean absolute inter-frame intensity change.
-    It is NOT Adelson-Bergen spatiotemporal energy, an unrelated oriented-filter model of motion perception that
-    shares the name. Nothing here filters for direction or speed; the measure is undirected and unsigned.
-
-    Each frame is mean-binned over 3x3 pixel blocks before differencing. Binning first is load-bearing: the absolute
-    difference rectifies per-pixel sensor and codec noise into a positive bias, so binning afterwards would not
-    suppress it.
-
-    The recordings are lossy, constant-quantization video, which bounds what the quiet end of the range can resolve.
-    The encoder's deadzone codes sub-threshold motion as no change at all, and its zero-residual regions are
-    block-structured at a scale far larger than the 3x3 bin, so binning averages pixels that were coded zero together
-    rather than decorrelating them. Idle-period energy therefore floors and compresses non-linearly. A periodic
-    component at the encoder's keyframe interval is also possible, since an intra-coded frame does not share its
-    predecessor's quantization error; check the autocorrelation at that lag before trusting slow structure.
-
-    A second video-derived analysis should be added as a sibling module in this package following this module's
-    shape. The chunked-decode scaffolding here is deliberately not shared: a common decode engine belongs in its own
-    module only once a third analysis needs one, at which point three working implementations will show what
-    actually varies between them.
+The analysis reduces each camera recording to a per-frame scalar indexing how much the animal moved, and as a pure
+function of pixels it applies to every camera the manifest names rather than being donated per acquisition system.
 """
 
 from __future__ import annotations
@@ -34,7 +9,7 @@ from __future__ import annotations
 import os
 from enum import StrEnum
 from typing import TYPE_CHECKING
-from contextlib import contextmanager
+from contextlib import nullcontext, contextmanager
 from concurrent.futures import ProcessPoolExecutor
 
 import cv2
@@ -59,12 +34,12 @@ session's raw camera-data directory under this suffix."""
 
 SPATIAL_BIN_SIZE: int = 3
 """The edge length, in pixels, of the square block each frame is mean-binned over before differencing. Matches the
-Facemap ``sbin`` default. Binning before differencing suppresses per-pixel sensor and codec noise; binning after would
-not, because the absolute difference rectifies that noise into a positive bias first."""
+``sbin`` value Facemap's internal SVD and ROI helpers are written around. Facemap's own user-facing defaults are 1 in
+``process.run`` and 7 in its GUI."""
 
 MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
-preceding keyframe, so each chunk discards up to one group of pictures worth of decoded frames; at roughly sixteen
+preceding keyframe, so each chunk discards up to one group of pictures worth of decoded frames. At roughly sixteen
 times the typical keyframe interval, that waste stays under seven percent of the chunk."""
 
 WORKER_THREAD_VARIABLES: tuple[str, ...] = (
@@ -76,51 +51,19 @@ WORKER_THREAD_VARIABLES: tuple[str, ...] = (
     "POLARS_MAX_THREADS",
     "OPENCV_FFMPEG_THREADS",
 )
-"""The environment variables that cap each threading layer a worker process can start a pool for. Every scientific
-library in this pipeline's import graph sizes its own pool to the machine's core count on first import, so a worker
-that inherits the defaults reserves far more of the machine than the one core it was budgeted."""
-
-
-@contextmanager
-def pinned_worker_threads() -> Iterator[None]:
-    """Caps every threading layer to a single thread for the duration of the block, then restores the environment.
-
-    Worker processes are started with the environment they inherit at spawn time, and each scientific library sizes
-    its thread pool when it is first imported -- which, because a worker re-imports rather than inheriting the
-    parent's modules, happens before any code in the worker runs. Setting the caps inside the worker is therefore too
-    late; they have to be in place in the parent before the pool starts its children. Wrapping only the pool's
-    lifetime, rather than setting the caps at import, keeps the restriction off the rest of the library: the analysis
-    package deliberately runs multi-threaded numba kernels, and a process-wide cap set here would silently serialize
-    them.
-
-    The caps make a worker cost the one core it was budgeted. They do not measurably change this pipeline's runtime,
-    because the pools a worker would otherwise start sit idle -- it never calls into a threaded kernel. What they buy
-    is that a run given N workers occupies N cores rather than advertising several thousand threads to every other
-    tenant of the machine.
-
-    Yields:
-        None. The caps are in effect for the duration of the block.
-    """
-    previous = {variable: os.environ.get(variable) for variable in WORKER_THREAD_VARIABLES}
-    os.environ.update(dict.fromkeys(WORKER_THREAD_VARIABLES, "1"))
-    try:
-        yield
-    finally:
-        for variable, value in previous.items():
-            if value is None:
-                os.environ.pop(variable, None)
-            else:
-                os.environ[variable] = value
-
+"""The environment variables that cap each threading layer a worker process can start a pool for. Most of these
+libraries size their pool to the machine's core count on first import, so a worker that inherits the defaults reserves
+far more of the machine than the one core it was budgeted. ``OPENCV_FFMPEG_THREADS`` is the exception: the decoder
+reads it when a capture is constructed rather than at import, so a worker re-sets it for itself."""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count of a decoded frame the decoder handed back as a single image plane, which needs no plane
 selection."""
 
 _MONOCHROME_PLANE_INDEX: int = 1
-"""The index of the plane read from a frame the decoder handed back as several planes. Monochrome sources are stored
-across identical planes, so any one of them carries the image; this one is read for all frames so the choice never
-varies within a recording."""
+"""The index of the plane read from a frame the decoder handed back as several planes. When the decoder cannot hand
+back the raw luma plane it falls back to a BGR expansion whose three channels are identical for a monochrome source, so
+any one of them carries the image. This one is read for all frames, so the choice never varies within a recording."""
 
 
 class MotionEnergyColumn(StrEnum):
@@ -141,18 +84,28 @@ class MotionEnergyColumn(StrEnum):
         wheel, where it is partly an optical tachometer and saturates once the frame decorrelates.
 
         Whole-frame coverage also means that a camera imaging the eye folds pupil motion and blinks into its movement
-        signal, and those are not facial movement. Controlling for them collapsed the apparent fraction of
-        movement-modulated units from roughly two thirds to a twentieth in Talluri et al., and most blinks do not
-        coincide with movement at all (Turner et al.), so the leak is neither small nor self-cancelling. This column
-        remains the right primary product for movement-frame rejection, where an eye event is a frame worth
-        rejecting anyway. But an analysis that claims to measure FACIAL movement from an eye-bearing camera must
-        exclude the eye region and say so, and must not treat this column as independent of the pupil feather
-        extracted from the same recording.
+        signal, and those are not facial movement. In Talluri et al., units that looked movement-modulated during free
+        viewing (67 percent) mostly stopped looking so once the animal held fixation and the retinal input was
+        stabilized (5 percent). Blinks co-occur with volitional whisking in about 40 percent of awake blink events
+        (Turner et al.), so the leak is not redundant with the body-movement signal. This column remains the right
+        primary product for movement-frame rejection, where an eye event is a frame worth rejecting anyway. But an
+        analysis that claims to measure FACIAL movement from an eye-bearing camera must exclude the eye region and say
+        so, and must not treat this column as independent of the pupil feather extracted from the same recording.
 
-        The absolute difference is a full-wave rectifier, so a movement that oscillates appears in this signal at
-        TWICE its true frequency: an eight-hertz rhythm reads as a sixteen-hertz peak. Any frequency-domain analysis
-        of this column must halve the observed peak before naming a behavioral rhythm. Amplitude-domain uses --
-        thresholding, frame rejection, regression against a slow signal -- are unaffected.
+        The absolute difference is a full-wave rectifier, so a symmetric movement that oscillates appears in this
+        signal at TWICE its true frequency: an eight-hertz rhythm reads as a sixteen-hertz peak. An asymmetric rhythm,
+        such as one whose protraction and retraction velocities differ, retains power at its own frequency as well. A
+        frequency-domain analysis of this column must therefore check for a harmonic pair before naming a behavioral
+        rhythm. Amplitude-domain uses (thresholding, frame rejection, regression against a slow signal) are
+        unaffected.
+
+        The recordings are lossy, constant-quantization video, which bounds what the quiet end of the range can
+        resolve. The encoder's deadzone codes sub-threshold motion as no change at all, and its zero-residual regions
+        are block-structured at a scale far larger than the 3x3 bin, so binning averages pixels that were coded zero
+        together rather than decorrelating them. Idle-period energy therefore floors and compresses non-linearly. A
+        periodic component at the encoder's keyframe interval is also possible, since an intra-coded frame does not
+        share its predecessor's quantization error. Check the autocorrelation at that lag before trusting slow
+        structure.
 
         The feather is strictly a frame index and the metrics keyed to it. It carries no timestamps: aligning frames
         to the acquisition clock belongs to dataset assembly, which owns every other stream's alignment too. Three
@@ -160,7 +113,7 @@ class MotionEnergyColumn(StrEnum):
         equals the camera's timestamp feather's before joining, since nothing upstream enforces that. It must
         subtract one from ``frame`` to reach the timestamp feather's zero-based positional rows. And because motion
         energy is a per-interval rather than a per-second quantity, it must either divide each sample by its actual
-        inter-frame interval or mask samples whose interval departs from the modal one -- a difference taken across a
+        inter-frame interval or mask samples whose interval departs from the modal one. A difference taken across a
         dropped frame spans more real time than its neighbours and reads as spuriously high motion.
     """
 
@@ -181,7 +134,7 @@ class MotionEnergyColumn(StrEnum):
     including frame 1.
 
     Read it at the session timescale, not per frame. On a head-fixed face recording its frame-to-frame changes track
-    movement rather than illumination: they correlate with ``motion_energy`` at about 0.7, and that correlation
+    movement rather than illumination. They correlate with ``motion_energy`` at about 0.7, and that correlation
     survives almost undiminished when the largest brightness jumps are excluded, because a moving animal displaces
     bright structure within the frame and drags the mean along with it. Large single-frame excursions were checked
     for and behave like movement rather than like switching: they are embedded in sustained activity rather than
@@ -189,14 +142,41 @@ class MotionEnergyColumn(StrEnum):
     an illumination artifact will therefore reject real movement.
 
     What does survive as illumination is slow. After the movement-explained part is regressed out, a drift of a few
-    gray levels remains across a session -- around an order of magnitude larger than the energy floor -- and it is
-    not attributable to the animal. That drift is what this column is for: detrending or including a slow luminance
-    regressor when comparing energy across the length of a session, and confirming that a change in energy level
-    between the start and end of a recording is behavioral rather than a lamp warming up.
+    gray levels remains across a session (around an order of magnitude larger than the energy floor) and it is
+    not attributable to the animal. That drift is what this column is for. Use it to detrend, or to include a slow
+    luminance regressor, when comparing energy across the length of a session. It also confirms that a change in
+    energy level between the start and end of a recording is behavioral rather than a lamp warming up.
 
     These figures come from one face recording on one rig. The balance between the two regimes depends on how much
-    of the frame the animal fills and on what else in the scene emits or reflects light, so re-measure both the
+    of the frame the animal fills and on what else in the scene emits or reflects light. Re-measure both the
     correlation and the residual drift before relying on either on a different camera."""
+
+
+@contextmanager
+def pinned_worker_threads() -> Iterator[None]:
+    """Caps every threading layer to a single thread for the duration of the block, then restores the environment.
+
+    Worker processes are started with the environment they inherit at spawn time. Each scientific library sizes its
+    thread pool when it is first imported, which, because a worker re-imports rather than inheriting the parent's
+    modules, happens before any code in the worker runs. Setting the caps inside the worker is therefore too late
+    for those libraries. They have to be in place in the parent before the pool starts its children. Wrapping only
+    the pool's lifetime, rather than setting the caps at import, keeps the restriction off the rest of the library:
+    the analysis package deliberately runs multi-threaded numba kernels, and a process-wide cap set here would
+    silently serialize them.
+
+    Yields:
+        None. The caps are in effect for the duration of the block.
+    """
+    previous = {variable: os.environ.get(variable) for variable in WORKER_THREAD_VARIABLES}
+    os.environ.update(dict.fromkeys(WORKER_THREAD_VARIABLES, "1"))
+    try:
+        yield
+    finally:
+        for variable, value in previous.items():
+            if value is None:
+                os.environ.pop(variable, default=None)
+            else:
+                os.environ[variable] = value
 
 
 def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_name: str) -> Path | None:
@@ -236,9 +216,18 @@ def compute_camera_motion_energy(
 
     Decodes the recording, mean-bins each frame over 3x3 pixel blocks, and reduces every consecutive pair to the mean
     absolute intensity difference between them. The recording is split into contiguous frame chunks decoded in
-    parallel; each chunk beyond the first decodes one extra priming frame so that the difference spanning its leading
-    boundary is computed rather than lost, which makes the chunked result bit-identical to a sequential pass and the
-    chunk count a pure performance knob.
+    parallel. Each chunk beyond the first decodes one extra priming frame so that the difference spanning its leading
+    boundary is computed rather than lost, which makes the chunked result bit-identical to a sequential pass over the
+    frames that decode. The chunk count is a pure performance knob for an intact recording. On a recording whose
+    container over-reports its frame count by more than the final chunk's size, a higher chunk count turns a warning
+    into a truncation error.
+
+    Notes:
+        "Motion energy" here means frame-differencing motion energy, the mean absolute inter-frame intensity change,
+        not the Adelson-Bergen spatiotemporal-energy model that shares the name. Nothing filters for direction or
+        speed, so the measure is undirected and unsigned. Binning before differencing is load-bearing: the absolute
+        difference rectifies per-pixel sensor and codec noise into a positive bias, so binning afterwards would not
+        suppress it.
 
     References:
         The measure and its use as a behavioral-state regressor:
@@ -256,7 +245,7 @@ def compute_camera_motion_energy(
                 movements. Nature Neuroscience, 26(11), 1953-1959.
             Turner, K. L., Gheres, K. W., & Drew, P. J. (2023). Relating pupil diameter and blinking to cortical
                 activity and hemodynamics across arousal states. Journal of Neuroscience, 43(6), 949-964.
-        The unrelated oriented-filter model that shares the name, disclaimed in the module notes:
+        The unrelated oriented-filter model that shares the name, disclaimed in the notes above:
             Adelson, E. H., & Bergen, J. R. (1985). Spatiotemporal energy models for the perception of motion.
                 Journal of the Optical Society of America A, 2(2), 284-299.
 
@@ -266,12 +255,14 @@ def compute_camera_motion_energy(
         workers: The number of worker processes to decode with. Set to -1 to use all available CPU cores (minus
             reserved cores). Resolved here, so an unresolved count may be passed in.
         executor: An optional process pool to submit the decode chunks into, shared across cameras so the cost of
-            spawning worker processes is paid once. When None, a pool is created and torn down for this recording.
+            spawning worker processes is paid once. When None, a pool is created and torn down for this recording,
+            unless the recording plans to a single decode chunk, which runs in-process with no pool.
         display_progress: Determines whether per-chunk completion is reported as the analysis runs.
 
     Raises:
-        ValueError: If the recording cannot be opened, reports no frames, or ends early at a chunk other than the
-            last, which means the file is truncated and every later frame index would be wrong.
+        ValueError: If the recording cannot be opened, reports no frames, cannot decode the priming frame preceding a
+            chunk, or ends early at a chunk other than the last, which means the file is truncated and every later
+            frame index would be wrong.
     """
     frame_count = _read_frame_count(video_path=video_path)
     resolved_workers = resolve_worker_count(requested_workers=workers)
@@ -285,7 +276,7 @@ def compute_camera_motion_energy(
         level=LogLevel.INFO,
     )
 
-    # A pool is only worth its startup cost with more than one chunk to decode; a single chunk runs in-process.
+    # A pool is only worth its startup cost with more than one chunk to decode. A single chunk runs in-process.
     if len(chunks) == 1:
         results = [_energy_chunk(video_path=str(video_path), start_frame=0, frame_count=frame_count)]
     elif executor is not None:
@@ -396,14 +387,22 @@ def _submit_chunks(
         The per-chunk ``(energy, luminance)`` arrays, ordered to match the input chunks.
     """
     futures = [
-        executor.submit(_energy_chunk, str(video_path), start_frame, frame_count) for start_frame, frame_count in chunks
+        executor.submit(_energy_chunk, video_path=str(video_path), start_frame=start_frame, frame_count=frame_count)
+        for start_frame, frame_count in chunks
     ]
 
+    progress_context = (
+        console.progress(total=len(futures), description="Decoding motion-energy chunks", unit="chunk")
+        if display
+        else nullcontext()
+    )
+
     results: list[tuple[NDArray[np.float32], NDArray[np.float32]]] = []
-    for index, future in enumerate(futures):
-        results.append(future.result())
-        if display:
-            console.echo(message=f"Decoded motion-energy chunk {index + 1} of {len(futures)}.")
+    with progress_context as progress_bar:
+        for future in futures:
+            results.append(future.result())
+            if progress_bar is not None:
+                progress_bar.update(1)
     return results
 
 
@@ -440,8 +439,8 @@ def _join_chunks(
     energy = np.concatenate([chunk_energy for chunk_energy, _ in results])
     luminance = np.concatenate([chunk_luminance for _, chunk_luminance in results])
 
-    # The container's frame count is an estimate, so a short final chunk is benign but must be announced: the feather
-    # then covers fewer frames than the recording claimed, and a consumer joining on frame index needs to know.
+    # A short final chunk is benign but must be announced: a consumer joining on frame index needs to know the feather
+    # covers fewer frames than the recording claimed.
     planned_total = sum(planned for _, planned in chunks)
     if energy.size != planned_total:
         console.echo(
@@ -460,12 +459,13 @@ def _energy_chunk(
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
     """Computes the motion energy and luminance of one contiguous chunk of a recording.
 
-    Runs inside a pool worker, so it takes only picklable primitives and imports nothing from this package. Chunks
-    beyond the first seek one frame early and decode a priming frame, whose own energy is discarded, so that the
-    difference spanning the chunk's leading boundary is computed exactly as a sequential pass would compute it.
+    Runs inside a pool worker when more than one chunk is planned, and in-process otherwise, so it takes only
+    picklable primitives. Chunks beyond the first seek one frame early and decode a priming frame, whose own energy is
+    discarded, so that the difference spanning the chunk's leading boundary is computed exactly as a sequential pass
+    would compute it.
 
     Args:
-        video_path: The path to the camera recording, as a string.
+        video_path: The path to the camera recording.
         start_frame: The zero-based index of the chunk's first frame.
         frame_count: The number of frames the chunk covers.
 
@@ -477,38 +477,40 @@ def _energy_chunk(
         ValueError: If the recording cannot be opened, or if the priming frame preceding a chunk cannot be decoded.
     """
     # Pins every layer of threading to one thread per worker. The decoder honors this environment variable when the
-    # capture is constructed rather than at import, and it is the only knob that reaches the decoder: the OpenCV
-    # thread count governs its own kernels instead. Left unpinned, each of the many workers spawns its own decode
-    # threads and the pool oversubscribes the machine several times over.
+    # capture is constructed rather than at import, and it is the knob that reaches the decoder without rebuilding the
+    # capture: cv2.CAP_PROP_N_THREADS also does, but only through the VideoCapture constructor's params argument, and
+    # the OpenCV thread count governs its own kernels instead. Left unpinned, each of the many workers spawns its own
+    # decode threads and the pool oversubscribes the machine several times over.
     os.environ["OPENCV_FFMPEG_THREADS"] = "1"
     cv2.setNumThreads(1)
-    # The recordings store monochrome content across three planes, which the decoder reports as an unsupported
-    # format on every single frame. Silenced here rather than per frame, since a chunk decodes many thousands.
+    # The recordings are encoded as yuv420p, which the decoder does not recognize and reports as an unsupported
+    # picture format on every single frame before handing back its luma plane. Silenced here rather than per frame,
+    # since a chunk decodes many thousands.
     cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
 
-    energy = np.full(frame_count, np.nan, dtype=np.float32)
-    luminance = np.full(frame_count, np.nan, dtype=np.float32)
+    energy = np.full(frame_count, fill_value=np.nan, dtype=np.float32)
+    luminance = np.full(frame_count, fill_value=np.nan, dtype=np.float32)
 
     capture = cv2.VideoCapture(video_path)
     try:
         if not capture.isOpened():
             message = f"Unable to open '{video_path}' to decode motion-energy frames {start_frame} onward."
-            raise ValueError(message)
+            console.error(message=message, error=ValueError)
 
         # Hands back the decoded planes untouched instead of interleaving them into a color image. For this
         # monochrome source that yields the single plane the measurement needs, at no conversion cost.
-        capture.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+        capture.set(propId=cv2.CAP_PROP_CONVERT_RGB, value=0)
 
         previous = None
         if start_frame > 0:
-            capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame - 1)
+            capture.set(propId=cv2.CAP_PROP_POS_FRAMES, value=start_frame - 1)
             decoded, frame = capture.read()
             if not decoded:
                 message = (
                     f"Unable to decode the frame preceding motion-energy chunk starting at frame {start_frame} of "
                     f"'{video_path}'."
                 )
-                raise ValueError(message)
+                console.error(message=message, error=ValueError)
             previous = _bin_frame(frame=frame)  # type: ignore[arg-type]
 
         for index in range(frame_count):
@@ -518,11 +520,12 @@ def _energy_chunk(
                 return energy[:index], luminance[:index]
 
             binned = _bin_frame(frame=frame)  # type: ignore[arg-type]
-            luminance[index] = cv2.mean(binned)[0]
+            luminance[index] = cv2.mean(src=binned)[0]
             if previous is not None:
-                # OpenCV accumulates the absolute differences in double internally, so this matches a numpy mean of
-                # the absolute difference exactly while running through its vectorized kernel.
-                energy[index] = cv2.norm(binned, previous, cv2.NORM_L1) / binned.size
+                # OpenCV forms the differences in single precision and accumulates them in double. For the similar
+                # consecutive frames this loop sees, the subtraction is exact, so this reproduces a float64 numpy
+                # mean of the absolute difference while running through the vectorized kernel.
+                energy[index] = cv2.norm(src1=binned, src2=previous, normType=cv2.NORM_L1) / binned.size
             previous = binned
     finally:
         capture.release()
@@ -538,14 +541,14 @@ def _bin_frame(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     divide evenly by the block size, and silently blends across block boundaries when they do not.
 
     Args:
-        frame: The decoded frame, either a single plane or several identical ones.
+        frame: The decoded frame, either a single luma plane or a BGR expansion of one.
 
     Returns:
         The block-mean frame, as single-precision gray levels.
     """
-    # The decoder yields one plane for monochrome sources; when it falls back to reporting three, they carry the same
-    # content and the second is taken. Rows and columns past the last whole block are dropped, since a partial block
-    # would average fewer pixels and carry different noise statistics than every other block.
+    # The decoder yields one plane for monochrome sources. When it falls back to a BGR expansion, the three channels
+    # carry the same content and the second is taken. Rows and columns past the last whole block are dropped, since a
+    # partial block would average fewer pixels and carry different noise statistics than every other block.
     gray = frame if frame.ndim == _SINGLE_PLANE_DIMENSIONS else frame[:, :, _MONOCHROME_PLANE_INDEX]
     height, width = gray.shape
     bin_height = height // SPATIAL_BIN_SIZE * SPATIAL_BIN_SIZE
@@ -555,6 +558,6 @@ def _bin_frame(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     # means, and every sampled neighbourhood is fully interior so border handling never applies. The depth is fixed
     # to single precision by the CV_32F argument, which the OpenCV stubs do not express in their return type.
     binned: NDArray[np.float32] = cv2.boxFilter(  # type: ignore[assignment]
-        gray, cv2.CV_32F, (SPATIAL_BIN_SIZE, SPATIAL_BIN_SIZE), normalize=True
+        src=gray, ddepth=cv2.CV_32F, ksize=(SPATIAL_BIN_SIZE, SPATIAL_BIN_SIZE), normalize=True
     )[1:bin_height:SPATIAL_BIN_SIZE, 1:bin_width:SPATIAL_BIN_SIZE]
     return binned

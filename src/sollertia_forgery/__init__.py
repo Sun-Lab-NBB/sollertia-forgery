@@ -2,7 +2,7 @@
 
 # Configures numba threading layer for parallel execution across all modules. This must be set before any numba
 # functions are compiled, hence it appears before other imports. macOS uses OpenMP because tbb4py publishes no
-# Apple Silicon wheel; all other platforms use TBB for lower overhead on flat prange loops.
+# Apple Silicon wheel. All other platforms use TBB for lower overhead on flat prange loops.
 import sys
 
 from numba import config

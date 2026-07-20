@@ -46,7 +46,7 @@ def run_two_photon_processing_pipeline(
     path and output path with these session-resolved locations, and its worker count and progress flag with the
     supplied ``workers`` and ``display_progress`` arguments. It then writes the result as the session's cindra
     ``configuration.yaml`` and delegates the binarization, per-plane processing, and combination stages to cindra. When
-    none of ``binarize``, ``process``, or ``combine`` is requested, all three stages run in sequence (local mode); a
+    none of ``binarize``, ``process``, or ``combine`` is requested, all three stages run in sequence (local mode). A
     supplied ``job_id`` instead runs only the matching job.
 
     Notes:
@@ -54,16 +54,16 @@ def run_two_photon_processing_pipeline(
         dispatches to the acquisition system's donated locator. If the registry holds no locator for the session's
         acquisition system, the lookup raises and the pipeline fails before any cindra work begins. cindra owns the
         heavy work and records the run on the two-photon processing tracker (``single_recording_tracker.yaml``,
-        ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory (``session.processed_data.cindra_data_path``);
-        the stage flags map directly onto its stages. Additional ``FileNotFoundError``/``ValueError`` conditions may
+        ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory (``session.processed_data.cindra_data_path``).
+        The stage flags map directly onto its stages. Additional ``FileNotFoundError``/``ValueError`` conditions may
         propagate from the underlying cindra pipeline.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         configuration_path: The path to the cindra single-recording configuration template. Its data path, output
-            path, worker count, and progress flag are overridden; every other parameter is used as supplied.
+            path, worker count, and progress flag are overridden. Every other parameter is used as supplied.
         job_id: The unique hexadecimal identifier for the cindra job to execute. If provided, only the matching job
-            runs (remote mode); otherwise every requested stage runs (local mode).
+            runs (remote mode). Otherwise every requested stage runs (local mode).
         binarize: Determines whether to run the binarization stage.
         process: Determines whether to run the per-plane motion-correction, ROI-detection, and trace-extraction stage.
         combine: Determines whether to run the multi-plane combination stage.

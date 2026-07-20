@@ -131,7 +131,7 @@ class ProcessingPipeline:
             self._started = True
             resume_stage = self._resume_stage()
             if resume_stage > max(self.jobs):
-                # Every job already succeeded during a previous run; resolves the outcome without resubmitting.
+                # Every job already succeeded during a previous run. Resolves the outcome without resubmitting.
                 self._finalize(success=self._tracker_reports_success())
                 return
             self._pipeline_stage = resume_stage
@@ -170,14 +170,14 @@ class ProcessingPipeline:
         try:
             self.server.pull(remote_path=self.remote_tracker_path, local_path=self.local_tracker_path)
         except FileNotFoundError:
-            return 1  # No prior tracker exists; starts from the first stage.
+            return 1  # No prior tracker exists. Starts from the first stage.
 
         tracker = ProcessingTracker.from_yaml(file_path=self.local_tracker_path)
         if not tracker.jobs:
             return 1
 
         # Aborts any jobs the tracker still reports as RUNNING. These belong to an orchestrator that was interrupted
-        # mid-runtime; aborting them prevents duplicate execution when their stage is resubmitted.
+        # mid-runtime. Aborting them prevents duplicate execution when their stage is resubmitted.
         self._abort_stale_running_jobs(tracker=tracker)
 
         # When a full rerun is requested, ignores the prior progress and resubmits every stage from the start.
@@ -194,7 +194,7 @@ class ProcessingPipeline:
             if any(job_id not in self._resume_succeeded for _, _, job_id in self.jobs[stage]):
                 return stage
 
-        # Every job already succeeded; signals the caller to resolve the outcome without resubmitting.
+        # Every job already succeeded. Signals the caller to resolve the outcome without resubmitting.
         return max(self.jobs) + 1
 
     def _abort_stale_running_jobs(self, tracker: ProcessingTracker) -> None:
@@ -209,7 +209,7 @@ class ProcessingPipeline:
             try:
                 slurm_job_id = int(state.executor_id)
             except ValueError:
-                continue  # The executor ID is a local process ID, not a SLURM job ID; nothing to abort remotely.
+                continue  # The executor ID is a local process ID, not a SLURM job ID. Nothing to abort remotely.
             with contextlib.suppress(Exception):
                 self.server.abort_job(slurm_job_id=slurm_job_id)
 
@@ -218,12 +218,12 @@ class ProcessingPipeline:
 
         Notes:
             Jobs that already succeeded in a previous run (tracked in _resume_succeeded) are skipped. The remote
-            workers generate and update the shared processing tracker themselves; this method only submits jobs to
+            workers generate and update the shared processing tracker themselves. This method only submits jobs to
             SLURM.
         """
         for job, _, job_id in self.jobs[self._pipeline_stage]:
             if job_id in self._resume_succeeded:
-                continue  # The job already completed successfully in a previous run; does not resubmit.
+                continue  # The job already completed successfully in a previous run. Does not resubmit.
             self.server.submit_job(job=job, verbose=False)
 
     def _poll_current_stage(self) -> ProcessingStatus | None:
@@ -264,7 +264,7 @@ class ProcessingPipeline:
         try:
             self.server.pull(remote_path=self.remote_tracker_path, local_path=self.local_tracker_path)
         except FileNotFoundError:
-            return False  # The workers never produced a tracker; treats the pipeline as failed.
+            return False  # The workers never produced a tracker. Treats the pipeline as failed.
         return ProcessingTracker.from_yaml(file_path=self.local_tracker_path).complete
 
     def _finalize(self, *, success: bool) -> None:

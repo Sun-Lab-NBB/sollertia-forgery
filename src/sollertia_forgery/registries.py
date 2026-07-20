@@ -86,7 +86,7 @@ MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Calla
 }
 """The single, fully-visible registry of microcontroller module parsers, keyed by ``(acquisition system, module type,
 module id)``. Each value is a plain module-level ``parse(event_partition, output_directory, session)`` function that an
-acquisition-system package implements for one hardware module; a module is parseable for a system exactly when it
+acquisition-system package implements for one hardware module. A module is parseable for a system exactly when it
 appears here."""
 
 MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict[tuple[int, int], tuple[int, ...]]]] = {
@@ -106,8 +106,8 @@ FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, ForgingAssemblyAsset] = {
 }
 """The single, fully-visible registry of per-session forging assets, keyed by acquisition system. Each value is a
 ``ForgingAssemblyAsset`` bundling the system's per-session ``assemble(source_session_path, output_path,
-dataset_name)`` worker with its column-description mapping. These are the only forging assets a system donates;
-dataset definition, the cindra multi-day stage, job/tracker orchestration, the per-dataset column-description
+dataset_name)`` worker with its column-description mapping. These are the only forging assets a system donates.
+Dataset definition, the cindra multi-day stage, job/tracker orchestration, the per-dataset column-description
 binding, and shared-asset re-export are owned by the agnostic ``forging`` package."""
 
 RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {

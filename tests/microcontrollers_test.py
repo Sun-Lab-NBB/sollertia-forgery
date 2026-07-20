@@ -190,7 +190,7 @@ def test_resolve_microcontroller_parsers_returns_mesoscope_callables() -> None:
     parsers = resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR)
     assert parsers  # Mesoscope-VR registers at least one module parser.
     assert all(callable(parser) for parser in parsers.values())
-    # The session stores the acquisition system as a string; resolution must accept that form too.
+    # The session stores the acquisition system as a string. Resolution must accept that form too.
     assert resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR.value).keys() == parsers.keys()
 
 
@@ -202,7 +202,7 @@ def test_resolve_microcontroller_parsers_invalid_system_raises() -> None:
 def test_resolve_two_photon_data_locator_returns_mesoscope_callable() -> None:
     locator = resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR)
     assert callable(locator)
-    # The session stores the acquisition system as a string; resolution must accept that form too.
+    # The session stores the acquisition system as a string. Resolution must accept that form too.
     assert resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR.value) is locator
 
 
@@ -280,7 +280,7 @@ def test_split_parse_specifier() -> None:
 
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
-    (tmp_path / "101_log.npz").touch()  # controller 101 archive present; controller 102 absent
+    (tmp_path / "101_log.npz").touch()  # controller 101 archive present, controller 102 absent
     controllers = {
         "101": ControllerExtractionConfig(
             controller_id=101,
@@ -303,7 +303,7 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
         controllers=controllers, parsers=parsers, log_directory=tmp_path, extraction_job_name=EXTRACTION_JOB_NAME
     )
 
-    # Module (4, 1) has no registered parser, so it never appears; controller 102 is parseable but has no archive.
+    # Module (4, 1) has no registered parser, so it never appears. Controller 102 is parseable but has no archive.
     assert set(universe) == {
         (EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),

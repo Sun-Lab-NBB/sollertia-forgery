@@ -112,7 +112,7 @@ class PupilColumn(StrEnum):
     PUPIL_FIT_RESIDUAL_PX = "pupil_fit_residual_px"
     """Root-mean-square distance in pixels between the confident pupil-perimeter points and their positions on the
     fitted ellipse at each frame, a fit-quality measure. NaN on unmeasured frames and on exactly-determined
-    three-point fits; only overdetermined fits report a residual."""
+    three-point fits. Only overdetermined fits report a residual."""
     EYE_CENTER_X_PX = "eye_center_x_px"
     """Horizontal position of the fitted eye ellipse center in pixels at each frame."""
     EYE_CENTER_Y_PX = "eye_center_y_px"
@@ -129,7 +129,7 @@ class PupilColumn(StrEnum):
     ring cannot be fit, the corneal reflection is lost, or the eye opens less than half its session-median amount."""
     DILATION_STATE = "dilation_state"
     """Boolean flag marking frames where the pupil dilated past the eye's aperture and was clipped too far to fit a
-    diameter. True only on non-blink frames whose pupil is otherwise unmeasurable; a fully visible dilated pupil is
+    diameter. True only on non-blink frames whose pupil is otherwise unmeasurable. A fully visible dilated pupil is
     measured normally and flagged False."""
     REFLECTION_X_PX = "reflection_x_px"
     """Horizontal position of the corneal reflection in pixels at each frame."""
@@ -179,7 +179,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     """
     # DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in
     # the session's raw camera_data directory during preprocessing. This pipeline's file is identified by the
-    # DeepLabCut project name baked into its filename; when several match, the natural-sort-first one is used.
+    # DeepLabCut project name baked into its filename. When several match, the natural-sort-first one is used.
     matches = natsorted(session.raw_data.camera_data_path.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
     if not matches:
         console.echo(
@@ -203,7 +203,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     pupil_metrics = _compute_pupil_metrics(points=points)
 
     # The feather is a positional table: one row per frame in acquisition order, storing only the per-frame metrics.
-    # Row position supplies the frame index, so none is stored; timestamps are left to dataset assembly, which owns
+    # Row position supplies the frame index, so none is stored. Timestamps are left to dataset assembly, which owns
     # every stream's alignment to the acquisition clock. The float64 geometry is cast to single precision because it
     # derives from pixel coordinates far coarser than float32 resolves, so float64 would only double the feather size.
     pupil_frame = pl.DataFrame(pupil_metrics).with_columns(pl.col(pl.Float64).cast(pl.Float32))
@@ -285,7 +285,7 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
         A mapping from each output column name to its per-frame array, ready to assemble into the output feather.
     """
     # A feature is measurable exactly when its fit is determined and well enough conditioned to trust. The pupil
-    # columns additionally answer to the blink; the eye columns answer only to their own fit.
+    # columns additionally answer to the blink. The eye columns answer only to their own fit.
     pupil_center, pupil_semi_a, pupil_semi_b, pupil_condition, pupil_residual, pupil_valid = _fit_ring_ellipse(
         points=points, names=_PUPIL_POINTS
     )
@@ -322,8 +322,8 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     not_blink = ~is_blink
 
     # Behind a shut lid there is no pupil to measure, so a pupil fit that happens to converge on a blink frame is
-    # reporting on points the eye was covering. The pupil columns answer to the blink as well as to their own fit;
-    # the eye columns answer only to theirs, since their openness is what detects the blink in the first place.
+    # reporting on points the eye was covering. The pupil columns answer to the blink as well as to their own fit.
+    # The eye columns answer only to theirs, since their openness is what detects the blink in the first place.
     pupil_measured = pupil_valid & not_blink
 
     # The remaining way to lose the pupil is for it to outgrow the palpebral opening, which then clips it past what

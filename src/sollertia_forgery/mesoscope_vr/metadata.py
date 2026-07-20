@@ -66,8 +66,8 @@ class DatasetColumn(StrEnum):
         ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
         Several columns are conditional: ``REINFORCING_GUIDED`` and ``AVERSIVE_GUIDED`` are present only when the
-        corresponding guidance events were recorded; ``BRAKE`` and ``SCREENS`` only for mesoscope experiments;
-        ``TORQUE_N_CM`` is absent for run training; and ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
+        corresponding guidance events were recorded. ``BRAKE`` and ``SCREENS`` are present only for mesoscope
+        experiments. ``TORQUE_N_CM`` is absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
         training. The remaining members are present in every forged session.
     """
 

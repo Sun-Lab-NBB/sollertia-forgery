@@ -21,7 +21,7 @@ def prepare_tracker(tracker: ProcessingTracker, jobs: list[tuple[str, str]], uni
         Foreign entries are detected against the full ``universe`` of producible jobs, not the requested ``jobs``
         subset, so a subset invocation aligns the tracker without wiping its siblings' completed state. The helper
         initializes a missing tracker, additively registers requested jobs absent from a valid tracker, and is a
-        no-op when all requested jobs are present; it warns and rebuilds only when the tracker holds entries outside
+        no-op when all requested jobs are present. It warns and rebuilds only when the tracker holds entries outside
         the universe.
 
     Args:
@@ -70,7 +70,7 @@ def tracked_job(tracker: ProcessingTracker, job_id: str) -> Iterator[None]:
         The system-agnostic counterpart to the acquisition libraries' ``execute_job`` bindings (such as
         ataraxis-video-system's and ataraxis-communication-interface's): it owns the tracker state machine (start,
         then complete on normal return or fail on exception) and leaves the job body to the caller. The job is
-        completed only when the wrapped block returns normally; any exception marks the job failed (recording its
+        completed only when the wrapped block returns normally. Any exception marks the job failed (recording its
         message) and is re-raised unchanged.
 
     Args:

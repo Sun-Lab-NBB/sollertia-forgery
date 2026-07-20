@@ -29,7 +29,7 @@ class ConcurrencyDescriptor:
     """Describes the per-pipeline concurrency policy consulted by the generic ``execute_jobs_tool``.
 
     Notes:
-        ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes; the generic tool floors
+        ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes. The generic tool floors
         the user-supplied parallel-job cap by ``worker_budget // cores_per_job``. ``default_max_parallel`` is the
         fallback hard cap applied when the caller does not request an explicit parallel-job ceiling. This descriptor
         is system-agnostic so both the system-specific batch adapters and the agnostic forging adapters can declare
@@ -85,7 +85,7 @@ class GenericPendingJob(PendingJob):
         Extends the shared ``PendingJob`` base with the small descriptor set shared by every registered
         pipeline worker, so a single descriptor replaces the former per-pipeline ``PendingJob`` subclasses. The
         picklable workers in the worker registry map these fields onto each pipeline's call convention (the
-        behavior worker uses ``unit_path``; the forging worker uses ``name`` and ``project_root``). Fields that
+        behavior worker uses ``unit_path``, while the forging worker uses ``name`` and ``project_root``). Fields that
         do not apply to a given pipeline are left at their defaults, and the processing tools assert the
         required fields per pipeline before dispatch.
     """

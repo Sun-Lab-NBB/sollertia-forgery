@@ -2,10 +2,10 @@
 
 Notes:
     This module's sole public entry point, ``assemble_mesoscope_session``, is the Mesoscope-VR "data assembly" asset
-    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``; the agnostic forging pipeline resolves it by acquisition
+    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``. The agnostic forging pipeline resolves it by acquisition
     system and invokes it once per session to produce that session's ``data.feather``. The pipeline owns dataset
     definition, the cindra multi-day stage, tracker orchestration, the per-dataset column-description binding, and
-    shared-asset re-export; this worker owns only the assembly of the Mesoscope-VR data.
+    shared-asset re-export. This worker owns only the assembly of the Mesoscope-VR data.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
         file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
     )
 
-    # Assembles the fluorescence sub-dataset first; its ``time_us`` column is the reference clock for the other two.
+    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock for the other two.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
         microcontroller_data_path=microcontroller_data_path,
@@ -111,7 +111,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     )
     reference_time = fluorescence_data["time_us"].to_numpy()
 
-    # Assembles the behavior and runtime sub-datasets in parallel; both align to the fluorescence reference clock.
+    # Assembles the behavior and runtime sub-datasets in parallel. Both align to the fluorescence reference clock.
     tasks = {
         "behavior": partial(
             assemble_behavior_dataset,
