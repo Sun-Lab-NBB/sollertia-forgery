@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from contextlib import ExitStack
 from concurrent.futures import ProcessPoolExecutor
 
+import polars as pl
 from natsort import natsorted
 from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
@@ -398,6 +399,12 @@ def _dispatch_job(
     """
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
 
+    # The extraction binding announces and runs the timestamp job itself. The jobs this module owns are announced here
+    # in the same format, so every job kind reports its start uniformly.
+    if job_name != TIMESTAMP_JOB_NAME:
+        source = f" for source '{specifier}'" if specifier else ""
+        console.echo(message=f"Running '{job_name}' job{source} (ID: {job_id})...", level=LogLevel.INFO)
+
     if job_name == TIMESTAMP_JOB_NAME:
         # The ataraxis-video-system binding extracts the timestamps, writes the
         # 'camera_{source_id}_timestamps.feather' into the video data directory, and records this job's start,
@@ -411,6 +418,12 @@ def _dispatch_job(
             tracker=tracker,
             display_progress=display_progress,
             executor=executor,
+        )
+        # The binding writes one timestamp per camera frame, so the feather's row count is the extracted frame count.
+        frame_count = pl.read_ipc(video_data_directory.joinpath(f"camera_{specifier}_timestamps.feather")).height
+        console.echo(
+            message=f"Extracted {frame_count} frame timestamp(s) for source '{specifier}'.",
+            level=LogLevel.SUCCESS,
         )
     elif job_name == TRACKING_JOB_NAME:
         _run_pose_tracking(
@@ -573,4 +586,7 @@ def _link_parsed_timestamps(
                 # Hardlinking can fail in some environments. Fall back to a copy so the canonical name is published.
                 shutil.copy2(src=parsed_path, dst=canonical_path)
             published += 1
-        console.echo(message=f"Published {published} parsed camera timestamp feather(s) under their canonical names.")
+        console.echo(
+            message=f"Renamed {published} parsed camera timestamp feather(s) to their canonical names.",
+            level=LogLevel.SUCCESS,
+        )

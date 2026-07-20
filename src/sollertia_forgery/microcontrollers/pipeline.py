@@ -66,8 +66,9 @@ def run_microcontroller_processing_pipeline(
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
         (across a worker pool when more than one worker is available and more than one module is runnable). In
-        remote mode (job_id is provided) only the single matching job runs in-process. The processing tracker is
-        co-located with the extracted and parsed output in ``microcontroller_data``.
+        remote mode (job_id is provided) only the single matching job runs. That job still honors the worker budget,
+        so a remote extraction fans intra-archive decoding across the pool while a remote parse runs single-core. The
+        processing tracker is co-located with the extracted and parsed output in ``microcontroller_data``.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.

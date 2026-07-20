@@ -192,11 +192,6 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
         return
     h5_path = matches[0]
 
-    console.echo(
-        message=f"Post-processing pupil tracking from '{h5_path.name}' for session '{session.session_name}'...",
-        level=LogLevel.INFO,
-    )
-
     points = _read_points_from_h5(h5_path=h5_path, bodyparts=_CANONICAL_POINTS)
     frame_count = next(iter(points.values())).shape[0]
 

@@ -13,7 +13,7 @@ import click
 from ..forging import run_forging_pipeline
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
 @click.command("forge", context_settings=CONTEXT_SETTINGS)

@@ -10,7 +10,7 @@ from ataraxis_base_utilities import console
 from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
 @click.group("manifest", context_settings=CONTEXT_SETTINGS)

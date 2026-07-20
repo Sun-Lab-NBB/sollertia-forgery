@@ -181,14 +181,6 @@ def compute_camera_motion_energy(
     resolved_workers = resolve_worker_count(requested_workers=workers)
     chunks = _plan_chunks(frame_count=frame_count, workers=resolved_workers)
 
-    console.echo(
-        message=(
-            f"Computing motion energy for {frame_count} frame(s) of '{video_path.name}' across {len(chunks)} "
-            f"decode chunk(s)..."
-        ),
-        level=LogLevel.INFO,
-    )
-
     # A pool is only worth its startup cost with more than one chunk to decode. A single chunk runs in-process.
     if len(chunks) == 1:
         results = [_energy_chunk(video_path=str(video_path), start_frame=0, frame_count=frame_count)]
