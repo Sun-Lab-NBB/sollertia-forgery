@@ -165,7 +165,7 @@ def video_command(
     track: bool,
     energy: bool,
 ) -> None:
-    """Extracts camera frame timestamps, post-processes pose predictions, and measures per-camera motion energy.
+    """Extracts camera frame timestamps, processes pose predictions, and measures per-camera motion energy.
 
     When none of ``--timestamp``, ``--track``, or ``--energy`` is requested, all three stages run (local mode).
     Supplying ``--job-id`` instead runs only the matching job.
