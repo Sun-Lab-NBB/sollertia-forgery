@@ -25,24 +25,24 @@ if TYPE_CHECKING:
 
 MOTION_ENERGY_SUFFIX: str = "_energy.feather"
 """The filename suffix appended to a camera's manifest name to form its motion-energy feather (for example, the
-``face_camera`` source produces ``face_camera_energy.feather``). Declared once here so the pipeline that writes the
-artifact and any consumer that later reads it build the filename from a single definition."""
+``face_camera`` source produces ``face_camera_energy.feather``)."""
 
-VIDEO_SUFFIX: str = ".mp4"
+_VIDEO_SUFFIX: str = ".mp4"
 """The container suffix of the camera recordings this analysis reads. Every VideoSystem writes its recordings into the
 session's raw camera-data directory under this suffix."""
 
-SPATIAL_BIN_SIZE: int = 3
-"""The edge length, in pixels, of the square block each frame is mean-binned over before differencing. Matches the
-``sbin`` value Facemap's internal SVD and ROI helpers are written around. Facemap's own user-facing defaults are 1 in
-``process.run`` and 7 in its GUI."""
+_SPATIAL_BIN_SIZE: int = 3
+"""The edge length, in pixels, of the square block each frame is mean-binned over before differencing. A small block
+averages out the single-pixel sensor and codec noise that the later absolute difference would otherwise rectify into a
+positive bias, while staying small enough to leave the movement the measure captures intact. An odd edge keeps the box
+filter's anchor on the pixel at each block's center, which the strided sampling that reads the block means relies on."""
 
-MINIMUM_CHUNK_FRAMES: int = 4000
+_MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
-preceding keyframe, so each chunk discards up to one group of pictures worth of decoded frames. At roughly sixteen
+preceding keyframe, so each chunk discards up to one group of frames worth of decoded frames. At roughly sixteen
 times the typical keyframe interval, that waste stays under seven percent of the chunk."""
 
-WORKER_THREAD_VARIABLES: tuple[str, ...] = (
+_WORKER_THREAD_VARIABLES: tuple[str, ...] = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -57,99 +57,30 @@ far more of the machine than the one core it was budgeted. ``OPENCV_FFMPEG_THREA
 reads it when a capture is constructed rather than at import, so a worker re-sets it for itself."""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
-"""The dimension count of a decoded frame the decoder handed back as a single image plane, which needs no plane
-selection."""
+"""The dimension count that identifies a decoded frame as a single grayscale plane. A frame matching it is used as-is,
+and a frame with more dimensions has one of its planes extracted instead."""
 
 _MONOCHROME_PLANE_INDEX: int = 1
-"""The index of the plane read from a frame the decoder handed back as several planes. When the decoder cannot hand
-back the raw luma plane it falls back to a BGR expansion whose three channels are identical for a monochrome source, so
-any one of them carries the image. This one is read for all frames, so the choice never varies within a recording."""
+"""The channel taken from a multi-plane frame, the single plane the motion-energy analysis runs on. A monochrome
+source's channels are identical, so any one carries the image."""
 
 
 class MotionEnergyColumn(StrEnum):
-    """Defines every column written into a camera's motion-energy feather by the video-processing pipeline.
+    """Every column written into a camera's motion-energy feather by the video-processing pipeline.
 
     Notes:
-        Values are raw gray levels and are deliberately left un-normalized. Their scale depends on sensor gain,
-        exposure, illuminator intensity, focus, and the encoder's quantization parameter, so motion energy is a
-        within-session signal that is not comparable across sessions or rigs without normalization. Choosing that
-        normalization (z-score for regression, a percentile or absolute cut for frame rejection, raw for quality
-        control) belongs to whoever owns the comparison, exactly as the analysis package consumes pre-normalized
-        fluorescence rather than re-baselining it. The signal is also left unsmoothed, because its value is precisely
-        that it resolves movement faster than pupil diameter does.
-
-        Values are computed over the whole frame, with no region of interest. For rejecting frames that contain
-        movement this is the sensitive choice rather than a compromise: any movement anywhere in the field registers.
-        The same property makes the measure unsuitable as a graded speed estimate on a camera that images the running
-        wheel, where it is partly an optical tachometer and saturates once the frame decorrelates.
-
-        Whole-frame coverage also means that a camera imaging the eye folds pupil motion and blinks into its movement
-        signal, and those are not facial movement. In Talluri et al., units that looked movement-modulated during free
-        viewing (67 percent) mostly stopped looking so once the animal held fixation and the retinal input was
-        stabilized (5 percent). Blinks co-occur with volitional whisking in about 40 percent of awake blink events
-        (Turner et al.), so the leak is not redundant with the body-movement signal. This column remains the right
-        primary product for movement-frame rejection, where an eye event is a frame worth rejecting anyway. But an
-        analysis that claims to measure FACIAL movement from an eye-bearing camera must exclude the eye region and say
-        so, and must not treat this column as independent of the pupil feather extracted from the same recording.
-
-        The absolute difference is a full-wave rectifier, so a symmetric movement that oscillates appears in this
-        signal at TWICE its true frequency: an eight-hertz rhythm reads as a sixteen-hertz peak. An asymmetric rhythm,
-        such as one whose protraction and retraction velocities differ, retains power at its own frequency as well. A
-        frequency-domain analysis of this column must therefore check for a harmonic pair before naming a behavioral
-        rhythm. Amplitude-domain uses (thresholding, frame rejection, regression against a slow signal) are
-        unaffected.
-
-        The recordings are lossy, constant-quantization video, which bounds what the quiet end of the range can
-        resolve. The encoder's deadzone codes sub-threshold motion as no change at all, and its zero-residual regions
-        are block-structured at a scale far larger than the 3x3 bin, so binning averages pixels that were coded zero
-        together rather than decorrelating them. Idle-period energy therefore floors and compresses non-linearly. A
-        periodic component at the encoder's keyframe interval is also possible, since an intra-coded frame does not
-        share its predecessor's quantization error. Check the autocorrelation at that lag before trusting slow
-        structure.
-
-        The feather is strictly a frame index and the metrics keyed to it. It carries no timestamps: aligning frames
-        to the acquisition clock belongs to dataset assembly, which owns every other stream's alignment too. Three
-        obligations follow for any consumer that joins this to a time base. It must verify this feather's row count
-        equals the camera's timestamp feather's before joining, since nothing upstream enforces that. It must
-        subtract one from ``frame`` to reach the timestamp feather's zero-based positional rows. And because motion
-        energy is a per-interval rather than a per-second quantity, it must either divide each sample by its actual
-        inter-frame interval or mask samples whose interval departs from the modal one. A difference taken across a
-        dropped frame spans more real time than its neighbours and reads as spuriously high motion.
+        Values are raw, un-normalized gray levels, so motion energy is a within-session signal. The feather is a
+        positional table, one row per decoded frame in acquisition order, matching the timestamp feather files.
     """
 
-    FRAME = "frame"
-    """One-based camera frame index, numbered to match the frame identifiers in the forged session dataset and the
-    ``frame`` column of this camera's tracking feathers. The feather's only key: every other column is a per-frame
-    metric. Note that this camera's timestamp feather is zero-based positional instead, so joining the two requires
-    subtracting one."""
     MOTION_ENERGY = "motion_energy"
-    """Mean absolute intensity difference, in gray levels, between this frame and the one before it, taken over the
-    whole frame after 3x3 mean binning. The behavioral movement magnitude and the fast complement to the pupil's slow
-    arousal signal: high during running and stereotyped behavior, low during idleness. NaN at frame 1, which has no
-    predecessor, and nowhere else. See the class notes on why it is neither normalized nor interval-corrected here."""
+    """Mean absolute intensity difference in gray levels between consecutive frames, over the whole 3x3-binned frame.
+    The behavioral movement magnitude, high during running, low during idleness. NaN in the first row, which has no
+    predecessor, and nowhere else."""
     FRAME_LUMINANCE = "frame_luminance"
-    """Mean intensity of this frame in gray levels, taken over the same binned frame. Its purpose is to separate a
-    change in scene illumination from a change in the animal's posture, since a whole-field brightness shift lands on
-    every pixel at once and inflates ``motion_energy`` without anything having moved. Defined at every frame,
-    including frame 1.
-
-    Read it at the session timescale, not per frame. On a head-fixed face recording its frame-to-frame changes track
-    movement rather than illumination. They correlate with ``motion_energy`` at about 0.7, and that correlation
-    survives almost undiminished when the largest brightness jumps are excluded, because a moving animal displaces
-    bright structure within the frame and drags the mean along with it. Large single-frame excursions were checked
-    for and behave like movement rather than like switching: they are embedded in sustained activity rather than
-    isolated, and most revert instead of holding a new level. Treating a per-frame jump in this column as evidence of
-    an illumination artifact will therefore reject real movement.
-
-    What does survive as illumination is slow. After the movement-explained part is regressed out, a drift of a few
-    gray levels remains across a session (around an order of magnitude larger than the energy floor) and it is
-    not attributable to the animal. That drift is what this column is for. Use it to detrend, or to include a slow
-    luminance regressor, when comparing energy across the length of a session. It also confirms that a change in
-    energy level between the start and end of a recording is behavioral rather than a lamp warming up.
-
-    These figures come from one face recording on one rig. The balance between the two regimes depends on how much
-    of the frame the animal fills and on what else in the scene emits or reflects light. Re-measure both the
-    correlation and the residual drift before relying on either on a different camera."""
+    """Mean intensity of the same binned frame, in gray levels. It separates a scene-illumination change from a behavior
+    change, since a whole-field brightness shift inflates ``motion_energy`` without anything moving. Use its slow
+    session-scale drift to detrend energy across a recording. Defined at every frame."""
 
 
 @contextmanager
@@ -161,14 +92,14 @@ def pinned_worker_threads() -> Iterator[None]:
     modules, happens before any code in the worker runs. Setting the caps inside the worker is therefore too late
     for those libraries. They have to be in place in the parent before the pool starts its children. Wrapping only
     the pool's lifetime, rather than setting the caps at import, keeps the restriction off the rest of the library:
-    the analysis package deliberately runs multi-threaded numba kernels, and a process-wide cap set here would
+    its two-photon pipeline drives cindra's multithreaded numba kernels, and a process-wide cap set here would
     silently serialize them.
 
     Yields:
         None. The caps are in effect for the duration of the block.
     """
-    previous = {variable: os.environ.get(variable) for variable in WORKER_THREAD_VARIABLES}
-    os.environ.update(dict.fromkeys(WORKER_THREAD_VARIABLES, "1"))
+    previous = {variable: os.environ.get(variable) for variable in _WORKER_THREAD_VARIABLES}
+    os.environ.update(dict.fromkeys(_WORKER_THREAD_VARIABLES, "1"))
     try:
         yield
     finally:
@@ -200,7 +131,7 @@ def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_
     if not camera_data_directory.is_dir():
         return None
 
-    video_path = camera_data_directory.joinpath(f"{session_name}_{camera_name}{VIDEO_SUFFIX}")
+    video_path = camera_data_directory.joinpath(f"{session_name}_{camera_name}{_VIDEO_SUFFIX}")
     return video_path if video_path.is_file() else None
 
 
@@ -223,37 +154,19 @@ def compute_camera_motion_energy(
     into a truncation error.
 
     Notes:
-        "Motion energy" here means frame-differencing motion energy, the mean absolute inter-frame intensity change,
-        not the Adelson-Bergen spatiotemporal-energy model that shares the name. Nothing filters for direction or
-        speed, so the measure is undirected and unsigned. Binning before differencing is load-bearing: the absolute
-        difference rectifies per-pixel sensor and codec noise into a positive bias, so binning afterwards would not
-        suppress it.
+        "Motion energy" here means frame-differencing motion energy, the mean absolute inter-frame intensity change.
+        Nothing filters for direction or speed, so the measure is undirected and unsigned. Binning before differencing
+        is load-bearing: the absolute difference rectifies per-pixel sensor and codec noise into a positive bias, so
+        binning afterward would not suppress it.
 
-    References:
-        The measure and its use as a behavioral-state regressor:
-            Stringer, C., et al. (2019). Spontaneous behaviors drive multidimensional, brainwide activity. Science,
-                364(6437), eaav7893.
-            Musall, S., et al. (2019). Single-trial neural dynamics are dominated by richly varied movements. Nature
-                Neuroscience, 22(10), 1677-1686.
-            Steinmetz, N. A., et al. (2019). Distributed coding of choice, action and engagement across the mouse
-                brain. Nature, 576(7786), 266-273.
-        The reference implementation this module's spatial binning follows:
-            Syeda, A., et al. (2024). Facemap: a framework for modeling neural activity based on orofacial tracking.
-                Nature Neuroscience, 27(1), 187-195.
-        Why an eye-bearing camera must exclude the eye before its energy is called facial movement:
-            Talluri, B. C., et al. (2023). Activity in primate visual cortex is minimally driven by spontaneous
-                movements. Nature Neuroscience, 26(11), 1953-1959.
-            Turner, K. L., Gheres, K. W., & Drew, P. J. (2023). Relating pupil diameter and blinking to cortical
-                activity and hemodynamics across arousal states. Journal of Neuroscience, 43(6), 949-964.
-        The unrelated oriented-filter model that shares the name, disclaimed in the notes above:
-            Adelson, E. H., & Bergen, J. R. (1985). Spatiotemporal energy models for the perception of motion.
-                Journal of the Optical Society of America A, 2(2), 284-299.
+        The bin-then-difference extraction is modeled on Facemap (Syeda et al., 2024, Nature Neuroscience, 27(1),
+        187-195) with numerous local efficiency enhancements.
 
     Args:
         video_path: The path to the camera recording to analyze.
         output_path: The path of the motion-energy feather to write.
         workers: The number of worker processes to decode with. Set to -1 to use all available CPU cores (minus
-            reserved cores). Resolved here, so an unresolved count may be passed in.
+            reserved cores).
         executor: An optional process pool to submit the decode chunks into, shared across cameras so the cost of
             spawning worker processes is paid once. When None, a pool is created and torn down for this recording,
             unless the recording plans to a single decode chunk, which runs in-process with no pool.
@@ -295,12 +208,10 @@ def compute_camera_motion_energy(
 
     energy, luminance = _join_chunks(results=results, chunks=chunks, video_path=video_path)
 
-    # Numbers frames from 1 to match the one-based frame identifiers the forging pipeline assigns in 'data.feather',
-    # so the two can be joined without an off-by-one correction.
-    frame = pl.Series(name=MotionEnergyColumn.FRAME, values=np.arange(1, energy.size + 1, dtype=np.uint32))
+    # A positional table: one row per decoded frame in acquisition order, matching the camera's timestamp and pupil
+    # feathers. Row position is the frame index, so no explicit index column is stored.
     pl.DataFrame(
         {
-            MotionEnergyColumn.FRAME: frame,
             MotionEnergyColumn.MOTION_ENERGY: energy,
             MotionEnergyColumn.FRAME_LUMINANCE: luminance,
         }
@@ -355,7 +266,7 @@ def _plan_chunks(frame_count: int, workers: int) -> list[tuple[int, int]]:
     Returns:
         A list of ``(start_frame, frame_count)`` pairs covering the recording with no gap and no overlap.
     """
-    chunk_count = max(1, min(workers, frame_count // MINIMUM_CHUNK_FRAMES))
+    chunk_count = max(1, min(workers, frame_count // _MINIMUM_CHUNK_FRAMES))
     base, remainder = divmod(frame_count, chunk_count)
 
     chunks: list[tuple[int, int]] = []
@@ -536,9 +447,7 @@ def _energy_chunk(
 def _bin_frame(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     """Reduces a decoded frame to its 3x3 block means.
 
-    Uses a normalized box filter sampled on a stride, which is an exact block mean for any frame size. Resizing with
-    pixel-area interpolation is not a safe substitute: it only coincides with a block mean when both dimensions
-    divide evenly by the block size, and silently blends across block boundaries when they do not.
+    Uses a normalized box filter sampled on a stride, which is an exact block mean for any frame size.
 
     Args:
         frame: The decoded frame, either a single luma plane or a BGR expansion of one.
@@ -551,13 +460,13 @@ def _bin_frame(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     # partial block would average fewer pixels and carry different noise statistics than every other block.
     gray = frame if frame.ndim == _SINGLE_PLANE_DIMENSIONS else frame[:, :, _MONOCHROME_PLANE_INDEX]
     height, width = gray.shape
-    bin_height = height // SPATIAL_BIN_SIZE * SPATIAL_BIN_SIZE
-    bin_width = width // SPATIAL_BIN_SIZE * SPATIAL_BIN_SIZE
+    bin_height = height // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
+    bin_width = width // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
 
     # The filter's anchor is the block center, so sampling from index 1 on a stride of 3 reads exactly the block
-    # means, and every sampled neighbourhood is fully interior so border handling never applies. The depth is fixed
+    # means, and every sampled neighborhood is fully interior so border handling never applies. The depth is fixed
     # to single precision by the CV_32F argument, which the OpenCV stubs do not express in their return type.
     binned: NDArray[np.float32] = cv2.boxFilter(  # type: ignore[assignment]
-        src=gray, ddepth=cv2.CV_32F, ksize=(SPATIAL_BIN_SIZE, SPATIAL_BIN_SIZE), normalize=True
-    )[1:bin_height:SPATIAL_BIN_SIZE, 1:bin_width:SPATIAL_BIN_SIZE]
+        src=gray, ddepth=cv2.CV_32F, ksize=(_SPATIAL_BIN_SIZE, _SPATIAL_BIN_SIZE), normalize=True
+    )[1:bin_height:_SPATIAL_BIN_SIZE, 1:bin_width:_SPATIAL_BIN_SIZE]
     return binned

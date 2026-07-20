@@ -1,11 +1,6 @@
-"""Provides the system-agnostic, end-to-end dataset forging pipeline.
-
-The pipeline owns dataset definition, the optional cindra multi-day stage, and per-session orchestration. The only
-system-specific concern, assembling one session's ``data.feather`` plus its data-format descriptor, is resolved
-from ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system. The dependency is strictly one-way: the
-pipeline reaches the system worker through the registry, never the reverse.
-
-See ``run_forging_pipeline`` for the stage ordering, the local/remote execution modes, and the tracker contract.
+"""Provides the system-agnostic, end-to-end dataset forging pipeline that defines the dataset hierarchy, runs the
+optional cindra multi-day stage, and assembles each session's ``data.feather`` and data-format descriptor through the
+per-session worker registered for the dataset's acquisition system in ``FORGING_ASSEMBLY_REGISTRY``.
 """
 
 from __future__ import annotations

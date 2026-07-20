@@ -26,18 +26,22 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.video import (
     ENERGY_JOB_NAME,
-    SPATIAL_BIN_SIZE,
-    MINIMUM_CHUNK_FRAMES,
-    MOTION_ENERGY_SUFFIX,
-    WORKER_THREAD_VARIABLES,
     MotionEnergyColumn,
     pipeline as pipeline_module,
+    run_video_processing_pipeline,
+)
+from sollertia_forgery.video.motion_energy import (
+    _SPATIAL_BIN_SIZE,
+    MOTION_ENERGY_SUFFIX,
+    _MINIMUM_CHUNK_FRAMES,
+    _WORKER_THREAD_VARIABLES,
+    _bin_frame,
+    _plan_chunks,
+    _energy_chunk,
     resolve_camera_video,
     pinned_worker_threads,
     compute_camera_motion_energy,
-    run_video_processing_pipeline,
 )
-from sollertia_forgery.video.motion_energy import _bin_frame, _plan_chunks, _energy_chunk
 
 _FRAME_HEIGHT: int = 100
 """The fixture frame height. Not a multiple of the spatial bin size, so the block-mean crop path always runs."""
@@ -116,11 +120,11 @@ def test_binning_matches_exact_block_mean() -> None:
 
     binned = _bin_frame(frame=frame)
 
-    bin_height = _FRAME_HEIGHT // SPATIAL_BIN_SIZE * SPATIAL_BIN_SIZE
-    bin_width = _FRAME_WIDTH // SPATIAL_BIN_SIZE * SPATIAL_BIN_SIZE
+    bin_height = _FRAME_HEIGHT // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
+    bin_width = _FRAME_WIDTH // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
     expected = (
         frame[:bin_height, :bin_width]
-        .reshape(bin_height // SPATIAL_BIN_SIZE, SPATIAL_BIN_SIZE, bin_width // SPATIAL_BIN_SIZE, SPATIAL_BIN_SIZE)
+        .reshape(bin_height // _SPATIAL_BIN_SIZE, _SPATIAL_BIN_SIZE, bin_width // _SPATIAL_BIN_SIZE, _SPATIAL_BIN_SIZE)
         .mean(axis=(1, 3), dtype=np.float64)
     )
 
@@ -132,7 +136,7 @@ def test_binning_matches_exact_block_mean() -> None:
 def test_binning_crops_partial_blocks(static_video: Path) -> None:
     """Verifies frame dimensions that are not multiples of the bin size crop cleanly to whole blocks."""
     binned = _decoded_frames(static_video)[0]
-    assert binned.shape == (_FRAME_HEIGHT // SPATIAL_BIN_SIZE, _FRAME_WIDTH // SPATIAL_BIN_SIZE)
+    assert binned.shape == (_FRAME_HEIGHT // _SPATIAL_BIN_SIZE, _FRAME_WIDTH // _SPATIAL_BIN_SIZE)
 
 
 def test_chunked_result_is_bit_identical_to_sequential(moving_video: Path) -> None:
@@ -216,19 +220,18 @@ def test_luminance_tracks_a_global_brightness_step(tmp_path: Path) -> None:
     assert int(np.nanargmax(energy)) == 20
 
 
-def test_output_schema_and_frame_index(tmp_path: Path, moving_video: Path) -> None:
-    """Verifies the feather's columns, dtypes, and one-based frame index."""
+def test_output_schema_is_positional(tmp_path: Path, moving_video: Path) -> None:
+    """Verifies the feather's columns, dtypes, and one row per decoded frame."""
     output_path = tmp_path.joinpath("moving_energy.feather")
     compute_camera_motion_energy(video_path=moving_video, output_path=output_path, workers=1)
 
     frame = pl.read_ipc(output_path)
     assert dict(frame.schema) == {
-        MotionEnergyColumn.FRAME.value: pl.UInt32,
         MotionEnergyColumn.MOTION_ENERGY.value: pl.Float32,
         MotionEnergyColumn.FRAME_LUMINANCE.value: pl.Float32,
     }
-    assert frame[MotionEnergyColumn.FRAME][0] == 1
-    assert frame[MotionEnergyColumn.FRAME][-1] == len(frame)
+    # The feather is a positional table, so it holds exactly one row per decoded frame.
+    assert len(frame) == len(_decoded_frames(moving_video))
 
 
 def test_unresolved_worker_count_is_resolved(tmp_path: Path, moving_video: Path) -> None:
@@ -256,7 +259,7 @@ def test_plan_chunks_tiles_the_recording_exactly() -> None:
 
 def test_plan_chunks_respects_the_minimum_chunk_size() -> None:
     """Verifies a recording too short to split is decoded as a single chunk."""
-    assert _plan_chunks(frame_count=MINIMUM_CHUNK_FRAMES - 1, workers=64) == [(0, MINIMUM_CHUNK_FRAMES - 1)]
+    assert _plan_chunks(frame_count=_MINIMUM_CHUNK_FRAMES - 1, workers=64) == [(0, _MINIMUM_CHUNK_FRAMES - 1)]
 
 
 def test_missing_recording_resolves_to_none(tmp_path: Path) -> None:
@@ -420,7 +423,7 @@ def test_pinned_worker_threads_caps_and_restores_the_environment() -> None:
     os.environ[sentinel] = "13"
     try:
         with pinned_worker_threads():
-            assert all(os.environ[variable] == "1" for variable in WORKER_THREAD_VARIABLES)
+            assert all(os.environ[variable] == "1" for variable in _WORKER_THREAD_VARIABLES)
         assert os.environ[sentinel] == "13"
     finally:
         if previous is None:
@@ -431,7 +434,7 @@ def test_pinned_worker_threads_caps_and_restores_the_environment() -> None:
 
 def test_pinned_worker_threads_removes_variables_it_introduced() -> None:
     """Verifies a variable absent before the block is absent again after it, rather than left set to one."""
-    unset = [variable for variable in WORKER_THREAD_VARIABLES if variable not in os.environ]
+    unset = [variable for variable in _WORKER_THREAD_VARIABLES if variable not in os.environ]
     if not unset:
         pytest.skip("every thread variable is already set in this environment")
 

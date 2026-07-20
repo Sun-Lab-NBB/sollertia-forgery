@@ -1,13 +1,6 @@
-"""Provides the camera video-processing pipeline.
-
-The pipeline runs several independent job kinds that share one processing tracker, not a dependency chain. It parses
-raw VideoSystem log archives into per-camera timestamp feathers, publishes each parsed feather under its
-canonical manifest name, runs the acquisition system's donated video-tracking function over the session's pose
-predictions, and measures the per-frame motion energy of every camera's recording. Only the publish job depends on
-another: it links the feathers the parse jobs write. The tracking and motion-energy jobs read only raw inputs, so they
-are independent of every other job. A local run executes the jobs sequentially over one shared worker pool; a remote
-run (selected by ``job_id``) dispatches a single job on its own, leaving cross-job parallelism to an external
-scheduler.
+"""Provides the camera video-processing pipeline that parses each VideoSystem log archive into per-camera frame
+timestamps, publishes them under canonical manifest names, runs the acquisition system's donated video-tracking
+function over pose predictions, and measures each recording's per-frame motion energy.
 """
 
 from __future__ import annotations
@@ -76,22 +69,18 @@ def run_video_processing_pipeline(
     """Discovers, validates, and executes the camera video-processing pipeline for the target session.
 
     Notes:
-        The pipeline runs four independent job kinds that share one tracker, not an ordered chain. ``parse`` runs one
-        job per camera whose ``{source_id}_log.npz`` archive is discovered on disk, extracting frame timestamps into
-        the session's processed video-data directory. ``rename`` is a single job that publishes every parsed feather
-        there under its canonical manifest name. ``track`` is a single job that runs the acquisition system's donated
-        video-tracking function, which post-processes the session's externally-produced pose predictions (DeepLabCut
-        ``.h5`` files) into tracking feathers in the processed video-data directory. It is a no-op when no predictions
-        are present. ``energy`` runs one job per registered camera, measuring that camera's recording into a per-frame
-        motion-energy feather, and no-ops for a camera whose recording is absent. The only dependency among them is
-        that ``rename`` links the feathers ``parse`` writes, so it must follow the parse jobs; ``track`` and ``energy``
-        read only raw inputs and are independent of everything else. With no flag set, all four run (full local
-        pipeline); a local run executes the requested jobs sequentially over one shared worker pool. In remote mode
-        (``job_id`` provided) only the matching job runs, so an external scheduler can drive each parse job, the rename
-        job, the tracking job, and each energy job independently and owns any cross-job parallelism. One parse job per
-        registered camera, the single rename job, the single tracking job, and one energy job per registered camera
-        together define the tracker-alignment universe. The parse jobs actually executed are the subset whose archive
-        was discovered on disk.
+        The pipeline runs four independent job kinds sharing one processing tracker. ``parse`` runs one job per camera
+        whose ``{source_id}_log.npz`` archive is on disk, extracting that camera's frame timestamps. ``rename`` is a
+        single job that republishes those parsed feathers under their canonical manifest names, and it alone must
+        follow another job since it links what ``parse`` writes. ``track`` is a single job that runs the acquisition
+        system's donated tracking function over the session's DeepLabCut pose predictions, and no-ops when none are
+        present. ``energy`` runs one job per camera, measuring its recording into a motion-energy feather, and no-ops
+        when the recording is absent.
+
+        The camera manifest defines the full job universe, one parse and one energy job per registered camera plus the
+        single rename and tracking jobs, so tracker alignment does not depend on which archives are on disk. With no
+        flag set, all four run locally in sequence over one shared worker pool. With ``job_id`` set, only the matching
+        job runs, leaving cross-job parallelism to an external scheduler.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -260,7 +249,7 @@ def run_video_processing_pipeline(
     # Caps the worker threading layers for the whole life of the shared pool, so a run given N workers occupies N
     # cores. The pool starts its children on demand and each child sizes its library thread pools while importing,
     # before any job code of ours runs, so the caps have to be in place here rather than inside the workers. Scoping
-    # them to the pool rather than setting them at import keeps the rest of the library multi-threaded.
+    # them to the pool rather than setting them at import keeps the rest of the library multithreaded.
     with pinned_worker_threads(), ExitStack() as pool_scope:
         shared_executor = (
             pool_scope.enter_context(ProcessPoolExecutor(max_workers=resolved_workers))
