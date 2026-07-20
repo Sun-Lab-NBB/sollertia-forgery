@@ -78,9 +78,15 @@ def run_video_processing_pipeline(
         when the recording is absent.
 
         The camera manifest defines the full job universe, one parse and one energy job per registered camera plus the
-        single rename and tracking jobs, so tracker alignment does not depend on which archives are on disk. With no
-        flag set, all four run locally in sequence over one shared worker pool. With ``job_id`` set, only the matching
-        job runs, leaving cross-job parallelism to an external scheduler.
+        single rename and tracking jobs, so tracker alignment does not depend on which archives are on disk.
+
+        Two runtimes select which of those jobs execute. In local mode (``job_id`` is None) the pipeline runs every
+        job whose flag is set, defaulting to all four kinds when no flag is set, sequentially over one shared worker
+        pool. The ``parse`` and ``energy`` jobs honor ``target_camera`` to narrow that pass to a single camera. In
+        remote mode (a ``job_id`` is provided) only the single job matching that identifier runs, chosen entirely by
+        the identifier, so the flags and ``target_camera`` are ignored. This lets an external scheduler drive cross-job
+        parallelism by dispatching each job identifier concurrently. Either way each parse or energy job fans its
+        per-recording decoding across the worker pool, while the rename and tracking jobs run single-core.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -91,7 +97,8 @@ def run_video_processing_pipeline(
         track: Determines whether to run the video-tracking job (the system's donated tracking function).
         energy: Determines whether to run the per-camera motion-energy job.
         target_camera: The numeric source ID of the single camera to process when running the parsing or motion-energy
-            jobs. Set to -1 to process all discovered cameras. Ignored by the renaming and tracking jobs, and in
+            jobs. Set to -1 to process every camera with a discovered log archive for the parsing job, and every camera
+            registered in the manifest for the motion-energy job. Ignored by the renaming and tracking jobs, and in
             remote mode (when job_id is provided), where the job to run is selected entirely by job_id.
         workers: The number of worker processes the extraction binding may use per archive, and that the motion-energy
             job decodes each recording with. Set to -1 to use all available CPU cores (minus reserved cores).
@@ -172,18 +179,21 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=FileNotFoundError)
 
-        _dispatch_job(
-            job_name=job_name,
-            specifier=specifier,
-            session=session,
-            log_paths=log_paths,
-            camera_names=camera_names,
-            video_data_directory=video_data_directory,
-            tracker=tracker,
-            workers=workers,
-            display_progress=display_progress,
-            executor=None,
-        )
+        # Caps the worker threading layers before the extraction binding starts its own pool, since in remote mode
+        # the binding owns the pool and would otherwise spawn each worker with the machine's full thread budget.
+        with pinned_worker_threads():
+            _dispatch_job(
+                job_name=job_name,
+                specifier=specifier,
+                session=session,
+                log_paths=log_paths,
+                camera_names=camera_names,
+                video_data_directory=video_data_directory,
+                tracker=tracker,
+                workers=workers,
+                display_progress=display_progress,
+                executor=None,
+            )
         console.echo(message="Camera video-processing job completed successfully.", level=LogLevel.SUCCESS)
         return
 
@@ -215,10 +225,10 @@ def run_video_processing_pipeline(
         jobs.append((RENAME_JOB_NAME, ""))
     if run_track:
         # Reads only the raw pose predictions and does not consume the parsed timestamp feathers, so its position in
-        # the local sequence is arbitrary; it is listed here only for a stable, readable order.
+        # the local sequence is arbitrary. It is listed here only for a stable, readable order.
         jobs.append((TRACKING_JOB_NAME, ""))
     if run_energy:
-        # Reads only each camera's recording, so it is independent of every other job; its position in the local
+        # Reads only each camera's recording, so it is independent of every other job. Its position in the local
         # sequence is arbitrary. Honors target_camera exactly as the parsing job does, and covers every registered
         # camera rather than only those with a discovered log archive, since a recording can be measured without its
         # archive.
@@ -278,7 +288,7 @@ def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
     """Maps each camera source ID registered in the acquisition-time manifest to its colloquial camera name.
 
     Reads the camera manifest that every VideoSystem writes alongside its log archives. The manifest is the sole
-    source of camera names, so the pipeline requires no acquisition-system-specific configuration: the colloquial
+    source of camera names, so the pipeline requires no acquisition-system-specific configuration. The colloquial
     source names recorded at acquisition time (for example, ``face_camera``) determine every output filename this
     pipeline writes and locate each camera's recording on disk.
 
@@ -380,7 +390,8 @@ def _dispatch_job(
         display_progress: Determines whether the extraction binding displays a progress bar and whether the energy
             job reports per-chunk completion.
         executor: An optional process pool shared across parse and energy jobs so neither spawns its own. The renaming
-            and tracking jobs ignore it. When None, the job creates and tears down its own pool.
+            and tracking jobs ignore it. When None, the job creates and tears down its own pool, except that a
+            motion-energy job whose recording plans a single decode chunk runs in-process without one.
 
     Raises:
         ValueError: If the job name does not identify a pipeline job.
@@ -475,7 +486,7 @@ def _run_motion_energy(
 
     Locates the camera's recording in the session's raw camera-data directory and writes its motion energy into the
     processed video-data directory. A camera whose recording is absent is skipped rather than failing, mirroring how
-    the tracking job no-ops without predictions: a rig that ran one of its cameras must not wedge the shared video
+    the tracking job no-ops without predictions. A rig that ran one of its cameras must not wedge the shared video
     tracker on the camera it did not run.
 
     Args:
@@ -488,7 +499,7 @@ def _run_motion_energy(
         workers: The number of worker processes to decode the recording with.
         display_progress: Determines whether per-chunk completion is reported as the recording is measured.
         executor: An optional process pool to decode the recording's chunks in. When None, a pool is created and torn
-            down for this recording.
+            down for this recording, unless it plans a single decode chunk, which runs in-process with no pool.
     """
     # Resolved inside the tracked job so that a missing recording and a decode failure alike are recorded against a
     # job that actually started, rather than leaving the tracker unable to explain why the job never ran.

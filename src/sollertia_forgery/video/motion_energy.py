@@ -169,13 +169,13 @@ def compute_camera_motion_energy(
             reserved cores).
         executor: An optional process pool to submit the decode chunks into, shared across cameras so the cost of
             spawning worker processes is paid once. When None, a pool is created and torn down for this recording,
-            unless the recording plans to a single decode chunk, which runs in-process with no pool.
+            unless the recording plans a single decode chunk, which runs in-process with no pool.
         display_progress: Determines whether per-chunk completion is reported as the analysis runs.
 
     Raises:
         ValueError: If the recording cannot be opened, reports no frames, cannot decode the priming frame preceding a
-            chunk, or ends early at a chunk other than the last, which means the file is truncated and every later
-            frame index would be wrong.
+            chunk, or ends early at a chunk other than the last. Such an early end means the file is truncated and
+            every later frame index would be wrong.
     """
     frame_count = _read_frame_count(video_path=video_path)
     resolved_workers = resolve_worker_count(requested_workers=workers)
@@ -208,8 +208,9 @@ def compute_camera_motion_energy(
 
     energy, luminance = _join_chunks(results=results, chunks=chunks, video_path=video_path)
 
-    # A positional table: one row per decoded frame in acquisition order, matching the camera's timestamp and pupil
-    # feathers. Row position is the frame index, so no explicit index column is stored.
+    # A positional table: one row per decoded frame in acquisition order, row position serving as the frame index, so
+    # no explicit index column is stored. This is the same index-free positional convention the camera's timestamp and
+    # pupil feathers follow.
     pl.DataFrame(
         {
             MotionEnergyColumn.MOTION_ENERGY: energy,
@@ -389,9 +390,9 @@ def _energy_chunk(
     """
     # Pins every layer of threading to one thread per worker. The decoder honors this environment variable when the
     # capture is constructed rather than at import, and it is the knob that reaches the decoder without rebuilding the
-    # capture: cv2.CAP_PROP_N_THREADS also does, but only through the VideoCapture constructor's params argument, and
-    # the OpenCV thread count governs its own kernels instead. Left unpinned, each of the many workers spawns its own
-    # decode threads and the pool oversubscribes the machine several times over.
+    # capture. The alternative cv2.CAP_PROP_N_THREADS also does, but only through the VideoCapture constructor's params
+    # argument, and the OpenCV thread count governs its own kernels instead. Left unpinned, each of the many workers
+    # spawns its own decode threads and the pool oversubscribes the machine several times over.
     os.environ["OPENCV_FFMPEG_THREADS"] = "1"
     cv2.setNumThreads(1)
     # The recordings are encoded as yuv420p, which the decoder does not recognize and reports as an unsupported

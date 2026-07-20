@@ -69,8 +69,8 @@ unknowns regardless of where on the ring they sit. Two can never suffice."""
 _MAXIMUM_FIT_CONDITION: float = 12.0
 """The largest condition number a feature's ellipse fit may have and still be trusted, above which the frame is
 rejected as underdetermined. The condition number measures how far the surviving arc must reach to pin the rest
-of the ellipse, and this cap is the worst value a minimally-determined three-point fit produces, so it admits
-every frame with enough confident points to fit."""
+of the ellipse. This cap is the worst value a minimally-determined three-point fit produces, so it admits every
+frame with enough confident points to fit."""
 
 _BLINK_FRACTION: float = 0.5
 """The fraction of the session-median eye openness below which a frame is flagged as a blink."""
