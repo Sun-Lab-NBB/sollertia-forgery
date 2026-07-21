@@ -1,5 +1,6 @@
-"""Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and DatasetColumn enumerations and the
-derived MESOSCOPE_COLUMN_DESCRIPTIONS mapping donated to the system-agnostic forging pipeline.
+"""Provides the Mesoscope-VR-specific metadata schema: the BehaviorDataFiles and VideoDataFiles filename
+enumerations, the DatasetColumn enumeration, and the derived MESOSCOPE_COLUMN_DESCRIPTIONS mapping donated to the
+system-agnostic forging pipeline.
 """
 
 from __future__ import annotations
@@ -55,6 +56,29 @@ class BehaviorDataFiles(StrEnum):
     """The runtime feather holding per-trial metadata (trial index, trial type, traveled distance at trial start)."""
 
 
+class VideoDataFiles(StrEnum):
+    """Enumerates the canonical filenames of the per-camera video feathers written by the video-processing pipeline and
+    read back by the donated video-dataset assembler. The pipeline writes them into the session's
+    ``processed_data/video_data`` directory under the acquisition-time camera names.
+
+    Notes:
+        These names are the file-naming contract for the fixed Mesoscope-VR camera set (the face and body cameras),
+        mirroring how the microcontroller module feathers are a fixed set. All entries are forgery-internal and must
+        not be referenced from outside the library.
+    """
+
+    FACE_CAMERA_TIMESTAMPS = "face_camera_timestamps.feather"
+    """The face-camera timestamp feather holding one frame-acquisition timestamp per recorded frame."""
+    FACE_CAMERA_ENERGY = "face_camera_energy.feather"
+    """The face-camera motion-energy feather holding the per-frame motion energy and frame luminance."""
+    FACE_CAMERA_PUPIL = "face_camera_pupil.feather"
+    """The face-camera pupil-tracking feather holding the per-frame pupil and eye metrics."""
+    BODY_CAMERA_TIMESTAMPS = "body_camera_timestamps.feather"
+    """The body-camera timestamp feather holding one frame-acquisition timestamp per recorded frame."""
+    BODY_CAMERA_ENERGY = "body_camera_energy.feather"
+    """The body-camera motion-energy feather holding the per-frame motion energy and frame luminance."""
+
+
 class DatasetColumn(StrEnum):
     """Defines every column that can appear in the assembled session data feather produced by the forging pipeline,
     pairing each column name with its human-readable description.
@@ -68,7 +92,9 @@ class DatasetColumn(StrEnum):
         Several columns are conditional: ``REINFORCING_GUIDED`` and ``AVERSIVE_GUIDED`` are present only when the
         corresponding guidance events were recorded. ``BRAKE`` and ``SCREENS`` are present only for mesoscope
         experiments. ``TORQUE_N_CM`` is absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
-        training. The remaining members are present in every forged session.
+        training. The per-camera video columns are present only when that camera's feathers were produced, and the
+        pupil columns only when the face camera's pose predictions were processed. The remaining members are present in
+        every forged session.
     """
 
     description: str
@@ -159,6 +185,113 @@ class DatasetColumn(StrEnum):
     MULTI_DAY_SPIKES = (
         "multi_day_spikes",
         "Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days.",
+    )
+
+    # Video motion-energy columns (from forging video assembly).
+    FACE_CAMERA_MOTION_ENERGY = (
+        "face_camera_motion_energy",
+        "Face camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
+        "within-session movement magnitude, high during movement and low during stillness.",
+    )
+    FACE_CAMERA_FRAME_LUMINANCE = (
+        "face_camera_frame_luminance",
+        "Face camera mean frame intensity at each sample in gray levels, tracking scene illumination.",
+    )
+    BODY_CAMERA_MOTION_ENERGY = (
+        "body_camera_motion_energy",
+        "Body camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
+        "within-session movement magnitude, high during movement and low during stillness.",
+    )
+    BODY_CAMERA_FRAME_LUMINANCE = (
+        "body_camera_frame_luminance",
+        "Body camera mean frame intensity at each sample in gray levels, tracking scene illumination.",
+    )
+
+    # Pupil-tracking columns (from forging video assembly, face camera).
+    PUPIL_CENTER_X_PX = (
+        "pupil_center_x_px",
+        "Horizontal position of the fitted pupil ellipse center in face-camera pixels at each sample.",
+    )
+    PUPIL_CENTER_Y_PX = (
+        "pupil_center_y_px",
+        "Vertical position of the fitted pupil ellipse center in face-camera pixels at each sample.",
+    )
+    PUPIL_DIAMETER_PX = (
+        "pupil_diameter_px",
+        "Mean of the fitted pupil ellipse's two axis diameters in face-camera pixels at each sample, the primary "
+        "arousal proxy. NaN marks blink and dilation samples.",
+    )
+    PUPIL_AREA_PX2 = (
+        "pupil_area_px2",
+        "Area enclosed by the fitted pupil ellipse in square face-camera pixels at each sample.",
+    )
+    PUPIL_FIT_CONDITION = (
+        "pupil_fit_condition",
+        "Condition number of the fitted pupil ellipse at each sample, where higher values indicate a less reliable "
+        "fit. NaN marks unmeasured samples.",
+    )
+    PUPIL_FIT_RESIDUAL_PX = (
+        "pupil_fit_residual_px",
+        "Root-mean-square distance in pixels between the confident pupil-perimeter points and the fitted ellipse at "
+        "each sample, a fit-quality measure.",
+    )
+    EYE_CENTER_X_PX = (
+        "eye_center_x_px",
+        "Horizontal position of the fitted eye ellipse center in face-camera pixels at each sample.",
+    )
+    EYE_CENTER_Y_PX = (
+        "eye_center_y_px",
+        "Vertical position of the fitted eye ellipse center in face-camera pixels at each sample.",
+    )
+    EYE_WIDTH_PX = (
+        "eye_width_px",
+        "Length of the fitted eye ellipse's left-right chord in face-camera pixels at each sample.",
+    )
+    EYE_HEIGHT_PX = (
+        "eye_height_px",
+        "Length of the fitted eye ellipse's top-bottom chord in face-camera pixels at each sample.",
+    )
+    EYE_OPENNESS = (
+        "eye_openness",
+        "Ratio of the fitted eye ellipse's height to its width at each sample, a distance-invariant measure of eye "
+        "openness.",
+    )
+    BLINKING_STATE = (
+        "blinking_state",
+        "Blink state at each sample, marking a closed or covered eye. Encoded as 1 during a blink and 0 otherwise.",
+    )
+    DILATION_STATE = (
+        "dilation_state",
+        "Dilation-clip state at each sample, marking a pupil dilated past the eye aperture. Encoded as 1 when clipped "
+        "and 0 otherwise.",
+    )
+    REFLECTION_X_PX = (
+        "reflection_x_px",
+        "Horizontal position of the corneal reflection in face-camera pixels at each sample.",
+    )
+    REFLECTION_Y_PX = (
+        "reflection_y_px",
+        "Vertical position of the corneal reflection in face-camera pixels at each sample.",
+    )
+    PUPIL_REFLECTION_OFFSET_X_PX = (
+        "pupil_reflection_offset_x_px",
+        "Horizontal offset of the pupil center from the corneal reflection in pixels at each sample, a motion-robust "
+        "horizontal eye-position signal.",
+    )
+    PUPIL_REFLECTION_OFFSET_Y_PX = (
+        "pupil_reflection_offset_y_px",
+        "Vertical offset of the pupil center from the corneal reflection in pixels at each sample, a motion-robust "
+        "vertical eye-position signal.",
+    )
+    PUPIL_IN_EYE_X = (
+        "pupil_in_eye_x",
+        "Horizontal offset of the pupil center from the eye center at each sample, normalized to the eye ellipse's "
+        "horizontal semi-axis and dimensionless.",
+    )
+    PUPIL_IN_EYE_Y = (
+        "pupil_in_eye_y",
+        "Vertical offset of the pupil center from the eye center at each sample, normalized to the eye ellipse's "
+        "vertical semi-axis and dimensionless.",
     )
 
 
