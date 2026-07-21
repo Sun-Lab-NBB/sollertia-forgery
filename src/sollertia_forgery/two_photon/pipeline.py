@@ -51,10 +51,11 @@ def run_two_photon_processing_pipeline(
 
     Notes:
         The raw-imaging input directory is resolved through the system-agnostic two-photon data registry, which
-        dispatches to the acquisition system's donated locator. If the registry holds no locator for the session's
-        acquisition system, the lookup raises and the pipeline fails before any cindra work begins. cindra owns the
-        heavy work and records the run on the two-photon processing tracker (``single_recording_tracker.yaml``,
-        ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory (``session.processed_data.cindra_data_path``).
+        dispatches to the acquisition system's donated locator. If the session's acquisition system is not a
+        supported AcquisitionSystems member, the lookup raises and the pipeline fails before any cindra work begins.
+        cindra owns the heavy work and records the run on the two-photon processing tracker
+        (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
+        (``session.processed_data.cindra_data_path``).
         The stage flags map directly onto its stages. Additional ``FileNotFoundError``/``ValueError`` conditions may
         propagate from the underlying cindra pipeline.
 
@@ -63,7 +64,7 @@ def run_two_photon_processing_pipeline(
         configuration_path: The path to the cindra single-recording configuration template. Its data path, output
             path, worker count, and progress flag are overridden. Every other parameter is used as supplied.
         job_id: The unique hexadecimal identifier for the cindra job to execute. If provided, only the matching job
-            runs (remote mode). Otherwise every requested stage runs (local mode).
+            runs (remote mode). Otherwise, every requested stage runs (local mode).
         binarize: Determines whether to run the binarization stage.
         process: Determines whether to run the per-plane motion-correction, ROI-detection, and trace-extraction stage.
         combine: Determines whether to run the multi-plane combination stage.
@@ -73,11 +74,11 @@ def run_two_photon_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        KeyError: If the two-photon data registry holds no locator for the session's acquisition system.
         FileNotFoundError: If the configuration file does not exist or is not a YAML file, if the session's raw
             two-photon imaging directory does not exist, or if no cindra acquisition parameters file is available for
             the recording.
-        ValueError: If the configuration file cannot be loaded as a cindra single-recording configuration.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
+            configuration file cannot be loaded as a cindra single-recording configuration.
     """
     session = SessionData.load(session_path=session_path)
 
@@ -90,10 +91,10 @@ def run_two_photon_processing_pipeline(
 
     # Resolves the recording's raw two-photon imaging directory (cindra input) through the two-photon data registry,
     # which dispatches to the acquisition system's donated locator, and the session's processed-data root (cindra
-    # output) from the shared session hierarchy. If the registry holds no locator for the session's acquisition system,
-    # this lookup raises, failing the pipeline before any cindra work. cindra creates its 'cindra' output subdirectory
-    # under the processed-data root, which is exactly the session's canonical processed cindra directory, so downstream
-    # tools find the outputs where they expect them.
+    # output) from the shared session hierarchy. If the session's acquisition system is not a supported
+    # AcquisitionSystems member, this lookup raises, failing the pipeline before any cindra work. cindra creates its
+    # 'cindra' output subdirectory under the processed-data root, which is exactly the session's canonical processed
+    # cindra directory, so downstream tools find the outputs where they expect them.
     locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
     data_path = locate_two_photon_data(session)
     output_path = session.processed_data_path

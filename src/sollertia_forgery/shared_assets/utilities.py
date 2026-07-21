@@ -3,7 +3,7 @@
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 DELAY_TIMER: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
-"""The shared PrecisionTimer instance used across the library to delay the runtime's execution."""
+"""The shared timer used across the library to delay the runtime's execution."""
 
 
 def delay_terminal() -> None:

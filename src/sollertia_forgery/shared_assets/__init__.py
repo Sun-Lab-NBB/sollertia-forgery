@@ -1,6 +1,4 @@
-"""Provides the system-agnostic substrate shared across acquisition systems (tracking, timing, feather parsing, and
-log-archive naming).
-"""
+"""Provides the system-agnostic substrate shared across acquisition systems."""
 
 from .tracking import tracked_job, prepare_tracker
 from .utilities import DELAY_TIMER, delay_terminal

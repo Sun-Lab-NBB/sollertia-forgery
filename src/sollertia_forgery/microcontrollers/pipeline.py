@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 # The registered parser for a single module, resolved from the central MICROCONTROLLER_PARSER_REGISTRY: a plain
 # module-level function ``parse(event_partition, output_directory, session) -> None``. The PEP 695 alias is evaluated
-# lazily, so its annotation-only operands (Callable, Path, SessionData) need not exist at runtime.
+# lazily, so its annotation-only operands (Callable, Path) need not exist at runtime.
 type ModuleParser = Callable[[dict[int, pl.DataFrame], Path, SessionData], None]
 
 PARSE_JOB_NAME: str = "module_parsing"
@@ -121,7 +121,7 @@ def run_microcontroller_processing_pipeline(
         )
     )
 
-    # The tracker lives alongside the extracted and parsed data in ``microcontroller_data``. The same job universe
+    # Co-locates the tracker with the extracted and parsed data in ``microcontroller_data``. The same job universe
     # drives foreign-entry detection in both local and remote modes, so a single concurrent remote job aligns the
     # tracker without resetting its sibling jobs.
     tracker_directory = session.processed_data.microcontroller_data_path
@@ -461,8 +461,8 @@ def _run_parse_stage(
     """Runs Stage 2: parses each eligible module's raw feather into its domain-specific feather.
 
     Notes:
-        The extraction outputs are indexed once up front, so each parse job resolves its input feather with an O(1)
-        lookup rather than re-globbing and re-scanning the output directory per module. The acquisition binding
+        The extraction outputs are indexed once up front, so each parse job resolves its input feather with a single
+        O(1) dict lookup. The acquisition binding
         writes a raw feather only for modules that produced at least one message, so a configured, eligible module
         can legitimately have no feather. Such a parse job is completed with no output rather than left unresolved.
         Modules with a feather are dispatched to the shared process pool when one is available and more than one
@@ -484,7 +484,7 @@ def _run_parse_stage(
         return
 
     # Indexes every extracted module feather once, keyed by (controller_id, module_type, module_id), so each parse
-    # job resolves its input with a single dict lookup instead of re-globbing and re-scanning the output directory.
+    # job resolves its input with a single dict lookup.
     feather_index = _index_module_feathers(extraction_output=extraction_output)
 
     runnable: dict[str, tuple[Path, ModuleParser]] = {}
@@ -747,7 +747,7 @@ def _run_parse(feather_path: Path, module_parser: ModuleParser, output_directory
     module_dataframe = pl.read_ipc(source=feather_path, memory_map=True)
     event_partition = partition_events(module_dataframe=module_dataframe)
     output_directory.mkdir(parents=True, exist_ok=True)
-    module_parser(event_partition, output_directory, session)
+    module_parser(event_partition=event_partition, output_directory=output_directory, session=session)
 
 
 def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int], Path]:
@@ -755,8 +755,7 @@ def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int]
 
     Notes:
         Globs the directory once and parses each feather name a single time, building a lookup keyed by
-        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with an O(1) dict lookup
-        instead of re-globbing and re-scanning the directory once per module.
+        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with a single O(1) dict lookup.
 
     Args:
         extraction_output: The directory holding the raw per-module feathers.

@@ -66,7 +66,7 @@ def run_runtime_processing_pipeline(
     )
 
     # Resolves the system's runtime binding: the source id locating its runtime archive and the parser interpreting
-    # the decoded messages. The system is inferred from the session, so the pipeline never names a system-specific type.
+    # the decoded messages. The system is inferred from the session, so the pipeline stays system-agnostic.
     source_id, parser = resolve_runtime_binding(session.acquisition_system)
 
     log_directory = session.raw_data.behavior_data_path
@@ -84,7 +84,7 @@ def run_runtime_processing_pipeline(
     jobs = [(RUNTIME_JOB_NAME, source_id)]
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
-    # The tracker co-locates with the parsed output in ``runtime_data``. The runtime job is the only job this pipeline
+    # Co-locates the tracker with the parsed output in ``runtime_data``. The runtime job is the only job this pipeline
     # produces, so the tracker is reset and reinitialized from scratch on every run.
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
