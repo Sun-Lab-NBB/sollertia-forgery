@@ -149,7 +149,7 @@ CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, CindraConfigurationAsset
 """The single, fully-visible registry of cindra configuration resolvers, keyed by acquisition system. Each value is a
 ``CindraConfigurationAsset`` bundling the system's single- and multi-recording ``resolve(session)`` resolvers. The
 agnostic two-photon and forging pipelines obtain a runnable cindra configuration through these resolvers. Each system
-therefore decides for itself how its configuration is derived, keeping its lab-tuned logic next to its parsers."""
+therefore decides for itself how its configuration is derived, keeping its system-specific logic next to its parsers."""
 
 RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),

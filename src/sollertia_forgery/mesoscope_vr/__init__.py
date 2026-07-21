@@ -7,8 +7,11 @@ from .metadata import (
     DatasetColumn,
     BehaviorDataFiles,
 )
-from .two_photon import locate_two_photon_data
-from .fluorescence import FluorescenceColumn
+from .two_photon import (
+    locate_two_photon_data,
+    resolve_multi_recording_configuration,
+    resolve_single_recording_configuration,
+)
 from .video_tracking import (
     PUPIL_CAMERA_NAME,
     EYE_TRACKING_PROJECT_NAME,
@@ -26,10 +29,7 @@ from .microcontrollers import (
     parse_mesoscope_frame,
     get_module_event_codes,
 )
-from .cindra_configuration import (
-    resolve_multi_recording_configuration,
-    resolve_single_recording_configuration,
-)
+from .two_photon_dataset import FluorescenceColumn
 
 __all__ = [
     "EYE_TRACKING_PROJECT_NAME",

@@ -1,7 +1,7 @@
 """Tests for the Mesoscope-VR genotype-driven cindra configuration resolvers and their registry wiring.
 
 The classifier and both configuration builders are exercised directly, and the session resolvers are exercised with a
-stubbed surgery loader. A golden regression pins each built configuration to the lab's shipped reference YAMLs, modulo
+stubbed surgery loader. A golden regression pins each built configuration to the reference mesoscope-vr YAMLs, modulo
 the deploy-time fields the pipelines override. The registry resolvers are checked for dispatch and unknown-system
 handling.
 """
@@ -17,12 +17,12 @@ import pytest
 from cindra import SingleRecordingConfiguration, MultiRecordingConfiguration
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-import sollertia_forgery.mesoscope_vr.cindra_configuration as configuration_module
+import sollertia_forgery.mesoscope_vr.two_photon as two_photon_module
 from sollertia_forgery.registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from sollertia_forgery.mesoscope_vr.cindra_configuration import (
+from sollertia_forgery.mesoscope_vr.two_photon import (
     CalciumIndicator,
     resolve_calcium_indicator,
     resolve_multi_recording_configuration,
@@ -32,7 +32,7 @@ from sollertia_forgery.mesoscope_vr.cindra_configuration import (
 )
 
 _FIXTURES: Path = Path(__file__).parent / "fixtures" / "cindra"
-"""The directory holding the lab's shipped reference cindra configuration YAMLs the golden regression pins against."""
+"""The directory holding the reference mesoscope-vr cindra configuration YAMLs the golden regression pins against."""
 
 
 def _neutralize_single(configuration: dict[str, Any]) -> dict[str, Any]:
@@ -56,7 +56,7 @@ def _neutralize_multi(configuration: dict[str, Any]) -> dict[str, Any]:
 def _stub_surgery_loader(monkeypatch: pytest.MonkeyPatch, genotype: str) -> None:
     """Replaces the surgery loader so the resolvers read the given genotype without a real surgery YAML."""
     monkeypatch.setattr(
-        configuration_module,
+        two_photon_module,
         "SurgeryData",
         SimpleNamespace(from_yaml=lambda file_path: SimpleNamespace(subject=SimpleNamespace(genotype=genotype))),  # noqa: ARG005
     )
@@ -126,7 +126,7 @@ def test_multi_recording_genotype_delta() -> None:
     [("GP5.17", "CA1_GCaMP6f_SD.yaml"), ("GCaMP8s x CamKIICre", "CA1_GCaMP8s_SD.yaml")],
 )
 def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
-    """Verifies each built single-recording configuration equals the lab's shipped reference YAML field-for-field."""
+    """Verifies each built single-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
     built = _neutralize_single(dataclasses.asdict(_build_single_recording_configuration(genotype)))
     reference = _neutralize_single(
         dataclasses.asdict(SingleRecordingConfiguration.from_yaml(file_path=_FIXTURES / fixture_name))
@@ -139,7 +139,7 @@ def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: st
     [("GP5.17", "CA1_GCaMP6f_MD.yaml"), ("GCaMP8s x CamKIICre", "CA1_GCaMP8s_MD.yaml")],
 )
 def test_multi_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
-    """Verifies each built multi-recording configuration equals the lab's shipped reference YAML field-for-field."""
+    """Verifies each built multi-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
     built = _neutralize_multi(dataclasses.asdict(_build_multi_recording_configuration(genotype)))
     reference = _neutralize_multi(
         dataclasses.asdict(MultiRecordingConfiguration.from_yaml(file_path=_FIXTURES / fixture_name))

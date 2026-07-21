@@ -1,10 +1,7 @@
 """Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline.
 
-Notes:
-    This module's sole public entry point, ``parse_runtime``, is the Mesoscope-VR runtime parser contributed to the
-    central ``RUNTIME_PARSER_REGISTRY`` (paired with ``RUNTIME_SOURCE_ID``, the DataLogger source id that locates the
-    runtime archive). It interprets the decoded runtime payloads into the session's behavior feathers: system and
-    runtime state, guidance states, and the experiment-only VR cue, trigger-zone, and per-trial data.
+The parser interprets the decoded runtime payloads into the session's system and runtime state, guidance state, and
+experiment-only VR cue, trigger-zone, and per-trial behavior feathers.
 """
 
 from __future__ import annotations

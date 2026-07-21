@@ -20,11 +20,11 @@ from sollertia_shared_assets import (
     MesoscopeExperimentConfiguration,
 )
 
-from .fluorescence import assemble_cindra_dataset
 from .video_dataset import assemble_video_dataset
 from ..shared_assets import multi_recording_dataset_directory
 from .runtime_dataset import assemble_runtime_dataset, mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
+from .two_photon_dataset import assemble_cindra_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
