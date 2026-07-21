@@ -37,25 +37,34 @@ class _ModuleSpecification:
     output_filename: str
     """The name of the output feather file."""
     required_fields: tuple[str, ...]
-    """The MesoscopeHardwareState field names that must be configured for processing eligibility."""
+    """The MesoscopeHardwareState field names that must be configured (not None) for processing eligibility."""
+    usage_flags: tuple[str, ...]
+    """The MesoscopeHardwareState boolean field names recording whether the module was used during acquisition. A flag
+    set to False marks the module as unused, unlike a recorded state value (such as screens_initially_on), which is
+    False on every session where the module was active."""
+    event_codes: tuple[int, ...]
+    """The axci event codes the module's parse function reads. The system-agnostic microcontroller pipeline builds the
+    module's extraction filter from these codes, so a code absent here is never extracted from the log archive."""
 
     def check_eligibility(self, hardware_state: MesoscopeHardwareState) -> bool:
-        """Determines whether the hardware state has all required fields configured for this module.
+        """Determines whether the hardware state marks this module as used and fully configured.
+
+        Notes:
+            Per the MesoscopeHardwareState contract, a field set to None indicates that the corresponding module was
+            not used, so None is the sole absence test for required_fields. A recorded state value is therefore never
+            treated as an absence marker, even when it is False. Modules that additionally carry an explicit usage
+            flag are skipped when that flag is not set.
 
         Args:
             hardware_state: The MesoscopeHardwareState instance to validate against.
 
         Returns:
-            True if all required fields are configured (not None and not False for boolean fields).
+            True if the module was used and all of its required fields are configured.
         """
         for field_name in self.required_fields:
-            value = getattr(hardware_state, field_name, None)
-            if value is None:
+            if getattr(hardware_state, field_name, None) is None:
                 return False
-            # Handles boolean fields like delivered_gas_puffs and recorded_mesoscope_ttl.
-            if isinstance(value, bool) and not value:
-                return False
-        return True
+        return all(getattr(hardware_state, flag_name, None) is True for flag_name in self.usage_flags)
 
 
 # Public parser entry points wired into the MICROCONTROLLER_PARSER_REGISTRY (registries.py). Each shares the uniform
@@ -163,8 +172,9 @@ def is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosco
     """Determines whether a module is eligible for processing based on the hardware state configuration.
 
     Notes:
-        A module is eligible if all of its required hardware state fields are configured (not None). Modules
-        whose hardware parameters were not set during the acquisition session are skipped during processing.
+        A module is eligible if all of its required hardware state fields are configured (not None) and every usage
+        flag it carries is set. Modules whose hardware parameters were not set during the acquisition session, and
+        modules a session explicitly records as unused, are skipped during processing.
 
     Args:
         module_type: The type code of the hardware module.
@@ -180,6 +190,22 @@ def is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosco
 
     specification = _MODULE_REGISTRY[module_key]
     return specification.check_eligibility(hardware_state=hardware_state)
+
+
+def get_module_event_codes() -> dict[tuple[int, int], tuple[int, ...]]:
+    """Returns the axci event codes each Mesoscope-VR hardware module's parser reads.
+
+    Notes:
+        This is the Mesoscope-VR system's donation to the MICROCONTROLLER_EVENT_CODE_REGISTRY ('registries.py'). The
+        system-agnostic microcontroller pipeline builds each controller's extraction filter from this mapping, so the
+        codes returned here are exactly the codes the extraction stage pulls out of the raw log archives. The mapping
+        is rebuilt on every call, so callers may mutate the returned dictionary freely.
+
+    Returns:
+        A mapping from each ``(module_type, module_id)`` pair this system parses to the tuple of event codes its
+        parser reads.
+    """
+    return {module_key: specification.event_codes for module_key, specification in _MODULE_REGISTRY.items()}
 
 
 def _resolve_hardware_state(session: SessionData) -> MesoscopeHardwareState:
@@ -628,42 +654,62 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
         parse_function=_parse_encoder_data,
         output_filename=BehaviorDataFiles.ENCODER,
         required_fields=("cm_per_pulse",),
+        usage_flags=(),
+        event_codes=(51, 52),
     ),
     (1, 1): _ModuleSpecification(
         parse_function=_parse_ttl_data,
         output_filename=BehaviorDataFiles.MESOSCOPE_FRAME,
-        required_fields=("recorded_mesoscope_ttl",),
+        required_fields=(),
+        usage_flags=("recorded_mesoscope_ttl",),
+        event_codes=(51, 52),
     ),
     (3, 1): _ModuleSpecification(
         parse_function=_parse_brake_data,
         output_filename=BehaviorDataFiles.BRAKE,
         required_fields=("maximum_brake_strength", "minimum_brake_strength"),
+        usage_flags=(),
+        event_codes=(51, 52),
     ),
     (5, 1): _ModuleSpecification(
         parse_function=_parse_valve_data,
         output_filename=BehaviorDataFiles.VALVE,
         required_fields=("valve_scale_coefficient", "valve_nonlinearity_exponent"),
+        usage_flags=(),
+        # Code 53 (kCalibrated) is emitted only by the firmware's calibration command, never during a normal runtime.
+        event_codes=(51, 52, 54, 55),
     ),
     (5, 2): _ModuleSpecification(
         parse_function=_parse_gas_puff_data,
         output_filename=BehaviorDataFiles.GAS_PUFF,
-        required_fields=("delivered_gas_puffs",),
+        required_fields=(),
+        usage_flags=("delivered_gas_puffs",),
+        # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
+        # gas-puff parser does not read them, so extracting them would be wasted work.
+        event_codes=(51, 52),
     ),
     (4, 1): _ModuleSpecification(
         parse_function=_parse_lick_data,
         output_filename=BehaviorDataFiles.LICK,
         required_fields=("lick_threshold",),
+        usage_flags=(),
+        event_codes=(51,),
     ),
     (6, 1): _ModuleSpecification(
         parse_function=_parse_torque_data,
         output_filename=BehaviorDataFiles.TORQUE,
         required_fields=("torque_per_adc_unit",),
+        usage_flags=(),
+        event_codes=(51, 52),
     ),
     (7, 1): _ModuleSpecification(
         parse_function=_parse_screen_data,
         output_filename=BehaviorDataFiles.SCREEN,
         required_fields=("screens_initially_on",),
+        usage_flags=(),
+        event_codes=(51, 52),
     ),
 }
 """Maps (module_type, module_id) pairs to their processing specifications. Each specification defines the parse
-function, output filename, and required hardware state fields for a specific hardware module."""
+function, output filename, required hardware state fields, usage flags, and extracted event codes for a specific
+hardware module."""

@@ -257,7 +257,7 @@ def _align_pulses_to_scanimage(
             ``pulse_start``, ``pulse_end``, and ``duration_ms``, sorted by ``pulse_start``.
         raw_data_path: The path to the session's raw_data directory. The ScanImage metadata archive is resolved
             as ``raw_data_path / mesoscope_data / frame_variant_metadata.npz``.
-        expected_frame_count: The number of frames recorded by cindra; used as the authoritative target count for
+        expected_frame_count: The number of frames recorded by cindra, used as the authoritative target count for
             the alignment.
 
     Returns:
@@ -287,7 +287,7 @@ def _align_pulses_to_scanimage(
     chronological_order = np.argsort(frame_numbers, kind="stable")
     si_microseconds = (frame_seconds[chronological_order] * _MICROSECONDS_PER_SECOND).astype(np.int64)
 
-    # The ScanImage archive must contain exactly as many entries as cindra's frame count; if it does not, the
+    # The ScanImage archive must contain exactly as many entries as cindra's frame count. If it does not, the
     # input data is internally inconsistent and alignment cannot proceed.
     if si_microseconds.size != expected_frame_count:
         message = (

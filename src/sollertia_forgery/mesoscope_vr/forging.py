@@ -2,10 +2,10 @@
 
 Notes:
     This module's sole public entry point, ``assemble_mesoscope_session``, is the Mesoscope-VR "data assembly" asset
-    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``; the agnostic forging pipeline resolves it by acquisition
+    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``. The agnostic forging pipeline resolves it by acquisition
     system and invokes it once per session to produce that session's ``data.feather``. The pipeline owns dataset
     definition, the cindra multi-day stage, tracker orchestration, the per-dataset column-description binding, and
-    shared-asset re-export; this worker owns only the assembly of the Mesoscope-VR data.
+    shared-asset re-export. This worker owns only the assembly of the Mesoscope-VR data.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from sollertia_shared_assets import (
 )
 
 from .fluorescence import assemble_cindra_dataset
+from .video_dataset import assemble_video_dataset
 from .runtime_dataset import assemble_runtime_dataset, _mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 
@@ -34,10 +35,11 @@ if TYPE_CHECKING:
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
     """Assembles a single Mesoscope-VR session's unified data feather.
 
-    Combines the session's fluorescence, behavior, and runtime sub-datasets into a single time-aligned Polars
+    Combines the session's fluorescence, behavior, runtime, and video sub-datasets into a single time-aligned Polars
     DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The fluorescence sub-dataset is
-    assembled first because its ``time_us`` column is the reference clock the behavior and runtime sub-datasets align
-    to. The meaning of each emitted column is documented by ``DatasetColumn`` and donated to the dataset's
+    assembled first because its ``time_us`` column is the reference clock the other sub-datasets align to. The video
+    sub-dataset is optional and contributes columns only when the session carries processed camera feathers. The
+    meaning of each emitted column is documented by ``DatasetColumn`` and donated to the dataset's
     ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
     Notes:
@@ -61,6 +63,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     microcontroller_data_path = session.processed_data.microcontroller_data_path
     runtime_data_path = session.processed_data.runtime_data_path
     cindra_data_path = session.processed_data.cindra_data_path
+    video_data_path = session.processed_data.video_data_path
     raw_data_path = session.raw_data_path
 
     # Validates that the processed microcontroller, runtime, and single-recording cindra outputs exist before any
@@ -102,7 +105,7 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
         file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
     )
 
-    # Assembles the fluorescence sub-dataset first; its ``time_us`` column is the reference clock for the other two.
+    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock for the other two.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
         microcontroller_data_path=microcontroller_data_path,
@@ -111,7 +114,8 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
     )
     reference_time = fluorescence_data["time_us"].to_numpy()
 
-    # Assembles the behavior and runtime sub-datasets in parallel; both align to the fluorescence reference clock.
+    # Assembles the behavior, runtime, and video sub-datasets in parallel. All three align to the fluorescence
+    # reference clock. The video sub-dataset is empty when the session carries no processed camera feathers.
     tasks = {
         "behavior": partial(
             assemble_behavior_dataset,
@@ -128,15 +132,24 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
             experiment_configuration=experiment_configuration,
             reference_time=reference_time,
         ),
+        "video": partial(
+            assemble_video_dataset,
+            video_data_path=video_data_path,
+            reference_time=reference_time,
+        ),
     }
     results: dict[str, pl.DataFrame] = {}
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         future_to_name = {executor.submit(task): name for name, task in tasks.items()}
         for future in as_completed(future_to_name):
             results[future_to_name[future]] = future.result()
 
-    # Concatenates the three sub-datasets into the unified feather, masks non-run experiment columns, and writes it
-    # uncompressed so downstream consumers can memory-map it.
-    result = pl.concat([fluorescence_data, results["behavior"], results["runtime"]], how="horizontal")
+    # Concatenates the sub-datasets into the unified feather, masks non-run experiment columns, and writes it
+    # uncompressed so downstream consumers can memory-map it. The video sub-dataset joins only when it produced
+    # columns, so a session processed without camera data still forges.
+    sub_datasets = [fluorescence_data, results["behavior"], results["runtime"]]
+    if results["video"].width > 0:
+        sub_datasets.append(results["video"])
+    result = pl.concat(sub_datasets, how="horizontal")
     result = _mask_non_run_experiment_data(experiment_data=result)
     result.write_ipc(file=output_path)

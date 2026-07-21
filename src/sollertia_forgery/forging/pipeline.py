@@ -1,11 +1,6 @@
-"""Provides the system-agnostic, end-to-end dataset forging pipeline.
-
-The pipeline owns dataset definition, the optional cindra multi-day stage, and per-session orchestration; the only
-system-specific concern -- assembling one session's ``data.feather`` plus its data-format descriptor -- is resolved
-from ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system. The dependency is strictly one-way: the
-pipeline reaches the system worker through the registry, never the reverse.
-
-See ``run_forging_pipeline`` for the stage ordering, the local/remote execution modes, and the tracker contract.
+"""Provides the system-agnostic, end-to-end dataset forging pipeline that defines the dataset hierarchy, runs the
+optional cindra multi-day stage, and assembles each session's ``data.feather`` and data-format descriptor through the
+per-session worker registered for the dataset's acquisition system in ``FORGING_ASSEMBLY_REGISTRY``.
 """
 
 from __future__ import annotations
@@ -63,7 +58,7 @@ def run_forging_pipeline(
 
         In local mode (``job_id`` is None), all assembly jobs are distributed across a parallel worker pool. In
         remote mode (``job_id`` is provided), the identifier must match an assembly job and only that single
-        session's assembly runs in-process; the cindra multi-day stage never runs in remote mode because it is a
+        session's assembly runs in-process. The cindra multi-day stage never runs in remote mode because it is a
         dataset-level prerequisite executed once, not per session.
 
         The cindra multi-day stage runs only when ``activity_configuration`` is provided (gated on the configuration
@@ -73,19 +68,19 @@ def run_forging_pipeline(
     Args:
         name: The unique name of the dataset.
         session_names: The session names to include in the dataset. When the dataset already exists and a non-empty
-            list is provided, the set is verified against the existing definition; pass an empty tuple to work with
+            list is provided, the set is verified against the existing definition. Pass an empty tuple to work with
             an already-defined dataset without triggering verification.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
         job_id: The hexadecimal identifier of the single assembly job to execute (remote mode). If not provided, the
             whole pipeline runs (local mode).
         workers: The number of worker processes to use. A value less than 1 uses all available CPU cores (minus
-            reserved cores); 1 forces sequential processing.
+            reserved cores), and 1 forces sequential processing.
         display_progress: Determines whether to display a progress bar during assembly.
         force_recreate: Determines whether to allow deletion of the existing dataset hierarchy when the provided
             session list does not match the existing definition.
         activity_configuration: The path to the cindra multi-recording configuration file. When provided (and in a
-            full local run), the multi-day cell-tracking stage runs before assembly; when None, the stage is skipped.
+            full local run), the multi-day cell-tracking stage runs before assembly. When None, the stage is skipped.
 
     Raises:
         ValueError: If the dataset does not exist and no sessions were provided to create it, if the provided session
@@ -176,7 +171,7 @@ def run_forging_pipeline(
         # Every session's data.feather now exists, so the dataset's data-description contract can be enforced against
         # the fully composed dataset: every column any session actually wrote must be described in the dataset's
         # data_descriptions.feather. A violation means the acquisition system emitted an undescribed column. Remote
-        # mode skips this because the other sessions are not yet present; the batch verifier enforces it once the full
+        # mode skips this because the other sessions are not yet present. The batch verifier enforces it once the full
         # set has been assembled.
         console.echo(message="Verifying assembled-data column descriptions...", level=LogLevel.INFO)
         dataset.verify_data_descriptions()
@@ -271,7 +266,7 @@ def _execute_jobs_parallel(
 
     Notes:
         Every dispatched job is tracked individually, and in-flight futures are allowed to finish on failure so the
-        tracker stays accurate for all of them; the first captured exception is re-raised after all futures resolve.
+        tracker stays accurate for all of them. The first captured exception is re-raised after all futures resolve.
 
     Args:
         sessions: The ordered list of session names to assemble.
@@ -280,7 +275,7 @@ def _execute_jobs_parallel(
         project_root: The path to the project's root directory.
         tracker: The forging processing tracker.
         job_ids: The mapping from session name to job ID.
-        worker: The registered per-session assembly worker; must be picklable for the worker processes.
+        worker: The registered per-session assembly worker. Must be picklable for the worker processes.
         workers: The resolved worker-process count for the shared pool.
         display_progress: Determines whether to display a per-session progress bar.
     """
@@ -392,7 +387,7 @@ def _forge_session(
     Raises:
         FileNotFoundError: If a shared asset the session is required to carry is missing from the source session.
     """
-    # Resolves the shared assets the forged session re-exports. The session descriptor is universal; the VR and
+    # Resolves the shared assets the forged session re-exports. The session descriptor is universal. The VR and
     # experiment configurations are present only for some session types, so each is re-exported only when present.
     session = SessionData.load(session_path=source_session_path)
     reexported_assets = {

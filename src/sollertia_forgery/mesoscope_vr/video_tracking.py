@@ -1,38 +1,19 @@
 """Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline.
 
-The video pipeline resolves this function from the registry hub and runs it once per session, expecting it to do all
-the work (mirroring how a system donates its forging assembler). It post-processes externally-produced DeepLabCut
-(DLC) pose predictions for the Mesoscope-VR face camera into per-frame pupil and eye metrics.
-
-Notes:
-    sollertia-forgery never runs DeepLabCut: DLC pins ``numpy<2`` while slf is ``numpy>=2`` / Python 3.14, so DLC
-    cannot be imported in-process. DLC runs out-of-band (its own conda environment) and writes its ``.h5`` predictions
-    straight into the session's processed video-data directory -- the same well-defined location the timestamp stage
-    writes to, consistent with how every other pipeline keeps its intermediates and finals in one ``processed_data``
-    directory. This module only READS that output -- via ``h5py`` and ``numpy`` (never ``pandas`` and never the
-    ``deeplabcut`` library), reading only the columns it needs without materializing the full table -- and only when
-    the file is present. With no ``.h5`` the function is a no-op, so the pipeline can run it unconditionally.
-
-    The model that produced the predictions is irrelevant here: the pupil project's prediction file is identified by
-    its DeepLabCut project name, and this function only requires that the ``.h5`` carries the nine canonical bodyparts
-    below. They are spelled in a DLC-friendly format (``eye_left`` etc.):
-    ``reflection`` (the corneal reflection), the four pupil-perimeter points (``pupil_top``/``pupil_bottom``/
-    ``pupil_left``/``pupil_right``), and the four eye-perimeter points (``eye_top``/``eye_bottom``/``eye_left``/
-    ``eye_right``).
+The function post-processes externally-produced DeepLabCut pose predictions for the face camera into per-frame pupil
+and eye metrics.
 """
 
 from __future__ import annotations
 
-import re
+from enum import StrEnum
 from typing import TYPE_CHECKING
-from dataclasses import field, dataclass
 
-import h5py
 import numpy as np
+import pandas as pd
 import polars as pl
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console
-from ataraxis_data_structures import YamlConfig
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,15 +21,13 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
 
-_DLC_PROJECT_NAME: str = "eye_tracking"
-"""The DeepLabCut project (task) name baked into the prediction filename, used to identify this pipeline's ``.h5``
-among any predictions DeepLabCut writes into the processed video-data directory. This decouples the donor from the
-model and the raw camera data: the contract is simply that a matching ``.h5`` is present. (Placeholder name; align
-with the actual DeepLabCut pupil project.)"""
+EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
+"""The DeepLabCut project name baked into the prediction filename, used to select this pipeline's ``.h5`` from
+the predictions written beside the face-camera video in the session's raw camera_data directory."""
 
-_PUPIL_CAMERA_NAME: str = "face_camera"
-"""The colloquial camera name whose recordings carry the eye. Used to locate the camera's per-frame timestamp feather
-(for attaching ``time_us``) and to name this function's output feather (``{camera}_{target}.feather``)."""
+PUPIL_CAMERA_NAME: str = "face_camera"
+"""The colloquial camera name whose recordings carry the eye, used to name this function's output feather
+(``{camera}_{target}.feather``)."""
 
 _PUPIL_TARGET: str = "pupil"
 """The tracking-target label used to name this function's output feather (``{camera}_{target}.feather``)."""
@@ -56,104 +35,176 @@ _PUPIL_TARGET: str = "pupil"
 _REFLECTION_POINT: str = "reflection"
 """The canonical bodypart for the corneal (infrared) reflection, used as a motion-robust positional reference."""
 
-_PUPIL_POINTS: tuple[str, str, str, str] = ("pupil_top", "pupil_bottom", "pupil_left", "pupil_right")
-"""The four canonical pupil-perimeter bodyparts, ordered ``(top, bottom, left, right)``."""
+_PUPIL_POINTS: tuple[str, ...] = (
+    "pupil_right",
+    "pupil_bottom_right",
+    "pupil_bottom",
+    "pupil_bottom_left",
+    "pupil_left",
+    "pupil_top_left",
+    "pupil_top",
+    "pupil_top_right",
+)
+"""The eight canonical pupil-perimeter bodyparts, in ring order starting from the right and advancing toward the
+bottom (image coordinates, y increasing downward). The order is load-bearing: it assigns each point its parametric
+angle on the pupil ellipse, evenly spaced around the ring."""
 
-_EYE_POINTS: tuple[str, str, str, str] = ("eye_top", "eye_bottom", "eye_left", "eye_right")
-"""The four canonical eye-perimeter bodyparts, ordered ``(top, bottom, left, right)``."""
+_EYE_POINTS: tuple[str, ...] = ("eye_right", "eye_bottom", "eye_left", "eye_top")
+"""The four canonical eye-perimeter bodyparts, in the same ring order as the pupil's."""
 
 _CANONICAL_POINTS: tuple[str, ...] = (_REFLECTION_POINT, *_PUPIL_POINTS, *_EYE_POINTS)
-"""All nine canonical bodyparts the DLC ``.h5`` must provide for this function to parse it."""
+"""All thirteen canonical bodyparts the DLC ``.h5`` must provide for this function to parse it."""
 
-_LIKELIHOOD_THRESHOLD: float = 0.6
-"""The minimum DLC likelihood for a point to be trusted in a frame. An ellipse that needs a below-threshold point
-yields NaN metrics for that frame and flags it as low-confidence (which, for the pupil, also reads as a blink)."""
+_LIKELIHOOD_THRESHOLD: float = 0.9
+"""The minimum DLC likelihood for a point to be trusted in a frame, set at the strict end of the field's 0.6-0.9
+``pcutoff`` band. The gate is strict because the labeled-angle fit trusts each surviving point's ring identity, so a
+mislabeled low-confidence point biases the ellipse directly rather than averaging out. It applies uniformly to the
+pupil ring, the eye ring, and the corneal reflection."""
+
+_MINIMUM_PERIMETER_POINTS: int = 3
+"""The number of a feature's ring points that must clear the likelihood threshold for its ellipse to be determined.
+Each point's ring position fixes its parametric angle, so three points supply six equations for the fit's six
+unknowns regardless of where on the ring they sit. Two can never suffice."""
+
+_MAXIMUM_FIT_CONDITION: float = 12.0
+"""The largest condition number a feature's ellipse fit may have and still be trusted, above which the frame is
+rejected as underdetermined. The condition number measures how far the surviving arc must reach to pin the rest
+of the ellipse. This cap is the worst value a minimally-determined three-point fit produces, so it admits every
+frame with enough confident points to fit."""
 
 _BLINK_FRACTION: float = 0.5
 """The fraction of the session-median eye openness below which a frame is flagged as a blink."""
 
-_CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
-"""The suffix the video pipeline appends to a camera's manifest name to form its canonical per-frame timestamp feather
-(e.g. ``face_camera_timestamps.feather``). Duplicated here so this donor never imports the video worker package."""
-
 _COORDINATES: tuple[str, str, str] = ("x", "y", "likelihood")
-"""The three DLC per-bodypart coordinate columns, used to recognize the coordinate level of the column MultiIndex."""
+"""The three DLC per-bodypart coordinate channels, in the order each bodypart's columns are read into its per-frame
+``(x, y, likelihood)`` array."""
+
+type _MetricArray = NDArray[np.float64] | NDArray[np.bool_]
+"""The per-frame array types the output columns take: floating-point geometry and the boolean state flags."""
 
 
-@dataclass
-class _PupilTrackingProvenance(YamlConfig):
-    """Captures the provenance of one pupil-tracking output for reproducibility, written beside the output feather."""
+class PupilColumn(StrEnum):
+    """Defines every column written into the Mesoscope-VR pupil-tracking feather by the donated video-tracking worker.
 
-    h5_file: str = ""
-    """The filename of the DLC ``.h5`` the metrics were parsed from."""
-    bodyparts: list[str] = field(default_factory=list)
-    """The canonical bodyparts that were read from the ``.h5``."""
-    frame_count: int = 0
-    """The number of frames (rows) parsed from the ``.h5``."""
-    likelihood_threshold: float = 0.0
-    """The likelihood threshold applied when gating points."""
-    blink_fraction: float = 0.0
-    """The eye-openness fraction used as the blink threshold."""
+    Notes:
+        Positions and lengths are expressed in the face camera's pixel coordinate frame (``_px``), matching the frame
+        DeepLabCut reports its predictions in, and are never converted to physical units: the camera is not calibrated
+        against a physical scale. Dimensionless ratios and flags carry no unit suffix.
+
+        Every geometric column is NaN on frames whose feature kept too few confident points to fit, so consumers see
+        NaN rather than a confidently-wrong ellipse. For the pupil columns those frames are exactly the ones
+        ``blinking_state`` and ``dilation_state`` flag. The eye columns answer only to their own fit, so they stay
+        populated on a blink flagged by low openness or by a lost corneal reflection.
+    """
+
+    PUPIL_CENTER_X_PX = "pupil_center_x_px"
+    """Horizontal position of the fitted pupil ellipse center in pixels at each frame."""
+    PUPIL_CENTER_Y_PX = "pupil_center_y_px"
+    """Vertical position of the fitted pupil ellipse center in pixels at each frame."""
+    PUPIL_DIAMETER_PX = "pupil_diameter_px"
+    """Mean of the fitted pupil ellipse's two axis diameters in pixels at each frame. The pipeline's primary arousal
+    proxy."""
+    PUPIL_AREA_PX2 = "pupil_area_px2"
+    """Area enclosed by the fitted pupil ellipse in square pixels at each frame."""
+    PUPIL_FIT_CONDITION = "pupil_fit_condition"
+    """Condition number of the fitted pupil ellipse at each frame, a fit-precision proxy on which higher values
+    indicate a less reliable fit. NaN wherever the pupil is unmeasured."""
+    PUPIL_FIT_RESIDUAL_PX = "pupil_fit_residual_px"
+    """Root-mean-square distance in pixels between the confident pupil-perimeter points and their positions on the
+    fitted ellipse at each frame, a fit-quality measure. NaN on unmeasured frames and on exactly-determined
+    three-point fits. Only overdetermined fits report a residual."""
+    EYE_CENTER_X_PX = "eye_center_x_px"
+    """Horizontal position of the fitted eye ellipse center in pixels at each frame."""
+    EYE_CENTER_Y_PX = "eye_center_y_px"
+    """Vertical position of the fitted eye ellipse center in pixels at each frame."""
+    EYE_WIDTH_PX = "eye_width_px"
+    """Length of the fitted eye ellipse's left-right chord in pixels at each frame."""
+    EYE_HEIGHT_PX = "eye_height_px"
+    """Length of the fitted eye ellipse's top-bottom chord in pixels at each frame."""
+    EYE_OPENNESS = "eye_openness"
+    """Ratio of the fitted eye ellipse's height to its width at each frame, a distance-invariant measure of how open
+    the eye is. NaN wherever the eye ring cannot be fit."""
+    BLINKING_STATE = "blinking_state"
+    """Boolean flag marking frames where the eye is closed or covered, leaving no measurable pupil. True when the eye
+    ring cannot be fit, the corneal reflection is lost, or the eye opens less than half its session-median amount."""
+    DILATION_STATE = "dilation_state"
+    """Boolean flag marking frames where the pupil dilated past the eye's aperture and was clipped too far to fit a
+    diameter. True only on non-blink frames whose pupil is otherwise unmeasurable. A fully visible dilated pupil is
+    measured normally and flagged False."""
+    REFLECTION_X_PX = "reflection_x_px"
+    """Horizontal position of the corneal reflection in pixels at each frame."""
+    REFLECTION_Y_PX = "reflection_y_px"
+    """Vertical position of the corneal reflection in pixels at each frame."""
+    PUPIL_REFLECTION_OFFSET_X_PX = "pupil_reflection_offset_x_px"
+    """Horizontal offset in pixels of the pupil center from the corneal reflection at each frame. Referencing the
+    reflection cancels the eye's common-mode motion relative to the camera, making this a motion-robust horizontal
+    eye-position signal."""
+    PUPIL_REFLECTION_OFFSET_Y_PX = "pupil_reflection_offset_y_px"
+    """Vertical offset in pixels of the pupil center from the corneal reflection at each frame. Referencing the
+    reflection cancels the eye's common-mode motion relative to the camera, making this a motion-robust vertical
+    eye-position signal."""
+    PUPIL_IN_EYE_X = "pupil_in_eye_x"
+    """Horizontal offset of the pupil center from the eye center at each frame, normalized to the eye ellipse's
+    horizontal semi-axis. Dimensionless and therefore comparable across animals."""
+    PUPIL_IN_EYE_Y = "pupil_in_eye_y"
+    """Vertical offset of the pupil center from the eye center at each frame, normalized to the eye ellipse's vertical
+    semi-axis. Dimensionless and therefore comparable across animals."""
 
 
 def process_mesoscope_video_tracking(session: SessionData, output_directory: Path) -> None:
     """Post-processes the Mesoscope-VR face-camera DLC predictions into per-frame pupil and eye metrics.
 
-    Locates the pupil project's externally-produced DLC ``.h5`` in the processed video-data directory (where
-    DeepLabCut writes it, the same well-defined location the timestamp stage writes to); if none is present, returns
-    without doing anything (the stage is optional and gated on detecting the prediction file). Otherwise reads the
-    nine canonical bodyparts, fits an ellipse to the pupil and to the eye each frame, derives a blink flag from the
-    variation in eye shape, derives motion-robust eye-position signals from the pupil relative to the eye and the
-    corneal reflection, and writes the results into a ``{camera}_pupil.feather`` (plus a provenance sidecar) in the
-    same directory.
+    Locates the pupil project's externally-produced DLC ``.h5`` beside the face-camera video in the session's raw
+    camera_data directory, where the acquisition rig writes it during preprocessing. If none is present, returns
+    without doing anything: the stage is optional and gated on detecting the prediction file.
+
+    Otherwise reads the thirteen canonical bodyparts and fits an ellipse to the pupil and to the eye for each frame.
+    Flags occluded frames as blinks and derives motion-robust eye-position signals from the pupil relative to the eye
+    and the corneal reflection. Writes the results into a ``{camera}_pupil.feather`` in the processed video-data
+    directory.
+
+    Notes:
+        The predictions are produced upstream rather than here because DeepLabCut pins ``numpy<2`` while
+        sollertia-forgery runs ``numpy>=2`` on Python 3.14, so DeepLabCut cannot be imported in-process. This worker
+        only reads DeepLabCut's ``.h5`` output and never depends on the ``deeplabcut`` library.
 
     Args:
-        session: The loaded session whose pupil DLC predictions are post-processed (used for status reporting).
-        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) where the
-            DLC ``.h5`` predictions are read from, where the pupil feather and its provenance sidecar are written, and
-            where the camera-timestamp feather (if already produced by the timestamp stage) is read to attach
-            per-frame ``time_us``.
+        session: The loaded session whose pupil DLC predictions are post-processed. Its raw camera_data directory
+            supplies the DLC ``.h5``.
+        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) the pupil
+            feather is written into.
 
     Raises:
         ValueError: If a DLC ``.h5`` is present but is missing a canonical bodypart or has an unrecognized layout.
     """
-    h5_path = _locate_pupil_h5(output_directory=output_directory)
-    if h5_path is None:
+    # DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in
+    # the session's raw camera_data directory during preprocessing. This pipeline's file is identified by the
+    # DeepLabCut project name baked into its filename. When several match, the natural-sort-first one is used.
+    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
+    if not matches:
         console.echo(
             message=(
-                f"No DeepLabCut '{_DLC_PROJECT_NAME}' '.h5' prediction file was found in the processed video-data "
-                f"directory of session '{session.session_name}'. Skipping pupil tracking."
+                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
+                f"video in the raw camera_data directory of session '{session.session_name}'. Skipping pupil tracking."
             ),
             level=LogLevel.INFO,
         )
         return
-
-    console.echo(
-        message=f"Post-processing pupil tracking from '{h5_path.name}' for session '{session.session_name}'...",
-        level=LogLevel.INFO,
-    )
+    h5_path = matches[0]
 
     points = _read_points_from_h5(h5_path=h5_path, bodyparts=_CANONICAL_POINTS)
     frame_count = next(iter(points.values())).shape[0]
 
     pupil_metrics = _compute_pupil_metrics(points=points)
-    frame_times = _load_frame_times(output_directory=output_directory, frame_count=frame_count)
 
-    columns: dict[str, NDArray[np.generic]] = {"frame": np.arange(frame_count, dtype=np.uint64)}
-    if frame_times is not None:
-        columns["time_us"] = frame_times
-    columns.update(pupil_metrics)
+    # The feather is a positional table: one row per frame in acquisition order, storing only the per-frame metrics.
+    # Row position supplies the frame index, so none is stored. Timestamps are left to dataset assembly, which owns
+    # every stream's alignment to the acquisition clock. The float64 geometry is cast to single precision because it
+    # derives from pixel coordinates far coarser than float32 resolves, so float64 would only double the feather size.
+    pupil_frame = pl.DataFrame(pupil_metrics).with_columns(pl.col(pl.Float64).cast(pl.Float32))
 
-    output_path = output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}.feather")
-    pl.DataFrame(columns).write_ipc(file=output_path)
-
-    _PupilTrackingProvenance(
-        h5_file=h5_path.name,
-        bodyparts=list(_CANONICAL_POINTS),
-        frame_count=frame_count,
-        likelihood_threshold=_LIKELIHOOD_THRESHOLD,
-        blink_fraction=_BLINK_FRACTION,
-    ).to_yaml(file_path=output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}_provenance.yaml"))
+    output_path = output_directory.joinpath(f"{PUPIL_CAMERA_NAME}_{_PUPIL_TARGET}.feather")
+    pupil_frame.write_ipc(file=output_path, compression="uncompressed")
 
     console.echo(
         message=f"Wrote pupil tracking for {frame_count} frame(s) to '{output_path.name}'.",
@@ -161,30 +212,12 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     )
 
 
-def _locate_pupil_h5(output_directory: Path) -> Path | None:
-    """Resolves the pupil project's externally-produced DLC ``.h5`` within the processed video-data directory.
-
-    DeepLabCut runs out-of-band and writes its predictions straight into the session's processed video-data directory
-    (the same well-defined location the timestamp stage writes to), so the donor never touches the raw camera data or
-    the model. The pupil pipeline's file is identified by the DeepLabCut project name baked into its filename.
-
-    Args:
-        output_directory: The processed video-data directory (``session.processed_data.video_data_path``) where the
-            DLC predictions are expected.
-
-    Returns:
-        The path to the discovered ``.h5`` file, or None if no matching prediction file is present (meaning there is
-        nothing to process).
-    """
-    matches = natsorted(output_directory.glob(f"*{_DLC_PROJECT_NAME}*.h5"))
-    return matches[0] if matches else None
-
-
 def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str, NDArray[np.float64]]:
-    """Reads the requested bodyparts from a DLC ``.h5`` using ``h5py`` and ``numpy`` (no ``pandas``).
+    """Reads the requested bodyparts from a DeepLabCut prediction ``.h5`` into per-bodypart coordinate arrays.
 
-    Reads only the columns for the requested bodyparts -- via lazy ``h5py`` slicing, so the full prediction table is
-    never materialized -- and returns one ``(frame_count, 3)`` array of ``(x, y, likelihood)`` per bodypart.
+    DeepLabCut serializes its predictions with ``pandas.DataFrame.to_hdf`` as a PyTables ``table``-format HDF5, so they
+    are read back with ``pandas``. The columns are a ``(scorer, bodypart, coordinate)`` MultiIndex, so this returns one
+    ``(frame_count, 3)`` array of ``(x, y, likelihood)`` per requested bodypart, with rows in ascending frame order.
 
     Args:
         h5_path: The path to the DLC prediction ``.h5`` file.
@@ -194,195 +227,51 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
         A mapping from each requested bodypart to its ``(frame_count, 3)`` array of per-frame ``(x, y, likelihood)``.
 
     Raises:
-        ValueError: If the file layout is unrecognized, or if a requested bodypart is missing from the file.
+        ValueError: If the file does not hold a DeepLabCut prediction frame, or a requested bodypart is missing.
     """
-    with h5py.File(str(h5_path), "r") as h5_file:
-        group = _resolve_predictions_group(h5_file=h5_file, h5_path=h5_path)
-        per_column_bodypart, per_column_coordinate = _read_column_labels(group=group, h5_path=h5_path)
-        values, frames_first = _resolve_value_matrix(
-            group=group, column_count=len(per_column_bodypart), h5_path=h5_path
+    predictions = pd.read_hdf(h5_path)
+    if not isinstance(predictions, pd.DataFrame):
+        message = (
+            f"Unable to read pupil tracking from '{h5_path.name}'. The file does not contain a DeepLabCut prediction "
+            f"frame."
         )
+        console.error(message=message, error=ValueError)
+    predictions = predictions.sort_index()
 
-        # Builds, for every requested bodypart, the column index of each of its three coordinate channels.
-        column_index: dict[tuple[str, str], int] = {
-            (bodypart, coordinate): index
-            for index, (bodypart, coordinate) in enumerate(zip(per_column_bodypart, per_column_coordinate, strict=True))
-        }
+    # DeepLabCut labels columns with a (scorer, bodypart, coordinate) MultiIndex. Keys each column by the trailing
+    # (bodypart, coordinate) pair, so the single scorer level need not be named, then reads the whole matrix once.
+    # A file carrying more than one scorer would collapse onto the last, which single-scorer DLC output never emits.
+    bodypart_labels = predictions.columns.get_level_values(-2)
+    coordinate_labels = predictions.columns.get_level_values(-1)
+    column_position: dict[tuple[str, str], int] = {
+        (bodypart, coordinate): position
+        for position, (bodypart, coordinate) in enumerate(zip(bodypart_labels, coordinate_labels, strict=True))
+    }
+    matrix = predictions.to_numpy(dtype=np.float64)
 
-        result: dict[str, NDArray[np.float64]] = {}
-        for bodypart in bodyparts:
-            channels = []
-            for coordinate in _COORDINATES:
-                index = column_index.get((bodypart, coordinate))
-                if index is None:
-                    message = (
-                        f"Unable to read pupil tracking from '{h5_path.name}'. The DeepLabCut prediction file does "
-                        f"not contain the required '{bodypart}' '{coordinate}' column."
-                    )
-                    console.error(message=message, error=ValueError)
-                # Reads a single column lazily: the matrix is oriented either (frames, columns) or (columns, frames).
-                channel = values[:, index] if frames_first else values[index, :]
-                channels.append(np.asarray(channel, dtype=np.float64))
-            result[bodypart] = np.stack(channels, axis=1)
+    result: dict[str, NDArray[np.float64]] = {}
+    for bodypart in bodyparts:
+        channels = []
+        for coordinate in _COORDINATES:
+            position = column_position.get((bodypart, coordinate))
+            if position is None:
+                message = (
+                    f"Unable to read pupil tracking from '{h5_path.name}'. The DeepLabCut prediction file does not "
+                    f"contain the required '{bodypart}' '{coordinate}' column."
+                )
+                console.error(message=message, error=ValueError)
+            channels.append(matrix[:, position])
+        result[bodypart] = np.stack(channels, axis=1)
     return result
 
 
-def _resolve_predictions_group(h5_file: h5py.File, h5_path: Path) -> h5py.Group:
-    """Resolves the HDF5 group holding the serialized DLC predictions frame.
+def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, _MetricArray]:
+    """Computes per-frame pupil and eye metrics from the thirteen canonical points.
 
-    Args:
-        h5_file: The opened DLC ``.h5`` file.
-        h5_path: The path to the file, used only for error messages.
-
-    Returns:
-        The predictions group (``df_with_missing`` when present, otherwise the single top-level group).
-
-    Raises:
-        ValueError: If no group can be resolved.
-    """
-    if "df_with_missing" in h5_file:
-        node = h5_file["df_with_missing"]
-        if isinstance(node, h5py.Group):
-            return node
-    groups = [key for key in h5_file if isinstance(h5_file[key], h5py.Group)]
-    if len(groups) == 1:
-        node = h5_file[groups[0]]
-        if isinstance(node, h5py.Group):
-            return node
-    message = (
-        f"Unable to read pupil tracking from '{h5_path.name}'. The file does not contain a recognizable DeepLabCut "
-        f"predictions group ('df_with_missing')."
-    )
-    console.error(message=message, error=ValueError)
-    raise ValueError(message)  # pragma: no cover - console.error is NoReturn; satisfies RET503/return typing.
-
-
-def _read_column_labels(group: h5py.Group, h5_path: Path) -> tuple[list[str], list[str]]:
-    """Reconstructs the per-column ``(bodypart, coordinate)`` labels from a pandas fixed-format column MultiIndex.
-
-    pandas stores a MultiIndex axis as paired ``*_levelN`` (unique values per level) and ``*_labelN`` (per-column
-    integer codes) datasets, all of which ``h5py`` can read directly. This recovers, for each data column, which
-    bodypart and which coordinate (``x``/``y``/``likelihood``) it holds -- without ``pandas``.
-
-    Args:
-        group: The DLC predictions group.
-        h5_path: The path to the file, used only for error messages.
-
-    Returns:
-        A ``(per_column_bodypart, per_column_coordinate)`` tuple of equal-length lists, one entry per data column.
-
-    Raises:
-        ValueError: If the column-label datasets are absent (e.g. a PyTables ``table``-format file) or cannot be
-            interpreted, which means the reader needs extending or the file re-exported (fixed-format ``.h5`` or CSV).
-    """
-    levels, labels = _collect_multiindex_datasets(group=group)
-    shared = sorted(set(levels) & set(labels))
-    if not shared:
-        message = (
-            f"Unable to read pupil tracking from '{h5_path.name}'. The DeepLabCut prediction file does not expose a "
-            f"fixed-format column index ('axis0_level*'/'axis0_label*'); re-export it as a fixed-format '.h5' or CSV."
-        )
-        console.error(message=message, error=ValueError)
-
-    coordinate_suffix = next(
-        (suffix for suffix in shared if {"x", "y", "likelihood"}.issubset(set(levels[suffix]))), None
-    )
-    bodypart_suffix = next((suffix for suffix in shared if suffix != coordinate_suffix), None)
-    if coordinate_suffix is None or bodypart_suffix is None:
-        message = (
-            f"Unable to read pupil tracking from '{h5_path.name}'. Could not identify the bodypart and coordinate "
-            f"levels of the DeepLabCut column index."
-        )
-        console.error(message=message, error=ValueError)
-
-    bodypart_levels, bodypart_codes = levels[bodypart_suffix], labels[bodypart_suffix]
-    coordinate_levels, coordinate_codes = levels[coordinate_suffix], labels[coordinate_suffix]
-    per_column_bodypart = [bodypart_levels[code] for code in bodypart_codes]
-    per_column_coordinate = [coordinate_levels[code] for code in coordinate_codes]
-    return per_column_bodypart, per_column_coordinate
-
-
-def _collect_multiindex_datasets(group: h5py.Group) -> tuple[dict[str, list[str]], dict[str, NDArray[np.intp]]]:
-    """Collects the ``*_levelN`` (decoded strings) and ``*_labelN`` (integer codes) column-index datasets from a group.
-
-    Prefers the ``axis0`` datasets (the column axis) and falls back to any ``*_level*``/``*_label*`` datasets, keying
-    each by its trailing integer so a level and its codes share a key.
-
-    Args:
-        group: The DLC predictions group.
-
-    Returns:
-        A ``(levels, labels)`` tuple: ``levels`` maps each level suffix to its decoded unique values, ``labels`` maps
-        each level suffix to its per-column integer codes.
-    """
-    for prefix in ("axis0", ""):
-        levels: dict[str, list[str]] = {}
-        labels: dict[str, NDArray[np.intp]] = {}
-        for key in group:
-            node = group[key]
-            if not isinstance(node, h5py.Dataset) or (prefix and not key.startswith(prefix)):
-                continue
-            data = node[()]
-            match = re.search(r"_level(\d+)$", key)
-            if match is not None:
-                levels[match.group(1)] = _decode_strings(data)
-                continue
-            match = re.search(r"_label(\d+)$", key)
-            if match is not None:
-                labels[match.group(1)] = np.asarray(data, dtype=np.intp)
-        if levels and labels:
-            return levels, labels
-    return {}, {}
-
-
-def _resolve_value_matrix(group: h5py.Group, column_count: int, h5_path: Path) -> tuple[h5py.Dataset, bool]:
-    """Resolves the float value matrix dataset and its orientation for lazy, column-wise reads.
-
-    Args:
-        group: The DLC predictions group.
-        column_count: The number of data columns reconstructed from the column index, used to orient the matrix.
-        h5_path: The path to the file, used only for error messages.
-
-    Returns:
-        A ``(dataset, frames_first)`` tuple. ``frames_first`` is True when the matrix is stored as
-        ``(frame_count, column_count)`` (column ``j`` is ``dataset[:, j]``) and False when stored transposed as
-        ``(column_count, frame_count)`` (column ``j`` is ``dataset[j, :]``).
-
-    Raises:
-        ValueError: If no value matrix dataset is present.
-    """
-    values = group.get("block0_values")
-    if isinstance(values, h5py.Dataset):
-        # pandas can store a block transposed; orient by matching whichever dimension equals the column count.
-        frames_first = values.shape[1] == column_count
-        return values, frames_first
-
-    message = (
-        f"Unable to read pupil tracking from '{h5_path.name}'. The DeepLabCut prediction file does not expose a "
-        f"fixed-format value matrix ('block0_values'); re-export it as a fixed-format '.h5' or CSV."
-    )
-    console.error(message=message, error=ValueError)
-    raise ValueError(message)  # pragma: no cover - console.error is NoReturn; satisfies the return typing.
-
-
-def _decode_strings(raw: NDArray[np.generic]) -> list[str]:
-    """Decodes an ``h5py`` string dataset (bytes or fixed-width bytes) into a list of Python strings.
-
-    Args:
-        raw: The raw array read from an ``h5py`` string dataset.
-
-    Returns:
-        The decoded strings.
-    """
-    return [value.decode() if isinstance(value, bytes) else str(value) for value in raw.tolist()]
-
-
-def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, NDArray[np.generic]]:
-    """Computes per-frame pupil and eye metrics from the nine canonical points.
-
-    Fits an axis-conjugate ellipse to the pupil and to the eye, gates each frame on point likelihood, flags blinks
-    from the variation in eye openness, and derives motion-robust eye-position signals (pupil relative to the eye and
-    to the corneal reflection).
+    Fits an ellipse to the pupil and to the eye each frame from whichever ring points survive the likelihood gate.
+    Flags occluded frames as blinks, derives motion-robust eye-position signals from the pupil relative to the eye and
+    to the corneal reflection, and reports the pupil fit's per-frame quality (condition number and, where the ring is
+    overdetermined, RMS residual). Frames whose feature is too occluded to fit yield NaN geometry.
 
     Args:
         points: A mapping from each canonical bodypart to its ``(frame_count, 3)`` ``(x, y, likelihood)`` array.
@@ -390,60 +279,85 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     Returns:
         A mapping from each output column name to its per-frame array, ready to assemble into the output feather.
     """
-    pupil_valid = _points_valid(points=points, names=_PUPIL_POINTS)
-    pupil_center, pupil_width, pupil_height, pupil_angle, pupil_area = _ellipse_from_cardinal(
-        top=points["pupil_top"][:, :2],
-        bottom=points["pupil_bottom"][:, :2],
-        left=points["pupil_left"][:, :2],
-        right=points["pupil_right"][:, :2],
+    # A feature is measurable exactly when its fit is determined and well enough conditioned to trust. The pupil
+    # columns additionally answer to the blink. The eye columns answer only to their own fit.
+    pupil_center, pupil_semi_a, pupil_semi_b, pupil_condition, pupil_residual, pupil_valid = _fit_ring_ellipse(
+        points=points, names=_PUPIL_POINTS
     )
-    pupil_diameter = (pupil_width + pupil_height) / 2.0
+    # The ellipse area is pi times the cross-product magnitude of its two conjugate semi-diameters.
+    pupil_area = np.pi * np.abs(pupil_semi_a[:, 0] * pupil_semi_b[:, 1] - pupil_semi_a[:, 1] * pupil_semi_b[:, 0])
+    # The pupil diameter is the mean of the ellipse's two full-axis diameters, (2|semi_a| + 2|semi_b|) / 2, i.e. the
+    # sum of the two semi-diameter lengths. There is no pupil width or height output column, so neither is materialized.
+    pupil_diameter = _norm(pupil_semi_a) + _norm(pupil_semi_b)
 
-    eye_valid = _points_valid(points=points, names=_EYE_POINTS)
-    eye_center, eye_width, eye_height, _eye_angle, eye_area = _ellipse_from_cardinal(
-        top=points["eye_top"][:, :2],
-        bottom=points["eye_bottom"][:, :2],
-        left=points["eye_left"][:, :2],
-        right=points["eye_right"][:, :2],
-    )
-    # Eye openness is the eye's vertical-to-horizontal aspect ratio, which is invariant to camera distance.
-    eye_openness = np.where(eye_width > 0.0, eye_height / eye_width, np.nan)
+    eye_center, eye_semi_a, eye_semi_b, _, _, eye_valid = _fit_ring_ellipse(points=points, names=_EYE_POINTS)
+    eye_semi_width, eye_semi_height = _norm(eye_semi_a), _norm(eye_semi_b)
+    eye_width, eye_height = 2.0 * eye_semi_width, 2.0 * eye_semi_height
+    # Eye openness is the eye's vertical-to-horizontal aspect ratio, which is invariant to camera distance. A
+    # zero-width eye is a degenerate fit rather than a closed eye, so it yields NaN instead of dividing.
+    eye_openness = np.divide(eye_height, eye_width, out=np.full_like(eye_height, np.nan), where=eye_width > 0.0)
 
-    # A blink shrinks the eye opening relative to its session-typical value; loss of the pupil points (occlusion) is
-    # an additional cue. Frames where the eye itself cannot be seen are treated as blinks.
+    # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline to compare
+    # against. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility
+    # to carry it.
     confident_openness = eye_openness[eye_valid]
-    baseline = float(np.nanmedian(confident_openness)) if confident_openness.size else np.nan
-    pupil_min_likelihood = np.min(np.stack([points[name][:, 2] for name in _PUPIL_POINTS], axis=1), axis=1)
-    is_blink = (eye_openness < _BLINK_FRACTION * baseline) | (pupil_min_likelihood < _LIKELIHOOD_THRESHOLD) | ~eye_valid
+    baseline = float(np.nanmedian(confident_openness)) if np.isfinite(confident_openness).any() else np.nan
 
     reflection = points[_REFLECTION_POINT][:, :2]
     reflection_valid = points[_REFLECTION_POINT][:, 2] >= _LIKELIHOOD_THRESHOLD
-    pupil_cr = pupil_center - reflection
-    pupil_cr = np.where((pupil_valid & reflection_valid)[:, None], pupil_cr, np.nan)
-    pupil_in_eye = (pupil_center - eye_center) / np.stack([eye_width / 2.0, eye_height / 2.0], axis=1)
-    pupil_in_eye = np.where((pupil_valid & eye_valid)[:, None], pupil_in_eye, np.nan)
 
-    min_likelihood = np.min(np.stack([points[name][:, 2] for name in _CANONICAL_POINTS], axis=1), axis=1)
+    # A blink is read from the eye and its cornea alone, never from the pupil. Something covering the eye takes the
+    # eye ring, the corneal reflection, and the opening down together, and the cause does not change the consequence:
+    # a lid and a paw read the same. The pupil is deliberately excluded because a pupil that vanishes under an OPEN
+    # eye has outgrown the aperture rather than been hidden by a lid. Folding that in here would delete the most
+    # dilated pupils from the arousal signal exactly when arousal is highest.
+    is_blink = (
+        ~(eye_valid & reflection_valid) | ~np.isfinite(eye_openness) | (eye_openness < _BLINK_FRACTION * baseline)
+    )
+    not_blink = ~is_blink
+
+    # Behind a shut lid there is no pupil to measure, so a pupil fit that happens to converge on a blink frame is
+    # reporting on points the eye was covering. The pupil columns answer to the blink as well as to their own fit.
+    # The eye columns answer only to theirs, since their openness is what detects the blink in the first place.
+    pupil_measured = pupil_valid & not_blink
+
+    # The remaining way to lose the pupil is for it to outgrow the palpebral opening, which then clips it past what
+    # the surviving arc can reconstruct. The eye is plainly open, so this is dilation rather than a blink, and the two
+    # flags partition every unmeasured frame between them: a frame is measured, dilated, or blinked, never two.
+    is_dilated = not_blink & ~pupil_measured
+
+    pupil_reflection_offset = pupil_center - reflection
+    pupil_reflection_offset = np.where((pupil_measured & reflection_valid)[:, None], pupil_reflection_offset, np.nan)
+    # Normalizes the pupil's offset to the eye's semi-axes. A degenerate zero-extent eye divides to NaN on the
+    # collapsed axis rather than to an infinity, matching how eye openness handles the same fit.
+    eye_semi_axes = np.stack([eye_semi_width, eye_semi_height], axis=1)
+    pupil_in_eye = np.divide(
+        pupil_center - eye_center,
+        eye_semi_axes,
+        out=np.full_like(eye_semi_axes, np.nan),
+        where=eye_semi_axes > 0.0,
+    )
+    pupil_in_eye = np.where((pupil_measured & eye_valid)[:, None], pupil_in_eye, np.nan)
 
     # Masks geometry of frames whose source points were gated out so downstream consumers see NaN, not a bad fit.
     pupil_metrics = _mask_invalid(
-        {
-            "pupil_center_x": pupil_center[:, 0],
-            "pupil_center_y": pupil_center[:, 1],
-            "pupil_diameter": pupil_diameter,
-            "pupil_area": pupil_area,
-            "pupil_angle": pupil_angle,
+        metrics={
+            PupilColumn.PUPIL_CENTER_X_PX: pupil_center[:, 0],
+            PupilColumn.PUPIL_CENTER_Y_PX: pupil_center[:, 1],
+            PupilColumn.PUPIL_DIAMETER_PX: pupil_diameter,
+            PupilColumn.PUPIL_AREA_PX2: pupil_area,
+            PupilColumn.PUPIL_FIT_CONDITION: pupil_condition,
+            PupilColumn.PUPIL_FIT_RESIDUAL_PX: pupil_residual,
         },
-        valid=pupil_valid,
+        valid=pupil_measured,
     )
     eye_metrics = _mask_invalid(
-        {
-            "eye_center_x": eye_center[:, 0],
-            "eye_center_y": eye_center[:, 1],
-            "eye_width": eye_width,
-            "eye_height": eye_height,
-            "eye_area": eye_area,
-            "eye_openness": eye_openness,
+        metrics={
+            PupilColumn.EYE_CENTER_X_PX: eye_center[:, 0],
+            PupilColumn.EYE_CENTER_Y_PX: eye_center[:, 1],
+            PupilColumn.EYE_WIDTH_PX: eye_width,
+            PupilColumn.EYE_HEIGHT_PX: eye_height,
+            PupilColumn.EYE_OPENNESS: eye_openness,
         },
         valid=eye_valid,
     )
@@ -451,65 +365,104 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     return {
         **pupil_metrics,
         **eye_metrics,
-        "is_blink": is_blink,
-        "reflection_x": np.where(reflection_valid, reflection[:, 0], np.nan),
-        "reflection_y": np.where(reflection_valid, reflection[:, 1], np.nan),
-        "pupil_cr_x": pupil_cr[:, 0],
-        "pupil_cr_y": pupil_cr[:, 1],
-        "pupil_in_eye_x": pupil_in_eye[:, 0],
-        "pupil_in_eye_y": pupil_in_eye[:, 1],
-        "min_likelihood": min_likelihood,
-        "low_confidence": min_likelihood < _LIKELIHOOD_THRESHOLD,
+        PupilColumn.BLINKING_STATE: is_blink,
+        PupilColumn.DILATION_STATE: is_dilated,
+        PupilColumn.REFLECTION_X_PX: np.where(reflection_valid, reflection[:, 0], np.nan),
+        PupilColumn.REFLECTION_Y_PX: np.where(reflection_valid, reflection[:, 1], np.nan),
+        PupilColumn.PUPIL_REFLECTION_OFFSET_X_PX: pupil_reflection_offset[:, 0],
+        PupilColumn.PUPIL_REFLECTION_OFFSET_Y_PX: pupil_reflection_offset[:, 1],
+        PupilColumn.PUPIL_IN_EYE_X: pupil_in_eye[:, 0],
+        PupilColumn.PUPIL_IN_EYE_Y: pupil_in_eye[:, 1],
     }
 
 
-def _points_valid(points: dict[str, NDArray[np.float64]], names: tuple[str, ...]) -> NDArray[np.bool_]:
-    """Computes the per-frame mask that is True only where every named point clears the likelihood threshold.
+def _fit_ring_ellipse(
+    points: dict[str, NDArray[np.float64]], names: tuple[str, ...]
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.bool_],
+]:
+    """Fits a centrally symmetric ellipse per frame from whichever of a feature's ring points are confident.
+
+    A point's position in the ring fixes its parametric angle, so a point labeled ``t`` lies at
+    ``P(t) = center + cos(t) * semi_a + sin(t) * semi_b``, where ``semi_a`` and ``semi_b`` are the ellipse's conjugate
+    semi-diameters. That is linear in the unknowns and separates by axis, so both coordinates share one
+    ``[1, cos(t), sin(t)]`` design matrix and three confident points already determine the fit, wherever on the ring
+    they sit. Points are used as they come: no point is ever reconstructed or imputed.
+
+    Determined is not the same as trustworthy. The design matrix depends only on which points survived, so its
+    condition number measures how far the surviving arc has to reach to pin the rest of the ellipse. Frames whose arc
+    is too narrow to carry a measurement are rejected rather than fitted.
 
     Args:
         points: A mapping from each canonical bodypart to its ``(frame_count, 3)`` ``(x, y, likelihood)`` array.
-        names: The bodyparts that must all be confident for the frame to be valid.
+        names: The feature's ring bodyparts, in ring order.
 
     Returns:
-        A per-frame boolean array.
+        A ``(center, semi_a, semi_b, condition, residual, valid)`` tuple. ``center``, ``semi_a`` and ``semi_b`` are
+        ``(frame_count, 2)`` arrays, NaN wherever the fit was rejected. ``condition`` is the per-frame fit condition
+        number (NaN where rejected), ``residual`` is the per-frame RMS point-to-ellipse distance in pixels, NaN where
+        rejected or where the fit was exactly determined (too few points to over-constrain it). ``valid`` is the
+        per-frame mask of frames that were fitted.
     """
-    valid = np.ones(points[names[0]].shape[0], dtype=np.bool_)
-    for name in names:
-        valid &= points[name][:, 2] >= _LIKELIHOOD_THRESHOLD
-    return valid
+    frame_count = points[names[0]].shape[0]
+    # The evenly spaced parametric angle of each ring point, in radians and starting at zero.
+    angles = 2.0 * np.pi * np.arange(len(names), dtype=np.float64) / len(names)
+    confident = np.stack([points[name][:, 2] >= _LIKELIHOOD_THRESHOLD for name in names], axis=1)
+    coordinates = np.stack([points[name][:, :2] for name in names], axis=1)
+
+    center = np.full((frame_count, 2), np.nan)
+    semi_a = np.full((frame_count, 2), np.nan)
+    semi_b = np.full((frame_count, 2), np.nan)
+    condition = np.full(frame_count, np.nan)
+    residual = np.full(frame_count, np.nan)
+    valid = np.zeros(frame_count, dtype=np.bool_)
+
+    # Frames that lost the same points share a design matrix, and therefore a conditioning verdict, so each distinct
+    # occlusion pattern is solved once for every frame that carries it. Packing each frame's confidence mask into one
+    # integer code groups the patterns with a fast 1-D unique, avoiding the void-row lexsort np.unique(..., axis=0)
+    # would run over the whole (frame_count, point_count) mask.
+    codes = confident.astype(np.int64) @ (1 << np.arange(len(names), dtype=np.int64))
+    _, representatives, inverse = np.unique(codes, return_index=True, return_inverse=True)
+    inverse = np.ravel(inverse)
+    for index in range(representatives.size):
+        kept = np.flatnonzero(confident[representatives[index]])
+        if kept.size < _MINIMUM_PERIMETER_POINTS:
+            continue
+        design = np.stack([np.ones(kept.size), np.cos(angles[kept]), np.sin(angles[kept])], axis=1)
+        condition_number = float(np.linalg.cond(design))
+        if not condition_number <= _MAXIMUM_FIT_CONDITION:
+            continue
+        rows = np.flatnonzero(inverse == index)
+        observed = coordinates[np.ix_(rows, kept)].transpose(1, 0, 2).reshape(kept.size, -1)
+        solution = np.linalg.lstsq(design, observed, rcond=None)[0]
+        center[rows], semi_a[rows], semi_b[rows] = solution.reshape(3, rows.size, 2)
+        condition[rows] = condition_number
+
+        # The residual only carries information when the ring is overdetermined: as many points as the design has
+        # unknowns (three) determine the ellipse exactly, so their residual is structurally zero and says nothing about
+        # fit quality. Those frames keep their NaN residual and are judged on the condition number alone.
+        if kept.size > design.shape[1]:
+            deviations = (design @ solution - observed).reshape(kept.size, rows.size, 2)
+            residual[rows] = np.sqrt(np.mean(deviations[:, :, 0] ** 2 + deviations[:, :, 1] ** 2, axis=0))
+        valid[rows] = True
+    return center, semi_a, semi_b, condition, residual, valid
 
 
-def _ellipse_from_cardinal(
-    top: NDArray[np.float64],
-    bottom: NDArray[np.float64],
-    left: NDArray[np.float64],
-    right: NDArray[np.float64],
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    """Fits a per-frame ellipse to four cardinal perimeter points via their two conjugate semi-diameters.
-
-    The four cardinal points determine a (possibly rotated) ellipse: its center is their centroid, its horizontal
-    extent and orientation come from the left-to-right chord, and its vertical extent from the top-to-bottom chord. A
-    general conic least-squares fit would need five or more perimeter points and is a future-model option.
+def _norm(vectors: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Computes the per-frame length of a ``(frame_count, 2)`` array of vectors.
 
     Args:
-        top: The ``(frame_count, 2)`` array of the top point's ``(x, y)`` per frame.
-        bottom: The ``(frame_count, 2)`` array of the bottom point's ``(x, y)`` per frame.
-        left: The ``(frame_count, 2)`` array of the left point's ``(x, y)`` per frame.
-        right: The ``(frame_count, 2)`` array of the right point's ``(x, y)`` per frame.
+        vectors: The ``(frame_count, 2)`` array of per-frame vectors.
 
     Returns:
-        A ``(center, width, height, angle, area)`` tuple: ``center`` is ``(frame_count, 2)``; the rest are per-frame
-        1-D arrays. ``width`` is the left-right chord length, ``height`` the top-bottom chord length, ``angle`` the
-        left-right chord orientation in radians, and ``area`` the enclosed ellipse area.
+        The per-frame vector lengths.
     """
-    center = (top + bottom + left + right) / 4.0
-    horizontal = right - left
-    vertical = bottom - top
-    width = np.hypot(horizontal[:, 0], horizontal[:, 1])
-    height = np.hypot(vertical[:, 0], vertical[:, 1])
-    angle = np.arctan2(horizontal[:, 1], horizontal[:, 0])
-    area = np.pi * (width / 2.0) * (height / 2.0)
-    return center, width, height, angle, area
+    return np.hypot(vectors[:, 0], vectors[:, 1])
 
 
 def _mask_invalid(metrics: dict[str, NDArray[np.float64]], valid: NDArray[np.bool_]) -> dict[str, NDArray[np.float64]]:
@@ -523,33 +476,3 @@ def _mask_invalid(metrics: dict[str, NDArray[np.float64]], valid: NDArray[np.boo
         A new mapping with the same keys whose values are NaN where ``valid`` is False.
     """
     return {name: np.where(valid, values, np.nan) for name, values in metrics.items()}
-
-
-def _load_frame_times(output_directory: Path, frame_count: int) -> NDArray[np.generic] | None:
-    """Loads the face camera's per-frame ``time_us`` from its timestamp feather, if the timestamp stage has run.
-
-    Args:
-        output_directory: The processed video-data directory holding the camera-timestamp feathers.
-        frame_count: The number of pose frames, used to confirm the timestamps align one-to-one with the predictions.
-
-    Returns:
-        The per-frame timestamp array when a matching, equal-length timestamp feather exists, otherwise None (so the
-        output carries only the frame index).
-    """
-    timestamp_path = output_directory.joinpath(f"{_PUPIL_CAMERA_NAME}{_CAMERA_TIMESTAMP_SUFFIX}")
-    if not timestamp_path.is_file():
-        return None
-
-    frame = pl.read_ipc(source=timestamp_path, memory_map=True)
-    if frame.height != frame_count:
-        console.echo(
-            message=(
-                f"The '{_PUPIL_CAMERA_NAME}' timestamp feather has {frame.height} row(s) but the DeepLabCut "
-                f"predictions have {frame_count} frame(s); writing pupil tracking without 'time_us'."
-            ),
-            level=LogLevel.WARNING,
-        )
-        return None
-
-    column = "time_us" if "time_us" in frame.columns else frame.columns[0]
-    return frame.get_column(column).to_numpy()

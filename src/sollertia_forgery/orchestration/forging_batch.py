@@ -58,7 +58,7 @@ def prepare_forging_unit(unit: dict[str, Any]) -> dict[str, Any]:
 
     Args:
         unit: The forging unit specification. Must carry a ``name`` (dataset name) and a ``project_root`` key, and
-            may carry ``session_names`` (the session names to include; empty reuses an existing dataset) and a
+            may carry ``session_names`` (the session names to include, an empty list reuses an existing dataset) and a
             ``force_recreate`` flag.
 
     Returns:
@@ -146,7 +146,7 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
     Loads the dataset's ``DatasetData`` marker and checks each session's ``data.feather`` (existence and
     readability), confirms every column it writes is described in the dataset's ``data_descriptions.feather``, the
     re-exported shared assets, and each animal's ``surgery_metadata.yaml``. The ``session_descriptor.yaml`` is
-    required for every session; the optional ``vr_configuration.yaml`` and ``experiment_configuration.yaml`` are
+    required for every session. The optional ``vr_configuration.yaml`` and ``experiment_configuration.yaml`` are
     reported per session but do not fail verification when absent, since only some session types carry them. Reads
     the forging processing tracker. Owns the full verification result, including the ``verified`` boolean and the
     ``tracker`` block. The check is system-agnostic: it validates only the universal output contract, the
@@ -216,7 +216,7 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
                         session_valid = False
 
         # Verifies the re-exported shared assets alongside the assembled feather. The session descriptor is part of
-        # the universal output contract and is required for every session; the VR and experiment configurations are
+        # the universal output contract and is required for every session. The VR and experiment configurations are
         # re-exported only for the session types that carry them, so they are reported per session but never fail
         # verification when absent.
         shared_results: dict[str, Any] = {}

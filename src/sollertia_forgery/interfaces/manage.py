@@ -3,6 +3,7 @@ generation and inspection, and session raw-data integrity checksum verification.
 """
 
 from pathlib import Path
+from dataclasses import dataclass
 
 import click
 from ataraxis_base_utilities import console
@@ -10,35 +11,62 @@ from ataraxis_base_utilities import console
 from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
+
+
+@dataclass(frozen=True, slots=True)
+class _SharedManifestParameters:
+    """Bundles the option parsed on the ``manifest`` group and shared across its ``generate`` and ``print``
+    subcommands.
+
+    The group callback builds one of these from its option and stores it on the Click context, and each subcommand
+    reads it back through the ``_pass_shared_parameters`` decorator.
+    """
+
+    project_path: Path | None
+    """The path to the project root data directory both subcommands operate on."""
+
+    def require_project_path(self) -> Path:
+        """Returns the project root path, raising a Click usage error when ``--project-path`` was not supplied."""
+        if self.project_path is None:
+            message = "Missing option '-pp' / '--project-path'."
+            raise click.UsageError(message=message)
+        return self.project_path
+
+
+_pass_shared_parameters = click.make_pass_decorator(_SharedManifestParameters)
+"""Injects the ``manifest`` group's ``_SharedManifestParameters`` as each subcommand's first argument."""
 
 
 @click.group("manifest", context_settings=CONTEXT_SETTINGS)
-def manifest_cli() -> None:
-    """Generates and inspects the project manifest .feather file that snapshots a project's state."""
-
-
-@manifest_cli.command("generate")
 @click.option(
     "-pp",
     "--project-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
+    default=None,
     help="The absolute path to the project's root data directory.",
 )
-def generate_manifest(project_path: Path) -> None:
-    """Generates the manifest .feather file that captures the snapshot of the target project's state."""
-    generate_project_manifest(project_directory=project_path)
+@click.pass_context
+def manifest_cli(context: click.Context, project_path: Path | None) -> None:
+    """Generates and inspects the project manifest .feather file that snapshots a project's state.
+
+    The project path is parsed on this group and shared by every subcommand, so it must be given before the
+    subcommand name.
+    """
+    context.obj = _SharedManifestParameters(project_path=project_path)
 
 
-@manifest_cli.command("print")
-@click.option(
-    "-pp",
-    "--project-path",
-    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
-    required=True,
-    help="The path to the project's root data directory.",
-)
+@manifest_cli.command("create", context_settings=CONTEXT_SETTINGS)
+@_pass_shared_parameters
+def create_manifest(shared: _SharedManifestParameters) -> None:
+    """Creates the manifest .feather file that captures the snapshot of the target project's state.
+
+    An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
+    """
+    generate_project_manifest(project_directory=shared.require_project_path())
+
+
+@manifest_cli.command("print", context_settings=CONTEXT_SETTINGS)
 @click.option(
     "-a",
     "--animal",
@@ -82,8 +110,9 @@ def generate_manifest(project_path: Path) -> None:
         "reflects the latest state of the project's data."
     ),
 )
+@_pass_shared_parameters
 def print_project_manifest_data(
-    project_path: Path,
+    shared: _SharedManifestParameters,
     *,
     animal: int | None,
     notes: bool,
@@ -99,6 +128,7 @@ def print_project_manifest_data(
         console.error(message=message, error=ValueError)
 
     # Resolves the manifest path and regenerates if requested or absent.
+    project_path = shared.require_project_path()
     manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
     if regenerate or not manifest_path.exists():
         generate_project_manifest(project_directory=project_path)

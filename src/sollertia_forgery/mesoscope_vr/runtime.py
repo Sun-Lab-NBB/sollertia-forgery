@@ -61,7 +61,7 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
 
     Notes:
         Routes each decoded payload by its leading code (or by length for VR wall cue sequences) and writes the
-        resulting behavior feathers; the experiment-only feathers are written only for experiment sessions.
+        resulting behavior feathers. The experiment-only feathers are written only for experiment sessions.
 
     Args:
         decoded_messages: The decoded runtime messages as a Polars DataFrame with a ``time_us`` UInt64 column and a
@@ -95,7 +95,7 @@ def _export_runtime_data(
     """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
 
     Notes:
-        Writes the system-state and runtime-state feathers for every session; for experiment sessions it also writes
+        Writes the system-state and runtime-state feathers for every session. For experiment sessions it also writes
         the cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events
         were recorded.
 

@@ -1,10 +1,9 @@
 """Tests for the standalone microcontroller log processing pipeline.
 
 The pipeline is exercised through stub parser functions injected in place of the central
-``resolve_microcontroller_parsers`` lookup, with real extraction configuration and manifest fixtures (so
-``_resolve_controllers`` runs for real) and a faked Stage 1 extraction (so no real ``.npz`` archive or
-acquisition-library extraction is required). Stage 2 parsing, the unified tracker, job discovery, and local/remote
-dispatch all run as production code.
+``resolve_microcontroller_parsers`` lookup. A real microcontroller manifest fixture lets ``_resolve_controllers``
+derive the extraction configurations for real, and a faked Stage 1 extraction removes the need for a real ``.npz``
+archive. Stage 2 parsing, the unified tracker, job discovery, and local/remote dispatch all run as production code.
 """
 
 from __future__ import annotations
@@ -19,9 +18,7 @@ from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 from ataraxis_communication_interface.microcontroller import (
     EXTRACTION_JOB_NAME,
-    EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
-    ExtractionConfig,
     ModuleSourceData,
     ModuleExtractionConfig,
     MicroControllerManifest,
@@ -33,6 +30,7 @@ from sollertia_forgery.registries import (
     MICROCONTROLLER_PARSER_REGISTRY,
     resolve_microcontroller_parsers,
     resolve_two_photon_data_locator,
+    resolve_microcontroller_event_codes,
 )
 from sollertia_forgery.microcontrollers import (
     PARSE_JOB_NAME,
@@ -40,6 +38,7 @@ from sollertia_forgery.microcontrollers import (
     run_microcontroller_processing_pipeline,
 )
 from sollertia_forgery.mesoscope_vr.two_photon import locate_two_photon_data
+from sollertia_forgery.mesoscope_vr.microcontrollers import is_module_eligible
 
 # Module-level stub parsers so the parallel parse path can pickle them by reference. Each writes a trivial domain
 # feather, named for its module, recording which event codes the partition carried. Their signature matches the
@@ -100,22 +99,8 @@ def _make_session(
 def _write_inputs(
     session: SimpleNamespace, *, modules: tuple[tuple[int, int], ...] = ((2, 1), (4, 1)), stage_archive: bool = True
 ) -> None:
-    """Writes the acquisition-time extraction configuration, manifest, and (optionally) a log archive placeholder."""
+    """Writes the acquisition-time microcontroller manifest and (optionally) a log archive placeholder."""
     behavior = session.raw_data.behavior_data_path
-
-    config = ExtractionConfig(
-        controllers=[
-            ControllerExtractionConfig(
-                controller_id=101,
-                modules=tuple(
-                    ModuleExtractionConfig(module_type=module_type, module_id=module_id, event_codes=(51, 52))
-                    for module_type, module_id in modules
-                ),
-                kernel=None,
-            )
-        ]
-    )
-    config.save(file_path=behavior / EXTRACTION_CONFIGURATION_FILENAME)
 
     manifest = MicroControllerManifest(
         controllers=[
@@ -205,7 +190,7 @@ def test_resolve_microcontroller_parsers_returns_mesoscope_callables() -> None:
     parsers = resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR)
     assert parsers  # Mesoscope-VR registers at least one module parser.
     assert all(callable(parser) for parser in parsers.values())
-    # The session stores the acquisition system as a string; resolution must accept that form too.
+    # The session stores the acquisition system as a string. Resolution must accept that form too.
     assert resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR.value).keys() == parsers.keys()
 
 
@@ -217,7 +202,7 @@ def test_resolve_microcontroller_parsers_invalid_system_raises() -> None:
 def test_resolve_two_photon_data_locator_returns_mesoscope_callable() -> None:
     locator = resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR)
     assert callable(locator)
-    # The session stores the acquisition system as a string; resolution must accept that form too.
+    # The session stores the acquisition system as a string. Resolution must accept that form too.
     assert resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR.value) is locator
 
 
@@ -239,12 +224,63 @@ def test_registered_parsers_are_picklable() -> None:
         assert pickle.loads(pickle.dumps(parser)) is parser, key
 
 
+def test_event_code_registry_covers_every_parseable_module() -> None:
+    # The extraction stage filters each module by its registered codes, so a parseable module that declares none would
+    # be dropped from its controller's extraction configuration and its parse job would silently never be discovered.
+    for system, module_type, module_id in MICROCONTROLLER_PARSER_REGISTRY:
+        assert (module_type, module_id) in resolve_microcontroller_event_codes(system=system)
+
+
+def test_screen_module_is_eligible_when_initially_off() -> None:
+    # screens_initially_on records the screens' initial state, not whether the module was used, so a False value must
+    # not suppress screen parsing. Only None, the MesoscopeHardwareState unused-module marker, does.
+    assert is_module_eligible(module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=False))
+    assert not is_module_eligible(module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=None))
+
+
+def test_usage_flag_modules_are_skipped_when_flag_is_unset() -> None:
+    # delivered_gas_puffs and recorded_mesoscope_ttl are genuine usage flags, so False does mark the module unused.
+    assert not is_module_eligible(module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=False))
+    assert is_module_eligible(module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=True))
+    assert not is_module_eligible(
+        module_type=1, module_id=1, hardware_state=SimpleNamespace(recorded_mesoscope_ttl=False)
+    )
+
+
+def test_resolve_controllers_derives_config_from_manifest(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    # (9, 9) is not registered for any system, so it must be excluded from the derived configuration.
+    _write_inputs(session, modules=((2, 1), (9, 9)), stage_archive=False)
+
+    controllers = pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52), (4, 1): (51,)})
+
+    assert set(controllers) == {"101"}
+    config = controllers["101"]
+    assert config.kernel is None
+    assert config.modules == (ModuleExtractionConfig(module_type=2, module_id=1, event_codes=(51, 52)),)
+
+
+def test_resolve_controllers_rejects_manifest_with_no_extractable_module(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+    _write_inputs(session, modules=((9, 9),), stage_archive=False)
+
+    with pytest.raises(ValueError, match="declares a module"):
+        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+
+
+def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
+    session = _make_session(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="microcontroller manifest"):
+        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+
+
 def test_split_parse_specifier() -> None:
     assert pipeline_module._split_parse_specifier("101-2-1") == ("101", 2, 1)
 
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
-    (tmp_path / "101_log.npz").touch()  # controller 101 archive present; controller 102 absent
+    (tmp_path / "101_log.npz").touch()  # controller 101 archive present, controller 102 absent
     controllers = {
         "101": ControllerExtractionConfig(
             controller_id=101,
@@ -267,7 +303,7 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
         controllers=controllers, parsers=parsers, log_directory=tmp_path, extraction_job_name=EXTRACTION_JOB_NAME
     )
 
-    # Module (4, 1) has no registered parser, so it never appears; controller 102 is parseable but has no archive.
+    # Module (4, 1) has no registered parser, so it never appears. Controller 102 is parseable but has no archive.
     assert set(universe) == {
         (EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),

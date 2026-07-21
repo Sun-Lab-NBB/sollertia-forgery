@@ -16,14 +16,14 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
 from ataraxis_communication_interface.microcontroller import (
     EXTRACTION_JOB_NAME,
-    EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
-    ExtractionConfig,
+    ModuleExtractionConfig,
     MicroControllerManifest,
+    ControllerExtractionConfig,
     execute_job,
 )
 
-from ..registries import resolve_microcontroller_parsers
+from ..registries import resolve_microcontroller_parsers, resolve_microcontroller_event_codes
 from ..shared_assets import (
     LOG_ARCHIVE_SUFFIX,
     tracked_job,
@@ -37,8 +37,6 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Mapping, Callable
     from concurrent.futures import Future
-
-    from ataraxis_communication_interface.microcontroller import ControllerExtractionConfig
 
 # The registered parser for a single module, resolved from the central MICROCONTROLLER_PARSER_REGISTRY: a plain
 # module-level function ``parse(event_partition, output_directory, session) -> None``. The PEP 695 alias is evaluated
@@ -64,26 +62,27 @@ def run_microcontroller_processing_pipeline(
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
         parser registered for the session's acquisition system (in ``MICROCONTROLLER_PARSER_REGISTRY``), writing the
-        domain-specific feather into ``microcontroller_data``; the pipeline stays system-agnostic.
+        domain-specific feather into ``microcontroller_data``. The pipeline is system-agnostic.
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
         (across a worker pool when more than one worker is available and more than one module is runnable). In
-        remote mode (job_id is provided) only the single matching job runs in-process. The processing tracker is
-        co-located with the extracted and parsed output in ``microcontroller_data``.
+        remote mode (job_id is provided) only the single matching job runs. That job still honors the worker budget,
+        so a remote extraction fans intra-archive decoding across the pool while a remote parse runs single-core. The
+        processing tracker is co-located with the extracted and parsed output in ``microcontroller_data``.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         job_id: The hexadecimal identifier of the single job to execute (remote mode). If not provided, the whole
             pipeline runs (local mode).
         workers: The number of worker processes to use. A value less than 1 uses all available CPU cores (minus
-            reserved cores); 1 forces sequential processing.
+            reserved cores), and 1 forces sequential processing.
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the session's extraction configuration or microcontroller manifest is missing, or,
-            in remote mode, if a requested extraction job's log archive is not present.
-        ValueError: If the session's acquisition system is unknown, if a configured controller ID is not registered
-            in the microcontroller manifest, if no processable controllers are discovered, or if the provided
+        FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
+            extraction job's log archive is not present.
+        ValueError: If the session's acquisition system is unknown, if no manifest controller declares a module the
+            session's acquisition system extracts, if no processable controllers are discovered, or if the provided
             job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
@@ -92,12 +91,13 @@ def run_microcontroller_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Looks up the parser function for every module this session's acquisition system can parse from the central
-    # registry, inferring the system from the session.
+    # Looks up the parser function and the extracted event codes for every module this session's acquisition system
+    # can parse from the central registries, inferring the system from the session.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
+    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
 
-    # Loads the per-controller extraction configurations (validated against the microcontroller manifest).
-    controllers = _resolve_controllers(session=session)
+    # Derives the per-controller extraction configurations from the microcontroller manifest and the event codes.
+    controllers = _resolve_controllers(session=session, event_codes=event_codes)
 
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
@@ -178,59 +178,69 @@ def run_microcontroller_processing_pipeline(
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
-def _resolve_controllers(session: SessionData) -> dict[str, ControllerExtractionConfig]:
-    """Resolves the per-controller extraction configurations for the target session.
+def _resolve_controllers(
+    session: SessionData, event_codes: Mapping[tuple[int, int], tuple[int, ...]]
+) -> dict[str, ControllerExtractionConfig]:
+    """Derives the per-controller extraction configurations for the target session.
 
     Notes:
-        Loads the acquisition-time extraction configuration (the source of truth for which controllers, modules,
-        and event codes to extract) from the session's raw behavior data directory, and validates every configured
-        controller ID against the microcontroller manifest written alongside the log archives. The manifest check
-        confirms the archives were produced by ataraxis-communication-interface, which also distinguishes the
-        microcontroller controllers from the runtime DataLogger archive that shares the same directory.
+        The configurations are built in memory. The microcontroller manifest written alongside the log archives
+        supplies the controller and module topology, and the session's acquisition system supplies the event codes
+        each module's parser reads (from the central MICROCONTROLLER_EVENT_CODE_REGISTRY). A manifest module the
+        system does not parse is excluded, since extracting it would produce an intermediate feather nothing consumes,
+        and a controller left with no such module contributes no configuration at all. Requiring the manifest also
+        confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
+        microcontroller controllers from the runtime DataLogger archive that shares the same directory. Kernel
+        extraction is never configured, because this pipeline does not consume the kernel feather.
 
     Args:
         session: The loaded session whose microcontroller logs are being processed.
+        event_codes: The event codes registered for the session's acquisition system, keyed by
+            ``(module_type, module_id)``.
 
     Returns:
-        An ordered mapping from each configured controller ID (as a string) to its ControllerExtractionConfig.
+        An ordered mapping from each manifest controller ID (as a string) to its derived ControllerExtractionConfig.
 
     Raises:
-        FileNotFoundError: If the extraction configuration or the microcontroller manifest is not present at the
-            session's canonical raw behavior data location.
-        ValueError: If a configured controller ID is not registered in the microcontroller manifest.
+        FileNotFoundError: If the microcontroller manifest is not present at the session's canonical raw behavior
+            data location.
+        ValueError: If no manifest controller declares a module the session's acquisition system extracts.
     """
     log_directory = session.raw_data.behavior_data_path
-
-    config_path = log_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
-    if not config_path.is_file():
-        message = (
-            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No extraction "
-            f"configuration was found at '{config_path}'. The extraction configuration is authored during "
-            f"acquisition and defines the per-controller event codes the extraction stage processes."
-        )
-        console.error(message=message, error=FileNotFoundError)
 
     manifest_path = log_directory.joinpath(MICROCONTROLLER_MANIFEST_FILENAME)
     if not manifest_path.is_file():
         message = (
             f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No "
-            f"microcontroller manifest was found at '{manifest_path}'. The manifest is required to confirm the log "
-            f"archives were produced by ataraxis-communication-interface."
+            f"microcontroller manifest was found at '{manifest_path}'. The manifest enumerates the controllers and "
+            f"modules to extract and confirms the log archives were produced by ataraxis-communication-interface."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    config = ExtractionConfig.load(file_path=config_path)
     manifest = MicroControllerManifest.load(file_path=manifest_path)
-    manifest_ids = {str(controller.id) for controller in manifest.controllers}
 
-    controllers = {str(controller.controller_id): controller for controller in config.controllers}
+    controllers: dict[str, ControllerExtractionConfig] = {}
+    for controller in manifest.controllers:
+        modules = tuple(
+            ModuleExtractionConfig(
+                module_type=module.module_type,
+                module_id=module.module_id,
+                event_codes=event_codes[(module.module_type, module.module_id)],
+            )
+            for module in controller.modules
+            if (module.module_type, module.module_id) in event_codes
+        )
+        if not modules:
+            continue
+        controllers[str(controller.id)] = ControllerExtractionConfig(
+            controller_id=controller.id, modules=modules, kernel=None
+        )
 
-    unregistered = natsorted(controller_id for controller_id in controllers if controller_id not in manifest_ids)
-    if unregistered:
+    if not controllers:
         message = (
-            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. The following "
-            f"configured controller IDs are not registered in the microcontroller manifest: "
-            f"{', '.join(unregistered)}. Registered IDs: {natsorted(manifest_ids)}."
+            f"Unable to resolve microcontroller controllers for session '{session.session_name}'. None of the "
+            f"controllers registered in the microcontroller manifest at '{manifest_path}' declares a module the "
+            f"'{session.acquisition_system}' acquisition system extracts."
         )
         console.error(message=message, error=ValueError)
 
@@ -320,7 +330,7 @@ def _discover_jobs(
 
     Notes:
         A controller contributes jobs only if at least one of its configured modules is eligible (present in the
-        resolved parser mapping); extracting a controller with no parseable modules would produce intermediate
+        resolved parser mapping). Extracting a controller with no parseable modules would produce intermediate
         feathers that nothing consumes. The universe enumerates every job the configuration could produce (one
         extraction job per such controller plus one parse job per eligible module), which stays stable across
         invocations for foreign-entry detection and remote-job validation. The requested set narrows the universe
@@ -387,7 +397,7 @@ def _run_extraction_stage(
         Controllers are extracted one at a time within a session. Each archive already fans its message decoding across
         the shared process pool, so a single controller saturates the session's worker budget, matching how the
         acquisition library orchestrates a multi-controller directory. Parallelism across sessions is handled by the
-        orchestration layer, which runs independent sessions concurrently under a per-session worker cap; extracting a
+        orchestration layer, which runs independent sessions concurrently under a per-session worker cap. Extracting a
         session's controllers sequentially therefore avoids oversubscribing cores across those concurrent sessions. The
         shared tracker is file-lock guarded and safe under concurrent access, so this ordering is a throughput choice
         rather than a correctness constraint. The pool is owned by the caller and shared with the parse stage, so this
@@ -454,7 +464,7 @@ def _run_parse_stage(
         The extraction outputs are indexed once up front, so each parse job resolves its input feather with an O(1)
         lookup rather than re-globbing and re-scanning the output directory per module. The acquisition binding
         writes a raw feather only for modules that produced at least one message, so a configured, eligible module
-        can legitimately have no feather; such a parse job is completed with no output rather than left unresolved.
+        can legitimately have no feather. Such a parse job is completed with no output rather than left unresolved.
         Modules with a feather are dispatched to the shared process pool when one is available and more than one
         module is runnable, with the parent owning all tracker state transitions.
 
@@ -484,7 +494,7 @@ def _run_parse_stage(
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(
                 message=(
-                    f"No extracted data was found for module '{specifier}'; completing its parse job with no output."
+                    f"No extracted data was found for module '{specifier}'. Completing its parse job with no output."
                 ),
                 level=LogLevel.WARNING,
             )
@@ -568,15 +578,15 @@ def _execute_parse_jobs_parallel(
         The pool is the one shared with the extraction stage and is owned by the caller, so this helper submits to
         it without shutting it down. Each job's tracker state is advanced to running immediately before its future
         is submitted, then resolved as the future completes. In-flight futures are allowed to finish on failure so
-        the tracker stays accurate for every dispatched job; the first captured exception is re-raised after all
+        the tracker stays accurate for every dispatched job. The first captured exception is re-raised after all
         futures resolve.
 
     Args:
         runnable: The parse jobs mapping each specifier to its ``(feather_path, module_parser)`` pair.
         tracker: The shared processing tracker.
-        session: The loaded session, passed through to each parser; must be picklable for the worker processes.
+        session: The loaded session, passed through to each parser. Must be picklable for the worker processes.
         parse_output: The directory the parsers write their domain-specific feathers into.
-        executor: The shared process pool to submit the parse jobs to. Owned by the caller; not shut down here.
+        executor: The shared process pool to submit the parse jobs to. Owned by the caller. Not shut down here.
         display_progress: Determines whether to display a per-module progress bar.
     """
     first_exception: Exception | None = None
@@ -701,7 +711,7 @@ def _execute_remote_job(
     if feather_path is None:
         console.echo(
             message=(
-                f"No extracted data was found for module '{specifier}'; completing its parse job with no output. "
+                f"No extracted data was found for module '{specifier}'. Completing its parse job with no output. "
                 f"Ensure the controller's extraction job has run first."
             ),
             level=LogLevel.WARNING,

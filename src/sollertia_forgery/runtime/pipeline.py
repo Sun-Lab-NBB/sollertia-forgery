@@ -51,7 +51,7 @@ def run_runtime_processing_pipeline(
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         workers: The number of worker processes the decode stage may use. A value less than 1 uses all available CPU
-            cores (minus reserved cores); 1 forces a single in-process decode.
+            cores (minus reserved cores), and 1 forces a single in-process decode.
         display_progress: Determines whether to display a progress bar while decoding a multi-batch archive.
 
     Raises:
@@ -139,7 +139,7 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
     Args:
         archive_path: The path to the runtime ``{source_id}_log.npz`` archive.
         workers: The number of worker processes the decode may use. A value less than 1 uses all available CPU cores
-            (minus reserved cores); 1 forces a single in-process decode.
+            (minus reserved cores), and 1 forces a single in-process decode.
         display_progress: Determines whether to display a per-batch progress bar during a parallel decode.
 
     Returns:

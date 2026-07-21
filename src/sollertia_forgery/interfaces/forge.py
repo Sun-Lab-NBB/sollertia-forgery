@@ -1,7 +1,7 @@
 """Provides the generic ``slf forge`` command that assembles a dataset from a project's processed sessions.
 
 Notes:
-    The assembly stage invokes the system-agnostic forging pipeline directly; that pipeline infers the acquisition
+    The assembly stage invokes the system-agnostic forging pipeline directly. That pipeline infers the acquisition
     system from the resolved dataset and resolves the system-specific assembly worker internally through the
     forging-assembly registry. The command carries no system selector.
 """
@@ -13,7 +13,7 @@ import click
 from ..forging import run_forging_pipeline
 
 CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
-"""Ensures that displayed Click help messages are formatted according to the lab standard."""
+"""Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
 @click.command("forge", context_settings=CONTEXT_SETTINGS)

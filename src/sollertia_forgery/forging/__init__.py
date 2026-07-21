@@ -1,7 +1,7 @@
 """Provides the system-agnostic dataset forging pipeline: dataset resolution and per-session assembly dispatch.
 
 The dataset hierarchy classes (``DatasetData``, ``DatasetFiles``, ``DatasetAnimal``, ``DatasetSession``) are owned by
-sollertia-shared-assets and re-exported here for convenience; this package owns the forging resolution policy and the
+sollertia-shared-assets and re-exported here for convenience. This package owns the forging resolution policy and the
 assembly pipeline.
 """
 
