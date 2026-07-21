@@ -1,6 +1,7 @@
 """Provides the system-agnostic, end-to-end dataset forging pipeline that defines the dataset hierarchy, runs the
-optional cindra multi-day stage, and assembles each session's ``data.feather`` and data-format descriptor through the
-per-session worker registered for the dataset's acquisition system in ``FORGING_ASSEMBLY_REGISTRY``.
+per-animal cindra multi-day cell-tracking stage the acquisition system resolves for each animal, and assembles each
+session's ``data.feather`` and data-format descriptor through the per-session worker registered for the dataset's
+acquisition system in ``FORGING_ASSEMBLY_REGISTRY``.
 """
 
 from __future__ import annotations
@@ -17,14 +18,14 @@ from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTracker
 from ataraxis_data_structures import ProcessingTracker
 
 from .dataset import resolve_dataset
-from ..registries import resolve_forging_assembly_worker
-from ..shared_assets import tracked_job, prepare_tracker
+from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
+from ..shared_assets import tracked_job, prepare_tracker, multi_recording_dataset_directory
 
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
-    from sollertia_shared_assets import DatasetSession
+    from sollertia_shared_assets import DatasetData, DatasetSession
 
 # The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY. The PEP 695 alias
 # is evaluated lazily, so its annotation-only operands need not exist at runtime.
@@ -34,6 +35,10 @@ FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name identifying per-session assembly jobs in the forging processing tracker. The same string is used by
 any deployment layer that submits per-session forging jobs, so the job identifiers it derives match the ones this
 pipeline computes."""
+
+_MULTI_RECORDING_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
+"""The filename under which the per-animal cindra multi-recording configuration is materialized in the animal's forged
+dataset directory before the multi-day cell-tracking stage runs."""
 
 
 def run_forging_pipeline(
@@ -45,14 +50,13 @@ def run_forging_pipeline(
     workers: int = -1,
     display_progress: bool = False,
     force_recreate: bool = False,
-    activity_configuration: Path | None = None,
 ) -> None:
     """Defines the dataset hierarchy and executes the forging assembly jobs for the target sessions.
 
     Notes:
-        This is the system-agnostic forging entry point. Stage 1 (dataset definition) and the optional Stage 2
-        (cindra multi-day processing) run up front before the processing tracker is created, so the tracker only
-        holds per-session assembly jobs. The per-session assembly worker is resolved from the central
+        This is the system-agnostic forging entry point. Stage 1 (dataset definition) and Stage 2 (per-animal cindra
+        multi-day cell tracking) run up front before the processing tracker is created, so the tracker only holds
+        per-session assembly jobs. The per-session assembly worker is resolved from the central
         ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system, so the pipeline stays system-agnostic and
         never names a system-specific type.
 
@@ -61,9 +65,10 @@ def run_forging_pipeline(
         session's assembly runs in-process. The cindra multi-day stage never runs in remote mode because it is a
         dataset-level prerequisite executed once, not per session.
 
-        The cindra multi-day stage runs only when ``activity_configuration`` is provided (gated on the configuration
-        alone, assuming single-recording cindra has already completed). When it is omitted, Stage 2 is skipped and
-        the assembly stage consumes whatever cindra outputs already exist on disk.
+        Stage 2 runs the acquisition system's multi-day cell-tracking configuration once per animal. The system's
+        resolver returns a per-animal configuration or None, so the system decides for itself whether cross-recording
+        tracking applies. Datasets whose sessions need no multi-day processing skip it, and datasets that do consume
+        the multi-day outputs Stage 2 produces during assembly.
 
     Args:
         name: The unique name of the dataset.
@@ -79,8 +84,6 @@ def run_forging_pipeline(
         display_progress: Determines whether to display a progress bar during assembly.
         force_recreate: Determines whether to allow deletion of the existing dataset hierarchy when the provided
             session list does not match the existing definition.
-        activity_configuration: The path to the cindra multi-recording configuration file. When provided (and in a
-            full local run), the multi-day cell-tracking stage runs before assembly. When None, the stage is skipped.
 
     Raises:
         ValueError: If the dataset does not exist and no sessions were provided to create it, if the provided session
@@ -104,11 +107,14 @@ def run_forging_pipeline(
 
     console.echo(message=f"Discovered {len(dataset_session_names)} assembly job(s).")
 
-    # Stage 2: runs the cindra multi-day stage once, up front, only in a full local run with a supplied
-    # configuration. It is a dataset-level prerequisite and writes its own trackers, so it is not part of the forging
-    # tracker and never runs for a single remote assembly job.
-    if job_id is None and activity_configuration is not None:
-        _run_activity_stage(configuration_path=activity_configuration)
+    # Stage 2: runs the per-animal cindra multi-day cell-tracking stage once, up front, only in a full local run. It is
+    # a dataset-level prerequisite and writes its own trackers, so it is not part of the forging tracker and never runs
+    # for a single remote assembly job. The system's resolver decides per animal whether tracking applies, so datasets
+    # whose sessions need no multi-day processing simply run no work here.
+    if job_id is None:
+        _run_activity_stage(
+            dataset=dataset, project_root=project_root, workers=workers, display_progress=display_progress
+        )
 
     # Prepares the forging tracker and registers one assembly job per session (Stages 3 and 4). For forging the job
     # universe equals the requested set: every session in the resolved dataset is always processable.
@@ -179,27 +185,74 @@ def run_forging_pipeline(
     console.echo(message="All forging jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
-def _run_activity_stage(configuration_path: Path) -> None:
-    """Runs the cindra multi-day (across-session cell tracking) stage for the dataset.
+def _run_activity_stage(dataset: DatasetData, project_root: Path, *, workers: int, display_progress: bool) -> None:
+    """Runs the cindra multi-day (across-recording cell tracking) stage once per animal for the dataset.
 
     Notes:
-        Runs both the cross-recording cell-discovery and the per-recording aligned-fluorescence extraction stages in
-        sequence so a single local invocation performs the full multi-day pipeline. cindra owns its own per-plane /
-        per-stage job decomposition and writes its own processing trackers at the recording root resolved from the
-        configuration file.
+        Cross-recording cell tracking registers cells within one brain, and a forged dataset can span multiple
+        animals, so the stage runs once per animal. The acquisition system's resolver returns the multi-recording
+        configuration for each animal or None, so the system decides whether tracking applies. An animal whose resolver
+        returns None is skipped. For a tracked animal the stage points the configuration at every one of the animal's
+        session cindra output directories and qualifies the cindra dataset name with the animal identifier so
+        per-animal outputs do not collide. Both the cross-recording cell-discovery and the per-recording
+        aligned-fluorescence extraction stages run in sequence, so a single local invocation performs the full
+        multi-day pipeline. cindra owns its own per-stage job decomposition and writes its own processing trackers at
+        the recording root resolved from the configuration.
 
     Args:
-        configuration_path: The path to the cindra multi-recording configuration file. The configuration encodes the
-            recordings to process and the per-dataset processing parameters.
+        dataset: The resolved dataset whose animals are tracked across their recordings.
+        project_root: The path to the project's root directory that stores the animal and session data directories.
+        workers: The numba worker budget cindra may use for the multi-day stage. -1 uses all available cores.
+        display_progress: Determines whether cindra displays progress bars during the multi-day stage.
+
+    Raises:
+        FileNotFoundError: If the acquisition system's resolver reports a missing input it needs for an animal.
+        ValueError: If the dataset's acquisition system is unknown, or if its resolver cannot resolve a configuration
+            for an animal.
     """
-    console.echo(
-        message=f"Stage 2: running multi-day cell-activity processing for '{configuration_path}'...",
-        level=LogLevel.INFO,
+    resolve_multi_recording_configuration = resolve_multi_recording_configuration_resolver(
+        system=dataset.acquisition_system
     )
-    run_multi_recording_pipeline(
-        configuration_path=configuration_path, job_id=None, discover=True, extract=True, target_recording=None
-    )
-    console.echo(message="Multi-day cell-activity processing completed successfully.", level=LogLevel.SUCCESS)
+
+    tracked_animals = 0
+    for dataset_animal in dataset.animals:
+        animal = dataset_animal.animal
+        animal_sessions = [
+            SessionData.load(session_path=project_root.joinpath(animal, entry.session))
+            for entry in dataset.get_sessions_for_animal(animal)
+        ]
+
+        # The system decides whether cross-recording tracking applies to this animal. A None result means it does not,
+        # so the animal contributes no multi-day processing.
+        configuration = resolve_multi_recording_configuration(animal_sessions[0])
+        if configuration is None:
+            continue
+
+        # Points the configuration at every one of the animal's session cindra output directories, each of which holds
+        # the combined_metadata.npz written by single-recording processing that the multi-day stage consumes.
+        configuration.recording_io.recording_directories = tuple(
+            session.processed_data.cindra_data_path for session in animal_sessions
+        )
+        # Qualifies the cindra dataset name with the animal identifier, matching how the assembler resolves each
+        # session's multi-recording output directory. The helper applies the same lowercasing cindra does, so the
+        # written output directory and the assembler's read path agree.
+        configuration.recording_io.dataset_name = multi_recording_dataset_directory(
+            animal_id=animal, dataset_name=dataset.name
+        )
+        configuration.runtime.parallel_workers = workers
+        configuration.runtime.display_progress_bars = display_progress
+
+        configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
+        configuration.save(file_path=configuration_path)
+
+        console.echo(message=f"Stage 2: running multi-day cell tracking for animal '{animal}'...", level=LogLevel.INFO)
+        run_multi_recording_pipeline(
+            configuration_path=configuration_path, job_id=None, discover=True, extract=True, target_recording=None
+        )
+        tracked_animals += 1
+
+    if tracked_animals:
+        console.echo(message="Multi-day cell tracking completed successfully.", level=LogLevel.SUCCESS)
 
 
 def _execute_jobs_sequential(

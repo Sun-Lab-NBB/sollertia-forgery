@@ -1,0 +1,49 @@
+---
+pipeline_type: multi-recording
+runtime:
+  parallel_workers: 20
+  display_progress_bars: false
+recording_io:
+  recording_directories: []
+  dataset_name: ''
+  repeat_selection: false
+roi_selection:
+  probability_threshold: 0.8
+  maximum_size: 1000
+  mroi_region_margin: 30
+  probability_threshold_channel_2: null
+  maximum_size_channel_2: null
+  mroi_region_margin_channel_2: null
+diffeomorphic_registration:
+  image_type: enhanced_mean
+  grid_sampling_factor: 1
+  scale_sampling: 30
+  speed_factor: 3
+  repeat_registration: false
+roi_tracking:
+  threshold: 0.75
+  mask_prevalence: 50
+  pixel_prevalence: 50
+  step_sizes:
+  - 200
+  - 200
+  bin_size: 50
+  maximum_distance: 20
+  minimum_size: 25
+signal_extraction:
+  extract_neuropil: true
+  allow_overlap: true
+  minimum_neuropil_pixels: 350
+  inner_neuropil_border_radius: 2
+  cell_probability_percentile: 50
+  classification_threshold: 0.5
+  batch_size: 500
+  colocalization_threshold: 0.65
+spike_deconvolution:
+  extract_spikes: true
+  neuropil_coefficient: 0.8
+  baseline_method: maximin
+  baseline_window: 60.0
+  baseline_sigma: 10.0
+  baseline_percentile: 8.0
+...

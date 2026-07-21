@@ -1,8 +1,11 @@
-"""Provides the Mesoscope-VR video sub-dataset assembler donated to the system-agnostic forging pipeline.
+"""Provides the Mesoscope-VR video sub-dataset assembler and camera-clock resolver donated to the system-agnostic
+forging pipeline.
 
 The assembler reads the fixed camera set's per-frame timestamp, motion-energy, and pupil-tracking feathers and aligns
-their values onto the mesoscope fluorescence reference clock, mirroring how the behavior and runtime sub-datasets are
-built. The camera set is hardcoded for the Mesoscope-VR system, matching the fixed microcontroller module set.
+their values onto the assembly reference clock, mirroring how the behavior and runtime sub-datasets are built. For
+training sessions, which carry no fluorescence clock, ``resolve_slowest_camera_clock`` derives the reference clock from
+the slowest camera. The camera set is hardcoded for the Mesoscope-VR system, matching the fixed microcontroller module
+set.
 """
 
 from __future__ import annotations
@@ -25,6 +28,13 @@ if TYPE_CHECKING:
 
 _BODY_CAMERA_NAME: str = "body_camera"
 """The colloquial name of the Mesoscope-VR body camera, used to prefix its motion-energy dataset columns."""
+
+_MICROSECONDS_PER_SECOND: float = 1_000_000.0
+"""The number of microseconds in one second, used to convert a camera's timestamp span into a mean frame rate."""
+
+_MINIMUM_CLOCK_FRAMES: int = 2
+"""The fewest frames a camera timestamp feather must hold to define a reference clock, since a mean frame rate needs at
+least two timestamps spanning a positive duration."""
 
 _FRAME_TIME_COLUMN: str = "frame_time_us"
 """The single column of each camera timestamp feather, holding one acquisition timestamp per recorded frame in
@@ -71,7 +81,8 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
         video_data_path: The path to the processed video-data directory holding the per-camera timestamp,
             motion-energy, and pupil-tracking feathers.
         reference_time: The reference time vector, in microseconds since the UTC epoch, to which to align the assembled
-            video values. It is the mesoscope fluorescence frame clock.
+            video values. It is the mesoscope fluorescence clock for experiment sessions and the slowest camera's clock
+            for training sessions.
 
     Returns:
         A Polars DataFrame aligned to the reference time vector with the per-camera motion-energy and frame-luminance
@@ -131,6 +142,65 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
     if not aligned_data:
         return pl.DataFrame()
     return pl.DataFrame(aligned_data)
+
+
+def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
+    """Resolves the slowest camera's acquisition clock, used as the assembly reference clock for training sessions.
+
+    Reads each present camera's timestamp feather from the processed video-data directory, computes its mean frame rate
+    as the recorded frame count divided by the timestamp span, and returns the timestamps of the camera with the lowest
+    mean rate verbatim. The slowest camera is chosen because every other data source can be interpolated onto its
+    coarser grid without inventing samples between its frames. Training sessions carry no fluorescence clock, so this
+    camera clock stands in as the reference the behavior and video sub-datasets align to.
+
+    Args:
+        video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.
+
+    Returns:
+        The slowest camera's per-frame acquisition timestamps, in microseconds since the UTC epoch.
+
+    Raises:
+        FileNotFoundError: If no camera timestamp feather with at least two frames spanning a positive duration is
+            present, so no camera clock can serve as the reference.
+    """
+    slowest_clock: NDArray[np.uint64] | None = None
+    slowest_rate = float("inf")
+    slowest_camera = ""
+
+    if video_data_path.is_dir():
+        for camera_name, timestamps_file, _energy_file, _pupil_file in _CAMERA_SOURCES:
+            timestamps_path = video_data_path.joinpath(timestamps_file)
+            if not timestamps_path.is_file():
+                continue
+
+            frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[_FRAME_TIME_COLUMN].to_numpy()
+
+            # A mean frame rate needs at least two frames spanning a positive duration. Casts the endpoints to float
+            # first, since the timestamps are unsigned and their difference would wrap on an out-of-order feather.
+            if frame_time.size < _MINIMUM_CLOCK_FRAMES:
+                continue
+            duration_seconds = (float(frame_time[-1]) - float(frame_time[0])) / _MICROSECONDS_PER_SECOND
+            if duration_seconds <= 0:
+                continue
+
+            mean_rate = frame_time.size / duration_seconds
+            if mean_rate < slowest_rate:
+                slowest_rate = mean_rate
+                slowest_clock = frame_time
+                slowest_camera = camera_name
+
+    if slowest_clock is None:
+        message = (
+            f"Unable to resolve the reference clock for the training session. No camera timestamp feather with at "
+            f"least two frames spanning a positive duration was found under '{video_data_path}', so no camera clock "
+            f"can serve as the assembly reference clock."
+        )
+        console.error(message=message, error=FileNotFoundError)
+        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
+        raise FileNotFoundError(message)  # pragma: no cover
+
+    console.echo(message=f"Resolved the '{slowest_camera}' clock ({slowest_rate:.2f} fps) as the reference clock.")
+    return slowest_clock
 
 
 def _interpolate_linear(

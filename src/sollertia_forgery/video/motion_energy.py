@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 MOTION_ENERGY_SUFFIX: str = "_energy.feather"
 """The filename suffix appended to a camera's manifest name to form its motion-energy feather (for example, the
-``face_camera`` source produces ``face_camera_energy.feather``)."""
+``left_camera`` source produces ``left_camera_energy.feather``)."""
 
 _VIDEO_SUFFIX: str = ".mp4"
 """The container suffix of the camera recordings this analysis reads. Every VideoSystem writes its recordings into the
@@ -115,7 +115,7 @@ def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_
 
     Every VideoSystem names its recording ``{session_name}_{camera_name}.mp4``, so the recording is resolved by
     reconstructing that exact name rather than by pattern-matching the camera name against the directory. Matching on
-    a suffix would be ambiguous: a camera named ``camera`` would match a ``body_camera`` recording, since that name
+    a suffix would be ambiguous: a camera named ``camera`` would match a ``left_camera`` recording, since that name
     also ends in ``_camera``.
 
     Args:
@@ -202,7 +202,7 @@ def compute_camera_motion_energy(
 
     # A positional table: one row per decoded frame in acquisition order, row position serving as the frame index, so
     # no explicit index column is stored. This is the same index-free positional convention the camera's timestamp and
-    # pupil feathers follow.
+    # other per-frame feathers follow.
     pl.DataFrame(
         {
             MotionEnergyColumn.MOTION_ENERGY: energy,

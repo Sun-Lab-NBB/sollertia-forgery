@@ -74,9 +74,7 @@ def assemble_behavior_dataset(
     state_enum = pl.Enum(list(state_mapping.keys()))
 
     # Loads the core behavior data present for all session types.
-    valve_data_frame = pl.read_ipc(
-        source=microcontroller_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True
-    )
+    valve_data_frame = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
     system_state_data_frame = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
     )

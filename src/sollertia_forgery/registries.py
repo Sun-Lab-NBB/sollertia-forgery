@@ -1,10 +1,11 @@
 """Collects every sollertia-forgery dispatch registry in one place and runs the import-time checks that guard them.
 
 Each acquisition system donates a set of assets to this module. The donated assets are the microcontroller module
-parsers and the event codes they read, the runtime log parser, the per-session forging data-assembly worker, and the
-raw two-photon imaging directory locator. This module binds those assets into the dispatch registries and exposes the
-``resolve_*`` helpers that consumers use to look them up. The registries are keyed by acquisition system (from
-sollertia-shared-assets) and, for microcontroller parsers, by hardware ``(module type, module id)``.
+parsers and the event codes they read, the runtime log parser, the per-session forging data-assembly worker, the raw
+two-photon imaging directory locator, and the cindra configuration resolvers. This module binds those assets into the
+dispatch registries and exposes the ``resolve_*`` helpers that consumers use to look them up. The registries are keyed
+by acquisition system (from sollertia-shared-assets) and, for microcontroller parsers, by hardware ``(module type,
+module id)``.
 """
 
 from __future__ import annotations
@@ -31,25 +32,34 @@ from .mesoscope_vr import (
     locate_two_photon_data,
     assemble_mesoscope_session,
     process_mesoscope_video_tracking,
+    resolve_multi_recording_configuration,
+    resolve_single_recording_configuration,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
+    from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
+    from sollertia_shared_assets import SessionData
+
 __all__ = [
+    "CINDRA_CONFIGURATION_REGISTRY",
     "FORGING_ASSEMBLY_REGISTRY",
     "MICROCONTROLLER_EVENT_CODE_REGISTRY",
     "MICROCONTROLLER_PARSER_REGISTRY",
     "RUNTIME_PARSER_REGISTRY",
     "TWO_PHOTON_DATA_REGISTRY",
     "VIDEO_TRACKING_REGISTRY",
+    "CindraConfigurationAsset",
     "ForgingAssemblyAsset",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
     "resolve_microcontroller_event_codes",
     "resolve_microcontroller_parsers",
+    "resolve_multi_recording_configuration_resolver",
     "resolve_runtime_binding",
+    "resolve_single_recording_configuration_resolver",
     "resolve_two_photon_data_locator",
     "resolve_video_tracking",
 ]
@@ -72,6 +82,26 @@ class ForgingAssemblyAsset:
     column_descriptions: dict[str, str]
     """The mapping from each column name the assembler can emit into ``data.feather`` to its human-readable
     description, baked into the forged dataset's per-dataset ``data_descriptions.feather``."""
+
+
+@dataclass(frozen=True, slots=True)
+class CindraConfigurationAsset:
+    """Bundles an acquisition system's donated cindra configuration resolvers: the single-recording and
+    multi-recording resolvers.
+
+    Notes:
+        Each resolver receives a loaded session and returns the runnable cindra configuration for it, deciding for
+        itself how the configuration is derived. The agnostic two-photon pipeline calls ``resolve_single_recording``
+        for the session it processes, and the agnostic forging pipeline calls ``resolve_multi_recording`` for each
+        animal it tracks across recordings.
+    """
+
+    resolve_single_recording: Callable[[SessionData], SingleRecordingConfiguration]
+    """The ``resolve(session)`` resolver that returns the system's single-recording cindra configuration for the
+    session, or raises when it cannot resolve one."""
+    resolve_multi_recording: Callable[[SessionData], MultiRecordingConfiguration | None]
+    """The ``resolve(session)`` resolver that returns the system's multi-recording cindra configuration for the
+    session, None when the system performs no cross-recording tracking for it, or raises when it cannot resolve one."""
 
 
 MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Callable[..., None]] = {
@@ -109,6 +139,17 @@ FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, ForgingAssemblyAsset] = {
 dataset_name)`` worker with its column-description mapping. These are the only forging assets a system donates.
 Dataset definition, the cindra multi-day stage, job/tracker orchestration, the per-dataset column-description
 binding, and shared-asset re-export are owned by the agnostic ``forging`` package."""
+
+CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, CindraConfigurationAsset] = {
+    AcquisitionSystems.MESOSCOPE_VR: CindraConfigurationAsset(
+        resolve_single_recording=resolve_single_recording_configuration,
+        resolve_multi_recording=resolve_multi_recording_configuration,
+    ),
+}
+"""The single, fully-visible registry of cindra configuration resolvers, keyed by acquisition system. Each value is a
+``CindraConfigurationAsset`` bundling the system's single- and multi-recording ``resolve(session)`` resolvers. The
+agnostic two-photon and forging pipelines obtain a runnable cindra configuration through these resolvers. Each system
+therefore decides for itself how its configuration is derived, keeping its lab-tuned logic next to its parsers."""
 
 RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, Callable[..., None]]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
@@ -170,6 +211,45 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
         ValueError: If the acquisition system is unknown.
     """
     return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system)].column_descriptions
+
+
+def resolve_single_recording_configuration_resolver(
+    system: str | AcquisitionSystems,
+) -> Callable[[SessionData], SingleRecordingConfiguration]:
+    """Resolves the single-recording cindra configuration resolver registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, as an AcquisitionSystems member or
+            its string value (for example, the value carried by ``SessionData.acquisition_system``).
+
+    Returns:
+        The registered ``resolve(session)`` resolver for the acquisition system. The agnostic two-photon pipeline
+        calls it with the session it processes to obtain a runnable single-recording configuration.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system)].resolve_single_recording
+
+
+def resolve_multi_recording_configuration_resolver(
+    system: str | AcquisitionSystems,
+) -> Callable[[SessionData], MultiRecordingConfiguration | None]:
+    """Resolves the multi-recording cindra configuration resolver registered for the target acquisition system.
+
+    Args:
+        system: The acquisition system that recorded the dataset being forged, as an AcquisitionSystems member or its
+            string value (for example, the value carried by ``DatasetData.acquisition_system``).
+
+    Returns:
+        The registered ``resolve(session)`` resolver for the acquisition system. The agnostic forging pipeline calls
+        it for each animal to obtain a runnable multi-recording configuration, or None when the system performs no
+        cross-recording tracking for that session.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system)].resolve_multi_recording
 
 
 def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dict[tuple[int, int], tuple[int, ...]]:
@@ -293,9 +373,9 @@ def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry, the
-    runtime-parser registry, the two-photon-data registry, and the microcontroller event-code registry, and registers
-    at least one microcontroller module parser. Additionally confirms that every parseable microcontroller module
-    declares the event codes its parser reads.
+    runtime-parser registry, the two-photon-data registry, the microcontroller event-code registry, and the cindra
+    configuration registry, and registers at least one microcontroller module parser. Additionally confirms that every
+    parseable microcontroller module declares the event codes its parser reads.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable microcontroller
@@ -311,6 +391,7 @@ def _assert_registry_coverage() -> None:
         ("TWO_PHOTON_DATA_REGISTRY", frozenset(TWO_PHOTON_DATA_REGISTRY)),
         ("VIDEO_TRACKING_REGISTRY", frozenset(VIDEO_TRACKING_REGISTRY)),
         ("MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(MICROCONTROLLER_EVENT_CODE_REGISTRY)),
+        ("CINDRA_CONFIGURATION_REGISTRY", frozenset(CINDRA_CONFIGURATION_REGISTRY)),
         ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing = systems - registered_systems

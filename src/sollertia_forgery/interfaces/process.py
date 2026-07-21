@@ -207,13 +207,6 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
 
 @process_cli.command("two-photon", context_settings=CONTEXT_SETTINGS)
 @click.option(
-    "-c",
-    "--configuration-path",
-    type=click.Path(exists=True, dir_okay=False, path_type=Path),
-    required=True,
-    help="The path to the cindra single-recording configuration file supplying the processing parameters.",
-)
-@click.option(
     "-b",
     "--binarize",
     is_flag=True,
@@ -245,7 +238,6 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
 @_pass_shared_parameters
 def two_photon_command(
     shared: _SharedProcessingParameters,
-    configuration_path: Path,
     target_plane: int,
     *,
     binarize: bool,
@@ -254,12 +246,12 @@ def two_photon_command(
 ) -> None:
     """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
 
-    When none of ``--binarize``, ``--process``, or ``--combine`` is requested, all three stages run in sequence
-    (local mode). Supplying ``--job-id`` instead runs only the matching job.
+    The acquisition system resolves the cindra processing configuration. When none of ``--binarize``,
+    ``--process``, or ``--combine`` is requested, all three stages run in sequence (local mode). Supplying
+    ``--job-id`` instead runs only the matching job.
     """
     run_two_photon_processing_pipeline(
         session_path=shared.require_session_path(),
-        configuration_path=configuration_path,
         job_id=shared.job_id,
         binarize=binarize,
         process=process,

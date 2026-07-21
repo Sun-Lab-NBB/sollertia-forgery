@@ -1,18 +1,19 @@
 """Provides the single-recording two-photon (calcium-imaging) processing pipeline that resolves the
-target session's raw imaging input and processed-output locations, materializes a runnable cindra configuration from
-the supplied processing parameters, and drives the cindra binarization, per-plane processing, and combination stages.
+target session's raw imaging input and processed-output locations, obtains a runnable cindra configuration from the
+acquisition system's donated resolver, and drives the cindra binarization, per-plane processing, and combination
+stages.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cindra import SingleRecordingConfiguration, run_single_recording_pipeline
+from cindra import run_single_recording_pipeline
 from cindra.io import PARAMETERS_FILENAME
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 
-from ..registries import resolve_two_photon_data_locator
+from ..registries import resolve_two_photon_data_locator, resolve_single_recording_configuration_resolver
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,7 +30,6 @@ recording is processable."""
 
 def run_two_photon_processing_pipeline(
     session_path: Path,
-    configuration_path: Path,
     job_id: str | None = None,
     *,
     binarize: bool = False,
@@ -42,27 +42,27 @@ def run_two_photon_processing_pipeline(
     """Materializes a session-bound cindra configuration and runs the single-recording two-photon processing pipeline.
 
     Resolves the session's raw imaging directory (cindra input) through the two-photon data registry and its
-    processed-data root (cindra output) from the session hierarchy. It overrides the configuration template's data
-    path and output path with these session-resolved locations, and its worker count and progress flag with the
-    supplied ``workers`` and ``display_progress`` arguments. It then writes the result as the session's cindra
-    ``configuration.yaml`` and delegates the binarization, per-plane processing, and combination stages to cindra. When
-    none of ``binarize``, ``process``, or ``combine`` is requested, all three stages run in sequence (local mode). A
-    supplied ``job_id`` instead runs only the matching job.
+    processed-data root (cindra output) from the session hierarchy. It obtains the cindra single-recording
+    configuration from the acquisition system's donated resolver, overrides its data path and output path with these
+    session-resolved locations, and overrides its worker count and progress flag with the supplied ``workers`` and
+    ``display_progress`` arguments. It then writes the result as the session's cindra ``configuration.yaml`` and
+    delegates the binarization, per-plane processing, and combination stages to cindra. When none of ``binarize``,
+    ``process``, or ``combine`` is requested, all three stages run in sequence (local mode). A supplied ``job_id``
+    instead runs only the matching job.
 
     Notes:
-        The raw-imaging input directory is resolved through the system-agnostic two-photon data registry, which
-        dispatches to the acquisition system's donated locator. If the session's acquisition system is not a
-        supported AcquisitionSystems member, the lookup raises and the pipeline fails before any cindra work begins.
-        cindra owns the heavy work and records the run on the two-photon processing tracker
-        (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
-        (``session.processed_data.cindra_data_path``).
-        The stage flags map directly onto its stages. Additional ``FileNotFoundError``/``ValueError`` conditions may
-        propagate from the underlying cindra pipeline.
+        The raw-imaging input directory and the configuration are resolved through the system-agnostic two-photon
+        registries, which dispatch to the acquisition system's donated assets. Each system decides for itself how its
+        configuration is derived, keeping the pipeline agnostic to every system's configuration source. If the
+        session's acquisition system is not a supported AcquisitionSystems member, the lookup raises and the pipeline
+        fails before any cindra work begins. cindra owns the heavy work and records the run on the two-photon processing
+        tracker (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
+        (``session.processed_data.cindra_data_path``). The stage flags map directly onto its stages. Additional
+        ``FileNotFoundError``/``ValueError`` conditions may propagate from the resolver or the underlying cindra
+        pipeline.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
-        configuration_path: The path to the cindra single-recording configuration template. Its data path, output
-            path, worker count, and progress flag are overridden. Every other parameter is used as supplied.
         job_id: The unique hexadecimal identifier for the cindra job to execute. If provided, only the matching job
             runs (remote mode). Otherwise, every requested stage runs (local mode).
         binarize: Determines whether to run the binarization stage.
@@ -74,11 +74,11 @@ def run_two_photon_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the configuration file does not exist or is not a YAML file, if the session's raw
-            two-photon imaging directory does not exist, or if no cindra acquisition parameters file is available for
-            the recording.
+        FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra acquisition
+            parameters file is available for the recording, or if the acquisition system's resolver reports missing
+            inputs it needs to resolve the configuration.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
-            configuration file cannot be loaded as a cindra single-recording configuration.
+            acquisition system's resolver cannot resolve a configuration for the session.
     """
     session = SessionData.load(session_path=session_path)
 
@@ -99,15 +99,6 @@ def run_two_photon_processing_pipeline(
     data_path = locate_two_photon_data(session)
     output_path = session.processed_data_path
     cindra_directory = session.processed_data.cindra_data_path
-
-    # Validates the caller-supplied processing configuration before loading it, so a missing or non-YAML file fails
-    # with an actionable message rather than deep inside cindra.
-    if not configuration_path.is_file() or configuration_path.suffix != ".yaml":
-        message = (
-            f"Unable to process two-photon data for session '{session.session_name}'. The supplied cindra "
-            f"single-recording configuration '{configuration_path}' does not exist or is not a '.yaml' file."
-        )
-        console.error(message=message, error=FileNotFoundError)
 
     # Confirms the recording exposes the data cindra needs. The raw imaging directory must exist for the binarization
     # stage, which also excludes sessions that did not acquire two-photon data (their imaging directory is absent).
@@ -135,20 +126,13 @@ def run_two_photon_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Loads the supplied configuration template and overrides only the session-bound locations and runtime settings,
-    # leaving every data-specific processing parameter as authored. The materialized copy is written into the cindra
-    # output directory, decoupling the reusable template from this session's run.
-    try:
-        configuration: SingleRecordingConfiguration = SingleRecordingConfiguration.from_yaml(
-            file_path=configuration_path
-        )
-    except Exception:
-        message = (
-            f"Unable to process two-photon data for session '{session.session_name}'. The file "
-            f"'{configuration_path}' could not be loaded as a cindra single-recording configuration. Ensure it is a "
-            f"valid single-recording configuration '.yaml' file."
-        )
-        console.error(message=message, error=ValueError)
+    # Obtains the cindra configuration from the acquisition system's donated resolver, then overrides only the
+    # session-bound locations and runtime settings, leaving every system-resolved processing parameter as returned. The
+    # materialized copy is written into the cindra output directory so the run is self-describing.
+    resolve_single_recording_configuration = resolve_single_recording_configuration_resolver(
+        system=session.acquisition_system
+    )
+    configuration = resolve_single_recording_configuration(session)
 
     configuration.file_io.data_path = data_path
     configuration.file_io.output_path = output_path

@@ -153,6 +153,38 @@ def assemble_runtime_dataset(
     )
 
 
+def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
+    """Masks cue, trial, and trial_type column values for non-run (idle or rest) system states.
+
+    Sets cue and trial to their dtype sentinels (``_CUE_UNDEFINED`` / ``_TRIAL_UNDEFINED``) and trial_type to the
+    "undefined" Enum member.
+
+    Args:
+        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
+
+    Returns:
+        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
+    """
+    # Extracts the Enum dtypes to ensure type consistency.
+    trial_type_dtype = experiment_data.schema["trial_type"]
+    system_state_dtype = experiment_data.schema["system_state"]
+
+    # Defines the non-run system states that should trigger masking, cast to the Enum type.
+    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
+
+    # Creates a boolean mask for rows where the system state is not "run".
+    is_non_run = pl.col("system_state").is_in(non_run_states)
+
+    return experiment_data.with_columns(
+        pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
+        pl.when(is_non_run).then(pl.lit(_TRIAL_UNDEFINED, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
+        pl.when(is_non_run)
+        .then(pl.lit("undefined").cast(trial_type_dtype))
+        .otherwise(pl.col("trial_type"))
+        .alias("trial_type"),
+    )
+
+
 @njit(cache=True)
 def _check_trigger_zones(
     traversed_distance: NDArray[np.float64],
@@ -207,35 +239,3 @@ def _check_trigger_zones(
             zone_index += 1
 
     return in_zone
-
-
-def _mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
-    """Masks cue, trial, and trial_type column values for non-run (idle or rest) system states.
-
-    Sets cue and trial to their dtype sentinels (``_CUE_UNDEFINED`` / ``_TRIAL_UNDEFINED``) and trial_type to the
-    "undefined" Enum member.
-
-    Args:
-        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
-
-    Returns:
-        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
-    """
-    # Extracts the Enum dtypes to ensure type consistency.
-    trial_type_dtype = experiment_data.schema["trial_type"]
-    system_state_dtype = experiment_data.schema["system_state"]
-
-    # Defines the non-run system states that should trigger masking, cast to the Enum type.
-    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
-
-    # Creates a boolean mask for rows where the system state is not "run".
-    is_non_run = pl.col("system_state").is_in(non_run_states)
-
-    return experiment_data.with_columns(
-        pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
-        pl.when(is_non_run).then(pl.lit(_TRIAL_UNDEFINED, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
-        pl.when(is_non_run)
-        .then(pl.lit("undefined").cast(trial_type_dtype))
-        .otherwise(pl.col("trial_type"))
-        .alias("trial_type"),
-    )

@@ -26,6 +26,10 @@ from .microcontrollers import (
     parse_mesoscope_frame,
     get_module_event_codes,
 )
+from .cindra_configuration import (
+    resolve_multi_recording_configuration,
+    resolve_single_recording_configuration,
+)
 
 __all__ = [
     "EYE_TRACKING_PROJECT_NAME",
@@ -49,4 +53,6 @@ __all__ = [
     "parse_torque",
     "parse_valve",
     "process_mesoscope_video_tracking",
+    "resolve_multi_recording_configuration",
+    "resolve_single_recording_configuration",
 ]

@@ -56,7 +56,8 @@ def generate_project_manifest(project_directory: Path) -> None:
         project_directory: The path to the processed project's root directory.
 
     Raises:
-        FileNotFoundError: If the project directory does not exist or contains no session data.
+        FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
+            without its descriptor file.
         ValueError: If an unsupported session type is encountered.
         Timeout: If the manifest .feather file lock cannot be acquired within 20 seconds.
     """
@@ -104,9 +105,9 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "session": [],
                 # Session acquisition time as a timezone-aware datetime in the host machine's local time.
                 "date": [],
-                # Session types (e.g., mesoscope experiment, run training, etc.).
+                # The session type, a SessionTypes enumeration value.
                 "type": [],
-                # The acquisition system used to acquire the session (e.g., mesoscope-vr, etc.).
+                # The acquisition system that recorded the session, an AcquisitionSystems enumeration value.
                 "system": [],
                 # The experimenter notes about the session.
                 "notes": [],
@@ -118,7 +119,7 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "two_photon": [],
                 # Determines whether the session has been processed with the runtime processing pipeline.
                 "runtime": [],
-                # Determines whether the session has been processed with the DeepLabCut (video tracking) pipeline.
+                # Determines whether the session has been processed with the video (pose tracking) pipeline.
                 "video": [],
                 # Stores the cindra multi-recording dataset names the session belongs to (empty list if none).
                 "multi_recording_datasets": [],
@@ -177,9 +178,8 @@ def generate_project_manifest(project_directory: Path) -> None:
                 ).astimezone()
                 manifest["date"].append(date_time)
 
-                # Loads the session descriptor to extract experimenter notes and completeness status. Some legacy
-                # Window Checking sessions lack descriptors, so a missing file is handled gracefully for that session
-                # type only.
+                # Loads the session descriptor to extract experimenter notes and completeness status. Every session
+                # carries a valid descriptor, so a missing or unparseable descriptor propagates as an error.
                 descriptor_path = session_data.raw_data.session_descriptor_path
                 descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
                 if descriptor_class is None:
@@ -191,17 +191,11 @@ def generate_project_manifest(project_directory: Path) -> None:
                     )
                     console.error(message=message, error=ValueError)
 
-                try:
-                    # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields
-                    # the manifest reads (every registered descriptor declares them) need an attribute-defined ignore.
-                    descriptor = descriptor_class.from_yaml(file_path=descriptor_path)
-                    is_complete = not descriptor.incomplete  # type: ignore[attr-defined]
-                    manifest["notes"].append(descriptor.experimenter_notes)  # type: ignore[attr-defined]
-                except Exception:
-                    if session_data.session_type != SessionTypes.WINDOW_CHECKING:
-                        raise
-                    is_complete = False
-                    manifest["notes"].append("N/A")
+                # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields the
+                # manifest reads (every registered descriptor declares them) need an attribute-defined ignore.
+                descriptor = descriptor_class.from_yaml(file_path=descriptor_path)
+                is_complete = not descriptor.incomplete  # type: ignore[attr-defined]
+                manifest["notes"].append(descriptor.experimenter_notes)  # type: ignore[attr-defined]
 
                 manifest["complete"].append(is_complete)
 
@@ -220,16 +214,14 @@ def generate_project_manifest(project_directory: Path) -> None:
                     manifest["multi_recording_complete"].append([])
                     continue
 
-                # Resolves two-photon, runtime, and DeepLabCut (video) processing status from canonical tracker paths
+                # Resolves two-photon, runtime, and video processing status from canonical tracker paths
                 # exposed by SessionData.
                 two_photon_tracker = _load_tracker_if_exists(
                     tracker_path=session_data.processed_data.two_photon_tracker_path
                 )
                 manifest["two_photon"].append(two_photon_tracker.complete if two_photon_tracker is not None else False)
 
-                runtime_tracker = _load_tracker_if_exists(
-                    tracker_path=session_data.processed_data.runtime_tracker_path
-                )
+                runtime_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.runtime_tracker_path)
                 manifest["runtime"].append(runtime_tracker.complete if runtime_tracker is not None else False)
 
                 video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)
