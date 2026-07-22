@@ -1,7 +1,5 @@
-"""Provides the system-agnostic, end-to-end dataset forging pipeline that defines the dataset hierarchy, runs the
-per-animal cindra multi-day cell-tracking stage the acquisition system resolves for each animal, and assembles each
-session's ``data.feather`` and data-format descriptor through the per-session worker registered for the dataset's
-acquisition system in ``FORGING_ASSEMBLY_REGISTRY``.
+"""Provides the system-agnostic, end-to-end dataset forging pipeline that defines the dataset hierarchy and assembles
+the data.feather files for each session included in the dataset.
 """
 
 from __future__ import annotations
@@ -23,18 +21,13 @@ from ..shared_assets import tracked_job, prepare_tracker, multi_recording_datase
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Callable
 
     from sollertia_shared_assets import DatasetData, DatasetSession
 
-# The registered, picklable per-session assembly worker resolved from FORGING_ASSEMBLY_REGISTRY. The PEP 695 alias
-# is evaluated lazily, so its annotation-only operands need not exist at runtime.
-type ForgingAssemblyWorker = Callable[[Path, Path, str], None]
+    from ..registries import ForgingAssembler
 
 FORGING_JOB_NAME: str = "session_data_assembly"
-"""The job name identifying per-session assembly jobs in the forging processing tracker. The same string is used by
-any deployment layer that submits per-session forging jobs, so the job identifiers it derives match the ones this
-pipeline computes."""
+"""The job name identifying per-session assembly jobs in the forging processing tracker."""
 
 _MULTI_RECORDING_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
 """The filename under which the per-animal cindra multi-recording configuration is materialized in the animal's forged
@@ -56,9 +49,9 @@ def run_forging_pipeline(
     Notes:
         This is the system-agnostic forging entry point. Stage 1 (dataset definition) and Stage 2 (per-animal cindra
         multi-day cell tracking) run up front before the processing tracker is created, so the tracker only holds
-        per-session assembly jobs. The per-session assembly worker is resolved from the central
-        ``FORGING_ASSEMBLY_REGISTRY`` by the dataset's acquisition system, so the pipeline stays system-agnostic and
-        never names a system-specific type.
+        per-session assembly jobs. The per-session assembly worker is resolved via
+        ``resolve_forging_assembly_worker`` from the dataset's acquisition system, so the pipeline stays
+        system-agnostic and never names a system-specific type.
 
         In local mode (``job_id`` is None), all assembly jobs are distributed across a parallel worker pool. In
         remote mode (``job_id`` is provided), the identifier must match an assembly job and only that single
@@ -262,7 +255,7 @@ def _execute_jobs_sequential(
     project_root: Path,
     tracker: ProcessingTracker,
     job_ids: dict[str, str],
-    worker: ForgingAssemblyWorker,
+    worker: ForgingAssembler,
     *,
     display_progress: bool,
 ) -> None:
@@ -310,7 +303,7 @@ def _execute_jobs_parallel(
     project_root: Path,
     tracker: ProcessingTracker,
     job_ids: dict[str, str],
-    worker: ForgingAssemblyWorker,
+    worker: ForgingAssembler,
     workers: int,
     *,
     display_progress: bool,
@@ -382,7 +375,7 @@ def _execute_job(
     project_root: Path,
     tracker: ProcessingTracker,
     job_id: str,
-    worker: ForgingAssemblyWorker,
+    worker: ForgingAssembler,
 ) -> None:
     """Executes a single session assembly job in-process with full tracker state management.
 
@@ -416,7 +409,7 @@ def _forge_session(
     source_session_path: Path,
     output_path: Path,
     dataset_name: str,
-    worker: ForgingAssemblyWorker,
+    worker: ForgingAssembler,
 ) -> None:
     """Forges and assembles a single session: runs the system worker, then re-exports the shared assets.
 

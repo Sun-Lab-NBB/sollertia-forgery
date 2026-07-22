@@ -41,7 +41,7 @@ def run_runtime_processing_pipeline(
         session's raw behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. It then
         hands that table to the registered runtime parser, which writes the system's behavior feathers into the
         session's processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and
-        parser are resolved from ``RUNTIME_PARSER_REGISTRY`` by the session's acquisition system, keeping the pipeline
+        parser are resolved via ``resolve_runtime_binding`` by the session's acquisition system, keeping the pipeline
         system-agnostic.
 
         The runtime job is the only job this pipeline produces, so it always runs and its processing tracker is reset
@@ -72,8 +72,11 @@ def run_runtime_processing_pipeline(
     log_directory = session.raw_data.behavior_data_path
     output_directory = session.processed_data.runtime_data_path
 
-    archive_path = _find_runtime_archive(log_directory=log_directory, source_id=source_id)
-    if archive_path is None:
+    # The runtime DataLogger always writes to a fixed per-system source id, so exactly one archive named
+    # '{source_id}_log.npz' is expected directly inside the session's raw behavior data directory. is_file() is
+    # already False when the directory itself is absent, so no separate directory guard is needed.
+    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
+    if not archive_path.is_file():
         message = (
             f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
             f"'{source_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
@@ -102,27 +105,6 @@ def run_runtime_processing_pipeline(
         message=f"Runtime processing for session '{session.session_name}' completed successfully.",
         level=LogLevel.SUCCESS,
     )
-
-
-def _find_runtime_archive(log_directory: Path, source_id: str) -> Path | None:
-    """Locates the runtime DataLogger archive for the source id, if it is present under the log directory.
-
-    Notes:
-        The runtime DataLogger always writes to a fixed per-system source id, so at most one archive named
-        ``{source_id}_log.npz`` is expected directly inside the session's raw behavior data directory. Returns None
-        when no archive is present so the caller can raise an actionable error rather than failing deep in the reader.
-
-    Args:
-        log_directory: The session's raw behavior data directory holding the runtime log archive.
-        source_id: The runtime DataLogger source id donated by the session's acquisition system.
-
-    Returns:
-        The path to the runtime log archive, or None if the directory or the archive does not exist.
-    """
-    if not log_directory.is_dir():
-        return None
-    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
-    return archive_path if archive_path.is_file() else None
 
 
 def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool) -> pl.DataFrame:

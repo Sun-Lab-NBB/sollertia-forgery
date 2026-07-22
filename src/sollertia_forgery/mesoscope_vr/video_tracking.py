@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
 
-EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
+_EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
 """The DeepLabCut project name baked into the prediction filename, used to select this pipeline's ``.h5`` from
 the predictions written beside the face-camera video in the session's raw camera_data directory."""
 
@@ -179,11 +179,11 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     # DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in
     # the session's raw camera_data directory during preprocessing. This pipeline's file is identified by the
     # DeepLabCut project name baked into its filename. When several match, the natural-sort-first one is used.
-    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
+    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{_EYE_TRACKING_PROJECT_NAME}*.h5"))
     if not matches:
         console.echo(
             message=(
-                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
+                f"No DeepLabCut '{_EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
                 f"video in the raw camera_data directory of session '{session.session_name}'. Skipping pupil tracking."
             ),
             level=LogLevel.INFO,

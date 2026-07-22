@@ -8,27 +8,27 @@ handling.
 
 from __future__ import annotations
 
-import dataclasses
 from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
+import dataclasses
 
+from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
 import pytest
-from cindra import SingleRecordingConfiguration, MultiRecordingConfiguration
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
-import sollertia_forgery.mesoscope_vr.two_photon as two_photon_module
 from sollertia_forgery.registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
+import sollertia_forgery.mesoscope_vr.two_photon as two_photon_module
 from sollertia_forgery.mesoscope_vr.two_photon import (
-    CalciumIndicator,
-    resolve_calcium_indicator,
-    resolve_multi_recording_configuration,
-    resolve_single_recording_configuration,
+    _CalciumIndicator,
+    _resolve_calcium_indicator,
     _build_multi_recording_configuration,
     _build_single_recording_configuration,
+    resolve_multi_recording_configuration,
+    resolve_single_recording_configuration,
 )
 
 _FIXTURES: Path = Path(__file__).parent / "fixtures" / "cindra"
@@ -37,7 +37,8 @@ _FIXTURES: Path = Path(__file__).parent / "fixtures" / "cindra"
 
 def _neutralize_single(configuration: dict[str, Any]) -> dict[str, Any]:
     """Clears the deploy-time single-recording fields the two-photon pipeline overrides, so the golden comparison
-    isolates the indicator-tuned base."""
+    isolates the indicator-tuned base.
+    """
     configuration["runtime"] = None
     configuration["file_io"]["data_path"] = None
     configuration["file_io"]["output_path"] = None
@@ -46,7 +47,8 @@ def _neutralize_single(configuration: dict[str, Any]) -> dict[str, Any]:
 
 def _neutralize_multi(configuration: dict[str, Any]) -> dict[str, Any]:
     """Clears the deploy-time multi-recording fields the forging pipeline overrides, so the golden comparison isolates
-    the indicator-tuned base."""
+    the indicator-tuned base.
+    """
     configuration["runtime"] = None
     configuration["recording_io"]["recording_directories"] = None
     configuration["recording_io"]["dataset_name"] = None
@@ -77,25 +79,26 @@ def _stub_session(tmp_path: Path, session_type: SessionTypes, *, surgery_present
 @pytest.mark.parametrize(
     ("genotype", "expected"),
     [
-        ("GP5.17", CalciumIndicator.GCAMP6F),
-        ("GP5.17 (hemi)", CalciumIndicator.GCAMP6F),
-        ("  gp 5.17  ", CalciumIndicator.GCAMP6F),
-        ("gp5.17", CalciumIndicator.GCAMP6F),
-        ("GCaMP8s x CamKIICre", CalciumIndicator.JGCAMP8S),
-        ("gcamp8s x camkiicre", CalciumIndicator.JGCAMP8S),
+        ("GP5.17", _CalciumIndicator.GCAMP6F),
+        ("GP5.17 (hemi)", _CalciumIndicator.GCAMP6F),
+        ("  gp 5.17  ", _CalciumIndicator.GCAMP6F),
+        ("gp5.17", _CalciumIndicator.GCAMP6F),
+        ("GCaMP8s x CamKIICre", _CalciumIndicator.JGCAMP8S),
+        ("gcamp8s x camkiicre", _CalciumIndicator.JGCAMP8S),
     ],
 )
-def test_resolve_calcium_indicator_recognized(genotype: str, expected: CalciumIndicator) -> None:
+def test_resolve_calcium_indicator_recognized(genotype: str, expected: _CalciumIndicator) -> None:
     """Verifies recognized genotypes resolve to their calcium indicator across casing, whitespace, and the qualifier."""
-    assert resolve_calcium_indicator(genotype) == expected
+    assert _resolve_calcium_indicator(genotype) == expected
 
 
 @pytest.mark.parametrize("genotype", ["GCaMP8f x CamKIICre", "GCaMP8m", "GCaMP6f", "wildtype", "", "GP5.18"])
 def test_resolve_calcium_indicator_rejects_unknown(genotype: str) -> None:
     """Verifies an unrecognized genotype raises rather than defaulting, so a jGCaMP8f or jGCaMP8m line never maps to
-    jGCaMP8s."""
+    jGCaMP8s.
+    """
     with pytest.raises(ValueError, match="Unable to resolve the calcium indicator"):
-        resolve_calcium_indicator(genotype)
+        _resolve_calcium_indicator(genotype)
 
 
 def test_single_recording_genotype_delta() -> None:
@@ -110,7 +113,8 @@ def test_single_recording_genotype_delta() -> None:
 
 def test_multi_recording_genotype_delta() -> None:
     """Verifies the multi-recording probability threshold and neuropil coefficient differ between the two indicators,
-    and that the base enables overlapping ROIs for both."""
+    and that the base enables overlapping ROIs for both.
+    """
     gcamp6f = _build_multi_recording_configuration("GP5.17")
     jgcamp8s = _build_multi_recording_configuration("GCaMP8s x CamKIICre")
     assert gcamp6f.roi_selection.probability_threshold == pytest.approx(0.85)
@@ -183,7 +187,8 @@ def test_resolve_multi_recording_configuration_training_returns_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_type: SessionTypes
 ) -> None:
     """Verifies the multi-recording resolver returns None for a training session, since Mesoscope-VR tracks no cells
-    for it."""
+    for it.
+    """
     _stub_surgery_loader(monkeypatch=monkeypatch, genotype="GP5.17")
     assert resolve_multi_recording_configuration(_stub_session(tmp_path=tmp_path, session_type=session_type)) is None
 

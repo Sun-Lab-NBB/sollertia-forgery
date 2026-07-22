@@ -15,8 +15,8 @@ import polars as pl
 import pytest
 from sollertia_shared_assets import SessionTypes
 
-import sollertia_forgery.mesoscope_vr.forging as dispatcher_module
 from sollertia_forgery.shared_assets import multi_recording_dataset_directory
+import sollertia_forgery.mesoscope_vr.forging as dispatcher_module
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import resolve_slowest_camera_clock
 
@@ -88,7 +88,8 @@ def test_resolve_slowest_camera_clock_errors_without_cameras(tmp_path: Path) -> 
 
 def test_multi_recording_dataset_directory_is_lowercased() -> None:
     """Verifies the multi-recording directory name is lowercased to match cindra, so the forging writer and the
-    experiment assembler resolve the same directory even when the dataset name or animal id carries uppercase."""
+    experiment assembler resolve the same directory even when the dataset name or animal id carries uppercase.
+    """
     assert multi_recording_dataset_directory(animal_id="101", dataset_name="Learning") == "101_learning"
     name = multi_recording_dataset_directory(animal_id="321", dataset_name="MaalstroomicFlow")
     assert name == name.lower()

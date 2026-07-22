@@ -67,13 +67,13 @@ class _ModuleSpecification:
         return all(getattr(hardware_state, flag_name, None) for flag_name in self.usage_flags)
 
 
-# Public parser entry points wired into the MICROCONTROLLER_PARSER_REGISTRY (registries.py). Each shares the uniform
+# Public parser entry points wired into the microcontroller parser registry ('registries.py'). Each shares the uniform
 # (event_partition, output_directory, session) signature, resolves the session hardware state, skips when the module
 # was not configured, and delegates to the matching private parser.
 def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the wheel-encoder module (type 2, id 1) into the session's encoder behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=2, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=2, module_id=1, hardware_state=hardware_state):
         return
     _parse_encoder_data(
         event_partition=event_partition,
@@ -87,7 +87,7 @@ def parse_mesoscope_frame(
 ) -> None:
     """Parses the mesoscope-frame TTL module (type 1, id 1) into the session's mesoscope-frame behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=1, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=1, module_id=1, hardware_state=hardware_state):
         return
     _parse_ttl_data(
         event_partition=event_partition,
@@ -99,7 +99,7 @@ def parse_mesoscope_frame(
 def parse_brake(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the brake module (type 3, id 1) into the session's brake behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=3, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=3, module_id=1, hardware_state=hardware_state):
         return
     _parse_brake_data(
         event_partition=event_partition,
@@ -111,7 +111,7 @@ def parse_brake(event_partition: dict[int, pl.DataFrame], output_directory: Path
 def parse_valve(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the water-valve module (type 5, id 1) into the session's valve behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=5, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=5, module_id=1, hardware_state=hardware_state):
         return
     _parse_valve_data(
         event_partition=event_partition,
@@ -123,7 +123,7 @@ def parse_valve(event_partition: dict[int, pl.DataFrame], output_directory: Path
 def parse_gas_puff(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the gas-puff valve module (type 5, id 2) into the session's gas-puff behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=5, module_id=2, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=5, module_id=2, hardware_state=hardware_state):
         return
     _parse_gas_puff_data(
         event_partition=event_partition,
@@ -135,7 +135,7 @@ def parse_gas_puff(event_partition: dict[int, pl.DataFrame], output_directory: P
 def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the lick-sensor module (type 4, id 1) into the session's lick behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=4, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=4, module_id=1, hardware_state=hardware_state):
         return
     _parse_lick_data(
         event_partition=event_partition,
@@ -147,7 +147,7 @@ def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path,
 def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the torque-sensor module (type 6, id 1) into the session's torque behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=6, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=6, module_id=1, hardware_state=hardware_state):
         return
     _parse_torque_data(
         event_partition=event_partition,
@@ -159,7 +159,7 @@ def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Pat
 def parse_screen(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the screen module (type 7, id 1) into the session's screen behavior feather."""
     hardware_state = _resolve_hardware_state(session=session)
-    if not is_module_eligible(module_type=7, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_type=7, module_id=1, hardware_state=hardware_state):
         return
     _parse_screen_data(
         event_partition=event_partition,
@@ -168,7 +168,7 @@ def parse_screen(event_partition: dict[int, pl.DataFrame], output_directory: Pat
     )
 
 
-def is_module_eligible(module_type: int, module_id: int, hardware_state: MesoscopeHardwareState) -> bool:
+def _is_module_eligible(module_type: int, module_id: int, hardware_state: MesoscopeHardwareState) -> bool:
     """Determines whether a module is eligible for processing based on the hardware state configuration.
 
     Notes:
@@ -196,7 +196,7 @@ def get_module_event_codes() -> dict[tuple[int, int], tuple[int, ...]]:
     """Returns the axci event codes each Mesoscope-VR hardware module's parser reads.
 
     Notes:
-        This is the Mesoscope-VR system's donation to the MICROCONTROLLER_EVENT_CODE_REGISTRY ('registries.py'). The
+        This is the Mesoscope-VR system's donation to the microcontroller event-code registry ('registries.py'). The
         system-agnostic microcontroller pipeline builds each controller's extraction filter from this mapping, so the
         codes returned here are exactly the codes the extraction stage pulls out of the raw log archives. The mapping
         is rebuilt on every call, so callers may mutate the returned dictionary freely.

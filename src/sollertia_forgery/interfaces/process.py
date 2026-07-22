@@ -16,7 +16,7 @@ from ..runtime import run_runtime_processing_pipeline
 from ..two_photon import run_two_photon_processing_pipeline
 from ..microcontrollers import run_microcontroller_processing_pipeline
 
-CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+_CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
@@ -56,7 +56,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
 """Injects the ``process`` group's ``_SharedProcessingParameters`` as each subcommand's first argument."""
 
 
-@click.group("process", context_settings=CONTEXT_SETTINGS)
+@click.group("process", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-sp",
     "--session-path",
@@ -111,7 +111,7 @@ def process_cli(
     )
 
 
-@process_cli.command("video", context_settings=CONTEXT_SETTINGS)
+@process_cli.command("video", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-ts",
     "--timestamp",
@@ -182,7 +182,7 @@ def video_command(
     )
 
 
-@process_cli.command("microcontroller", context_settings=CONTEXT_SETTINGS)
+@process_cli.command("microcontroller", context_settings=_CONTEXT_SETTINGS)
 @_pass_shared_parameters
 def microcontroller_command(shared: _SharedProcessingParameters) -> None:
     """Extracts the microcontroller module log archives and parses them into domain-specific behavior feathers."""
@@ -194,7 +194,7 @@ def microcontroller_command(shared: _SharedProcessingParameters) -> None:
     )
 
 
-@process_cli.command("runtime", context_settings=CONTEXT_SETTINGS)
+@process_cli.command("runtime", context_settings=_CONTEXT_SETTINGS)
 @_pass_shared_parameters
 def runtime_command(shared: _SharedProcessingParameters) -> None:
     """Decodes the acquisition runtime log archive and parses it into the session's runtime behavior feathers."""
@@ -205,7 +205,7 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
     )
 
 
-@process_cli.command("two-photon", context_settings=CONTEXT_SETTINGS)
+@process_cli.command("two-photon", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-b",
     "--binarize",

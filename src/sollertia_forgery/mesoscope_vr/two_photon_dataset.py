@@ -4,7 +4,6 @@ processing pipeline outputs.
 
 from __future__ import annotations
 
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,7 +11,7 @@ import polars as pl
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import MesoscopeDirectories
 
-from .metadata import BehaviorDataFiles
+from .metadata import DatasetColumn, BehaviorDataFiles
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -52,17 +51,6 @@ ScanImage-recorded frame timestamps in the fallback alignment path."""
 _SI_ANCHOR_SEARCH_LIMIT: int = 10
 """The maximum number of leading TTL pulses considered as candidate clock-offset anchors in the fallback alignment
 path."""
-
-
-class FluorescenceColumn(StrEnum):
-    """Defines the neuropil- and baseline-subtracted fluorescence columns produced by the Mesoscope-VR data-assembly
-    worker.
-    """
-
-    SINGLE_DAY_SUBTRACTED = "single_day_subtracted_fluorescence"
-    """Single-recording neuropil- and baseline-subtracted fluorescence."""
-    MULTI_DAY_SUBTRACTED = "multi_day_subtracted_fluorescence"
-    """Multi-recording neuropil- and baseline-subtracted fluorescence aligned across recording days."""
 
 
 def assemble_cindra_dataset(
@@ -190,14 +178,19 @@ def assemble_cindra_dataset(
     # Streams fluorescence Series into the DataFrame one file at a time to keep peak memory at one
     # array-worth instead of eight.
     fluorescence_sources: tuple[tuple[Path, str, str, NDArray[np.bool_] | None], ...] = (
-        (cindra_data_path, "cell_fluorescence.npy", "single_day_cell_fluorescence", is_cell_mask),
-        (cindra_data_path, "neuropil_fluorescence.npy", "single_day_neuropil_fluorescence", is_cell_mask),
-        (cindra_data_path, "subtracted_fluorescence.npy", FluorescenceColumn.SINGLE_DAY_SUBTRACTED.value, is_cell_mask),
-        (cindra_data_path, "spikes.npy", "single_day_spikes", is_cell_mask),
-        (multiday_data_path, "cell_fluorescence.npy", "multi_day_cell_fluorescence", None),
-        (multiday_data_path, "neuropil_fluorescence.npy", "multi_day_neuropil_fluorescence", None),
-        (multiday_data_path, "subtracted_fluorescence.npy", FluorescenceColumn.MULTI_DAY_SUBTRACTED.value, None),
-        (multiday_data_path, "spikes.npy", "multi_day_spikes", None),
+        (cindra_data_path, "cell_fluorescence.npy", DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE, is_cell_mask),
+        (cindra_data_path, "neuropil_fluorescence.npy", DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE, is_cell_mask),
+        (
+            cindra_data_path,
+            "subtracted_fluorescence.npy",
+            DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE,
+            is_cell_mask,
+        ),
+        (cindra_data_path, "spikes.npy", DatasetColumn.SINGLE_DAY_SPIKES, is_cell_mask),
+        (multiday_data_path, "cell_fluorescence.npy", DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE, None),
+        (multiday_data_path, "neuropil_fluorescence.npy", DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE, None),
+        (multiday_data_path, "subtracted_fluorescence.npy", DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE, None),
+        (multiday_data_path, "spikes.npy", DatasetColumn.MULTI_DAY_SPIKES, None),
     )
     for source_path, filename, column_name, mask in fluorescence_sources:
         series = _load_cindra_fluorescence(

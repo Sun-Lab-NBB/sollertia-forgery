@@ -38,12 +38,12 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 
-class CalciumIndicator(StrEnum):
+class _CalciumIndicator(StrEnum):
     """Enumerates the calcium indicators the Mesoscope-VR cindra configurations are tuned for.
 
     Notes:
         The indicator sets the OASIS decay ``tau``, the neuropil coefficient, and the multi-recording ROI-selection
-        probability threshold. It is resolved from the animal's genotype through ``resolve_calcium_indicator``.
+        probability threshold. It is resolved from the animal's genotype through ``_resolve_calcium_indicator``.
     """
 
     GCAMP6F = "GCaMP6f"
@@ -72,20 +72,20 @@ class _IndicatorParameters:
     """The multi-recording ROI-selection cell-probability threshold (``roi_selection.probability_threshold``)."""
 
 
-_INDICATOR_PARAMETERS: dict[CalciumIndicator, _IndicatorParameters] = {
-    CalciumIndicator.GCAMP6F: _IndicatorParameters(tau=0.4, neuropil_coefficient=0.7, probability_threshold=0.85),
-    CalciumIndicator.JGCAMP8S: _IndicatorParameters(tau=0.7, neuropil_coefficient=0.8, probability_threshold=0.80),
+_INDICATOR_PARAMETERS: dict[_CalciumIndicator, _IndicatorParameters] = {
+    _CalciumIndicator.GCAMP6F: _IndicatorParameters(tau=0.4, neuropil_coefficient=0.7, probability_threshold=0.85),
+    _CalciumIndicator.JGCAMP8S: _IndicatorParameters(tau=0.7, neuropil_coefficient=0.8, probability_threshold=0.80),
 }
-"""Maps each calcium indicator to its indicator-dependent cindra parameters. Every ``CalciumIndicator`` member must
+"""Maps each calcium indicator to its indicator-dependent cindra parameters. Every ``_CalciumIndicator`` member must
 appear here, which ``_assert_indicator_coverage`` enforces at import time."""
 
-_GENOTYPE_INDICATOR_REGISTRY: dict[str, CalciumIndicator] = {
-    "gp5.17": CalciumIndicator.GCAMP6F,
-    "gp 5.17": CalciumIndicator.GCAMP6F,
-    "gcamp8s x camkiicre": CalciumIndicator.JGCAMP8S,
+_GENOTYPE_INDICATOR_REGISTRY: dict[str, _CalciumIndicator] = {
+    "gp5.17": _CalciumIndicator.GCAMP6F,
+    "gp 5.17": _CalciumIndicator.GCAMP6F,
+    "gcamp8s x camkiicre": _CalciumIndicator.JGCAMP8S,
 }
 """Maps each recognized normalized genotype string to its calcium indicator. Keys are matched against the genotype
-normalized by ``resolve_calcium_indicator`` (casefolded, trailing parenthetical qualifier dropped, whitespace
+normalized by ``_resolve_calcium_indicator`` (casefolded, trailing parenthetical qualifier dropped, whitespace
 collapsed). Only the two indicators used with the reference mesoscope-vr system are recognized, so an unrecognized 
 genotype fails loudly rather than defaulting to a possibly-wrong sensor."""
 
@@ -148,7 +148,7 @@ def resolve_multi_recording_configuration(session: SessionData) -> MultiRecordin
     return _build_multi_recording_configuration(_read_session_genotype(session))
 
 
-def resolve_calcium_indicator(genotype: str) -> CalciumIndicator:
+def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
     """Resolves an animal's genotype string to the calcium indicator its cindra configuration is tuned for.
 
     Notes:
@@ -222,7 +222,7 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    parameters = _INDICATOR_PARAMETERS[resolve_calcium_indicator(genotype)]
+    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype)]
     return SingleRecordingConfiguration(
         main=Main(
             two_channels=False,
@@ -315,7 +315,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    parameters = _INDICATOR_PARAMETERS[resolve_calcium_indicator(genotype)]
+    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype)]
     return MultiRecordingConfiguration(
         recording_io=RecordingIO(
             repeat_selection=False,
@@ -369,13 +369,13 @@ def _assert_indicator_coverage() -> None:
     """Verifies at import time that every calcium indicator declares its indicator-dependent parameters.
 
     Raises:
-        RuntimeError: If a ``CalciumIndicator`` member is missing from ``_INDICATOR_PARAMETERS``. The error names the
+        RuntimeError: If a ``_CalciumIndicator`` member is missing from ``_INDICATOR_PARAMETERS``. The error names the
             offending members so an added indicator without parameters fails loudly at import rather than at build time.
     """
-    uncovered = sorted(indicator.name for indicator in CalciumIndicator if indicator not in _INDICATOR_PARAMETERS)
+    uncovered = sorted(indicator.name for indicator in _CalciumIndicator if indicator not in _INDICATOR_PARAMETERS)
     if uncovered:
         message = (
-            f"Unable to validate calcium-indicator coverage. Every CalciumIndicator member must declare its "
+            f"Unable to validate calcium-indicator coverage. Every _CalciumIndicator member must declare its "
             f"indicator-dependent parameters in _INDICATOR_PARAMETERS, but the following members do not: "
             f"{', '.join(uncovered)}."
         )

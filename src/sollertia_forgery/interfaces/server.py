@@ -7,20 +7,20 @@ from ataraxis_base_utilities import LogLevel, console
 from ..server import Server, discover_project_data, get_server_configuration, create_server_configuration_file
 
 # Ensures that displayed CLICK help messages are formatted according to the sollertia platform standard.
-CONTEXT_SETTINGS = {"max_content_width": 120}
+_CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 # Hardcoded SLURM output formats
-SACCT_FORMAT = "JobID,JobName%50,ReqMem,MaxRSS,AveRSS,MaxVMSize,NCPUS,AveCPU,Elapsed,State"
+_SACCT_FORMAT = "JobID,JobName%50,ReqMem,MaxRSS,AveRSS,MaxVMSize,NCPUS,AveCPU,Elapsed,State"
 """The format for the slurm accounting 'sacct' command used to display and evaluate completed job's efficiency."""
-SACCT_HEADERS = ["JobID", "JobName", "ReqMem", "MaxRSS", "AveRSS", "MaxVMSize", "NCPUS", "AveCPU", "Elapsed", "State"]
-"""The headers corresponding to SACCT_FORMAT, used for display after merging rows."""
-SQUEUE_FORMAT = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.12L"
+_SACCT_HEADERS = ["JobID", "JobName", "ReqMem", "MaxRSS", "AveRSS", "MaxVMSize", "NCPUS", "AveCPU", "Elapsed", "State"]
+"""The headers corresponding to _SACCT_FORMAT, used for display after merging rows."""
+_SQUEUE_FORMAT = "%.10i %.9P %.50j %.8u %.8T %.6D %.6C %.10m %.10M %.12l %.12L"
 """The format for the slurm queue 'squeue' command used to display running and pending jobs."""
 
 # Minimum number of rows required for valid sacct output (header + at least one data row).
 _MINIMUM_SACCT_ROWS: int = 2
 
-# Number of columns expected in sacct output based on SACCT_FORMAT.
+# Number of columns expected in sacct output based on _SACCT_FORMAT.
 _SACCT_COLUMN_COUNT: int = 10
 
 
@@ -113,10 +113,10 @@ def _format_sacct_output(raw_output: str) -> str:
     if not merged_data:
         return "No data available."
 
-    return tabulate(merged_data, headers=SACCT_HEADERS, tablefmt="simple", colalign=["center"] * len(SACCT_HEADERS))
+    return tabulate(merged_data, headers=_SACCT_HEADERS, tablefmt="simple", colalign=["center"] * len(_SACCT_HEADERS))
 
 
-@click.group("server", context_settings=CONTEXT_SETTINGS)
+@click.group("server", context_settings=_CONTEXT_SETTINGS)
 def server_cli() -> None:
     """Provides commands for interacting with the remote Sollertia compute server.
 
@@ -125,7 +125,7 @@ def server_cli() -> None:
     """
 
 
-@server_cli.command("configure", context_settings=CONTEXT_SETTINGS)
+@server_cli.command("configure", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-u",
     "--username",
@@ -273,14 +273,14 @@ def print_slurm_info(
         if job_data:
             # If a specific job ID is requested, bypasses user and date filtering
             if job_id is not None:
-                cmd = f'sacct -j {job_id} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                cmd = f'sacct -j {job_id} -o "{_SACCT_FORMAT}" --parsable2 --units=G'
                 console.echo(message=f"Fetching job accounting data for job ID '{job_id}'...", level=LogLevel.INFO)
             else:
                 # Builds the command with optional user filtering
                 if all_users:
-                    cmd = f'sacct -a -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                    cmd = f'sacct -a -o "{_SACCT_FORMAT}" --parsable2 --units=G'
                 else:
-                    cmd = f'sacct -u {user} -o "{SACCT_FORMAT}" --parsable2 --units=G'
+                    cmd = f'sacct -u {user} -o "{_SACCT_FORMAT}" --parsable2 --units=G'
                 if start_time:
                     cmd += f" --starttime={start_time}"
                 if end_time:
@@ -316,10 +316,10 @@ def print_slurm_info(
         # Displays squeue output if requested
         if queue:
             if all_users:
-                cmd = f'squeue -o "{SQUEUE_FORMAT}"'
+                cmd = f'squeue -o "{_SQUEUE_FORMAT}"'
                 console.echo(message="Fetching queue status for all users...", level=LogLevel.INFO)
             else:
-                cmd = f'squeue -o "{SQUEUE_FORMAT}" -u {user}'
+                cmd = f'squeue -o "{_SQUEUE_FORMAT}" -u {user}'
                 console.echo(message=f"Fetching queue status for user '{user}'...", level=LogLevel.INFO)
 
             result = server.execute_command(command=cmd)

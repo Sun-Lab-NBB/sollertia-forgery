@@ -1,11 +1,4 @@
-"""Provides the forging-specific dataset resolution policy layered above the shared dataset hierarchy.
-
-The dataset container classes (``DatasetData``, ``DatasetSession``, ``DatasetAnimal``, ``DatasetFiles``) live in
-sollertia-shared-assets alongside the session and project hierarchies. This module owns only the forging policy that
-resolves them from a processed-session set: the ``resolve_dataset`` entry point that loads, creates, verifies, or
-recreates a dataset, the cross-session consistency checks, and the per-animal surgery-metadata copy. The acquisition
-system's column descriptions are resolved from the central registry here and baked into the created dataset.
-"""
+"""Provides the forging-specific dataset resolution policy layered above the shared dataset hierarchy."""
 
 from __future__ import annotations
 
@@ -41,12 +34,12 @@ def resolve_dataset(
 ) -> DatasetData:
     """Creates, loads, or recreates a dataset hierarchy based on the provided session set.
 
-    Acts as the dataset-definition entry point for both the forging pipeline and the MCP ``prepare`` tool so that
-    tracker setup and batch dispatch can layer above this helper rather than duplicating the resolution logic. When
-    the dataset already exists, loads it and, when a session list is provided, verifies that the provided set matches
-    the existing definition. A mismatch surfaces as an error unless ``force_recreate`` is True, which unlocks
-    deletion and fresh recreation from the provided session names. When the dataset does not exist, creates it from
-    the provided session names. A non-empty session list is required in that case.
+    Acts as the dataset-definition entry point for the forging pipeline so that tracker setup and batch dispatch
+    can layer above this helper rather than duplicating the resolution logic. When the dataset already exists, loads
+    it and, when a session list is provided, verifies that the provided set matches the existing definition. A mismatch
+    surfaces as an error unless ``force_recreate`` is True, which unlocks deletion and fresh recreation from the
+    provided session names. When the dataset does not exist, creates it from the provided session names. A non-empty
+    session list is required in that case.
 
     Args:
         name: The unique name of the dataset.

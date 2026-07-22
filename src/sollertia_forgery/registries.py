@@ -46,16 +46,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 __all__ = [
-    "CINDRA_CONFIGURATION_REGISTRY",
-    "FORGING_ASSEMBLY_REGISTRY",
-    "MICROCONTROLLER_EVENT_CODE_REGISTRY",
-    "MICROCONTROLLER_PARSER_REGISTRY",
-    "RUNTIME_PARSER_REGISTRY",
-    "TWO_PHOTON_DATA_REGISTRY",
-    "VIDEO_TRACKING_REGISTRY",
-    "CindraConfigurationAsset",
     "ForgingAssembler",
-    "ForgingAssemblyAsset",
     "MicrocontrollerParser",
     "RuntimeParser",
     "TwoPhotonDataLocator",
@@ -108,7 +99,7 @@ class VideoTracker(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ForgingAssemblyAsset:
+class _ForgingAssemblyAsset:
     """Bundles an acquisition system's donated forging assets."""
 
     assembler: ForgingAssembler
@@ -121,7 +112,7 @@ class ForgingAssemblyAsset:
 
 
 @dataclass(frozen=True, slots=True)
-class CindraConfigurationAsset:
+class _CindraConfigurationAsset:
     """Bundles an acquisition system's donated cindra configuration resolvers."""
 
     resolve_single_recording: Callable[[SessionData], SingleRecordingConfiguration]
@@ -133,7 +124,7 @@ class CindraConfigurationAsset:
     dataset and skips the animals for which it returns None."""
 
 
-MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], MicrocontrollerParser] = {
+_MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], MicrocontrollerParser] = {
     (AcquisitionSystems.MESOSCOPE_VR, 1, 1): parse_mesoscope_frame,
     (AcquisitionSystems.MESOSCOPE_VR, 2, 1): parse_encoder,
     (AcquisitionSystems.MESOSCOPE_VR, 3, 1): parse_brake,
@@ -147,42 +138,42 @@ MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Micro
 acquisition-system package implements for that hardware module. A module is parseable for a system exactly when it
 appears here."""
 
-MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict[tuple[int, int], tuple[int, ...]]]] = {
+_MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict[tuple[int, int], tuple[int, ...]]]] = {
     AcquisitionSystems.MESOSCOPE_VR: get_module_event_codes,
 }
 """Maps each acquisition system to the module-level accessor returning its ``(module_type, module_id) -> event
 codes`` mapping for every module the system parses. The agnostic microcontroller pipeline derives each controller's
 extraction filter from this mapping, so a system's event codes live next to the parsers that read them."""
 
-FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, ForgingAssemblyAsset] = {
-    AcquisitionSystems.MESOSCOPE_VR: ForgingAssemblyAsset(
+_FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
+    AcquisitionSystems.MESOSCOPE_VR: _ForgingAssemblyAsset(
         assembler=assemble_mesoscope_session,
         column_descriptions=MESOSCOPE_COLUMN_DESCRIPTIONS,
     ),
 }
-"""Maps each acquisition system to the ``ForgingAssemblyAsset`` bundling its per-session assembly worker with its
+"""Maps each acquisition system to the ``_ForgingAssemblyAsset`` bundling its per-session assembly worker with its
 column-description mapping. Dataset definition, the cindra multi-day stage, in-pipeline job and tracker preparation,
 the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic ``forging``
 package."""
 
-CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, CindraConfigurationAsset] = {
-    AcquisitionSystems.MESOSCOPE_VR: CindraConfigurationAsset(
+_CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAsset] = {
+    AcquisitionSystems.MESOSCOPE_VR: _CindraConfigurationAsset(
         resolve_single_recording=resolve_single_recording_configuration,
         resolve_multi_recording=resolve_multi_recording_configuration,
     ),
 }
-"""Maps each acquisition system to the ``CindraConfigurationAsset`` bundling its single- and multi-recording
+"""Maps each acquisition system to the ``_CindraConfigurationAsset`` bundling its single- and multi-recording
 configuration resolvers. The agnostic two-photon and forging pipelines obtain a runnable cindra configuration through
 these resolvers, so each system decides for itself how its configuration is derived."""
 
-RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, RuntimeParser]] = {
+_RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, RuntimeParser]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
 }
 """Maps each acquisition system to its runtime DataLogger source id, which locates the ``{source_id}_log.npz``
 archive, paired with the module-level parser that interprets the decoded runtime payloads into the system's behavior
 feathers."""
 
-TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, TwoPhotonDataLocator] = {
+_TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, TwoPhotonDataLocator] = {
     AcquisitionSystems.MESOSCOPE_VR: locate_two_photon_data,
 }
 """Maps each acquisition system to the module-level locator that resolves the loaded session's raw two-photon
@@ -190,7 +181,7 @@ TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, TwoPhotonDataLocator] = {
 its input. Every system donates a locator, and a system that produces no two-photon data donates one returning the
 path it would use."""
 
-VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, VideoTracker] = {
+_VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, VideoTracker] = {
     AcquisitionSystems.MESOSCOPE_VR: process_mesoscope_video_tracking,
 }
 """Maps each acquisition system to the module-level function that performs all of that system's video tracking. The
@@ -213,7 +204,7 @@ def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Forging
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].assembler
+    return _FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].assembler
 
 
 def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dict[str, str]:
@@ -231,7 +222,7 @@ def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dic
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].column_descriptions
+    return _FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].column_descriptions
 
 
 def resolve_single_recording_configuration_resolver(
@@ -250,7 +241,7 @@ def resolve_single_recording_configuration_resolver(
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system=system)].resolve_single_recording
+    return _CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system=system)].resolve_single_recording
 
 
 def resolve_multi_recording_configuration_resolver(
@@ -269,7 +260,7 @@ def resolve_multi_recording_configuration_resolver(
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system=system)].resolve_multi_recording
+    return _CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system=system)].resolve_multi_recording
 
 
 def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dict[tuple[int, int], tuple[int, ...]]:
@@ -290,7 +281,7 @@ def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dic
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return MICROCONTROLLER_EVENT_CODE_REGISTRY[_resolve_system(system=system)]()
+    return _MICROCONTROLLER_EVENT_CODE_REGISTRY[_resolve_system(system=system)]()
 
 
 def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tuple[int, int], MicrocontrollerParser]:
@@ -310,7 +301,7 @@ def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tu
     resolved_system = _resolve_system(system=system)
     return {
         (module_type, module_id): parser
-        for (registered_system, module_type, module_id), parser in MICROCONTROLLER_PARSER_REGISTRY.items()
+        for (registered_system, module_type, module_id), parser in _MICROCONTROLLER_PARSER_REGISTRY.items()
         if registered_system == resolved_system
     }
 
@@ -330,7 +321,7 @@ def resolve_runtime_binding(system: str | AcquisitionSystems) -> tuple[str, Runt
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return RUNTIME_PARSER_REGISTRY[_resolve_system(system=system)]
+    return _RUNTIME_PARSER_REGISTRY[_resolve_system(system=system)]
 
 
 def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> TwoPhotonDataLocator:
@@ -347,7 +338,7 @@ def resolve_two_photon_data_locator(system: str | AcquisitionSystems) -> TwoPhot
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return TWO_PHOTON_DATA_REGISTRY[_resolve_system(system=system)]
+    return _TWO_PHOTON_DATA_REGISTRY[_resolve_system(system=system)]
 
 
 def resolve_video_tracking(system: str | AcquisitionSystems) -> VideoTracker:
@@ -364,7 +355,7 @@ def resolve_video_tracking(system: str | AcquisitionSystems) -> VideoTracker:
     Raises:
         ValueError: If the acquisition system is unknown.
     """
-    return VIDEO_TRACKING_REGISTRY[_resolve_system(system=system)]
+    return _VIDEO_TRACKING_REGISTRY[_resolve_system(system=system)]
 
 
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
@@ -405,16 +396,16 @@ def _assert_registry_coverage() -> None:
             immediately locate the unwired touch point.
     """
     systems = frozenset(AcquisitionSystems)
-    microcontroller_systems = frozenset(system for system, _, _ in MICROCONTROLLER_PARSER_REGISTRY)
+    microcontroller_systems = frozenset(system for system, _, _ in _MICROCONTROLLER_PARSER_REGISTRY)
 
     for registry_name, registered_systems in (
-        ("FORGING_ASSEMBLY_REGISTRY", frozenset(FORGING_ASSEMBLY_REGISTRY)),
-        ("RUNTIME_PARSER_REGISTRY", frozenset(RUNTIME_PARSER_REGISTRY)),
-        ("TWO_PHOTON_DATA_REGISTRY", frozenset(TWO_PHOTON_DATA_REGISTRY)),
-        ("VIDEO_TRACKING_REGISTRY", frozenset(VIDEO_TRACKING_REGISTRY)),
-        ("MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(MICROCONTROLLER_EVENT_CODE_REGISTRY)),
-        ("CINDRA_CONFIGURATION_REGISTRY", frozenset(CINDRA_CONFIGURATION_REGISTRY)),
-        ("MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
+        ("_FORGING_ASSEMBLY_REGISTRY", frozenset(_FORGING_ASSEMBLY_REGISTRY)),
+        ("_RUNTIME_PARSER_REGISTRY", frozenset(_RUNTIME_PARSER_REGISTRY)),
+        ("_TWO_PHOTON_DATA_REGISTRY", frozenset(_TWO_PHOTON_DATA_REGISTRY)),
+        ("_VIDEO_TRACKING_REGISTRY", frozenset(_VIDEO_TRACKING_REGISTRY)),
+        ("_MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(_MICROCONTROLLER_EVENT_CODE_REGISTRY)),
+        ("_CINDRA_CONFIGURATION_REGISTRY", frozenset(_CINDRA_CONFIGURATION_REGISTRY)),
+        ("_MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing_systems = systems - registered_systems
         if missing_systems:
@@ -427,20 +418,20 @@ def _assert_registry_coverage() -> None:
             console.error(message=message, error=RuntimeError)
 
     # Requires every parseable module to also declare its event codes, because the extraction stage filters each
-    # module by the codes resolved from MICROCONTROLLER_EVENT_CODE_REGISTRY. Dropping a parseable module from that
+    # module by the codes resolved from _MICROCONTROLLER_EVENT_CODE_REGISTRY. Dropping a parseable module from that
     # registry would remove it from its controller's extraction configuration, leaving its parse job undiscovered.
     for target_system in sorted(microcontroller_systems, key=lambda member: member.name):
         parseable_modules = {
             (module_type, module_id)
-            for (registered_system, module_type, module_id) in MICROCONTROLLER_PARSER_REGISTRY
+            for (registered_system, module_type, module_id) in _MICROCONTROLLER_PARSER_REGISTRY
             if registered_system == target_system
         }
-        uncoded_modules = sorted(parseable_modules - set(MICROCONTROLLER_EVENT_CODE_REGISTRY[target_system]()))
+        uncoded_modules = sorted(parseable_modules - set(_MICROCONTROLLER_EVENT_CODE_REGISTRY[target_system]()))
         if uncoded_modules:
             module_names = ", ".join(f"({module_type}, {module_id})" for module_type, module_id in uncoded_modules)
             message = (
-                f"Unable to validate donor-registry coverage for MICROCONTROLLER_EVENT_CODE_REGISTRY. Every module "
-                f"registered in MICROCONTROLLER_PARSER_REGISTRY must also declare the event codes its parser reads, "
+                f"Unable to validate donor-registry coverage for _MICROCONTROLLER_EVENT_CODE_REGISTRY. Every module "
+                f"registered in _MICROCONTROLLER_PARSER_REGISTRY must also declare the event codes its parser reads, "
                 f"but {target_system.name} does not declare codes for the following modules: {module_names}."
             )
             console.error(message=message, error=RuntimeError)

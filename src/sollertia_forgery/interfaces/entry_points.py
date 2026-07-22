@@ -9,11 +9,11 @@ Notes:
 
 import click
 
-CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+_CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
-@click.group("slf", context_settings=CONTEXT_SETTINGS)
+@click.group("slf", context_settings=_CONTEXT_SETTINGS)
 def slf_cli() -> None:
     """Processes and manages data acquired with the Sollertia data acquisition platform.
 
