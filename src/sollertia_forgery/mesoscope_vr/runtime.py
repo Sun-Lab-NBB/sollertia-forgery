@@ -1,7 +1,6 @@
-"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline.
-
-The parser interprets the decoded runtime payloads into the session's system and runtime state feathers, plus the
-experiment-only guidance state, VR cue, trigger-zone, and per-trial behavior feathers.
+"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline. The parser interprets
+the decoded runtime payloads into the session's system and runtime state feathers, plus the experiment-only guidance
+state, VR cue, trigger-zone, and per-trial behavior feathers.
 """
 
 from __future__ import annotations
@@ -363,7 +362,7 @@ def _prepare_motif_data(
     motif_data: list[tuple[int, NDArray[np.uint8], int]] = [
         (index, motif, len(motif)) for index, motif in enumerate(trial_motifs)
     ]
-    motif_data.sort(key=lambda x: x[2], reverse=True)
+    motif_data.sort(key=lambda entry: entry[2], reverse=True)
 
     # Calculates total size needed to represent all motifs in a single array.
     total_size: int = sum(len(motif) for motif in trial_motifs)
@@ -425,20 +424,20 @@ def _decompose_sequence_numba_flat(
     while sequence_position < sequence_length and trial_count < max_trials:
         motif_found = False
 
-        for i in range(motif_count):
-            motif_length = motif_lengths[i]
+        for motif_index in range(motif_count):
+            motif_length = motif_lengths[motif_index]
 
             if sequence_position + motif_length <= sequence_length:
-                motif_start = motif_starts[i]
+                motif_start = motif_starts[motif_index]
 
                 match = True
-                for j in range(motif_length):
-                    if cue_sequence[sequence_position + j] != motifs_flat[motif_start + j]:
+                for element_index in range(motif_length):
+                    if cue_sequence[sequence_position + element_index] != motifs_flat[motif_start + element_index]:
                         match = False
                         break
 
                 if match:
-                    trial_indices[trial_count] = motif_indices[i]
+                    trial_indices[trial_count] = motif_indices[motif_index]
                     trial_count += 1
                     sequence_position += motif_length
                     motif_found = True

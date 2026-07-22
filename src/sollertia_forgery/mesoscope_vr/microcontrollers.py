@@ -56,7 +56,7 @@ class _ModuleSpecification:
             flag are skipped when that flag is not set.
 
         Args:
-            hardware_state: The MesoscopeHardwareState instance to validate against.
+            hardware_state: The session hardware configuration to validate against.
 
         Returns:
             True if the module was used and all of its required fields are configured.
@@ -64,7 +64,7 @@ class _ModuleSpecification:
         for field_name in self.required_fields:
             if getattr(hardware_state, field_name, None) is None:
                 return False
-        return all(getattr(hardware_state, flag_name, None) is True for flag_name in self.usage_flags)
+        return all(getattr(hardware_state, flag_name, None) for flag_name in self.usage_flags)
 
 
 # Public parser entry points wired into the MICROCONTROLLER_PARSER_REGISTRY (registries.py). Each shares the uniform
@@ -179,7 +179,7 @@ def is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosco
     Args:
         module_type: The type code of the hardware module.
         module_id: The instance ID of the hardware module.
-        hardware_state: The MesoscopeHardwareState instance to check against.
+        hardware_state: The session hardware configuration to check against.
 
     Returns:
         True if the module is eligible for processing, False otherwise.
@@ -215,7 +215,7 @@ def _resolve_hardware_state(session: SessionData) -> MesoscopeHardwareState:
         session: The loaded session whose microcontroller modules are being parsed.
 
     Returns:
-        The loaded MesoscopeHardwareState instance.
+        The session's hardware configuration loaded from its raw-data YAML.
 
     Raises:
         FileNotFoundError: If no hardware state YAML file is present at the session's canonical location.
@@ -246,9 +246,8 @@ def _parse_encoder_data(
     """
     cm_per_pulse = np.float64(hardware_state.cm_per_pulse)
 
-    # Pre-declares variable types so the fallback-branch reassignments below are checked against a fixed
-    # declared type rather than widening into a union, which avoids a false-positive type mismatch when
-    # passing these arrays into merge_event_streams().
+    # Pre-declares the array types so mypy keeps the fallback-branch reassignments at the declared NDArray types
+    # for the merge_event_streams() call.
     ccw_timestamps: NDArray[np.uint64]
     ccw_values: NDArray[np.float64]
     cw_timestamps: NDArray[np.uint64]
@@ -334,7 +333,7 @@ def _parse_brake_data(
     """
     maximum_brake_strength = np.float64(hardware_state.maximum_brake_strength)
 
-    # Handles legacy field naming (brake vs break) for backward compatibility.
+    # Reads the misspelled minimum_break_strength field when minimum_brake_strength is unset.
     minimum_brake_strength_value = hardware_state.minimum_brake_strength
     if minimum_brake_strength_value is None:
         minimum_brake_strength_value = getattr(hardware_state, "minimum_break_strength", None)
@@ -552,8 +551,7 @@ def _parse_torque_data(
     """
     torque_per_adc_unit = np.float64(hardware_state.torque_per_adc_unit)
 
-    # Pre-declares variable types so the fallback-branch reassignments below are checked against a fixed
-    # declared type rather than widening into a union.
+    # Pre-declares the array types so mypy keeps the fallback-branch reassignments at the declared NDArray types.
     ccw_timestamps: NDArray[np.uint64]
     ccw_values: NDArray[np.float64]
     cw_timestamps: NDArray[np.uint64]

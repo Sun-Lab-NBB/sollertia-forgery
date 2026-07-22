@@ -1,8 +1,6 @@
 """Provides the Mesoscope-VR two-photon pipeline assets donated to the system-agnostic two-photon and forging worker
-packages.
-
-The assets locate the raw ``mesoscope_data`` input the cindra pipeline consumes and resolve the genotype-tuned cindra
-single- and multi-recording configurations for a session.
+packages. The assets locate the raw ``mesoscope_data`` input the cindra pipeline consumes and resolve the
+genotype-tuned cindra single- and multi-recording configurations for a session.
 """
 
 from __future__ import annotations
@@ -20,6 +18,7 @@ from cindra.dataclasses import (
     Registration,
     BaselineMethod,
     SignalExtraction,
+    ReferenceImageType,
     SpikeDeconvolution,
     NonrigidRegistration,
     OnePhotonRegistration,
@@ -30,7 +29,6 @@ from cindra.dataclasses.multi_recording_configuration import (
     ROITracking,
     RecordingIO,
     ROISelection,
-    ReferenceImageType,
     DiffeomorphicRegistration,
 )
 
@@ -38,20 +36,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sollertia_shared_assets import SessionData
-
-
-def locate_two_photon_data(session: SessionData) -> Path:
-    """Resolves the Mesoscope-VR session's raw two-photon imaging directory, which is the input to the cindra pipeline.
-
-    Args:
-        session: The loaded session whose raw two-photon imaging directory is resolved.
-
-    Returns:
-        The path to the session's ``mesoscope_data`` directory under its raw-data root. This directory stores the
-        compressed 2-Photon Random Access Mesoscope (2P-RAM) acquisition output and accompanying metadata that the
-        cindra single-recording pipeline consumes.
-    """
-    return session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
 
 
 class CalciumIndicator(StrEnum):
@@ -104,6 +88,20 @@ _GENOTYPE_INDICATOR_REGISTRY: dict[str, CalciumIndicator] = {
 normalized by ``resolve_calcium_indicator`` (casefolded, trailing parenthetical qualifier dropped, whitespace
 collapsed). Only the two indicators used with the reference mesoscope-vr system are recognized, so an unrecognized 
 genotype fails loudly rather than defaulting to a possibly-wrong sensor."""
+
+
+def locate_two_photon_data(session: SessionData) -> Path:
+    """Resolves the Mesoscope-VR session's raw two-photon imaging directory, which is the input to the cindra pipeline.
+
+    Args:
+        session: The loaded session whose raw two-photon imaging directory is resolved.
+
+    Returns:
+        The path to the session's ``mesoscope_data`` directory under its raw-data root. This directory stores the
+        compressed 2-Photon Random Access Mesoscope (2P-RAM) acquisition output and accompanying metadata that the
+        cindra single-recording pipeline consumes.
+    """
+    return session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
 
 
 def resolve_single_recording_configuration(session: SessionData) -> SingleRecordingConfiguration:
@@ -179,8 +177,6 @@ def resolve_calcium_indicator(genotype: str) -> CalciumIndicator:
             f"'{normalized}', which does not match a recognized indicator. The recognized genotypes are: {recognized}."
         )
         console.error(message=message, error=ValueError)
-        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        raise ValueError(message)  # pragma: no cover
 
     return indicator
 
@@ -205,8 +201,6 @@ def _read_session_genotype(session: SessionData) -> str:
             f"cindra configuration."
         )
         console.error(message=message, error=FileNotFoundError)
-        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        raise FileNotFoundError(message)  # pragma: no cover
     return SurgeryData.from_yaml(file_path=surgery_metadata_path).subject.genotype
 
 
@@ -386,8 +380,6 @@ def _assert_indicator_coverage() -> None:
             f"{', '.join(uncovered)}."
         )
         console.error(message=message, error=RuntimeError)
-        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        raise RuntimeError(message)  # pragma: no cover
 
 
 _assert_indicator_coverage()

@@ -65,23 +65,27 @@ def assemble_runtime_dataset(
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True)
-    trigger_zones_df = pl.read_ipc(
+    encoder_data_frame = pl.read_ipc(
+        source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True
+    )
+    trigger_zones_data_frame = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
     )
-    cue_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
-    trial_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
-    runtime_state_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True)
+    cue_data_frame = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
+    trial_data_frame = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
+    runtime_state_data_frame = pl.read_ipc(
+        source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
+    )
 
     # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
     # intermediate Polars DataFrame since both are only consumed by interpolate_data.
-    trial_distance = trial_df["traveled_distance_cm"].to_numpy()
-    trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_df) + 1, dtype=np.uint32)
+    trial_distance = trial_data_frame["traveled_distance_cm"].to_numpy()
+    trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_data_frame) + 1, dtype=np.uint32)
 
     # Interpolates the traveled distance first as it's used as a reference for other interpolations.
     reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
-        source_coordinates=encoder_df["time_us"].to_numpy(),
-        source_values=encoder_df["traveled_distance_cm"].to_numpy(),
+        source_coordinates=encoder_data_frame["time_us"].to_numpy(),
+        source_values=encoder_data_frame["traveled_distance_cm"].to_numpy(),
         target_coordinates=reference_time,
         is_discrete=False,
     )
@@ -101,24 +105,24 @@ def assemble_runtime_dataset(
         ),
         "trial_type": interpolate_data(
             source_coordinates=trial_distance,
-            source_values=trial_df["trial_type_index"].to_numpy(),
+            source_values=trial_data_frame["trial_type_index"].to_numpy(),
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
         "cue": interpolate_data(
-            source_coordinates=cue_df["traveled_distance_cm"].to_numpy(),
-            source_values=cue_df["vr_cue"].to_numpy(),
+            source_coordinates=cue_data_frame["traveled_distance_cm"].to_numpy(),
+            source_values=cue_data_frame["vr_cue"].to_numpy(),
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
         "in_trigger_zone": _check_trigger_zones(
             traversed_distance=reference_distance,
-            trigger_zone_starts=trigger_zones_df["trigger_zone_start_cm"].to_numpy(),
-            trigger_zone_ends=trigger_zones_df["trigger_zone_end_cm"].to_numpy(),
+            trigger_zone_starts=trigger_zones_data_frame["trigger_zone_start_cm"].to_numpy(),
+            trigger_zone_ends=trigger_zones_data_frame["trigger_zone_end_cm"].to_numpy(),
         ),
         "runtime_state": interpolate_data(
-            source_coordinates=runtime_state_df["time_us"].to_numpy(),
-            source_values=runtime_state_df["runtime_state"].to_numpy(),
+            source_coordinates=runtime_state_data_frame["time_us"].to_numpy(),
+            source_values=runtime_state_data_frame["runtime_state"].to_numpy(),
             target_coordinates=reference_time,
             is_discrete=True,
         ),
@@ -126,20 +130,20 @@ def assemble_runtime_dataset(
 
     # Adds reinforcing guidance state if the file was produced by the processing pipeline.
     if reinforcing_guidance_file.exists():
-        reinforcing_df = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
+        reinforcing_data_frame = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
         aligned_data["reinforcing_guided"] = interpolate_data(
-            source_coordinates=reinforcing_df["time_us"].to_numpy(),
-            source_values=reinforcing_df["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
+            source_coordinates=reinforcing_data_frame["time_us"].to_numpy(),
+            source_values=reinforcing_data_frame["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
             target_coordinates=reference_time,
             is_discrete=True,
         )
 
     # Adds aversive guidance state if the file was produced by the processing pipeline.
     if aversive_guidance_file.exists():
-        aversive_df = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
+        aversive_data_frame = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
         aligned_data["aversive_guided"] = interpolate_data(
-            source_coordinates=aversive_df["time_us"].to_numpy(),
-            source_values=aversive_df["aversive_guidance_state"].to_numpy().astype(np.uint8),
+            source_coordinates=aversive_data_frame["time_us"].to_numpy(),
+            source_values=aversive_data_frame["aversive_guidance_state"].to_numpy().astype(np.uint8),
             target_coordinates=reference_time,
             is_discrete=True,
         )
@@ -216,8 +220,8 @@ def _check_trigger_zones(
 
     # Determines whether each distance-point falls into a trigger zone. This relies on the distance and trigger zone
     # data being sorted and monotonically increasing.
-    for i in range(distance_value_count):
-        evaluated_distance = traversed_distance[i]
+    for sample_index in range(distance_value_count):
+        evaluated_distance = traversed_distance[sample_index]
 
         # Moves the zone_index backward if needed (handles slight non-monotonicity in the distance data).
         while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
@@ -232,7 +236,7 @@ def _check_trigger_zones(
 
             # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
             if evaluated_distance <= trigger_zone_ends[zone_index]:
-                in_zone[i] = 1
+                in_zone[sample_index] = 1
                 break
 
             # If the distance is past the evaluated trigger zone, moves to the next zone.

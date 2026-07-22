@@ -1,11 +1,4 @@
-"""Provides the Mesoscope-VR data-assembly dispatcher donated to the system-agnostic forging pipeline.
-
-Notes:
-    This module's sole public entry point, ``assemble_mesoscope_session``, is the Mesoscope-VR "data assembly" asset
-    contributed to the central ``FORGING_ASSEMBLY_REGISTRY``. The agnostic forging pipeline resolves it by acquisition
-    system and invokes it once per session. It routes each session to the experiment-session or training-session
-    assembler by session type, keeping the two assembly paths isolated in their own modules.
-"""
+"""Provides the Mesoscope-VR data-assembly dispatcher donated to the system-agnostic forging pipeline."""
 
 from __future__ import annotations
 
@@ -66,5 +59,3 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
         f"not a supported forging session type. The supported session types are: {supported}."
     )
     console.error(message=message, error=ValueError)
-    # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-    raise ValueError(message)  # pragma: no cover

@@ -1,9 +1,6 @@
 """Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-This module assembles a run or lick training session into its unified ``data.feather``. Training sessions carry no
-mesoscope imaging, so the assembler resolves the reference clock from the slowest camera and combines only the behavior
-and video sub-datasets on that clock. The ``forging`` dispatcher routes training sessions here, and routes mesoscope
-experiment sessions to the experiment-session assembler.
+The worker combines a run or lick training session's behavior and video sub-datasets on the slowest camera's clock into
+the session's unified ``data.feather``, since a training session carries no mesoscope fluorescence clock.
 """
 
 from __future__ import annotations

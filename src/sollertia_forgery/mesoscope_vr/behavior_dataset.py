@@ -53,7 +53,7 @@ def assemble_behavior_dataset(
             as part of a different dataset that is later combined with the behavior dataset.
 
     Returns:
-        The Polars DataFrame that contains the assembled behavior data.
+        The assembled behavior data aligned to the reference time vector.
 
     Raises:
         ValueError: If the hardware state configuration is missing the required 'system_state_codes' mapping, or
@@ -301,7 +301,7 @@ def _calculate_running_speed(
     microseconds_to_seconds = np.float64(1.0 / _MICROSECONDS_PER_SECOND)
 
     # Maintains a sliding window start index that advances monotonically through the data.
-    # This avoids redundant searching and reduces complexity from O(n^2) to O(n).
+    # Avoids redundant searching and reduces complexity from O(n^2) to O(n).
     window_start_index = 0
 
     # Processes each time point to calculate its running speed.

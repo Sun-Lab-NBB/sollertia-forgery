@@ -1,8 +1,6 @@
 """Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-This module assembles a mesoscope experiment session into its unified ``data.feather``, combining the fluorescence,
-behavior, runtime, and video sub-datasets on the fluorescence reference clock. The ``forging`` dispatcher routes
-experiment sessions here, and routes run and lick training sessions to the training-session assembler.
+The worker combines a mesoscope experiment session's fluorescence, behavior, runtime, and video sub-datasets on the
+fluorescence reference clock into the session's unified ``data.feather``.
 """
 
 from __future__ import annotations
@@ -89,9 +87,9 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Cindra writes the multi-recording dataset directory as ``{animal_id}_{dataset_name}`` (lowercased) to avoid
-    # collisions when batching multiple animals under a single forged dataset name, so the same shared helper the
-    # forging pipeline used to name the directory resolves it here.
+    # cindra writes the multi-recording dataset directory as ``{animal_id}_{dataset_name}`` (lowercased) to avoid
+    # collisions when batching multiple animals under a single forged dataset name. The same shared helper the forging
+    # pipeline uses to name the directory resolves it here.
     multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(
         multi_recording_dataset_directory(animal_id=str(session.animal_id), dataset_name=dataset_name)
     )
