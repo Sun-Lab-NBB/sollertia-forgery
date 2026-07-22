@@ -22,7 +22,6 @@ from ..shared_assets import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Callable
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
@@ -32,10 +31,6 @@ if TYPE_CHECKING:
 class _ModuleSpecification:
     """Defines the processing specification for a single hardware module type."""
 
-    parse_function: Callable[..., None]
-    """The function that transforms raw axci event data into domain-specific feather output."""
-    output_filename: str
-    """The name of the output feather file."""
     required_fields: tuple[str, ...]
     """The MesoscopeHardwareState field names that must be configured (not None) for processing eligibility."""
     usage_flags: tuple[str, ...]
@@ -332,12 +327,7 @@ def _parse_brake_data(
         hardware_state: The hardware configuration providing brake strength parameters.
     """
     maximum_brake_strength = np.float64(hardware_state.maximum_brake_strength)
-
-    # Reads the misspelled minimum_break_strength field when minimum_brake_strength is unset.
-    minimum_brake_strength_value = hardware_state.minimum_brake_strength
-    if minimum_brake_strength_value is None:
-        minimum_brake_strength_value = getattr(hardware_state, "minimum_break_strength", None)
-    minimum_brake_strength = np.float64(minimum_brake_strength_value)
+    minimum_brake_strength = np.float64(hardware_state.minimum_brake_strength)
 
     engaged_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
     disengaged_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
@@ -649,37 +639,27 @@ def _parse_screen_data(
 
 _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
     (2, 1): _ModuleSpecification(
-        parse_function=_parse_encoder_data,
-        output_filename=BehaviorDataFiles.ENCODER,
         required_fields=("cm_per_pulse",),
         usage_flags=(),
         event_codes=(51, 52),
     ),
     (1, 1): _ModuleSpecification(
-        parse_function=_parse_ttl_data,
-        output_filename=BehaviorDataFiles.MESOSCOPE_FRAME,
         required_fields=(),
         usage_flags=("recorded_mesoscope_ttl",),
         event_codes=(51, 52),
     ),
     (3, 1): _ModuleSpecification(
-        parse_function=_parse_brake_data,
-        output_filename=BehaviorDataFiles.BRAKE,
         required_fields=("maximum_brake_strength", "minimum_brake_strength"),
         usage_flags=(),
         event_codes=(51, 52),
     ),
     (5, 1): _ModuleSpecification(
-        parse_function=_parse_valve_data,
-        output_filename=BehaviorDataFiles.VALVE,
         required_fields=("valve_scale_coefficient", "valve_nonlinearity_exponent"),
         usage_flags=(),
         # Code 53 (kCalibrated) is emitted only by the firmware's calibration command, never during a normal runtime.
         event_codes=(51, 52, 54, 55),
     ),
     (5, 2): _ModuleSpecification(
-        parse_function=_parse_gas_puff_data,
-        output_filename=BehaviorDataFiles.GAS_PUFF,
         required_fields=(),
         usage_flags=("delivered_gas_puffs",),
         # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
@@ -687,22 +667,16 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
         event_codes=(51, 52),
     ),
     (4, 1): _ModuleSpecification(
-        parse_function=_parse_lick_data,
-        output_filename=BehaviorDataFiles.LICK,
         required_fields=("lick_threshold",),
         usage_flags=(),
         event_codes=(51,),
     ),
     (6, 1): _ModuleSpecification(
-        parse_function=_parse_torque_data,
-        output_filename=BehaviorDataFiles.TORQUE,
         required_fields=("torque_per_adc_unit",),
         usage_flags=(),
         event_codes=(51, 52),
     ),
     (7, 1): _ModuleSpecification(
-        parse_function=_parse_screen_data,
-        output_filename=BehaviorDataFiles.SCREEN,
         required_fields=("screens_initially_on",),
         usage_flags=(),
         event_codes=(51, 52),

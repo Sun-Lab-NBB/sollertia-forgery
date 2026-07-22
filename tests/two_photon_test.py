@@ -81,7 +81,7 @@ def _stub_session(tmp_path: Path, session_type: SessionTypes, *, surgery_present
     [
         ("GP5.17", _CalciumIndicator.GCAMP6F),
         ("GP5.17 (hemi)", _CalciumIndicator.GCAMP6F),
-        ("  gp 5.17  ", _CalciumIndicator.GCAMP6F),
+        ("  GP5.17  (hemi) ", _CalciumIndicator.GCAMP6F),
         ("gp5.17", _CalciumIndicator.GCAMP6F),
         ("GCaMP8s x CamKIICre", _CalciumIndicator.JGCAMP8S),
         ("gcamp8s x camkiicre", _CalciumIndicator.JGCAMP8S),

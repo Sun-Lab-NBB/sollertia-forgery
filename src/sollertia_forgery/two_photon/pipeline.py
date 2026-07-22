@@ -22,11 +22,6 @@ _MATERIALIZED_CONFIGURATION_FILENAME: str = "configuration.yaml"
 """The filename cindra expects for the shared single-recording configuration. The pipeline materializes the
 caller's template under this name in the session's cindra directory (``session.processed_data.cindra_data_path``)."""
 
-_SAVED_ACQUISITION_PARAMETERS_FILENAME: str = "acquisition_parameters.yaml"
-"""The filename under which cindra persists acquisition parameters in its output directory after the first run. The
-pipeline accepts its presence as an alternative to the raw-side ``cindra_parameters.json`` when validating that the
-recording is processable."""
-
 
 def run_two_photon_processing_pipeline(
     session_path: Path,
@@ -109,15 +104,10 @@ def run_two_photon_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Confirms the cindra acquisition parameters file is available. Every system producing two-photon data is expected
-    # to write 'cindra_parameters.json' alongside the raw imaging data at acquisition time. Once a recording has been
-    # processed, cindra also persists the same metadata as 'acquisition_parameters.yaml' next to its outputs, which is
-    # accepted here so a re-run can proceed even if the raw data has since been relocated.
-    acquisition_parameters_available = (
-        any(data_path.rglob(PARAMETERS_FILENAME))
-        or cindra_directory.joinpath(_SAVED_ACQUISITION_PARAMETERS_FILENAME).is_file()
-    )
-    if not acquisition_parameters_available:
+    # Confirms the cindra acquisition parameters file is available. Every system producing two-photon data writes
+    # 'cindra_parameters.json' alongside the raw imaging data at acquisition time, and that raw file is the canonical
+    # source of the recording's acquisition metadata.
+    if not any(data_path.rglob(PARAMETERS_FILENAME)):
         message = (
             f"Unable to process two-photon data for session '{session.session_name}'. No cindra acquisition "
             f"parameters file ('{PARAMETERS_FILENAME}') was found under the raw two-photon imaging directory "

@@ -81,13 +81,14 @@ appear here, which ``_assert_indicator_coverage`` enforces at import time."""
 
 _GENOTYPE_INDICATOR_REGISTRY: dict[str, _CalciumIndicator] = {
     "gp5.17": _CalciumIndicator.GCAMP6F,
-    "gp 5.17": _CalciumIndicator.GCAMP6F,
+    "gp5.17 (hemi)": _CalciumIndicator.GCAMP6F,
     "gcamp8s x camkiicre": _CalciumIndicator.JGCAMP8S,
 }
 """Maps each recognized normalized genotype string to its calcium indicator. Keys are matched against the genotype
-normalized by ``_resolve_calcium_indicator`` (casefolded, trailing parenthetical qualifier dropped, whitespace
-collapsed). Only the two indicators used with the reference mesoscope-vr system are recognized, so an unrecognized 
-genotype fails loudly rather than defaulting to a possibly-wrong sensor."""
+normalized by ``_resolve_calcium_indicator`` (casefolded, whitespace collapsed). Zygosity qualifiers are recorded as
+their own keys, so a hemizygous line resolves to the same indicator as the homozygous line while the surgery metadata
+keeps the distinction. Only the two indicators used with the reference mesoscope-vr system are recognized, so an
+unrecognized genotype fails loudly rather than defaulting to a possibly-wrong sensor."""
 
 
 def locate_two_photon_data(session: SessionData) -> Path:
@@ -153,9 +154,10 @@ def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
 
     Notes:
         The genotype is normalized before matching. Normalization casefolds the string, strips surrounding whitespace,
-        drops a single trailing parenthetical qualifier (for example the ``(hemi)`` in ``GP5.17 (hemi)``), and collapses
-        internal whitespace runs to one space. The normalized string is then matched exactly against the recognized
-        genotypes, so a jGCaMP8f or jGCaMP8m line does not silently resolve to the jGCaMP8s configuration.
+        and collapses internal whitespace runs to one space. Zygosity qualifiers such as the ``(hemi)`` in
+        ``GP5.17 (hemi)`` are preserved and carry their own registry key. The normalized string is then matched
+        exactly against the recognized genotypes, so a jGCaMP8f or jGCaMP8m line does not silently resolve to the
+        jGCaMP8s configuration.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -166,8 +168,7 @@ def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    normalized = re.sub(pattern=r"\s*\([^)]*\)\s*$", repl="", string=genotype.strip().casefold())
-    normalized = re.sub(pattern=r"\s+", repl=" ", string=normalized)
+    normalized = re.sub(pattern=r"\s+", repl=" ", string=genotype.strip().casefold())
 
     indicator = _GENOTYPE_INDICATOR_REGISTRY.get(normalized)
     if indicator is None:
