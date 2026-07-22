@@ -157,7 +157,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     camera_data directory, where the acquisition rig writes it during preprocessing. If none is present, returns
     without doing anything: the stage is optional and gated on detecting the prediction file.
 
-    Otherwise reads the thirteen canonical bodyparts and fits an ellipse to the pupil and to the eye for each frame.
+    Otherwise, reads the thirteen canonical bodyparts and fits an ellipse to the pupil and to the eye for each frame.
     Flags occluded frames as blinks and derives motion-robust eye-position signals from the pupil relative to the eye
     and the corneal reflection. Writes the results into a ``{camera}_pupil.feather`` in the processed video-data
     directory.
