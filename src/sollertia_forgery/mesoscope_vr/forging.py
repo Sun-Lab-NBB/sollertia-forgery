@@ -43,7 +43,8 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
             multi-recording output directory.
 
     Raises:
-        ValueError: If the session type is not a supported forging session type.
+        ValueError: If the session type is not a supported forging session type, or if a sub-dataset cannot be
+            assembled (propagated from the resolved assembler).
         FileNotFoundError: If a required processed-data directory or reference clock is missing (propagated from the
             resolved assembler).
     """

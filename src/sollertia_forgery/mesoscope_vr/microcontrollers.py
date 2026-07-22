@@ -40,8 +40,8 @@ class _ModuleSpecification:
     """The MesoscopeHardwareState field names that must be configured (not None) for processing eligibility."""
     usage_flags: tuple[str, ...]
     """The MesoscopeHardwareState boolean field names recording whether the module was used during acquisition. A flag
-    set to False marks the module as unused, unlike a recorded state value (such as screens_initially_on), which is
-    False on every session where the module was active."""
+    set to False marks the module as unused, unlike a recorded state value (such as screens_initially_on), which can be
+    False even on sessions where the module was active."""
     event_codes: tuple[int, ...]
     """The axci event codes the module's parse function reads. The system-agnostic microcontroller pipeline builds the
     module's extraction filter from these codes, so a code absent here is never extracted from the log archive."""

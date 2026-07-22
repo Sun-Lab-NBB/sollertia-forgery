@@ -1,7 +1,7 @@
 """Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline.
 
-The parser interprets the decoded runtime payloads into the session's system and runtime state, guidance state, and
-experiment-only VR cue, trigger-zone, and per-trial behavior feathers.
+The parser interprets the decoded runtime payloads into the session's system and runtime state feathers, plus the
+experiment-only guidance state, VR cue, trigger-zone, and per-trial behavior feathers.
 """
 
 from __future__ import annotations
@@ -244,8 +244,8 @@ def _decompose_multiple_cue_sequences_into_trials(
         during runtime. The second element is an array of cumulative distances at the end of each trial.
 
     Raises:
-        ValueError: If the number of breakpoints does not match the number of sequences minus one, or if no cue
-            sequences are provided.
+        ValueError: If there is more than one cue sequence and the number of breakpoints does not match the number of
+            sequences minus one, or if no cue sequences are provided.
         RuntimeError: If the function is unable to fully decompose any of the cue sequences.
     """
     if not cue_sequences:

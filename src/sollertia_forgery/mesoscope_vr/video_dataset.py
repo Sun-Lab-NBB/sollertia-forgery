@@ -27,7 +27,8 @@ if TYPE_CHECKING:
 
 
 _BODY_CAMERA_NAME: str = "body_camera"
-"""The colloquial name of the Mesoscope-VR body camera, used to prefix its motion-energy dataset columns."""
+"""The colloquial name of the Mesoscope-VR body camera, used to prefix its motion-energy and frame-luminance dataset
+columns."""
 
 _MICROSECONDS_PER_SECOND: float = 1_000_000.0
 """The number of microseconds in one second, used to convert a camera's timestamp span into a mean frame rate."""

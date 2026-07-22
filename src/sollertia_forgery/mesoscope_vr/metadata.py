@@ -53,7 +53,7 @@ class BehaviorDataFiles(StrEnum):
     VR_TRIGGER_ZONE = "vr_trigger_zone_data.feather"
     """The runtime feather holding VR trigger-zone entry and exit events."""
     TRIAL = "trial_data.feather"
-    """The runtime feather holding per-trial metadata (trial index, trial type, traveled distance at trial start)."""
+    """The runtime feather holding per-trial metadata (trial type index and traveled distance at trial start)."""
 
 
 class VideoDataFiles(StrEnum):
@@ -89,12 +89,14 @@ class DatasetColumn(StrEnum):
         source of truth for the Mesoscope-VR column descriptions baked into a forged dataset via
         ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
-        Several columns are conditional: ``REINFORCING_GUIDED`` and ``AVERSIVE_GUIDED`` are present only when the
-        corresponding guidance events were recorded. ``BRAKE`` and ``SCREENS`` are present only for mesoscope
-        experiments. ``TORQUE_N_CM`` is absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
-        training. The per-camera video columns are present only when that camera's feathers were produced, and the
-        pupil columns only when the face camera's pose predictions were processed. The remaining members are present in
-        every forged session.
+        Several columns are conditional. The runtime columns (``TRIAL``, ``TRIAL_TYPE``, ``CUE``, ``IN_TRIGGER_ZONE``,
+        ``RUNTIME_STATE``), the fluorescence columns (``FRAME`` and the ``SINGLE_DAY_*`` and ``MULTI_DAY_*`` members),
+        ``BRAKE``, and ``SCREENS`` are present only for mesoscope experiment sessions. ``REINFORCING_GUIDED`` and
+        ``AVERSIVE_GUIDED`` are present only when the corresponding guidance events were recorded. ``TORQUE_N_CM`` is
+        absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick training. The per-camera video
+        columns are present only when that camera's feathers were produced, and the pupil columns only when the face
+        camera's pose predictions were processed. The remaining behavior columns (``TIME_US``, ``ELAPSED_MINUTES``,
+        ``LICK``, ``WATER_UL``, ``REWARD``, ``SYSTEM_STATE``) are present in every forged session.
     """
 
     description: str
@@ -132,7 +134,11 @@ class DatasetColumn(StrEnum):
     SPEED_CM_S = ("speed_cm_s", "Animal's running speed in cm/s at each sample.")
     LICK = ("lick", "Lick sensor engagement state at each sample.")
     WATER_UL = ("water_uL", "The cumulative water reward volume delivered to the animal at each sample in microliters.")
-    REWARD = ("reward", "The reward delivery state (on / off) at each sample.")
+    REWARD = (
+        "reward",
+        "The reward-classification state at each sample, one of 'no' (no tone or reward), 'tone' (tone played, no "
+        "water delivered), or 'yes' (water reward delivered).",
+    )
     SYSTEM_STATE = ("system_state", "Acquisition system state at each sample (idle, rest, run).")
 
     # Runtime/experiment columns (from forging runtime assembly).
@@ -157,6 +163,7 @@ class DatasetColumn(StrEnum):
     )
 
     # Cindra fluorescence columns (from forging fluorescence assembly).
+    FRAME = ("frame", "One-based mesoscope acquisition frame index at each sample.")
     SINGLE_DAY_CELL_FLUORESCENCE = (
         "single_day_cell_fluorescence",
         "Single-recording raw cell fluorescence trace per ROI.",
@@ -167,7 +174,7 @@ class DatasetColumn(StrEnum):
     )
     SINGLE_DAY_SUBTRACTED_FLUORESCENCE = (
         "single_day_subtracted_fluorescence",
-        "Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence.",
+        "Single-recording neuropil- and baseline-subtracted fluorescence trace per ROI.",
     )
     SINGLE_DAY_SPIKES = ("single_day_spikes", "Single-recording OASIS-deconvolved spike rates per ROI.")
     MULTI_DAY_CELL_FLUORESCENCE = (
@@ -180,7 +187,7 @@ class DatasetColumn(StrEnum):
     )
     MULTI_DAY_SUBTRACTED_FLUORESCENCE = (
         "multi_day_subtracted_fluorescence",
-        "Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days.",
+        "Multi-recording neuropil- and baseline-subtracted fluorescence trace per ROI aligned across recording days.",
     )
     MULTI_DAY_SPIKES = (
         "multi_day_spikes",

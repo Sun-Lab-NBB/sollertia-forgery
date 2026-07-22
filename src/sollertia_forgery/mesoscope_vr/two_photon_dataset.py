@@ -55,14 +55,14 @@ path."""
 
 
 class FluorescenceColumn(StrEnum):
-    """Defines the neuropil-subtracted, baseline-corrected dF/F0 fluorescence columns produced by the Mesoscope-VR
-    data-assembly worker.
+    """Defines the neuropil- and baseline-subtracted fluorescence columns produced by the Mesoscope-VR data-assembly
+    worker.
     """
 
     SINGLE_DAY_SUBTRACTED = "single_day_subtracted_fluorescence"
-    """Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence."""
+    """Single-recording neuropil- and baseline-subtracted fluorescence."""
     MULTI_DAY_SUBTRACTED = "multi_day_subtracted_fluorescence"
-    """Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days."""
+    """Multi-recording neuropil- and baseline-subtracted fluorescence aligned across recording days."""
 
 
 def assemble_cindra_dataset(

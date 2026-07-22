@@ -52,7 +52,8 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
 
     Raises:
         FileNotFoundError: If the session's processed microcontroller-data, runtime-data, or single-recording cindra
-            output directory is missing.
+            output directory is missing, or if the multi-recording cindra output (cell_fluorescence.npy and its
+            companions under the resolved multi-recording directory) is absent.
         ValueError: If a sub-dataset cannot be assembled (for example, the ScanImage fallback alignment cannot
             recover the expected frame count, or a required hardware-state field is missing).
     """
