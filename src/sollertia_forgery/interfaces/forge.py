@@ -12,11 +12,11 @@ import click
 
 from ..forging import run_forging_pipeline
 
-CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+_CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
-@click.command("forge", context_settings=CONTEXT_SETTINGS)
+@click.command("forge", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-dn", "--dataset-name", type=str, required=True, help="The unique name for the dataset to create or use."
 )

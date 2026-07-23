@@ -27,7 +27,7 @@ from ataraxis_communication_interface.microcontroller import (
 )
 
 from sollertia_forgery.registries import (
-    MICROCONTROLLER_PARSER_REGISTRY,
+    _MICROCONTROLLER_PARSER_REGISTRY,
     resolve_microcontroller_parsers,
     resolve_two_photon_data_locator,
     resolve_microcontroller_event_codes,
@@ -38,7 +38,7 @@ from sollertia_forgery.microcontrollers import (
     run_microcontroller_processing_pipeline,
 )
 from sollertia_forgery.mesoscope_vr.two_photon import locate_two_photon_data
-from sollertia_forgery.mesoscope_vr.microcontrollers import is_module_eligible
+from sollertia_forgery.mesoscope_vr.microcontrollers import _is_module_eligible
 
 # Module-level stub parsers so the parallel parse path can pickle them by reference. Each writes a trivial domain
 # feather, named for its module, recording which event codes the partition carried. Their signature matches the
@@ -220,29 +220,33 @@ def test_locate_two_photon_data_resolves_mesoscope_data_directory(tmp_path: Path
 
 def test_registered_parsers_are_picklable() -> None:
     # Every registered parser is dispatched to worker processes, so each must pickle by reference.
-    for key, parser in MICROCONTROLLER_PARSER_REGISTRY.items():
+    for key, parser in _MICROCONTROLLER_PARSER_REGISTRY.items():
         assert pickle.loads(pickle.dumps(parser)) is parser, key
 
 
 def test_event_code_registry_covers_every_parseable_module() -> None:
     # The extraction stage filters each module by its registered codes, so a parseable module that declares none would
     # be dropped from its controller's extraction configuration and its parse job would silently never be discovered.
-    for system, module_type, module_id in MICROCONTROLLER_PARSER_REGISTRY:
+    for system, module_type, module_id in _MICROCONTROLLER_PARSER_REGISTRY:
         assert (module_type, module_id) in resolve_microcontroller_event_codes(system=system)
 
 
 def test_screen_module_is_eligible_when_initially_off() -> None:
     # screens_initially_on records the screens' initial state, not whether the module was used, so a False value must
     # not suppress screen parsing. Only None, the MesoscopeHardwareState unused-module marker, does.
-    assert is_module_eligible(module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=False))
-    assert not is_module_eligible(module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=None))
+    assert _is_module_eligible(module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=False))
+    assert not _is_module_eligible(
+        module_type=7, module_id=1, hardware_state=SimpleNamespace(screens_initially_on=None)
+    )
 
 
 def test_usage_flag_modules_are_skipped_when_flag_is_unset() -> None:
     # delivered_gas_puffs and recorded_mesoscope_ttl are genuine usage flags, so False does mark the module unused.
-    assert not is_module_eligible(module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=False))
-    assert is_module_eligible(module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=True))
-    assert not is_module_eligible(
+    assert not _is_module_eligible(
+        module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=False)
+    )
+    assert _is_module_eligible(module_type=5, module_id=2, hardware_state=SimpleNamespace(delivered_gas_puffs=True))
+    assert not _is_module_eligible(
         module_type=1, module_id=1, hardware_state=SimpleNamespace(recorded_mesoscope_ttl=False)
     )
 
@@ -273,10 +277,6 @@ def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="microcontroller manifest"):
         pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
-
-
-def test_split_parse_specifier() -> None:
-    assert pipeline_module._split_parse_specifier("101-2-1") == ("101", 2, 1)
 
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:

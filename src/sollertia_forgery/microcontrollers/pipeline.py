@@ -35,13 +35,10 @@ from ..shared_assets import (
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Mapping, Callable
+    from collections.abc import Mapping
     from concurrent.futures import Future
 
-# The registered parser for a single module, resolved from the central MICROCONTROLLER_PARSER_REGISTRY: a plain
-# module-level function ``parse(event_partition, output_directory, session) -> None``. The PEP 695 alias is evaluated
-# lazily, so its annotation-only operands (Callable, Path, SessionData) need not exist at runtime.
-type ModuleParser = Callable[[dict[int, pl.DataFrame], Path, SessionData], None]
+    from ..registries import MicrocontrollerParser
 
 PARSE_JOB_NAME: str = "module_parsing"
 """The job name identifying per-module parsing (Stage 2) jobs in the microcontroller processing tracker. Stage 1
@@ -61,8 +58,8 @@ def run_microcontroller_processing_pipeline(
         This is a two-stage pipeline. Stage 1 (extraction) reads each ``{controller_id}_log.npz`` archive via the
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
-        parser registered for the session's acquisition system (in ``MICROCONTROLLER_PARSER_REGISTRY``), writing the
-        domain-specific feather into ``microcontroller_data``. The pipeline is system-agnostic.
+        parser registered for the session's acquisition system (resolved via ``resolve_microcontroller_parsers``),
+        writing the domain-specific feather into ``microcontroller_data``. The pipeline is system-agnostic.
 
         In local mode (job_id is None) every present controller is extracted, then every eligible module is parsed
         (across a worker pool when more than one worker is available and more than one module is runnable). In
@@ -121,7 +118,7 @@ def run_microcontroller_processing_pipeline(
         )
     )
 
-    # The tracker lives alongside the extracted and parsed data in ``microcontroller_data``. The same job universe
+    # Co-locates the tracker with the extracted and parsed data in ``microcontroller_data``. The same job universe
     # drives foreign-entry detection in both local and remote modes, so a single concurrent remote job aligns the
     # tracker without resetting its sibling jobs.
     tracker_directory = session.processed_data.microcontroller_data_path
@@ -186,7 +183,7 @@ def _resolve_controllers(
     Notes:
         The configurations are built in memory. The microcontroller manifest written alongside the log archives
         supplies the controller and module topology, and the session's acquisition system supplies the event codes
-        each module's parser reads (from the central MICROCONTROLLER_EVENT_CODE_REGISTRY). A manifest module the
+        each module's parser reads (resolved via ``resolve_microcontroller_event_codes``). A manifest module the
         system does not parse is excluded, since extracting it would produce an intermediate feather nothing consumes,
         and a controller left with no such module contributes no configuration at all. Requiring the manifest also
         confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
@@ -322,7 +319,7 @@ def _extract_controller(
 
 def _discover_jobs(
     controllers: dict[str, ControllerExtractionConfig],
-    parsers: Mapping[tuple[int, int], ModuleParser],
+    parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     log_directory: Path,
     extraction_job_name: str,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], dict[str, Path], dict[str, tuple[str, int, int]]]:
@@ -449,7 +446,7 @@ def _run_extraction_stage(
 
 def _run_parse_stage(
     parse_specifiers: dict[str, tuple[str, int, int]],
-    parsers: Mapping[tuple[int, int], ModuleParser],
+    parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     session: SessionData,
     extraction_output: Path,
     parse_output: Path,
@@ -461,8 +458,8 @@ def _run_parse_stage(
     """Runs Stage 2: parses each eligible module's raw feather into its domain-specific feather.
 
     Notes:
-        The extraction outputs are indexed once up front, so each parse job resolves its input feather with an O(1)
-        lookup rather than re-globbing and re-scanning the output directory per module. The acquisition binding
+        The extraction outputs are indexed once up front, so each parse job resolves its input feather with a single
+        O(1) dict lookup. The acquisition binding
         writes a raw feather only for modules that produced at least one message, so a configured, eligible module
         can legitimately have no feather. Such a parse job is completed with no output rather than left unresolved.
         Modules with a feather are dispatched to the shared process pool when one is available and more than one
@@ -484,10 +481,10 @@ def _run_parse_stage(
         return
 
     # Indexes every extracted module feather once, keyed by (controller_id, module_type, module_id), so each parse
-    # job resolves its input with a single dict lookup instead of re-globbing and re-scanning the output directory.
+    # job resolves its input with a single dict lookup.
     feather_index = _index_module_feathers(extraction_output=extraction_output)
 
-    runnable: dict[str, tuple[Path, ModuleParser]] = {}
+    runnable: dict[str, tuple[Path, MicrocontrollerParser]] = {}
     for specifier, (controller_id, module_type, module_id) in parse_specifiers.items():
         feather_path = feather_index.get((controller_id, module_type, module_id))
         if feather_path is None:
@@ -526,7 +523,7 @@ def _run_parse_stage(
 
 
 def _execute_parse_jobs_sequential(
-    runnable: dict[str, tuple[Path, ModuleParser]],
+    runnable: dict[str, tuple[Path, MicrocontrollerParser]],
     tracker: ProcessingTracker,
     session: SessionData,
     parse_output: Path,
@@ -564,7 +561,7 @@ def _execute_parse_jobs_sequential(
 
 
 def _execute_parse_jobs_parallel(
-    runnable: dict[str, tuple[Path, ModuleParser]],
+    runnable: dict[str, tuple[Path, MicrocontrollerParser]],
     tracker: ProcessingTracker,
     session: SessionData,
     parse_output: Path,
@@ -633,7 +630,7 @@ def _execute_remote_job(
     universe: list[tuple[str, str]],
     extraction_job_name: str,
     controllers: dict[str, ControllerExtractionConfig],
-    parsers: Mapping[tuple[int, int], ModuleParser],
+    parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     session: SessionData,
     log_directory: Path,
     extraction_output: Path,
@@ -700,7 +697,9 @@ def _execute_remote_job(
         )
         return
 
-    controller_id, module_type, module_id = _split_parse_specifier(specifier=specifier)
+    # Splits the parse specifier, which is built in '{controller_id}-{module_type}-{module_id}' form.
+    controller_id, module_type_text, module_id_text = specifier.split("-")
+    module_type, module_id = int(module_type_text), int(module_id_text)
     module_parser = parsers[(module_type, module_id)]
     feather_path = _index_module_feathers(extraction_output=extraction_output).get(
         (controller_id, module_type, module_id)
@@ -728,7 +727,9 @@ def _execute_remote_job(
         raise
 
 
-def _run_parse(feather_path: Path, module_parser: ModuleParser, output_directory: Path, session: SessionData) -> None:
+def _run_parse(
+    feather_path: Path, module_parser: MicrocontrollerParser, output_directory: Path, session: SessionData
+) -> None:
     """Parses one raw module feather into its domain-specific feather.
 
     Notes:
@@ -747,7 +748,7 @@ def _run_parse(feather_path: Path, module_parser: ModuleParser, output_directory
     module_dataframe = pl.read_ipc(source=feather_path, memory_map=True)
     event_partition = partition_events(module_dataframe=module_dataframe)
     output_directory.mkdir(parents=True, exist_ok=True)
-    module_parser(event_partition, output_directory, session)
+    module_parser(event_partition=event_partition, output_directory=output_directory, session=session)
 
 
 def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int], Path]:
@@ -755,8 +756,7 @@ def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int]
 
     Notes:
         Globs the directory once and parses each feather name a single time, building a lookup keyed by
-        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with an O(1) dict lookup
-        instead of re-globbing and re-scanning the directory once per module.
+        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with a single O(1) dict lookup.
 
     Args:
         extraction_output: The directory holding the raw per-module feathers.
@@ -770,16 +770,3 @@ def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int]
         feather_controller, feather_type, feather_id = parse_module_feather_name(feather_path=feather_path)
         index[(str(feather_controller), feather_type, feather_id)] = feather_path
     return index
-
-
-def _split_parse_specifier(specifier: str) -> tuple[str, int, int]:
-    """Splits a parse-job specifier into its controller ID, module type, and module ID components.
-
-    Args:
-        specifier: The parse specifier in ``"{controller_id}-{module_type}-{module_id}"`` form.
-
-    Returns:
-        A tuple of (controller_id, module_type, module_id).
-    """
-    controller_id, module_type, module_id = specifier.split("-")
-    return controller_id, int(module_type), int(module_id)

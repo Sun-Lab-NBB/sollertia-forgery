@@ -65,23 +65,27 @@ def assemble_runtime_dataset(
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     # Loads all experiment data sources.
-    encoder_df = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True)
-    trigger_zones_df = pl.read_ipc(
+    encoder_data_frame = pl.read_ipc(
+        source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True
+    )
+    trigger_zones_data_frame = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.VR_TRIGGER_ZONE), memory_map=True
     )
-    cue_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
-    trial_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
-    runtime_state_df = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True)
+    cue_data_frame = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.VR_CUE), memory_map=True)
+    trial_data_frame = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.TRIAL), memory_map=True)
+    runtime_state_data_frame = pl.read_ipc(
+        source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
+    )
 
     # Extracts the trial distance and generates sequential trial numbers directly as numpy arrays, avoiding an
     # intermediate Polars DataFrame since both are only consumed by interpolate_data.
-    trial_distance = trial_df["traveled_distance_cm"].to_numpy()
-    trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_df) + 1, dtype=np.uint32)
+    trial_distance = trial_data_frame["traveled_distance_cm"].to_numpy()
+    trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_data_frame) + 1, dtype=np.uint32)
 
     # Interpolates the traveled distance first as it's used as a reference for other interpolations.
     reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
-        source_coordinates=encoder_df["time_us"].to_numpy(),
-        source_values=encoder_df["traveled_distance_cm"].to_numpy(),
+        source_coordinates=encoder_data_frame["time_us"].to_numpy(),
+        source_values=encoder_data_frame["traveled_distance_cm"].to_numpy(),
         target_coordinates=reference_time,
         is_discrete=False,
     )
@@ -101,24 +105,24 @@ def assemble_runtime_dataset(
         ),
         "trial_type": interpolate_data(
             source_coordinates=trial_distance,
-            source_values=trial_df["trial_type_index"].to_numpy(),
+            source_values=trial_data_frame["trial_type_index"].to_numpy(),
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
         "cue": interpolate_data(
-            source_coordinates=cue_df["traveled_distance_cm"].to_numpy(),
-            source_values=cue_df["vr_cue"].to_numpy(),
+            source_coordinates=cue_data_frame["traveled_distance_cm"].to_numpy(),
+            source_values=cue_data_frame["vr_cue"].to_numpy(),
             target_coordinates=reference_distance,
             is_discrete=True,
         ),
         "in_trigger_zone": _check_trigger_zones(
             traversed_distance=reference_distance,
-            trigger_zone_starts=trigger_zones_df["trigger_zone_start_cm"].to_numpy(),
-            trigger_zone_ends=trigger_zones_df["trigger_zone_end_cm"].to_numpy(),
+            trigger_zone_starts=trigger_zones_data_frame["trigger_zone_start_cm"].to_numpy(),
+            trigger_zone_ends=trigger_zones_data_frame["trigger_zone_end_cm"].to_numpy(),
         ),
         "runtime_state": interpolate_data(
-            source_coordinates=runtime_state_df["time_us"].to_numpy(),
-            source_values=runtime_state_df["runtime_state"].to_numpy(),
+            source_coordinates=runtime_state_data_frame["time_us"].to_numpy(),
+            source_values=runtime_state_data_frame["runtime_state"].to_numpy(),
             target_coordinates=reference_time,
             is_discrete=True,
         ),
@@ -126,20 +130,20 @@ def assemble_runtime_dataset(
 
     # Adds reinforcing guidance state if the file was produced by the processing pipeline.
     if reinforcing_guidance_file.exists():
-        reinforcing_df = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
+        reinforcing_data_frame = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
         aligned_data["reinforcing_guided"] = interpolate_data(
-            source_coordinates=reinforcing_df["time_us"].to_numpy(),
-            source_values=reinforcing_df["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
+            source_coordinates=reinforcing_data_frame["time_us"].to_numpy(),
+            source_values=reinforcing_data_frame["reinforcing_guidance_state"].to_numpy().astype(np.uint8),
             target_coordinates=reference_time,
             is_discrete=True,
         )
 
     # Adds aversive guidance state if the file was produced by the processing pipeline.
     if aversive_guidance_file.exists():
-        aversive_df = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
+        aversive_data_frame = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
         aligned_data["aversive_guided"] = interpolate_data(
-            source_coordinates=aversive_df["time_us"].to_numpy(),
-            source_values=aversive_df["aversive_guidance_state"].to_numpy().astype(np.uint8),
+            source_coordinates=aversive_data_frame["time_us"].to_numpy(),
+            source_values=aversive_data_frame["aversive_guidance_state"].to_numpy().astype(np.uint8),
             target_coordinates=reference_time,
             is_discrete=True,
         )
@@ -150,6 +154,38 @@ def assemble_runtime_dataset(
         pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype),
         pl.col("runtime_state").replace_strict(runtime_state_mapping).cast(runtime_state_enum_dtype),
         pl.col("trial").cast(pl.UInt16),
+    )
+
+
+def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
+    """Masks cue, trial, and trial_type column values for non-run (idle or rest) system states.
+
+    Sets cue and trial to their dtype sentinels (``_CUE_UNDEFINED`` / ``_TRIAL_UNDEFINED``) and trial_type to the
+    "undefined" Enum member.
+
+    Args:
+        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
+
+    Returns:
+        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
+    """
+    # Extracts the Enum dtypes to ensure type consistency.
+    trial_type_dtype = experiment_data.schema["trial_type"]
+    system_state_dtype = experiment_data.schema["system_state"]
+
+    # Defines the non-run system states that should trigger masking, cast to the Enum type.
+    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
+
+    # Creates a boolean mask for rows where the system state is not "run".
+    is_non_run = pl.col("system_state").is_in(non_run_states)
+
+    return experiment_data.with_columns(
+        pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
+        pl.when(is_non_run).then(pl.lit(_TRIAL_UNDEFINED, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
+        pl.when(is_non_run)
+        .then(pl.lit("undefined").cast(trial_type_dtype))
+        .otherwise(pl.col("trial_type"))
+        .alias("trial_type"),
     )
 
 
@@ -184,8 +220,8 @@ def _check_trigger_zones(
 
     # Determines whether each distance-point falls into a trigger zone. This relies on the distance and trigger zone
     # data being sorted and monotonically increasing.
-    for i in range(distance_value_count):
-        evaluated_distance = traversed_distance[i]
+    for sample_index in range(distance_value_count):
+        evaluated_distance = traversed_distance[sample_index]
 
         # Moves the zone_index backward if needed (handles slight non-monotonicity in the distance data).
         while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
@@ -200,42 +236,10 @@ def _check_trigger_zones(
 
             # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
             if evaluated_distance <= trigger_zone_ends[zone_index]:
-                in_zone[i] = 1
+                in_zone[sample_index] = 1
                 break
 
             # If the distance is past the evaluated trigger zone, moves to the next zone.
             zone_index += 1
 
     return in_zone
-
-
-def _mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
-    """Masks cue, trial, and trial_type column values for non-run (idle or rest) system states.
-
-    Sets cue and trial to their dtype sentinels (``_CUE_UNDEFINED`` / ``_TRIAL_UNDEFINED``) and trial_type to the
-    "undefined" Enum member.
-
-    Args:
-        experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
-
-    Returns:
-        The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
-    """
-    # Extracts the Enum dtypes to ensure type consistency.
-    trial_type_dtype = experiment_data.schema["trial_type"]
-    system_state_dtype = experiment_data.schema["system_state"]
-
-    # Defines the non-run system states that should trigger masking, cast to the Enum type.
-    non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
-
-    # Creates a boolean mask for rows where the system state is not "run".
-    is_non_run = pl.col("system_state").is_in(non_run_states)
-
-    return experiment_data.with_columns(
-        pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),
-        pl.when(is_non_run).then(pl.lit(_TRIAL_UNDEFINED, dtype=pl.UInt16)).otherwise(pl.col("trial")).alias("trial"),
-        pl.when(is_non_run)
-        .then(pl.lit("undefined").cast(trial_type_dtype))
-        .otherwise(pl.col("trial_type"))
-        .alias("trial_type"),
-    )

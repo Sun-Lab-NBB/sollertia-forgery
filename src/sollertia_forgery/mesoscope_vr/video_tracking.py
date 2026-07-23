@@ -1,7 +1,6 @@
-"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline.
-
-The function post-processes externally-produced DeepLabCut pose predictions for the face camera into per-frame pupil
-and eye metrics.
+"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline. The
+function post-processes externally-produced DeepLabCut pose predictions for the face camera into per-frame pupil and
+eye metrics.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
 
-EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
+_EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
 """The DeepLabCut project name baked into the prediction filename, used to select this pipeline's ``.h5`` from
 the predictions written beside the face-camera video in the session's raw camera_data directory."""
 
@@ -158,7 +157,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     camera_data directory, where the acquisition rig writes it during preprocessing. If none is present, returns
     without doing anything: the stage is optional and gated on detecting the prediction file.
 
-    Otherwise reads the thirteen canonical bodyparts and fits an ellipse to the pupil and to the eye for each frame.
+    Otherwise, reads the thirteen canonical bodyparts and fits an ellipse to the pupil and to the eye for each frame.
     Flags occluded frames as blinks and derives motion-robust eye-position signals from the pupil relative to the eye
     and the corneal reflection. Writes the results into a ``{camera}_pupil.feather`` in the processed video-data
     directory.
@@ -180,11 +179,11 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     # DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in
     # the session's raw camera_data directory during preprocessing. This pipeline's file is identified by the
     # DeepLabCut project name baked into its filename. When several match, the natural-sort-first one is used.
-    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{EYE_TRACKING_PROJECT_NAME}*.h5"))
+    matches = natsorted(session.raw_data.camera_data_path.glob(f"*{_EYE_TRACKING_PROJECT_NAME}*.h5"))
     if not matches:
         console.echo(
             message=(
-                f"No DeepLabCut '{EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
+                f"No DeepLabCut '{_EYE_TRACKING_PROJECT_NAME}' '.h5' prediction file was found beside the face-camera "
                 f"video in the raw camera_data directory of session '{session.session_name}'. Skipping pupil tracking."
             ),
             level=LogLevel.INFO,

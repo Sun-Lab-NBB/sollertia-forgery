@@ -2,19 +2,13 @@
 
 from .forging import assemble_mesoscope_session
 from .runtime import RUNTIME_SOURCE_ID, parse_runtime
-from .metadata import (
-    MESOSCOPE_COLUMN_DESCRIPTIONS,
-    DatasetColumn,
-    BehaviorDataFiles,
+from .metadata import MESOSCOPE_COLUMN_DESCRIPTIONS, DatasetColumn
+from .two_photon import (
+    locate_two_photon_data,
+    resolve_multi_recording_configuration,
+    resolve_single_recording_configuration,
 )
-from .two_photon import locate_two_photon_data
-from .fluorescence import FluorescenceColumn
-from .video_tracking import (
-    PUPIL_CAMERA_NAME,
-    EYE_TRACKING_PROJECT_NAME,
-    PupilColumn,
-    process_mesoscope_video_tracking,
-)
+from .video_tracking import PupilColumn, process_mesoscope_video_tracking
 from .microcontrollers import (
     parse_lick,
     parse_brake,
@@ -28,13 +22,9 @@ from .microcontrollers import (
 )
 
 __all__ = [
-    "EYE_TRACKING_PROJECT_NAME",
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
-    "PUPIL_CAMERA_NAME",
     "RUNTIME_SOURCE_ID",
-    "BehaviorDataFiles",
     "DatasetColumn",
-    "FluorescenceColumn",
     "PupilColumn",
     "assemble_mesoscope_session",
     "get_module_event_codes",
@@ -49,4 +39,6 @@ __all__ = [
     "parse_torque",
     "parse_valve",
     "process_mesoscope_video_tracking",
+    "resolve_multi_recording_configuration",
+    "resolve_single_recording_configuration",
 ]

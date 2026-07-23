@@ -1,0 +1,72 @@
+---
+pipeline_type: single-recording
+runtime:
+  parallel_workers: 20
+  display_progress_bars: false
+main:
+  two_channels: false
+  first_channel_functional: true
+  second_channel_functional: false
+  tau: 0.4
+  ignored_flyback_planes: []
+  custom_classifier_path: null
+file_io:
+  data_path: null
+  output_path: null
+  ignored_file_names:
+  - zstack
+  repeat_binarization: false
+registration:
+  repeat_registration: false
+  align_by_first_channel: true
+  reference_frame_count: 500
+  batch_size: 100
+  maximum_offset_fraction: 0.1
+  spatial_smoothing_sigma: 1.15
+  temporal_smoothing_sigma: 0.0
+  two_step_registration: false
+  bad_frame_threshold: 1.0
+  normalize_frames: true
+  registration_metric_principal_components: 10
+  compute_bidirectional_phase_offset: false
+  bidirectional_phase_offset_override: 0
+one_photon_registration:
+  enabled: false
+  spatial_highpass_window: 42
+  pre_smoothing_sigma: 0.0
+  edge_taper_pixels: 40.0
+nonrigid_registration:
+  enabled: true
+  block_size:
+  - 128
+  - 128
+  signal_to_noise_threshold: 1.2
+  maximum_block_offset: 5.0
+roi_detection:
+  enabled: true
+  preclassification_threshold: 0.5
+  threshold_scaling: 2.0
+  spatial_highpass_window: 25
+  maximum_overlap: 0.75
+  temporal_highpass_window: 100
+  maximum_iterations: 50
+  maximum_binned_frames: 5000
+  denoise: false
+  crop_to_soma: true
+signal_extraction:
+  extract_neuropil: true
+  allow_overlap: false
+  minimum_neuropil_pixels: 350
+  inner_neuropil_border_radius: 2
+  cell_probability_percentile: 50
+  classification_threshold: 0.5
+  batch_size: 500
+  colocalization_threshold: 0.65
+spike_deconvolution:
+  extract_spikes: true
+  neuropil_coefficient: 0.7
+  baseline_method: maximin
+  baseline_window: 60.0
+  baseline_sigma: 10.0
+  baseline_percentile: 8.0
+...

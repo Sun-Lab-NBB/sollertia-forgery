@@ -1,10 +1,6 @@
-"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline.
-
-Notes:
-    This module's sole public entry point, ``parse_runtime``, is the Mesoscope-VR runtime parser contributed to the
-    central ``RUNTIME_PARSER_REGISTRY`` (paired with ``RUNTIME_SOURCE_ID``, the DataLogger source id that locates the
-    runtime archive). It interprets the decoded runtime payloads into the session's behavior feathers: system and
-    runtime state, guidance states, and the experiment-only VR cue, trigger-zone, and per-trial data.
+"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline. The parser interprets
+the decoded runtime payloads into the session's system and runtime state feathers, plus the experiment-only guidance
+state, VR cue, trigger-zone, and per-trial behavior feathers.
 """
 
 from __future__ import annotations
@@ -247,8 +243,8 @@ def _decompose_multiple_cue_sequences_into_trials(
         during runtime. The second element is an array of cumulative distances at the end of each trial.
 
     Raises:
-        ValueError: If the number of breakpoints does not match the number of sequences minus one, or if no cue
-            sequences are provided.
+        ValueError: If there is more than one cue sequence and the number of breakpoints does not match the number of
+            sequences minus one, or if no cue sequences are provided.
         RuntimeError: If the function is unable to fully decompose any of the cue sequences.
     """
     if not cue_sequences:
@@ -366,7 +362,7 @@ def _prepare_motif_data(
     motif_data: list[tuple[int, NDArray[np.uint8], int]] = [
         (index, motif, len(motif)) for index, motif in enumerate(trial_motifs)
     ]
-    motif_data.sort(key=lambda x: x[2], reverse=True)
+    motif_data.sort(key=lambda entry: entry[2], reverse=True)
 
     # Calculates total size needed to represent all motifs in a single array.
     total_size: int = sum(len(motif) for motif in trial_motifs)
@@ -428,20 +424,20 @@ def _decompose_sequence_numba_flat(
     while sequence_position < sequence_length and trial_count < max_trials:
         motif_found = False
 
-        for i in range(motif_count):
-            motif_length = motif_lengths[i]
+        for motif_index in range(motif_count):
+            motif_length = motif_lengths[motif_index]
 
             if sequence_position + motif_length <= sequence_length:
-                motif_start = motif_starts[i]
+                motif_start = motif_starts[motif_index]
 
                 match = True
-                for j in range(motif_length):
-                    if cue_sequence[sequence_position + j] != motifs_flat[motif_start + j]:
+                for element_index in range(motif_length):
+                    if cue_sequence[sequence_position + element_index] != motifs_flat[motif_start + element_index]:
                         match = False
                         break
 
                 if match:
-                    trial_indices[trial_count] = motif_indices[i]
+                    trial_indices[trial_count] = motif_indices[motif_index]
                     trial_count += 1
                     sequence_position += motif_length
                     motif_found = True

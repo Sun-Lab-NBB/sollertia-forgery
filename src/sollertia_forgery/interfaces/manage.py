@@ -10,7 +10,7 @@ from ataraxis_base_utilities import console
 
 from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
 
-CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
+_CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
 
 
@@ -38,7 +38,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedManifestParameters)
 """Injects the ``manifest`` group's ``_SharedManifestParameters`` as each subcommand's first argument."""
 
 
-@click.group("manifest", context_settings=CONTEXT_SETTINGS)
+@click.group("manifest", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-pp",
     "--project-path",
@@ -56,7 +56,7 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
     context.obj = _SharedManifestParameters(project_path=project_path)
 
 
-@manifest_cli.command("create", context_settings=CONTEXT_SETTINGS)
+@manifest_cli.command("create", context_settings=_CONTEXT_SETTINGS)
 @_pass_shared_parameters
 def create_manifest(shared: _SharedManifestParameters) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
@@ -66,7 +66,7 @@ def create_manifest(shared: _SharedManifestParameters) -> None:
     generate_project_manifest(project_directory=shared.require_project_path())
 
 
-@manifest_cli.command("print", context_settings=CONTEXT_SETTINGS)
+@manifest_cli.command("print", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-a",
     "--animal",
@@ -152,7 +152,7 @@ def print_project_manifest_data(
         manifest.print_summary(animal=animal)
 
 
-@click.command("checksum", context_settings=CONTEXT_SETTINGS)
+@click.command("checksum", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-sp",
     "--session-path",

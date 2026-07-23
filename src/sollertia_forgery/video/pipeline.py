@@ -52,7 +52,7 @@ _RAW_CAMERA_LOG_PART_COUNT: int = 2
 
 _CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
 """The suffix appended to each camera's manifest name to form its canonical timestamp feather filename within the
-video data directory (e.g., the ``face_camera`` source produces ``face_camera_timestamps.feather``)."""
+video data directory (e.g., the ``left_camera`` source produces ``left_camera_timestamps.feather``)."""
 
 
 def run_video_processing_pipeline(
@@ -73,7 +73,7 @@ def run_video_processing_pipeline(
         runs one parse job per camera whose ``{source_id}_log.npz`` archive is on disk, each extracting that camera's
         frame timestamps, then the single rename job that republishes every parsed feather under its canonical manifest
         name. The ``track`` flag runs the single job that applies the acquisition system's donated tracking function to
-        the session's DeepLabCut pose predictions, which no-ops when none are present. The ``energy`` flag runs one job
+        the session's pose predictions, which no-ops when none are present. The ``energy`` flag runs one job
         per camera, measuring its recording into a motion-energy feather, and no-ops when the recording is absent.
 
         The camera manifest defines the full job universe, one parse and one energy job per registered camera plus the
@@ -289,7 +289,7 @@ def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
 
     Reads the camera manifest that every VideoSystem writes alongside its log archives. The manifest is the sole
     source of camera names, so the pipeline requires no acquisition-system-specific configuration. The colloquial
-    source names recorded at acquisition time (for example, ``face_camera``) determine every output filename this
+    source names recorded at acquisition time (for example, ``left_camera``) determine every output filename this
     pipeline writes and locate each camera's recording on disk.
 
     Args:
@@ -311,7 +311,7 @@ def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Each manifest source associates a source ID with a colloquial name (e.g., 'face_camera').
+    # Each manifest source associates a source ID with a colloquial name (e.g., 'left_camera').
     manifest = CameraManifest.from_yaml(file_path=manifest_path)
     return {source.id: source.name for source in manifest.sources}
 
@@ -467,11 +467,10 @@ def _run_pose_tracking(
 ) -> None:
     """Runs the acquisition system's donated video-tracking function over the session's pose predictions, as one job.
 
-    The system's donated tracking function locates its externally-produced DeepLabCut ``.h5`` predictions, parses them,
-    and writes its tracking outputs into the processed video-data directory. The predictions are produced upstream (for
-    the Mesoscope-VR system, by the acquisition rig during preprocessing) and travel with the session's raw data, so
-    this job only reads them. The function no-ops when no prediction file is present, so this job is safe to run on
-    every session.
+    The system's donated tracking function locates its externally-produced pose predictions, parses them, and writes
+    its tracking outputs into the processed video-data directory. The predictions are produced upstream and travel with
+    the session's raw data, so this job only reads them. The function no-ops when no prediction file is present, so
+    this job is safe to run on every session.
 
     Args:
         session: The loaded session whose acquisition system selects the tracking function.

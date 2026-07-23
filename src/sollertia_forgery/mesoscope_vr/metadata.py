@@ -6,7 +6,6 @@ system-agnostic forging pipeline.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Self
 
 
 class BehaviorDataFiles(StrEnum):
@@ -53,7 +52,7 @@ class BehaviorDataFiles(StrEnum):
     VR_TRIGGER_ZONE = "vr_trigger_zone_data.feather"
     """The runtime feather holding VR trigger-zone entry and exit events."""
     TRIAL = "trial_data.feather"
-    """The runtime feather holding per-trial metadata (trial index, trial type, traveled distance at trial start)."""
+    """The runtime feather holding per-trial metadata (trial type index and traveled distance at trial start)."""
 
 
 class VideoDataFiles(StrEnum):
@@ -80,222 +79,222 @@ class VideoDataFiles(StrEnum):
 
 
 class DatasetColumn(StrEnum):
-    """Defines every column that can appear in the assembled session data feather produced by the forging pipeline,
-    pairing each column name with its human-readable description.
+    """Defines every column name that can appear in the assembled session data feather produced by the forging
+    pipeline.
 
     Notes:
-        Each member's value is the column name as it appears in ``data.feather`` (so members compare equal to the raw
-        column strings), while the ``description`` attribute carries the column's meaning. This enum is the single
-        source of truth for the Mesoscope-VR column descriptions baked into a forged dataset via
-        ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
+        Each member's value is the column name as it appears in ``data.feather``, so members compare equal to the raw
+        column strings. The human-readable description of each column lives in ``_COLUMN_DESCRIPTIONS`` and reaches a
+        forged dataset through ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
-        Several columns are conditional: ``REINFORCING_GUIDED`` and ``AVERSIVE_GUIDED`` are present only when the
-        corresponding guidance events were recorded. ``BRAKE`` and ``SCREENS`` are present only for mesoscope
-        experiments. ``TORQUE_N_CM`` is absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick
-        training. The per-camera video columns are present only when that camera's feathers were produced, and the
-        pupil columns only when the face camera's pose predictions were processed. The remaining members are present in
-        every forged session.
+        Several columns are conditional. The runtime columns (``TRIAL``, ``TRIAL_TYPE``, ``CUE``, ``IN_TRIGGER_ZONE``,
+        ``RUNTIME_STATE``), the fluorescence columns (``FRAME`` and the ``SINGLE_DAY_*`` and ``MULTI_DAY_*`` members),
+        ``BRAKE``, and ``SCREENS`` are present only for mesoscope experiment sessions. ``REINFORCING_GUIDED`` and
+        ``AVERSIVE_GUIDED`` are present only when the corresponding guidance events were recorded. ``TORQUE_N_CM`` is
+        absent for run training. ``DISTANCE_CM`` and ``SPEED_CM_S`` are absent for lick training. The per-camera video
+        columns are present only when that camera's feathers were produced, and the pupil columns only when the face
+        camera's pose predictions were processed. The remaining behavior columns (``TIME_US``, ``ELAPSED_MINUTES``,
+        ``LICK``, ``WATER_UL``, ``REWARD``, ``SYSTEM_STATE``) are present in every forged session.
     """
 
-    description: str
-    """The human-readable description of the column, recorded in the dataset's ``data_descriptions.feather``."""
+    # Groups the behavior-alignment columns produced by the forging behavior assembly.
+    TIME_US = "time_us"
+    ELAPSED_MINUTES = "elapsed_minutes"
+    BRAKE = "brake"
+    SCREENS = "screens"
+    TORQUE_N_CM = "torque_N_cm"
+    DISTANCE_CM = "distance_cm"
+    SPEED_CM_S = "speed_cm_s"
+    LICK = "lick"
+    WATER_UL = "water_uL"
+    REWARD = "reward"
+    SYSTEM_STATE = "system_state"
 
-    def __new__(cls, value: str, description: str) -> Self:
-        """Builds a DatasetColumn member whose string value is the column name and that carries its description.
+    # Groups the runtime and experiment columns produced by the forging runtime assembly.
+    TRIAL = "trial"
+    TRIAL_TYPE = "trial_type"
+    CUE = "cue"
+    IN_TRIGGER_ZONE = "in_trigger_zone"
+    RUNTIME_STATE = "runtime_state"
+    REINFORCING_GUIDED = "reinforcing_guided"
+    AVERSIVE_GUIDED = "aversive_guided"
 
-        Args:
-            value: The column name as it appears in ``data.feather``.
-            description: The human-readable description of the column.
+    # Groups the cindra fluorescence columns produced by the forging fluorescence assembly.
+    FRAME = "frame"
+    SINGLE_DAY_CELL_FLUORESCENCE = "single_day_cell_fluorescence"
+    SINGLE_DAY_NEUROPIL_FLUORESCENCE = "single_day_neuropil_fluorescence"
+    SINGLE_DAY_SUBTRACTED_FLUORESCENCE = "single_day_subtracted_fluorescence"
+    SINGLE_DAY_SPIKES = "single_day_spikes"
+    MULTI_DAY_CELL_FLUORESCENCE = "multi_day_cell_fluorescence"
+    MULTI_DAY_NEUROPIL_FLUORESCENCE = "multi_day_neuropil_fluorescence"
+    MULTI_DAY_SUBTRACTED_FLUORESCENCE = "multi_day_subtracted_fluorescence"
+    MULTI_DAY_SPIKES = "multi_day_spikes"
 
-        Returns:
-            The constructed DatasetColumn member.
-        """
-        member = str.__new__(cls, value)
-        member._value_ = value
-        member.description = description
-        return member
+    # Groups the video motion-energy columns produced by the forging video assembly.
+    FACE_CAMERA_MOTION_ENERGY = "face_camera_motion_energy"
+    FACE_CAMERA_FRAME_LUMINANCE = "face_camera_frame_luminance"
+    BODY_CAMERA_MOTION_ENERGY = "body_camera_motion_energy"
+    BODY_CAMERA_FRAME_LUMINANCE = "body_camera_frame_luminance"
 
-    # Behavior alignment columns (from forging behavior assembly).
-    TIME_US = ("time_us", "Microsecond-precision sample timestamps from the acquisition reference clock.")
-    ELAPSED_MINUTES = ("elapsed_minutes", "Elapsed session time in minutes since the session's onset.")
-    BRAKE = ("brake", "The running wheel brake engagement at each sample.")
-    SCREENS = ("screens", "The Virtual Reality displays state at each sample.")
-    TORQUE_N_CM = (
-        "torque_N_cm",
-        "The torque applied by the animal to the running wheel in N·cm at each sample, forced to zero during "
-        "'run' periods upstream.",
-    )
-    DISTANCE_CM = (
-        "distance_cm",
-        "Cumulative distance traveled by the animal in centimeters at each sample.",
-    )
-    SPEED_CM_S = ("speed_cm_s", "Animal's running speed in cm/s at each sample.")
-    LICK = ("lick", "Lick sensor engagement state at each sample.")
-    WATER_UL = ("water_uL", "The cumulative water reward volume delivered to the animal at each sample in microliters.")
-    REWARD = ("reward", "The reward delivery state (on / off) at each sample.")
-    SYSTEM_STATE = ("system_state", "Acquisition system state at each sample (idle, rest, run).")
+    # Groups the pupil-tracking columns produced by the forging video assembly for the face camera.
+    PUPIL_CENTER_X_PX = "pupil_center_x_px"
+    PUPIL_CENTER_Y_PX = "pupil_center_y_px"
+    PUPIL_DIAMETER_PX = "pupil_diameter_px"
+    PUPIL_AREA_PX2 = "pupil_area_px2"
+    PUPIL_FIT_CONDITION = "pupil_fit_condition"
+    PUPIL_FIT_RESIDUAL_PX = "pupil_fit_residual_px"
+    EYE_CENTER_X_PX = "eye_center_x_px"
+    EYE_CENTER_Y_PX = "eye_center_y_px"
+    EYE_WIDTH_PX = "eye_width_px"
+    EYE_HEIGHT_PX = "eye_height_px"
+    EYE_OPENNESS = "eye_openness"
+    BLINKING_STATE = "blinking_state"
+    DILATION_STATE = "dilation_state"
+    REFLECTION_X_PX = "reflection_x_px"
+    REFLECTION_Y_PX = "reflection_y_px"
+    PUPIL_REFLECTION_OFFSET_X_PX = "pupil_reflection_offset_x_px"
+    PUPIL_REFLECTION_OFFSET_Y_PX = "pupil_reflection_offset_y_px"
+    PUPIL_IN_EYE_X = "pupil_in_eye_x"
+    PUPIL_IN_EYE_Y = "pupil_in_eye_y"
 
-    # Runtime/experiment columns (from forging runtime assembly).
-    TRIAL = ("trial", "One-based trial identifier at each sample. 65535 marks samples outside any trial.")
-    TRIAL_TYPE = (
-        "trial_type",
-        "Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples.",
-    )
-    CUE = ("cue", "Active virtual reality cue identifier at each sample. 255 marks samples outside the run state.")
-    IN_TRIGGER_ZONE = (
-        "in_trigger_zone",
-        "Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample.",
-    )
-    RUNTIME_STATE = ("runtime_state", "Experiment runtime state label at each sample.")
-    REINFORCING_GUIDED = (
-        "reinforcing_guided",
-        "Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded.",
-    )
-    AVERSIVE_GUIDED = (
-        "aversive_guided",
-        "Aversive guidance state at each sample. Present only when aversive guidance was recorded.",
-    )
 
-    # Cindra fluorescence columns (from forging fluorescence assembly).
-    SINGLE_DAY_CELL_FLUORESCENCE = (
-        "single_day_cell_fluorescence",
-        "Single-recording raw cell fluorescence trace per ROI.",
-    )
-    SINGLE_DAY_NEUROPIL_FLUORESCENCE = (
-        "single_day_neuropil_fluorescence",
-        "Single-recording raw neuropil fluorescence trace per ROI.",
-    )
-    SINGLE_DAY_SUBTRACTED_FLUORESCENCE = (
-        "single_day_subtracted_fluorescence",
-        "Single-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence.",
-    )
-    SINGLE_DAY_SPIKES = ("single_day_spikes", "Single-recording OASIS-deconvolved spike rates per ROI.")
-    MULTI_DAY_CELL_FLUORESCENCE = (
-        "multi_day_cell_fluorescence",
-        "Multi-recording raw cell fluorescence trace per ROI.",
-    )
-    MULTI_DAY_NEUROPIL_FLUORESCENCE = (
-        "multi_day_neuropil_fluorescence",
-        "Multi-recording raw neuropil fluorescence trace per ROI.",
-    )
-    MULTI_DAY_SUBTRACTED_FLUORESCENCE = (
-        "multi_day_subtracted_fluorescence",
-        "Multi-recording neuropil-subtracted, baseline-corrected dF/F0 fluorescence aligned across recording days.",
-    )
-    MULTI_DAY_SPIKES = (
-        "multi_day_spikes",
-        "Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days.",
-    )
-
-    # Video motion-energy columns (from forging video assembly).
-    FACE_CAMERA_MOTION_ENERGY = (
-        "face_camera_motion_energy",
+_COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
+    # Behavior-alignment column descriptions.
+    DatasetColumn.TIME_US: "Microsecond-precision sample timestamps from the acquisition reference clock.",
+    DatasetColumn.ELAPSED_MINUTES: "Elapsed session time in minutes since the session's onset.",
+    DatasetColumn.BRAKE: "The running wheel brake engagement at each sample.",
+    DatasetColumn.SCREENS: "The Virtual Reality display state at each sample.",
+    DatasetColumn.TORQUE_N_CM: (
+        "The torque applied by the animal to the running wheel in N·cm at each sample, forced to zero during 'run' "
+        "periods upstream."
+    ),
+    DatasetColumn.DISTANCE_CM: "Cumulative distance traveled by the animal in centimeters at each sample.",
+    DatasetColumn.SPEED_CM_S: "Animal's running speed in cm/s at each sample.",
+    DatasetColumn.LICK: "Lick sensor engagement state at each sample.",
+    DatasetColumn.WATER_UL: "The cumulative water reward volume delivered to the animal at each sample in microliters.",
+    DatasetColumn.REWARD: (
+        "The reward-classification state at each sample, one of 'no' (no tone or reward), 'tone' (tone played, no "
+        "water delivered), or 'yes' (water reward delivered)."
+    ),
+    DatasetColumn.SYSTEM_STATE: "Acquisition system state at each sample (idle, rest, run).",
+    # Runtime and experiment column descriptions.
+    DatasetColumn.TRIAL: "One-based trial identifier at each sample. 65535 marks samples outside any trial.",
+    DatasetColumn.TRIAL_TYPE: (
+        "Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."
+    ),
+    DatasetColumn.CUE: "Active virtual reality cue identifier at each sample. 255 marks samples outside the run state.",
+    DatasetColumn.IN_TRIGGER_ZONE: (
+        "Boolean flag indicating whether the animal is inside a stimulus trigger zone at each sample."
+    ),
+    DatasetColumn.RUNTIME_STATE: "Experiment runtime state label at each sample.",
+    DatasetColumn.REINFORCING_GUIDED: (
+        "Reinforcing guidance state at each sample. Present only when reinforcing guidance was recorded."
+    ),
+    DatasetColumn.AVERSIVE_GUIDED: (
+        "Aversive guidance state at each sample. Present only when aversive guidance was recorded."
+    ),
+    # cindra fluorescence column descriptions.
+    DatasetColumn.FRAME: "One-based mesoscope acquisition frame index at each sample.",
+    DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE: "Single-recording raw cell fluorescence trace per ROI.",
+    DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE: "Single-recording raw neuropil fluorescence trace per ROI.",
+    DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE: (
+        "Single-recording neuropil- and baseline-subtracted fluorescence trace per ROI."
+    ),
+    DatasetColumn.SINGLE_DAY_SPIKES: "Single-recording OASIS-deconvolved spike rates per ROI.",
+    DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE: "Multi-recording raw cell fluorescence trace per ROI.",
+    DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE: "Multi-recording raw neuropil fluorescence trace per ROI.",
+    DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE: (
+        "Multi-recording neuropil- and baseline-subtracted fluorescence trace per ROI aligned across recording days."
+    ),
+    DatasetColumn.MULTI_DAY_SPIKES: (
+        "Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days."
+    ),
+    # Video motion-energy column descriptions.
+    DatasetColumn.FACE_CAMERA_MOTION_ENERGY: (
         "Face camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
-        "within-session movement magnitude, high during movement and low during stillness.",
-    )
-    FACE_CAMERA_FRAME_LUMINANCE = (
-        "face_camera_frame_luminance",
-        "Face camera mean frame intensity at each sample in gray levels, tracking scene illumination.",
-    )
-    BODY_CAMERA_MOTION_ENERGY = (
-        "body_camera_motion_energy",
+        "within-session movement magnitude, high during movement and low during stillness."
+    ),
+    DatasetColumn.FACE_CAMERA_FRAME_LUMINANCE: (
+        "Face camera mean frame intensity at each sample in gray levels, tracking scene illumination."
+    ),
+    DatasetColumn.BODY_CAMERA_MOTION_ENERGY: (
         "Body camera motion energy at each sample, the mean absolute inter-frame intensity change in gray levels. A "
-        "within-session movement magnitude, high during movement and low during stillness.",
-    )
-    BODY_CAMERA_FRAME_LUMINANCE = (
-        "body_camera_frame_luminance",
-        "Body camera mean frame intensity at each sample in gray levels, tracking scene illumination.",
-    )
-
-    # Pupil-tracking columns (from forging video assembly, face camera).
-    PUPIL_CENTER_X_PX = (
-        "pupil_center_x_px",
-        "Horizontal position of the fitted pupil ellipse center in face-camera pixels at each sample.",
-    )
-    PUPIL_CENTER_Y_PX = (
-        "pupil_center_y_px",
-        "Vertical position of the fitted pupil ellipse center in face-camera pixels at each sample.",
-    )
-    PUPIL_DIAMETER_PX = (
-        "pupil_diameter_px",
+        "within-session movement magnitude, high during movement and low during stillness."
+    ),
+    DatasetColumn.BODY_CAMERA_FRAME_LUMINANCE: (
+        "Body camera mean frame intensity at each sample in gray levels, tracking scene illumination."
+    ),
+    # Pupil-tracking column descriptions (face camera).
+    DatasetColumn.PUPIL_CENTER_X_PX: (
+        "Horizontal position of the fitted pupil ellipse center in face-camera pixels at each sample."
+    ),
+    DatasetColumn.PUPIL_CENTER_Y_PX: (
+        "Vertical position of the fitted pupil ellipse center in face-camera pixels at each sample."
+    ),
+    DatasetColumn.PUPIL_DIAMETER_PX: (
         "Mean of the fitted pupil ellipse's two axis diameters in face-camera pixels at each sample, the primary "
-        "arousal proxy. NaN marks blink and dilation samples.",
-    )
-    PUPIL_AREA_PX2 = (
-        "pupil_area_px2",
-        "Area enclosed by the fitted pupil ellipse in square face-camera pixels at each sample.",
-    )
-    PUPIL_FIT_CONDITION = (
-        "pupil_fit_condition",
+        "arousal proxy. NaN marks blink and dilation samples."
+    ),
+    DatasetColumn.PUPIL_AREA_PX2: (
+        "Area enclosed by the fitted pupil ellipse in square face-camera pixels at each sample."
+    ),
+    DatasetColumn.PUPIL_FIT_CONDITION: (
         "Condition number of the fitted pupil ellipse at each sample, where higher values indicate a less reliable "
-        "fit. NaN marks unmeasured samples.",
-    )
-    PUPIL_FIT_RESIDUAL_PX = (
-        "pupil_fit_residual_px",
+        "fit. NaN marks unmeasured samples."
+    ),
+    DatasetColumn.PUPIL_FIT_RESIDUAL_PX: (
         "Root-mean-square distance in pixels between the confident pupil-perimeter points and the fitted ellipse at "
-        "each sample, a fit-quality measure.",
-    )
-    EYE_CENTER_X_PX = (
-        "eye_center_x_px",
-        "Horizontal position of the fitted eye ellipse center in face-camera pixels at each sample.",
-    )
-    EYE_CENTER_Y_PX = (
-        "eye_center_y_px",
-        "Vertical position of the fitted eye ellipse center in face-camera pixels at each sample.",
-    )
-    EYE_WIDTH_PX = (
-        "eye_width_px",
-        "Length of the fitted eye ellipse's left-right chord in face-camera pixels at each sample.",
-    )
-    EYE_HEIGHT_PX = (
-        "eye_height_px",
-        "Length of the fitted eye ellipse's top-bottom chord in face-camera pixels at each sample.",
-    )
-    EYE_OPENNESS = (
-        "eye_openness",
+        "each sample, a fit-quality measure."
+    ),
+    DatasetColumn.EYE_CENTER_X_PX: (
+        "Horizontal position of the fitted eye ellipse center in face-camera pixels at each sample."
+    ),
+    DatasetColumn.EYE_CENTER_Y_PX: (
+        "Vertical position of the fitted eye ellipse center in face-camera pixels at each sample."
+    ),
+    DatasetColumn.EYE_WIDTH_PX: (
+        "Length of the fitted eye ellipse's left-right chord in face-camera pixels at each sample."
+    ),
+    DatasetColumn.EYE_HEIGHT_PX: (
+        "Length of the fitted eye ellipse's top-bottom chord in face-camera pixels at each sample."
+    ),
+    DatasetColumn.EYE_OPENNESS: (
         "Ratio of the fitted eye ellipse's height to its width at each sample, a distance-invariant measure of eye "
-        "openness.",
-    )
-    BLINKING_STATE = (
-        "blinking_state",
-        "Blink state at each sample, marking a closed or covered eye. Encoded as 1 during a blink and 0 otherwise.",
-    )
-    DILATION_STATE = (
-        "dilation_state",
+        "openness."
+    ),
+    DatasetColumn.BLINKING_STATE: (
+        "Blink state at each sample, marking a closed or covered eye. Encoded as 1 during a blink and 0 otherwise."
+    ),
+    DatasetColumn.DILATION_STATE: (
         "Dilation-clip state at each sample, marking a pupil dilated past the eye aperture. Encoded as 1 when clipped "
-        "and 0 otherwise.",
-    )
-    REFLECTION_X_PX = (
-        "reflection_x_px",
-        "Horizontal position of the corneal reflection in face-camera pixels at each sample.",
-    )
-    REFLECTION_Y_PX = (
-        "reflection_y_px",
-        "Vertical position of the corneal reflection in face-camera pixels at each sample.",
-    )
-    PUPIL_REFLECTION_OFFSET_X_PX = (
-        "pupil_reflection_offset_x_px",
+        "and 0 otherwise."
+    ),
+    DatasetColumn.REFLECTION_X_PX: (
+        "Horizontal position of the corneal reflection in face-camera pixels at each sample."
+    ),
+    DatasetColumn.REFLECTION_Y_PX: "Vertical position of the corneal reflection in face-camera pixels at each sample.",
+    DatasetColumn.PUPIL_REFLECTION_OFFSET_X_PX: (
         "Horizontal offset of the pupil center from the corneal reflection in pixels at each sample, a motion-robust "
-        "horizontal eye-position signal.",
-    )
-    PUPIL_REFLECTION_OFFSET_Y_PX = (
-        "pupil_reflection_offset_y_px",
+        "horizontal eye-position signal."
+    ),
+    DatasetColumn.PUPIL_REFLECTION_OFFSET_Y_PX: (
         "Vertical offset of the pupil center from the corneal reflection in pixels at each sample, a motion-robust "
-        "vertical eye-position signal.",
-    )
-    PUPIL_IN_EYE_X = (
-        "pupil_in_eye_x",
+        "vertical eye-position signal."
+    ),
+    DatasetColumn.PUPIL_IN_EYE_X: (
         "Horizontal offset of the pupil center from the eye center at each sample, normalized to the eye ellipse's "
-        "horizontal semi-axis and dimensionless.",
-    )
-    PUPIL_IN_EYE_Y = (
-        "pupil_in_eye_y",
+        "horizontal semi-axis and dimensionless."
+    ),
+    DatasetColumn.PUPIL_IN_EYE_Y: (
         "Vertical offset of the pupil center from the eye center at each sample, normalized to the eye ellipse's "
-        "vertical semi-axis and dimensionless.",
-    )
+        "vertical semi-axis and dimensionless."
+    ),
+}
+"""Maps each DatasetColumn to its human-readable description. Every member must appear here, which the
+``MESOSCOPE_COLUMN_DESCRIPTIONS`` comprehension enforces at import time by raising ``KeyError`` on any omission."""
 
 
-MESOSCOPE_COLUMN_DESCRIPTIONS: dict[str, str] = {column.value: column.description for column in DatasetColumn}
+MESOSCOPE_COLUMN_DESCRIPTIONS: dict[str, str] = {column.value: _COLUMN_DESCRIPTIONS[column] for column in DatasetColumn}
 """The Mesoscope-VR column-description binding donated to the forging pipeline. Maps every column name the
 Mesoscope-VR assembly worker can emit into ``data.feather`` to its human-readable description, baked into each forged
-dataset's ``data_descriptions.feather``. Derived from ``DatasetColumn`` so the descriptions stay single-sourced."""
+dataset's ``data_descriptions.feather``. Derived from ``DatasetColumn`` and ``_COLUMN_DESCRIPTIONS``."""

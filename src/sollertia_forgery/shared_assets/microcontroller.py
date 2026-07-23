@@ -32,8 +32,8 @@ def find_module_feathers(data_directory: Path) -> list[Path]:
         data_directory: The path to the session's microcontroller data directory.
 
     Returns:
-        A sorted list of paths to the discovered module feather files. Returns an empty list if the directory does
-        not exist or if no matching files are found.
+        The discovered module feather paths, sorted, or an empty list when the directory does not exist or holds no
+        matching files.
     """
     if not data_directory.is_dir():
         return []
@@ -50,7 +50,7 @@ def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
             archives).
 
     Returns:
-        A tuple of three integers: (controller_id, module_type, module_id).
+        The (controller_id, module_type, module_id) parsed from the filename.
 
     Raises:
         ValueError: If the filename does not follow the expected naming convention.
@@ -73,9 +73,8 @@ def partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
     """Partitions a module DataFrame into per-event sub-DataFrames in a single pass.
 
     Notes:
-        Replaces the pattern of calling ``module_dataframe.filter(pl.col("event") == code)`` once per event
-        code, which scans the entire DataFrame each time. Polars' partition_by traverses the DataFrame once
-        and returns the groups keyed by event code, allowing subsequent lookups to be O(1).
+        Groups the rows by event code in a single ``partition_by`` traversal of the DataFrame, returning the groups
+        keyed by event code so subsequent per-code lookups are O(1).
 
     Args:
         module_dataframe: The Polars DataFrame read from an ataraxis-communication-interface module feather file with
@@ -102,7 +101,7 @@ def get_event_timestamps(partition: dict[int, pl.DataFrame], event_code: int) ->
         event_code: The event code to look up.
 
     Returns:
-        A NumPy uint64 array of timestamps, or an empty array if the event code is not present.
+        The timestamps for the requested event code, or an empty array when the code is not present.
     """
     event_dataframe = partition.get(event_code)
     if event_dataframe is None:
@@ -119,9 +118,8 @@ def get_event_data[ScalarT: np.generic](
 
     Notes:
         Relies on the ataraxis-communication-interface protocol guarantee that all messages sharing an event code also
-        share a payload dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call
-        instead of a per-row Python loop. The reconstructed values are then cast to the requested output dtype for
-        uniform downstream handling.
+        share a payload dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call.
+        The reconstructed values are then cast to the requested output dtype for uniform downstream handling.
 
     Args:
         partition: The event-code-keyed partition dictionary produced by partition_events().
@@ -129,8 +127,8 @@ def get_event_data[ScalarT: np.generic](
         values_dtype: The NumPy scalar type to cast the reconstructed values to.
 
     Returns:
-        A tuple of (uint64 timestamp array, values array cast to values_dtype). Both arrays are empty if the
-        event code is not present in the partition.
+        The timestamps and the reconstructed values cast to values_dtype, both empty when the event code is not
+        present in the partition.
     """
     event_dataframe = partition.get(event_code)
     if event_dataframe is None:
@@ -156,8 +154,8 @@ def merge_event_streams[ScalarT: np.generic](
 
     Notes:
         Consolidates the allocate-empty-arrays / fill-halves / argsort pattern used by most parsing functions to
-        align message streams (event codes). Uses NumPy's stable mergesort, which is near-linear on the already-sorted
-        runs produced by the ataraxis-communication-interface log format.
+        align message streams (event codes). Uses NumPy's stable sort (``kind="stable"``), which NumPy maps to a
+        linear-time radix sort for the uint64 timestamp keys.
 
     Args:
         timestamps_a: The uint64 timestamp array for the first event stream.
