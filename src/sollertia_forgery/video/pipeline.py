@@ -25,7 +25,7 @@ from .motion_energy import (
     pinned_worker_threads,
     compute_camera_motion_energy,
 )
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -169,7 +169,7 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
 
-        prepare_tracker(tracker=tracker, jobs=universe, universe=universe)
+        tracker.align_jobs(jobs=universe, universe=universe)
 
         job_name, specifier = id_to_job[job_id]
         if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
@@ -245,7 +245,7 @@ def run_video_processing_pipeline(
 
     # Detects foreign entries against the full universe rather than the requested subset, so a partial invocation (a
     # single job kind, or a partial discovery) aligns the tracker without wiping the previously completed sibling jobs.
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=universe)
+    tracker.align_jobs(jobs=jobs, universe=universe)
 
     console.echo(message=f"Running {len(jobs)} camera video-processing job(s).")
 

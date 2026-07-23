@@ -14,7 +14,7 @@ import numpy as np
 import polars as pl
 from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
 from sollertia_shared_assets import validate_directory
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
+from ataraxis_data_structures import delete_directory
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -229,83 +229,6 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     for job in state.all_jobs.values():
         tracker_jobs.setdefault(job.tracker_path, []).append(job)
     return tracker_jobs
-
-
-def read_tracker_status(tracker_path: Path) -> dict[str, Any]:
-    """Reads a processing tracker file and returns structured per-job status information.
-
-    Args:
-        tracker_path: The path to the ``ProcessingTracker`` YAML file.
-
-    Returns:
-        A dictionary containing per-job status details in ``jobs`` and summary counts in ``summary``. Each job
-        entry has ``job_id``, ``job_name``, ``specifier``, ``status``, and optionally ``error_message`` keys.
-    """
-    tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
-
-    job_details: list[dict[str, Any]] = []
-    succeeded_count = 0
-    failed_count = 0
-    running_count = 0
-    scheduled_count = 0
-
-    for job_id, job_state in tracker.jobs.items():
-        status = job_state.status
-
-        if status == ProcessingStatus.SUCCEEDED:
-            succeeded_count += 1
-        elif status == ProcessingStatus.FAILED:
-            failed_count += 1
-        elif status == ProcessingStatus.RUNNING:
-            running_count += 1
-        else:
-            scheduled_count += 1
-
-        entry: dict[str, Any] = {
-            "job_id": job_id,
-            "job_name": job_state.job_name,
-            "specifier": job_state.specifier,
-            "status": status.name,
-        }
-        if job_state.error_message is not None:
-            entry["error_message"] = job_state.error_message
-        job_details.append(entry)
-
-    return {
-        "jobs": job_details,
-        "summary": {
-            "total": len(tracker.jobs),
-            "succeeded": succeeded_count,
-            "failed": failed_count,
-            "running": running_count,
-            "scheduled": scheduled_count,
-        },
-    }
-
-
-def derive_tracker_status(summary: dict[str, Any]) -> str:
-    """Derives a high-level processing status label from a tracker summary's job counts.
-
-    Applies a fixed priority: ``failed`` if any job failed, ``completed`` if all succeeded, ``processing`` if
-    any are running, ``not_started`` if all are scheduled, and ``in_progress`` otherwise.
-
-    Args:
-        summary: A dictionary containing ``total``, ``succeeded``, ``failed``, ``running``, and ``scheduled``
-            counts.
-
-    Returns:
-        A status string: one of ``failed``, ``completed``, ``processing``, ``not_started``, or ``in_progress``.
-    """
-    total = summary.get("total", 0)
-    if summary.get("failed", 0) > 0:
-        return "failed"
-    if summary.get("succeeded", 0) == total and total > 0:
-        return "completed"
-    if summary.get("running", 0) > 0:
-        return "processing"
-    if summary.get("scheduled", 0) == total and total > 0:
-        return "not_started"
-    return "in_progress"
 
 
 def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> dict[str, Any]:

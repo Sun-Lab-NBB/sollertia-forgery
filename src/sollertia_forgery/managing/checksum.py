@@ -8,8 +8,6 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
-from ..shared_assets import prepare_tracker
-
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -60,7 +58,7 @@ def resolve_checksum(
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
     tracker = ProcessingTracker(file_path=session_data.raw_data.checksum_tracker_path)
     jobs = [(CHECKSUM_JOB_NAME, session_data.session_name)]
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
+    tracker.align_jobs(jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session_data.session_name)
 
     tracker.start_job(job_id=job_id)

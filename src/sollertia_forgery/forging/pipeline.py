@@ -17,7 +17,7 @@ from ataraxis_data_structures import ProcessingTracker
 
 from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
-from ..shared_assets import tracked_job, prepare_tracker, multi_recording_dataset_directory
+from ..shared_assets import tracked_job, multi_recording_dataset_directory
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -114,7 +114,7 @@ def run_forging_pipeline(
     dataset_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
     jobs = [(FORGING_JOB_NAME, session) for session in dataset_session_names]
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
+    tracker.align_jobs(jobs=jobs, universe=jobs)
 
     job_ids = {
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)

@@ -1,6 +1,10 @@
 """Provides the system-agnostic substrate shared across acquisition systems."""
 
-from .tracking import tracked_job, prepare_tracker
+from .tracking import (
+    tracked_job,
+    summarize_tracker,
+    derive_tracker_status,
+)
 from .utilities import (
     DELAY_TIMER,
     LOG_ARCHIVE_SUFFIX,
@@ -20,6 +24,7 @@ __all__ = [
     "DELAY_TIMER",
     "LOG_ARCHIVE_SUFFIX",
     "delay_terminal",
+    "derive_tracker_status",
     "find_module_feathers",
     "get_event_data",
     "get_event_timestamps",
@@ -27,6 +32,6 @@ __all__ = [
     "multi_recording_dataset_directory",
     "parse_module_feather_name",
     "partition_events",
-    "prepare_tracker",
+    "summarize_tracker",
     "tracked_job",
 ]

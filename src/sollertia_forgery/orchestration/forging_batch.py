@@ -28,14 +28,9 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
-from .local import (
-    ConcurrencyDescriptor,
-    read_tracker_status,
-    analyze_feather_file,
-    derive_tracker_status,
-)
+from .local import ConcurrencyDescriptor, analyze_feather_file
 from ..forging import resolve_dataset
-from ..shared_assets import prepare_tracker
+from ..shared_assets import summarize_tracker, derive_tracker_status
 from ..forging.pipeline import FORGING_JOB_NAME, run_forging_pipeline
 
 if TYPE_CHECKING:
@@ -80,9 +75,9 @@ def prepare_forging_unit(unit: dict[str, Any]) -> dict[str, Any]:
     # Prepares the processing tracker and aligns it with the session set.
     tracker = ProcessingTracker(file_path=tracker_path)
     jobs_tuples = [(FORGING_JOB_NAME, entry.session) for entry in dataset.sessions]
-    prepare_tracker(tracker=tracker, jobs=jobs_tuples, universe=jobs_tuples)
+    tracker.align_jobs(jobs=jobs_tuples, universe=jobs_tuples)
 
-    # Builds enriched job descriptors directly from the in-memory tracker, which prepare_tracker just aligned. This
+    # Builds enriched job descriptors directly from the in-memory tracker, which align_jobs just aligned. This
     # avoids a redundant YAML deserialization.
     session_by_job_id = {
         ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=entry.session): entry
@@ -259,7 +254,7 @@ def verify_forging_unit(unit_path: Path) -> dict[str, Any]:
     tracker_info: dict[str, Any] = {}
     if tracker_path.exists():
         try:
-            tracker_info = read_tracker_status(tracker_path=tracker_path)
+            tracker_info = summarize_tracker(jobs=ProcessingTracker(file_path=tracker_path).snapshot())
         except Exception:
             tracker_info = {"error": "Unable to read tracker file."}
 
@@ -325,7 +320,7 @@ def iterate_forging_overview(root_directory: str) -> Iterator[dict[str, Any]]:
             continue
         dataset_name = dataset_path.name
         try:
-            status = read_tracker_status(tracker_path=tracker_path)
+            status = summarize_tracker(jobs=ProcessingTracker(file_path=tracker_path).snapshot())
             summary = status.get("summary", {})
             dataset_status = derive_tracker_status(summary=summary)
             yield {

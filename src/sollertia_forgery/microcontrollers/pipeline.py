@@ -27,7 +27,6 @@ from ..registries import resolve_microcontroller_parsers, resolve_microcontrolle
 from ..shared_assets import (
     LOG_ARCHIVE_SUFFIX,
     tracked_job,
-    prepare_tracker,
     partition_events,
     find_module_feathers,
     parse_module_feather_name,
@@ -124,7 +123,7 @@ def run_microcontroller_processing_pipeline(
     tracker_directory = session.processed_data.microcontroller_data_path
     tracker_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=tracker_directory / ProcessingTrackers.MICROCONTROLLER)
-    prepare_tracker(tracker=tracker, jobs=requested, universe=universe)
+    tracker.align_jobs(jobs=requested, universe=universe)
 
     if job_id is not None:
         _execute_remote_job(
