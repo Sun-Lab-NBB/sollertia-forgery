@@ -57,13 +57,21 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
 
 
 @manifest_cli.command("create", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-pr",
+    "--progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to display a preamble message and a completion message during manifest generation.",
+)
 @_pass_shared_parameters
-def create_manifest(shared: _SharedManifestParameters) -> None:
+def create_manifest(shared: _SharedManifestParameters, *, progress: bool) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
 
     An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
     """
-    generate_project_manifest(project_directory=shared.require_project_path())
+    generate_project_manifest(project_directory=shared.require_project_path(), display_progress=progress)
 
 
 @manifest_cli.command("print", context_settings=_CONTEXT_SETTINGS)

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 import polars as pl
 from natsort import natsorted
 from filelock import FileLock
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     SessionData,
     SessionTypes,
@@ -74,7 +74,7 @@ def project_manifest_path(project_directory: Path) -> Path:
     return project_directory.joinpath(f"{project_directory.stem}_manifest.feather")
 
 
-def generate_project_manifest(project_directory: Path) -> None:
+def generate_project_manifest(project_directory: Path, *, display_progress: bool = False) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
     The manifest captures one row per session with its acquisition metadata and per-pipeline processing status. A
@@ -83,6 +83,8 @@ def generate_project_manifest(project_directory: Path) -> None:
 
     Args:
         project_directory: The path to the processed project's root directory.
+        display_progress: Determines whether to emit a preamble message when generation starts and a completion
+            message when the manifest is written. Generation is fast enough that no progress bar is displayed.
 
     Raises:
         FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
@@ -96,6 +98,12 @@ def generate_project_manifest(project_directory: Path) -> None:
             f"The specified project directory does not exist."
         )
         console.error(message=message, error=FileNotFoundError)
+
+    if display_progress:
+        console.echo(
+            message=f"Generating the project manifest for the '{project_directory.stem}' project...",
+            level=LogLevel.INFO,
+        )
 
     # Discovers and loads every session under the project once. Both the multi-recording registry and the
     # per-session manifest rows consume this list, avoiding a second project-wide scan and redundant
@@ -260,6 +268,12 @@ def generate_project_manifest(project_directory: Path) -> None:
             sorted_manifest.write_ipc(file=manifest_path, compression="uncompressed")
 
             tracker.complete_job(job_id=job_id)
+
+            if display_progress:
+                console.echo(
+                    message=f"Project '{project_directory.stem}' manifest: Generated.",
+                    level=LogLevel.SUCCESS,
+                )
 
         except Exception as exception:
             # Records the manifest job as failed before re-raising so the tracker reflects the aborted run.
