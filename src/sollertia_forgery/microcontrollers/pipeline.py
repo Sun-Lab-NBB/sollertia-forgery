@@ -174,6 +174,68 @@ def run_microcontroller_processing_pipeline(
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
+def discover_microcontroller_jobs(
+    session_path: Path,
+) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolves the microcontroller pipeline's job universe and runnable subset for the target session.
+
+    Notes:
+        The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
+        controller that declares at least one module the acquisition system parses, plus one parse job per such
+        module. The runnable subset narrows the universe to controllers whose log archive is present on disk, since a
+        controller with no archive can be neither extracted nor parsed. This is discovery only, reading the manifest
+        and globbing for archives while decoding no data and mutating nothing.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        subset of that universe. Extraction specifiers are controller IDs and parse specifiers are
+        ``"{controller_id}-{module_type}-{module_id}"``.
+
+    Raises:
+        FileNotFoundError: If the session's microcontroller manifest is not present.
+        ValueError: If the session's acquisition system is unknown, or if no manifest controller declares a module the
+            acquisition system extracts.
+    """
+    session = SessionData.load(session_path=session_path)
+    parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
+    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    controllers = _resolve_controllers(session=session, event_codes=event_codes)
+    universe, requested, _, _ = _discover_jobs(
+        controllers=controllers,
+        parsers=parsers,
+        log_directory=session.raw_data.behavior_data_path,
+        extraction_job_name=EXTRACTION_JOB_NAME,
+    )
+    return session, universe, requested
+
+
+def microcontroller_job_prerequisites(
+    universe: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the microcontroller pipeline.
+
+    Notes:
+        Each parse job reads the raw per-module feather its controller's extraction job writes, so every parse job
+        requires that extraction job to have succeeded. Extraction jobs read the raw archive directly and have no
+        upstream dependency. Extraction jobs use the acquisition library's ``EXTRACTION_JOB_NAME`` and each parse
+        specifier encodes its controller as the leading ``"{controller_id}-..."`` segment.
+
+    Args:
+        universe: The job universe as returned by ``discover_microcontroller_jobs``.
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs. Parse jobs map to their controller's extraction job,
+        and extraction jobs map to an empty tuple.
+    """
+    return {
+        (job_name, specifier): ((EXTRACTION_JOB_NAME, specifier.split("-")[0]),) if job_name == PARSE_JOB_NAME else ()
+        for job_name, specifier in universe
+    }
+
+
 def _resolve_controllers(
     session: SessionData, event_codes: Mapping[tuple[int, int], tuple[int, ...]]
 ) -> dict[str, ControllerExtractionConfig]:

@@ -44,8 +44,8 @@ def run_runtime_processing_pipeline(
         parser are resolved via ``resolve_runtime_binding`` by the session's acquisition system, keeping the pipeline
         system-agnostic.
 
-        The runtime job is the only job this pipeline produces, so it always runs and its processing tracker is reset
-        and reinitialized from scratch on every invocation. The registered parser may additionally raise
+        The runtime job is the only job this pipeline produces, so it always runs. Its processing tracker is aligned
+        against the single-job universe, preserving any prior state. The registered parser may additionally raise
         system-specific errors (for example ``ValueError`` or ``RuntimeError``) that propagate unchanged.
 
     Args:
@@ -59,24 +59,23 @@ def run_runtime_processing_pipeline(
             location.
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
     """
-    session = SessionData.load(session_path=session_path)
+    session, universe, runnable = discover_runtime_jobs(session_path=session_path)
     console.echo(
         message=f"Initializing runtime processing pipeline for session '{session.session_name}'...",
         level=LogLevel.INFO,
     )
 
-    # Resolves the system's runtime binding: the source id locating its runtime archive and the parser interpreting
-    # the decoded messages. The system is inferred from the session, so the pipeline stays system-agnostic.
-    source_id, parser = resolve_runtime_binding(session.acquisition_system)
+    # Recovers the source id from the single-job universe and re-resolves the parser that interprets the decoded
+    # messages. The system is inferred from the session, so the pipeline stays system-agnostic.
+    source_id = universe[0][1]
+    _, parser = resolve_runtime_binding(session.acquisition_system)
 
     log_directory = session.raw_data.behavior_data_path
     output_directory = session.processed_data.runtime_data_path
 
-    # The runtime DataLogger always writes to a fixed per-system source id, so exactly one archive named
-    # '{source_id}_log.npz' is expected directly inside the session's raw behavior data directory. is_file() is
-    # already False when the directory itself is absent, so no separate directory guard is needed.
-    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
-    if not archive_path.is_file():
+    # The runtime job is runnable only when its DataLogger archive is present. This single-job pipeline has no other
+    # work, so an absent archive is a hard error here even though the resolver reports it as merely unrunnable.
+    if not runnable:
         message = (
             f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
             f"'{source_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
@@ -84,15 +83,14 @@ def run_runtime_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    jobs = [(RUNTIME_JOB_NAME, source_id)]
+    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
-    # Co-locates the tracker with the parsed output in ``runtime_data``. The runtime job is the only job this pipeline
-    # produces, so the tracker is reset and reinitialized from scratch on every run.
+    # Co-locates the tracker with the parsed output in ``runtime_data`` and aligns its single job against the universe,
+    # preserving any prior job state.
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
-    tracker.reset()
-    tracker.initialize_jobs(jobs=jobs)
+    tracker.align_jobs(jobs=runnable, universe=universe)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
     with tracked_job(tracker=tracker, job_id=job_identifier):
@@ -105,6 +103,53 @@ def run_runtime_processing_pipeline(
         message=f"Runtime processing for session '{session.session_name}' completed successfully.",
         level=LogLevel.SUCCESS,
     )
+
+
+def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolves the runtime pipeline's job universe and runnable subset for the target session.
+
+    Notes:
+        The runtime pipeline produces exactly one job, so the universe is always the single
+        ``(RUNTIME_JOB_NAME, source_id)`` pair, where the source id is resolved from the session's acquisition system.
+        That job is runnable only when its DataLogger archive is present on disk. This is pure discovery that loads no
+        message data and mutates nothing. It reports an absent archive as an empty runnable subset rather than raising,
+        so a batch layer can align the tracker slot against the universe and skip the unrunnable job.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        subset of that universe.
+
+    Raises:
+        ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
+    """
+    session = SessionData.load(session_path=session_path)
+    source_id, _ = resolve_runtime_binding(session.acquisition_system)
+    universe = [(RUNTIME_JOB_NAME, source_id)]
+    archive_path = session.raw_data.behavior_data_path.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
+    runnable = list(universe) if archive_path.is_file() else []
+    return session, universe, runnable
+
+
+def runtime_job_prerequisites(
+    universe: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the runtime pipeline.
+
+    Notes:
+        The runtime pipeline produces a single job with no upstream dependency, so every job maps to an empty
+        prerequisite tuple. This mirrors the prerequisite contract the other worker packages publish, so a batch
+        layer can validate ordering uniformly across pipelines.
+
+    Args:
+        universe: The job universe as returned by ``discover_runtime_jobs``.
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs, which is always empty for the runtime pipeline.
+    """
+    return dict.fromkeys(universe, ())
 
 
 def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool) -> pl.DataFrame:

@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cindra import run_single_recording_pipeline
-from cindra.io import PARAMETERS_FILENAME
+from cindra import SingleRecordingJobNames, run_single_recording_pipeline
+from cindra.io import PARAMETERS_FILENAME, resolve_single_recording_contexts
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 
@@ -17,6 +17,8 @@ from ..registries import resolve_two_photon_data_locator, resolve_single_recordi
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from cindra import SingleRecordingConfiguration
 
 _MATERIALIZED_CONFIGURATION_FILENAME: str = "configuration.yaml"
 """The filename cindra expects for the shared single-recording configuration. The pipeline materializes the
@@ -84,12 +86,132 @@ def run_two_photon_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Resolves the recording's raw two-photon imaging directory (cindra input) through the two-photon data registry,
-    # which dispatches to the acquisition system's donated locator, and the session's processed-data root (cindra
-    # output) from the shared session hierarchy. If the session's acquisition system is not a supported
-    # AcquisitionSystems member, this lookup raises, failing the pipeline before any cindra work. cindra creates its
-    # 'cindra' output subdirectory under the processed-data root, which is exactly the session's canonical processed
-    # cindra directory, so downstream tools find the outputs where they expect them.
+    # Resolves the session-bound cindra input and output locations and materializes the run's configuration.yaml,
+    # overriding the resolver's worker count and progress flag with the supplied runtime settings.
+    _, materialized_configuration_path = _resolve_configuration(
+        session=session, workers=workers, display_progress=display_progress
+    )
+
+    # Requests all stages when the caller selected none (a local "run everything" invocation), mirroring the cindra
+    # single-recording binding's own default.
+    if not (binarize or process or combine):
+        binarize = process = combine = True
+
+    run_single_recording_pipeline(
+        configuration_path=materialized_configuration_path,
+        job_id=job_id,
+        binarize=binarize,
+        process=process,
+        combine=combine,
+        target_plane=target_plane,
+    )
+
+    console.echo(
+        message=f"Single-recording two-photon processing for session '{session.session_name}' completed successfully.",
+        level=LogLevel.SUCCESS,
+    )
+
+
+def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolves the two-photon pipeline's job universe and runnable subset for the target session.
+
+    Notes:
+        cindra owns this pipeline's job model, so the universe is the single binarization job, one processing job per
+        virtual imaging plane, and the single combination job. The virtual-plane count is a property of the recording's
+        acquisition parameters on disk (ROI x physical plane for MROI data), recovered by resolving the session's
+        cindra runtime contexts. Every stage is runnable once the raw imaging directory and acquisition parameters
+        exist, which the resolution enforces, so the runnable subset equals the universe. This resolver additionally
+        writes the session's cindra configuration.yaml and persists the per-plane bootstrap, matching how a cindra
+        prepare step primes a recording single-threaded before its jobs dispatch.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        subset, which equals the universe. Processing specifiers are ``"plane_{index}"`` and the binarization and
+        combination specifiers are empty.
+
+    Raises:
+        FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
+            is not present.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
+            acquisition system's resolver cannot resolve a configuration for the session.
+    """
+    session = SessionData.load(session_path=session_path)
+    configuration, _ = _resolve_configuration(session=session, workers=-1, display_progress=False)
+
+    # Recovers the virtual-plane count by resolving cindra's per-plane runtime contexts. Persisting the bootstrap here
+    # primes the recording so its jobs can dispatch, matching cindra's single-threaded prepare step.
+    contexts = resolve_single_recording_contexts(configuration=configuration, persist=True)
+    plane_count = len(contexts)
+
+    universe: list[tuple[str, str]] = [
+        (str(SingleRecordingJobNames.BINARIZE), ""),
+        *((str(SingleRecordingJobNames.PROCESS), f"plane_{plane_index}") for plane_index in range(plane_count)),
+        (str(SingleRecordingJobNames.COMBINE), ""),
+    ]
+    return session, universe, list(universe)
+
+
+def two_photon_job_prerequisites(
+    universe: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the two-photon pipeline.
+
+    Notes:
+        cindra's stages run in a strict chain: binarization writes the inputs each per-plane processing job reads, and
+        combination merges every processing job's output. So each processing job requires the binarization job, the
+        combination job requires every processing job, and the binarization job has no upstream dependency. This is the
+        forward reading of the same dependency chain cindra expands in reverse when it resets a phase.
+
+    Args:
+        universe: The job universe as returned by ``discover_two_photon_jobs``.
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs, following the binarization to processing to
+        combination chain.
+    """
+    binarize_job = (str(SingleRecordingJobNames.BINARIZE), "")
+    process_name = str(SingleRecordingJobNames.PROCESS)
+    combine_name = str(SingleRecordingJobNames.COMBINE)
+    process_jobs = tuple(job for job in universe if job[0] == process_name)
+
+    return {
+        job: (binarize_job,) if job[0] == process_name else process_jobs if job[0] == combine_name else ()
+        for job in universe
+    }
+
+
+def _resolve_configuration(
+    session: SessionData, *, workers: int, display_progress: bool
+) -> tuple[SingleRecordingConfiguration, Path]:
+    """Resolves the session's cindra input and output locations and materializes its single-recording configuration.
+
+    Notes:
+        The raw imaging input directory is resolved through the two-photon data registry, which dispatches to the
+        acquisition system's donated locator, and the output root is the session's processed-data root. cindra creates
+        its ``cindra`` output subdirectory there, which is the session's canonical processed cindra directory. The
+        configuration comes from the acquisition system's donated resolver, with only the session-bound locations and
+        the supplied runtime settings overridden, leaving every system-resolved processing parameter as returned. The
+        materialized copy is written into the cindra output directory so the run is self-describing.
+
+    Args:
+        session: The loaded session whose two-photon data is being resolved.
+        workers: The number of numba worker threads to record in the configuration's runtime section.
+        display_progress: Determines whether cindra displays progress bars during processing. Recorded in the
+            configuration's runtime section.
+
+    Returns:
+        A tuple of the resolved single-recording configuration and the path to the materialized cindra
+        ``configuration.yaml``.
+
+    Raises:
+        FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
+            is not present.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
+            acquisition system's resolver cannot resolve a configuration for the session.
+    """
     locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
     data_path = locate_two_photon_data(session)
     output_path = session.processed_data_path
@@ -116,9 +238,6 @@ def run_two_photon_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Obtains the cindra configuration from the acquisition system's donated resolver, then overrides only the
-    # session-bound locations and runtime settings, leaving every system-resolved processing parameter as returned. The
-    # materialized copy is written into the cindra output directory so the run is self-describing.
     resolve_single_recording_configuration = resolve_single_recording_configuration_resolver(
         system=session.acquisition_system
     )
@@ -132,22 +251,4 @@ def run_two_photon_processing_pipeline(
     cindra_directory.mkdir(parents=True, exist_ok=True)
     materialized_configuration_path = cindra_directory.joinpath(_MATERIALIZED_CONFIGURATION_FILENAME)
     configuration.save(file_path=materialized_configuration_path)
-
-    # Requests all stages when the caller selected none (a local "run everything" invocation), mirroring the cindra
-    # single-recording binding's own default.
-    if not (binarize or process or combine):
-        binarize = process = combine = True
-
-    run_single_recording_pipeline(
-        configuration_path=materialized_configuration_path,
-        job_id=job_id,
-        binarize=binarize,
-        process=process,
-        combine=combine,
-        target_plane=target_plane,
-    )
-
-    console.echo(
-        message=f"Single-recording two-photon processing for session '{session.session_name}' completed successfully.",
-        level=LogLevel.SUCCESS,
-    )
+    return configuration, materialized_configuration_path
