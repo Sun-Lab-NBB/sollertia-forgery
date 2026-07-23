@@ -88,7 +88,13 @@ def resolve_checksum(
 
         # If the two checksums do not match, this indicates data corruption.
         if stored_checksum != calculated_checksum:
-            tracker.fail_job(job_id=job_id)
+            tracker.fail_job(
+                job_id=job_id,
+                error_message=(
+                    f"Raw data integrity compromised: recomputed checksum '{calculated_checksum}' does not match "
+                    f"stored checksum '{stored_checksum}'."
+                ),
+            )
             if display_progress:
                 console.echo(
                     message=f"Session '{session_data.session_name}' raw data integrity: Compromised.",
@@ -102,7 +108,7 @@ def resolve_checksum(
                     level=LogLevel.SUCCESS,
                 )
 
-    except Exception:
+    except Exception as error:
         # Marks the job as failed and re-raises any unexpected errors.
-        tracker.fail_job(job_id=job_id)
+        tracker.fail_job(job_id=job_id, error_message=f"{type(error).__name__}: {error}")
         raise

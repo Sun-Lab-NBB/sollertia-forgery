@@ -261,9 +261,9 @@ def generate_project_manifest(project_directory: Path) -> None:
 
             tracker.complete_job(job_id=job_id)
 
-        except Exception:
+        except Exception as exception:
             # Records the manifest job as failed before re-raising so the tracker reflects the aborted run.
-            tracker.fail_job(job_id=job_id)
+            tracker.fail_job(job_id=job_id, error_message=str(exception))
             raise
 
 

@@ -171,10 +171,18 @@ def print_project_manifest_data(
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
     ),
 )
-def checksum_command(session_path: Path, *, regenerate_checksum: bool) -> None:
+@click.option(
+    "-pr",
+    "--progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help="Determines whether to display a preamble message and a progress bar during checksum resolution.",
+)
+def checksum_command(session_path: Path, *, regenerate_checksum: bool, progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
     integrity checksum to include expected changes.
     """
-    resolve_checksum(session_path=session_path, regenerate_checksum=regenerate_checksum)
+    resolve_checksum(session_path=session_path, regenerate_checksum=regenerate_checksum, display_progress=progress)
