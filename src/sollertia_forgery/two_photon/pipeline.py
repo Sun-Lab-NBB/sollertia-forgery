@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cindra import SingleRecordingJobNames, run_single_recording_pipeline
+from cindra import SingleRecordingJobNames, execute_single_recording_job
 from cindra.io import PARAMETERS_FILENAME, resolve_single_recording_contexts
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
+from ataraxis_data_structures import ProcessingTracker
 
 from ..registries import resolve_two_photon_data_locator, resolve_single_recording_configuration_resolver
 
@@ -39,33 +40,43 @@ def run_two_photon_processing_pipeline(
     """Materializes a session-bound cindra configuration and runs the single-recording two-photon processing pipeline.
 
     Resolves the session's raw imaging directory (cindra input) through the two-photon data registry and its
-    processed-data root (cindra output) from the session hierarchy. It obtains the cindra single-recording
-    configuration from the acquisition system's donated resolver, overrides its data path and output path with these
-    session-resolved locations, and overrides its worker count and progress flag with the supplied ``workers`` and
-    ``display_progress`` arguments. It then writes the result as the session's cindra ``configuration.yaml`` and
-    delegates the binarization, per-plane processing, and combination stages to cindra. When none of ``binarize``,
-    ``process``, or ``combine`` is requested, all three stages run in sequence (local mode). A supplied ``job_id``
-    instead runs only the matching job.
+    processed-data root (cindra output) from the session hierarchy. Obtains the cindra single-recording configuration
+    from the acquisition system's donated resolver, overrides its data path, output path, worker count, and progress
+    flag, and writes the result as the session's cindra ``configuration.yaml``. Then owns the two-photon processing
+    tracker and dispatches each stage to cindra as a single tracked job.
 
     Notes:
+        The pipeline runs the single binarization job, one processing job per virtual imaging plane, and the single
+        combination job, all sharing one tracker. The virtual-plane count is a property of the recording's acquisition
+        parameters on disk, recovered by resolving the session's cindra runtime contexts, which also persists the
+        shared bootstrap in local mode so the per-job stages can read it. The full binarization, per-plane processing,
+        and combination universe defines tracker alignment, so a partial invocation never wipes sibling jobs from the
+        shared tracker.
+
+        cindra records each dispatched job's start, completion, and failure directly on this tracker, which lives in
+        the session's cindra output directory (``session.processed_data.two_photon_tracker_path``), so slf owns the
+        tracker while cindra provides the per-job compute. Two runtimes select which jobs execute. In local mode
+        (``job_id`` is None) the requested stages run in binarization to processing to combination order, and every
+        stage runs when no flag is set. The processing stage honors ``target_plane`` to narrow the pass to one plane.
+        In remote mode (a ``job_id`` is provided) only the single job matching that identifier runs, chosen entirely by
+        the identifier, so the stage flags and ``target_plane`` are ignored. This lets an external scheduler drive
+        cross-job parallelism by dispatching each identifier concurrently.
+
         The raw-imaging input directory and the configuration are resolved through the system-agnostic two-photon
-        registries, which dispatch to the acquisition system's donated assets. Each system decides for itself how its
-        configuration is derived, keeping the pipeline agnostic to every system's configuration source. If the
-        session's acquisition system is not a supported AcquisitionSystems member, the lookup raises and the pipeline
-        fails before any cindra work begins. cindra owns the heavy work and records the run on the two-photon processing
-        tracker (``single_recording_tracker.yaml``, ``ProcessingTrackers.TWO_PHOTON``) inside its output subdirectory
-        (``session.processed_data.cindra_data_path``). The stage flags map directly onto its stages. Additional
-        ``FileNotFoundError``/``ValueError`` conditions may propagate from the resolver or the underlying cindra
-        pipeline.
+        registries, which dispatch to the acquisition system's donated assets, so the pipeline stays agnostic to every
+        system's configuration source. If the session's acquisition system is not a supported AcquisitionSystems
+        member, the lookup raises before any cindra work begins.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         job_id: The unique hexadecimal identifier for the cindra job to execute. If provided, only the matching job
             runs (remote mode). Otherwise, every requested stage runs (local mode).
-        binarize: Determines whether to run the binarization stage.
+        binarize: Determines whether to run the binarization stage. Ignored in remote mode.
         process: Determines whether to run the per-plane motion-correction, ROI-detection, and trace-extraction stage.
-        combine: Determines whether to run the multi-plane combination stage.
+            Ignored in remote mode.
+        combine: Determines whether to run the multi-plane combination stage. Ignored in remote mode.
         target_plane: The imaging plane to process when running the processing stage. Set to -1 to process all planes.
+            Ignored in remote mode, where the job to run is selected entirely by job_id.
         workers: The number of numba worker threads cindra may use. Set to -1 to use all available CPU cores (minus
             reserved cores).
         display_progress: Determines whether to display progress bars during processing.
@@ -74,8 +85,9 @@ def run_two_photon_processing_pipeline(
         FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra acquisition
             parameters file is available for the recording, or if the acquisition system's resolver reports missing
             inputs it needs to resolve the configuration.
-        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
-            acquisition system's resolver cannot resolve a configuration for the session.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the
+            acquisition system's resolver cannot resolve a configuration for the session, or if job_id does not match
+            any available job.
     """
     session = SessionData.load(session_path=session_path)
 
@@ -88,23 +100,93 @@ def run_two_photon_processing_pipeline(
 
     # Resolves the session-bound cindra input and output locations and materializes the run's configuration.yaml,
     # overriding the resolver's worker count and progress flag with the supplied runtime settings.
-    _, materialized_configuration_path = _resolve_configuration(
+    configuration, materialized_configuration_path = _resolve_configuration(
         session=session, workers=workers, display_progress=display_progress
     )
 
-    # Requests all stages when the caller selected none (a local "run everything" invocation), mirroring the cindra
-    # single-recording binding's own default.
+    # Recovers the virtual-plane count for the job universe by resolving cindra's per-plane runtime contexts. Persists
+    # the shared bootstrap in local mode, where this single invocation primes the recording single-threaded. In remote
+    # mode the prepare step already primed it, so this loads only, letting the scheduler's concurrent per-plane jobs
+    # share the one primed copy.
+    contexts = resolve_single_recording_contexts(configuration=configuration, persist=job_id is None)
+    plane_count = len(contexts)
+
+    # The universe is the single binarization job, one processing job per virtual plane, and the single combination
+    # job, used for tracker alignment so a partial invocation never wipes sibling jobs from the shared tracker.
+    universe: list[tuple[str, str]] = [
+        (str(SingleRecordingJobNames.BINARIZE), ""),
+        *((str(SingleRecordingJobNames.PROCESS), f"plane_{plane_index}") for plane_index in range(plane_count)),
+        (str(SingleRecordingJobNames.COMBINE), ""),
+    ]
+
+    # cindra records every dispatched job on this tracker, which lives in the session's cindra output directory and
+    # matches SessionData.processed_data.two_photon_tracker_path.
+    tracker = ProcessingTracker(file_path=session.processed_data.two_photon_tracker_path)
+
+    if job_id is not None:
+        # Remote mode: aligns the tracker against the full universe so the single-job invocation does not wipe sibling
+        # jobs, then executes only the requested job.
+        id_to_job = {
+            ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
+            for job_name, specifier in universe
+        }
+        if job_id not in id_to_job:
+            message = (
+                f"Unable to execute the requested job with ID '{job_id}'. The identifier does not match any two-photon "
+                f"processing job available for this session. Valid job IDs: {sorted(id_to_job.keys())}."
+            )
+            console.error(message=message, error=ValueError)
+
+        tracker.align_jobs(jobs=universe, universe=universe)
+
+        job_name, specifier = id_to_job[job_id]
+        execute_single_recording_job(
+            configuration_path=materialized_configuration_path,
+            job_name=SingleRecordingJobNames(job_name),
+            specifier=specifier,
+            job_id=job_id,
+            tracker=tracker,
+        )
+        console.echo(
+            message=(
+                f"Single-recording two-photon processing job for session '{session.session_name}' completed "
+                f"successfully."
+            ),
+            level=LogLevel.SUCCESS,
+        )
+        return
+
+    # Local mode: builds the requested stages, aligns against the universe, and runs them in binarization to processing
+    # to combination order. Runs every stage when no flag is set, mirroring the cindra single-recording resolution.
     if not (binarize or process or combine):
         binarize = process = combine = True
 
-    run_single_recording_pipeline(
-        configuration_path=materialized_configuration_path,
-        job_id=job_id,
-        binarize=binarize,
-        process=process,
-        combine=combine,
-        target_plane=target_plane,
-    )
+    jobs: list[tuple[str, str]] = []
+    if binarize:
+        jobs.append((str(SingleRecordingJobNames.BINARIZE), ""))
+    if process:
+        if target_plane == -1:
+            jobs.extend(
+                (str(SingleRecordingJobNames.PROCESS), f"plane_{plane_index}") for plane_index in range(plane_count)
+            )
+        else:
+            jobs.append((str(SingleRecordingJobNames.PROCESS), f"plane_{target_plane}"))
+    if combine:
+        jobs.append((str(SingleRecordingJobNames.COMBINE), ""))
+
+    tracker.align_jobs(jobs=jobs, universe=universe)
+
+    console.echo(message=f"Running {len(jobs)} two-photon processing job(s).")
+
+    for job_name, specifier in jobs:
+        job_identifier = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
+        execute_single_recording_job(
+            configuration_path=materialized_configuration_path,
+            job_name=SingleRecordingJobNames(job_name),
+            specifier=specifier,
+            job_id=job_identifier,
+            tracker=tracker,
+        )
 
     console.echo(
         message=f"Single-recording two-photon processing for session '{session.session_name}' completed successfully.",
