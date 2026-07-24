@@ -9,10 +9,8 @@ from .local import (
     GenericPendingJob,
     JobExecutionState,
     ConcurrencyDescriptor,
-    analyze_feather_file,
     group_jobs_by_tracker,
     job_execution_manager,
-    clean_output_subdirectory,
 )
 from .pipelines import ProcessingPipelines
 
@@ -24,8 +22,6 @@ __all__ = [
     "JobExecutionState",
     "PendingJob",
     "ProcessingPipelines",
-    "analyze_feather_file",
-    "clean_output_subdirectory",
     "group_jobs_by_tracker",
     "job_execution_manager",
 ]

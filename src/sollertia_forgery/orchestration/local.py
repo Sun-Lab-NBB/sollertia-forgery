@@ -1,8 +1,8 @@
-"""Provides generic batch-orchestration primitives shared across every package's Model Context Protocol tools."""
+"""Provides the generic batch-orchestration primitives that the interface Model Context Protocol tools drive."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from pathlib import Path
 from threading import Lock, Thread
 import contextlib
@@ -10,18 +10,15 @@ from collections import deque
 from dataclasses import field, dataclass
 from concurrent.futures import Future, ProcessPoolExecutor
 
-import numpy as np
-import polars as pl
-from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
-from sollertia_shared_assets import validate_directory
-from ataraxis_data_structures import delete_directory
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 RESERVED_CORES: int = 2
-"""The number of CPU cores reserved for system operations. Each package's ``execute_*_jobs_tool`` subtracts this
-value from the available core count when resolving the worker budget."""
+"""The number of CPU cores held back for host-system operations when the worker budget auto-resolves. The generic
+``execute_jobs_tool`` forwards this to ``resolve_worker_count``, which applies it only to a non-positive budget and
+honors an explicit budget up to the physical core count."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,8 +29,8 @@ class ConcurrencyDescriptor:
         ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes. The generic tool floors
         the user-supplied parallel-job cap by ``worker_budget // cores_per_job``. ``default_max_parallel`` is the
         fallback hard cap applied when the caller does not request an explicit parallel-job ceiling. This descriptor
-        is system-agnostic so both the system-specific batch adapters and the agnostic forging adapters can declare
-        their concurrency policy with one shared type.
+        is system-agnostic, so one shared type declares the concurrency policy for every pipeline in the dispatch
+        table, whether system-specific or agnostic.
     """
 
     cores_per_job: int
@@ -43,25 +40,14 @@ class ConcurrencyDescriptor:
     value defers concurrency to the resolved worker budget alone."""
 
 
-_MINIMUM_ROWS_FOR_INTERVALS: int = 2
-"""The minimum number of rows required in a feather file to compute inter-row timing intervals."""
-
-_TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp_us", "time_us", "frame_time_us")
-"""Column names, in priority order, that ``analyze_feather_file`` recognizes as the canonical time axis
-when computing timing summaries. The first matching column present in the dataframe is used, which lets the
-helper cover every feather variant produced across the Sollertia stack: ``timestamp_us`` (raw axci module
-feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``frame_time_us`` (axvs camera
-timestamp feathers)."""
-
-
 @dataclass(slots=True)
 class PendingJob:
     """Describes a single batch processing job tracked by a ``ProcessingTracker`` file.
 
     Notes:
-        Packages subclass this dataclass with additional fields required by their domain-specific worker
-        callables. The base fields are sufficient for the shared execution manager to group jobs by tracker,
-        read their status from disk, and cancel or reset them without knowing any domain-specific details.
+        Subclasses extend this dataclass with the additional fields their worker callables need. The base fields
+        are sufficient for the shared execution manager to group jobs by tracker, read their status from disk, and
+        cancel or reset them without knowing any domain-specific details.
     """
 
     tracker_path: Path
@@ -82,19 +68,18 @@ class GenericPendingJob(PendingJob):
     """Describes a single batch processing job for the system-agnostic processing tools.
 
     Notes:
-        Extends the shared ``PendingJob`` base with the small descriptor set shared by every registered
-        pipeline worker, so a single descriptor replaces the former per-pipeline ``PendingJob`` subclasses. The
-        picklable workers in the worker registry map these fields onto each pipeline's call convention (the
-        behavior worker uses ``unit_path``, while the forging worker uses ``name`` and ``project_root``). Fields that
-        do not apply to a given pipeline are left at their defaults, and the processing tools assert the
-        required fields per pipeline before dispatch.
+        Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so
+        one descriptor serves every pipeline. The picklable workers in the worker registry map these fields onto each
+        pipeline's call convention (the session pipeline workers use ``unit_path``, while the forging worker uses
+        ``name`` and ``project_root``). Fields that do not apply to a given pipeline stay at their defaults, and the
+        processing tools assert the required fields per pipeline before dispatch.
     """
 
     name: str = ""
-    """The human-readable unit name (the session name for behavior jobs or the dataset name for forging jobs)
+    """The human-readable unit name (the session name for session jobs or the dataset name for forging jobs)
     used for logging and status reporting."""
     unit_path: Path = field(default_factory=Path)
-    """The path to the processing unit this job operates on (the session root for behavior jobs)."""
+    """The path to the processing unit this job operates on (the session root for session jobs)."""
     job_name: str = ""
     """The pipeline job type name registered in the ``ProcessingTracker`` (paired with ``specifier`` to derive
     the job ID)."""
@@ -122,11 +107,11 @@ class JobExecutionState[PendingJobT: PendingJob]:
 
     The state stores the pending and active job queues, the worker callable used to dispatch each job to a
     subprocess, the lock that serializes state mutations, and the cancellation flag consulted by the manager
-    thread. Each package that exposes MCP batch tools keeps its own module-level state variable so that status
-    and cancel tools can read it directly. The manager owns a single ``ProcessPoolExecutor`` sized to
+    thread. The generic batch tools store one of these per pipeline in a module-level registry, so the status
+    and cancel tools read it directly. The manager owns a single ``ProcessPoolExecutor`` sized to
     ``worker_budget`` and dispatches each pending job as an independent future.
 
-    The generic type parameter ``PendingJobT`` is the package-specific ``PendingJob`` subclass. Subclasses
+    The generic type parameter ``PendingJobT`` is a ``PendingJob`` subclass. Subclasses
     carry fields such as session paths, output directories, and job specifiers that the worker callable needs
     at dispatch time.
     """
@@ -229,127 +214,3 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     for job in state.all_jobs.values():
         tracker_jobs.setdefault(job.tracker_path, []).append(job)
     return tracker_jobs
-
-
-def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> dict[str, Any]:
-    """Deletes a named subdirectory under a single output directory.
-
-    Removes the ``<output_directory>/<subdirectory_name>`` tree via
-    ``ataraxis_data_structures.delete_directory``, which performs parallel file deletion with platform-safe
-    retry logic. Returns structured outcome information suitable for inclusion in MCP tool responses.
-
-    Args:
-        output_directory: The absolute path to the parent output directory containing the subdirectory to
-            delete.
-        subdirectory_name: The name of the subdirectory to delete under ``output_directory``.
-
-    Returns:
-        A dictionary containing ``output_directory``, a ``cleaned`` flag, and either ``data_path`` (the path
-        that was removed) or ``error`` (a human-readable failure description).
-    """
-    error = validate_directory(output_directory)
-    if error is not None:
-        return {"output_directory": output_directory, "cleaned": False, "error": error}
-
-    data_path = Path(output_directory) / subdirectory_name
-
-    if not data_path.exists():
-        return {"output_directory": output_directory, "cleaned": True, "message": "Nothing to clean."}
-
-    try:
-        delete_directory(directory_path=data_path)
-    except Exception as error:
-        return {
-            "output_directory": output_directory,
-            "cleaned": False,
-            "data_path": str(data_path),
-            "error": f"Unable to delete: {error}",
-        }
-
-    return {"output_directory": output_directory, "cleaned": True, "data_path": str(data_path)}
-
-
-def analyze_feather_file(feather_file: str, max_sample_rows: int) -> dict[str, Any]:
-    """Reads a single feather file and computes generic summary statistics.
-
-    Computes the total row count, the list of columns, inter-row timing statistics (when a ``timestamp_us``
-    column is present), and a configurable number of sample rows. Columns whose dtype is ``polars.Binary``
-    are replaced in the sample rows by a boolean ``<column>_has_data`` flag so the payload stays
-    JSON-serializable.
-
-    Args:
-        feather_file: The absolute path to the feather file.
-        max_sample_rows: The maximum number of sample rows to include.
-
-    Returns:
-        A dictionary containing ``file``, ``summary``, ``inter_row_timing``, and ``sample_rows`` keys, or
-        ``file`` and ``error`` keys if the file cannot be read.
-    """
-    file_path = Path(feather_file)
-
-    if not file_path.exists():
-        return {"file": feather_file, "error": f"File does not exist: {feather_file}"}
-
-    if not file_path.is_file():
-        return {"file": feather_file, "error": f"Path is not a file: {feather_file}"}
-
-    try:
-        dataframe = pl.read_ipc(source=file_path)
-    except Exception as error:
-        return {"file": feather_file, "error": f"Unable to read feather file: {error}"}
-
-    total_rows = dataframe.height
-
-    summary: dict[str, Any] = {"total_rows": total_rows, "columns": dataframe.columns}
-
-    inter_row_timing: dict[str, Any] = {}
-    time_column = next((name for name in _TIME_COLUMN_CANDIDATES if name in dataframe.columns), None)
-    if time_column is not None and total_rows >= _MINIMUM_ROWS_FOR_INTERVALS:
-        timestamps = dataframe[time_column].to_numpy().astype(np.int64)
-        first_timestamp_us = int(timestamps[0])
-        last_timestamp_us = int(timestamps[-1])
-        duration_us = last_timestamp_us - first_timestamp_us
-        summary["first_timestamp_us"] = first_timestamp_us
-        summary["last_timestamp_us"] = last_timestamp_us
-        summary["duration_us"] = duration_us
-        summary["duration_seconds"] = (
-            round(
-                convert_time(
-                    time=duration_us, from_units=TimeUnits.MICROSECOND, to_units=TimeUnits.SECOND, as_float=True
-                ),
-                6,
-            )
-            if duration_us > 0
-            else 0.0
-        )
-
-        intervals_us = np.diff(timestamps)
-        inter_row_timing = {
-            "mean_us": round(float(np.mean(intervals_us)), 2),
-            "median_us": round(float(np.median(intervals_us)), 2),
-            "std_us": round(float(np.std(intervals_us)), 2),
-            "min_us": int(np.min(intervals_us)),
-            "max_us": int(np.max(intervals_us)),
-        }
-
-    sample_rows: list[dict[str, Any]] = []
-    sample_count = min(max_sample_rows, total_rows)
-    if sample_count > 0:
-        sample_df = dataframe.head(sample_count)
-        binary_columns = {name for name, dtype in dataframe.schema.items() if dtype == pl.Binary}
-
-        for row in sample_df.iter_rows(named=True):
-            sample_entry: dict[str, Any] = {}
-            for column, value in row.items():
-                if column in binary_columns:
-                    sample_entry[f"{column}_has_data"] = value is not None
-                else:
-                    sample_entry[column] = value
-            sample_rows.append(sample_entry)
-
-    return {
-        "file": feather_file,
-        "summary": summary,
-        "inter_row_timing": inter_row_timing,
-        "sample_rows": sample_rows,
-    }

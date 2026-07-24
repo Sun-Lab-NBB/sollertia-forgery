@@ -43,14 +43,14 @@ classifiers = [
 dependencies = [
     # Sollertia Libraries
     "ataraxis-time>=6,<7",
-    "ataraxis-base-utilities>=6,<7",
+    "ataraxis-base-utilities>=6.0.2,<7",
     "ataraxis-data-structures>=6.1.1,<7",
-    "sollertia-shared-assets>=9.1.0rc2,<10",
+    "sollertia-shared-assets>=9.1.0rc3,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
     "ataraxis-video-system>=4,<5",
     "ataraxis-communication-interface>=6,<7",
-    "cindra>=1.1.0,<2",
+    "cindra>=1.2.0rc2,<2",
 
     # Machine Vision (GenICam runtime for ataraxis-video-system, sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
@@ -101,7 +101,7 @@ dev = [
     "uv>=0,<1",
     "tox-uv>=1,<2",
 
-    # Development Automation (>=8.1.1 required alongside cindra>=1.1.0, which needs importlib-metadata>=9)
+    # Development Automation (>=8.1.1 required alongside cindra>=1.2.0rc2, which needs importlib-metadata>=9)
     "ataraxis-automation>=8.1.1,<9",
 
     # Types
@@ -236,12 +236,13 @@ exclude_lines = [
     "pass",
 ]
 
-# Import-linter contracts that enforce the registry-hub architecture: the acquisition-system subpackages
-# (mesoscope_vr and its future siblings) are reachable only through the registries hub, and neither the
-# infrastructure cross-system layers nor the interface layer ever import a system package directly. The
-# system-agnostic worker packages (microcontrollers, runtime, two_photon, forging) are intentionally outside these
-# contracts: each resolves its system-specific assets through the registries hub, so it reaches mesoscope_vr
-# only indirectly through that sanctioned path.
+# Import-linter contracts that enforce the registry-hub architecture. The dependency hierarchy runs
+# system-packages -> registries -> worker packages (microcontrollers, runtime, two_photon, forging) -> orchestration
+# -> interfaces. The acquisition-system subpackages (mesoscope_vr and its future siblings) are reachable only through
+# the registries hub, and the pure infrastructure layers (shared_assets, server, managing) never import a system
+# package or the hub directly. The worker packages and the composition layers above them (orchestration, interfaces)
+# resolve system-specific assets through the registries hub, so they reach mesoscope_vr only indirectly through that
+# sanctioned path and sit outside the infrastructure contracts.
 [tool.importlinter]
 root_package = "sollertia_forgery"
 
@@ -252,7 +253,6 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
-    "sollertia_forgery.orchestration",
     "sollertia_forgery.interfaces",
 ]
 forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
@@ -273,7 +273,6 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
-    "sollertia_forgery.orchestration",
 ]
 forbidden_modules = [
     "sollertia_forgery.registries",
