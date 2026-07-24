@@ -1,4 +1,4 @@
-"""Provides system-agnostic management pipelines: raw-data checksum verification and project manifest generation."""
+"""Provides system-agnostic management pipelines: raw-data checksum verification and project manifest handling."""
 
 from .checksum import CHECKSUM_JOB_NAME, resolve_checksum
 from .manifest import (

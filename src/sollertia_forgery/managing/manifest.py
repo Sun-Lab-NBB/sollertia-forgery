@@ -39,8 +39,8 @@ PIPELINE_STATUS_COLUMNS: dict[str, str] = {
     "video": "video",
     "two_photon": "two_photon",
 }
-"""Maps each per-session pipeline to the manifest column that carries its rolled-up status. The checksum pipeline
-writes the historically named ``integrity`` column, so the mapping is not an identity."""
+"""Maps each per-session pipeline to the manifest column that carries its rolled-up status. The checksum pipeline's
+status lives under the ``integrity`` column, so the mapping's keys differ from its values."""
 
 JOB_STRUCT: pl.Struct = pl.Struct(
     {
@@ -55,9 +55,10 @@ JOB_STRUCT: pl.Struct = pl.Struct(
         "completed_at": pl.UInt64,
     }
 )
-"""The element type of the manifest's ``jobs`` column. Mirrors ``ataraxis_data_structures.JobState`` field for
-field, with a ``pipeline`` discriminator prepended, so exploding the column yields one row per tracked job across
-every pipeline of a session."""
+"""The element type of the manifest's ``jobs`` column. Mirrors the per-job entry that ``summarize_tracker`` emits,
+which carries every ``ataraxis_data_structures.JobState`` field plus the ``job_id`` registry key, with a
+``pipeline`` discriminator prepended. Exploding the column yields one row per tracked job across every pipeline of a
+session."""
 
 DATASET_STRUCT: pl.Struct = pl.Struct(
     {
@@ -74,7 +75,7 @@ def project_manifest_path(project_directory: Path) -> Path:
     """Resolves the path to the project manifest .feather file under the target project's root directory.
 
     This is the single source of truth for the manifest filename, so both the manifest writer and any consumer that
-    locates the manifest (such as the project mirror) derive the same path.
+    locates the manifest derive the same path.
 
     Args:
         project_directory: The path to the project's root directory.
@@ -116,9 +117,8 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
             level=LogLevel.INFO,
         )
 
-    # Discovers and loads every session under the project once. Both the multi-recording registry and the
-    # per-session manifest rows consume this list, avoiding a second project-wide scan and redundant
-    # SessionData loads.
+    # Discovers and loads every session under the project once, so the per-session manifest rows are built without
+    # redundant SessionData loads.
     sessions: list[SessionData] = list(iterate_sessions(root_path=project_directory))
 
     if not sessions:
@@ -300,26 +300,14 @@ class ProjectManifest:
     def print_data(self) -> None:
         """Prints the entire contents of the manifest file to the terminal."""
         with pl.Config(
-            set_tbl_rows=-1,  # Displays all rows (-1 means unlimited)
-            set_tbl_cols=-1,  # Displays all columns (-1 means unlimited)
+            set_tbl_rows=-1,
+            set_tbl_cols=-1,
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="LEFT",
             set_tbl_width_chars=250,
-            set_fmt_str_lengths=600,  # Allows longer strings to display properly (default is 30)
+            set_fmt_str_lengths=600,
         ):
             console.echo(message=str(self._data), raw=True)
-
-    def _display_frame(self) -> pl.DataFrame:
-        """Returns a manifest copy prepared for terminal display, with the session name replaced by a per-animal
-        1-based session index and the acquisition date truncated to the second as a timezone-aware UTC datetime.
-
-        The stored 'session' and 'date' columns are left untouched on the underlying data, so this transformation
-        only affects the printed views and never the identifiers the other query methods resolve against.
-        """
-        return self._data.sort(by=["animal", "session"]).with_columns(
-            pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
-            pl.col("date").dt.truncate("1s").alias("date"),
-        )
 
     def print_summary(self, animal: int | None = None) -> None:
         """Prints a summary view of the manifest file to the terminal, excluding the 'experimenter notes' data for
@@ -370,7 +358,6 @@ class ProjectManifest:
             .alias("datasets"),
         ).select(summary_cols)
 
-        # Optionally filters the data for the target animal.
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
@@ -399,7 +386,6 @@ class ProjectManifest:
         # Pre-selects the columns to display.
         data_frame = self._display_frame().select(["animal", "session", "date", "type", "system", "notes"])
 
-        # Optionally filters the data for the target animal.
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
@@ -409,8 +395,8 @@ class ProjectManifest:
             set_tbl_cols=-1,
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="LEFT",
-            set_tbl_width_chars=170,  # Wider columns for notes
-            set_fmt_str_lengths=2000,  # Allows very long strings for notes
+            set_tbl_width_chars=170,
+            set_fmt_str_lengths=2000,
         ):
             console.echo(message=str(data_frame), raw=True)
 
@@ -511,7 +497,7 @@ class ProjectManifest:
     def summarize(self) -> dict[str, Any]:
         """Returns a structured summary of the project manifest for programmatic consumption.
 
-        Computes aggregate statistics across all sessions including per-pipeline completion counts and
+        Computes aggregate statistics across all sessions including per-pipeline status distributions and
         forged dataset membership. Designed for MCP tool responses where a structured dictionary is
         more useful than a printed table.
 
@@ -596,6 +582,18 @@ class ProjectManifest:
         """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
         return self._data
 
+    def _display_frame(self) -> pl.DataFrame:
+        """Returns a manifest copy prepared for terminal display, with the session name replaced by a per-animal
+        1-based session index and the acquisition date truncated to the second as a timezone-aware UTC datetime.
+
+        The stored 'session' and 'date' columns are left untouched on the underlying data, so this transformation
+        only affects the printed views and never the identifiers the other query methods resolve against.
+        """
+        return self._data.sort(by=["animal", "session"]).with_columns(
+            pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
+            pl.col("date").dt.truncate("1s").alias("date"),
+        )
+
     def _get_filtered_sessions(
         self,
         animal: int | None = None,
@@ -620,7 +618,6 @@ class ProjectManifest:
         """
         data = self._data
 
-        # Filters by animal if specified.
         if animal is not None:
             if animal not in self.animals:
                 message = (
@@ -631,19 +628,20 @@ class ProjectManifest:
 
             data = data.filter(pl.col("animal") == animal)
 
-        # Optionally filters out incomplete sessions.
         if exclude_incomplete:
             data = data.filter(pl.col("complete") == 1)
 
-        # Formats and returns session IDs to the caller.
         sessions = data.select("session").sort("session").to_series().to_list()
         return tuple(sessions)
 
 
 def _build_session_row(session_data: SessionData, project_directory: Path) -> dict[str, Any]:
-    """Builds every manifest column for a single session.
+    """Builds every manifest column for a single session except the dataset-membership column.
 
     Notes:
+        The dataset-membership column is excluded here because it resolves against a project-wide dataset map rather
+        than the session alone, so the caller appends it after this returns.
+
         Every pipeline is read for every session regardless of completeness or integrity. Suppressing processing
         state for an incomplete session would make an unprocessable session indistinguishable from an unprocessed
         one, which is exactly the distinction an orchestrator needs.
