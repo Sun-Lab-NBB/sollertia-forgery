@@ -203,8 +203,6 @@ module = [
     "sollertia_forgery.server.job",
     "sollertia_forgery.server.server_configuration",
     "sollertia_forgery.interfaces.server_tools",
-    "sollertia_forgery.orchestration.pipeline",
-    "sollertia_forgery.orchestration.managing",
 ]
 ignore_errors = true
 
@@ -254,7 +252,6 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
-    "sollertia_forgery.mirror",
     "sollertia_forgery.orchestration",
     "sollertia_forgery.interfaces",
 ]
@@ -276,7 +273,6 @@ source_modules = [
     "sollertia_forgery.shared_assets",
     "sollertia_forgery.server",
     "sollertia_forgery.managing",
-    "sollertia_forgery.mirror",
     "sollertia_forgery.orchestration",
 ]
 forbidden_modules = [

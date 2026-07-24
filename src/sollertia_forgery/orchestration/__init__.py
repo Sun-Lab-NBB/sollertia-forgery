@@ -1,5 +1,5 @@
-"""Provides the unified orchestration layer: the in-process batch job-execution engine and the remote SLURM pipeline
-engine.
+"""Provides the local orchestration layer: the in-process batch job-execution engine and the pipeline-identity
+enumeration.
 """
 
 from .local import (
@@ -14,7 +14,7 @@ from .local import (
     job_execution_manager,
     clean_output_subdirectory,
 )
-from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from .pipelines import ProcessingPipelines
 
 __all__ = [
     "RESERVED_CORES",
@@ -23,11 +23,9 @@ __all__ = [
     "GenericPendingJob",
     "JobExecutionState",
     "PendingJob",
-    "ProcessingPipeline",
+    "ProcessingPipelines",
     "analyze_feather_file",
-    "check_session_eligibility",
     "clean_output_subdirectory",
-    "execute_pipelines",
     "group_jobs_by_tracker",
     "job_execution_manager",
 ]
