@@ -474,6 +474,19 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
+    # Declares every extraction job up front, then runs a clean progress bar, mirroring the parse stage. The
+    # acquisition binding also announces each job as it runs, which would bisect the bar, so its console output is
+    # silenced for the duration of each extraction. console.error still raises while the console is disabled, so a
+    # failing extraction surfaces rather than being swallowed.
+    extraction_job_ids = {
+        controller_id: ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
+        for controller_id in extraction_archives
+    }
+    for controller_id, extraction_job_id in extraction_job_ids.items():
+        console.echo(
+            message=f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
+        )
+
     progress_context = (
         console.progress(
             total=len(extraction_archives), description="Extracting microcontroller logs", unit="controller"
@@ -484,23 +497,25 @@ def _run_extraction_stage(
 
     with progress_context as progress_bar:
         for controller_id, archive_path in extraction_archives.items():
-            extraction_job_id = ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
-            console.echo(
-                message=(
-                    f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
+            # Silences the binding's per-controller announcement so it does not bisect the bar, restoring the
+            # console's prior state once the extraction returns.
+            console_enabled = console.enabled
+            console.disable()
+            try:
+                _extract_controller(
+                    archive_path=archive_path,
+                    output_directory=extraction_output,
+                    controller_id=controller_id,
+                    controller_config=controllers[controller_id],
+                    job_id=extraction_job_ids[controller_id],
+                    tracker=tracker,
+                    workers=workers,
+                    display_progress=False,
+                    executor=executor,
                 )
-            )
-            _extract_controller(
-                archive_path=archive_path,
-                output_directory=extraction_output,
-                controller_id=controller_id,
-                controller_config=controllers[controller_id],
-                job_id=extraction_job_id,
-                tracker=tracker,
-                workers=workers,
-                display_progress=False,
-                executor=executor,
-            )
+            finally:
+                if console_enabled:
+                    console.enable()
             if progress_bar is not None:
                 progress_bar.update(1)
 
