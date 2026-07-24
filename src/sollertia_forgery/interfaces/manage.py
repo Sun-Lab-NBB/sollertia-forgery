@@ -16,7 +16,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @dataclass(frozen=True, slots=True)
 class _SharedManifestParameters:
-    """Bundles the option parsed on the ``manifest`` group and shared across its ``generate`` and ``print``
+    """Bundles the option parsed on the ``manifest`` group and shared across its ``create`` and ``print``
     subcommands.
 
     The group callback builds one of these from its option and stores it on the Click context, and each subcommand
@@ -58,20 +58,23 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
 
 @manifest_cli.command("create", context_settings=_CONTEXT_SETTINGS)
 @click.option(
-    "-pr",
-    "--progress",
+    "-np",
+    "--no-progress",
     is_flag=True,
     show_default=True,
     default=False,
-    help="Determines whether to display a preamble message and a completion message during manifest generation.",
+    help=(
+        "Determines whether to suppress the preamble and completion messages during manifest generation. These "
+        "messages are displayed by default."
+    ),
 )
 @_pass_shared_parameters
-def create_manifest(shared: _SharedManifestParameters, *, progress: bool) -> None:
+def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
 
     An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
     """
-    generate_project_manifest(project_directory=shared.require_project_path(), display_progress=progress)
+    generate_project_manifest(project_directory=shared.require_project_path(), display_progress=not no_progress)
 
 
 @manifest_cli.command("print", context_settings=_CONTEXT_SETTINGS)
@@ -107,17 +110,6 @@ def create_manifest(shared: _SharedManifestParameters, *, progress: bool) -> Non
         "for tracking the data processing state of each data acquisition session conducted for the target project."
     ),
 )
-@click.option(
-    "-r",
-    "--regenerate",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to regenerate the manifest file before loading it. Use this option to ensure the manifest "
-        "reflects the latest state of the project's data."
-    ),
-)
 @_pass_shared_parameters
 def print_project_manifest_data(
     shared: _SharedManifestParameters,
@@ -125,7 +117,6 @@ def print_project_manifest_data(
     animal: int | None,
     notes: bool,
     summary: bool,
-    regenerate: bool,
 ) -> None:
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
     if not summary and not notes:
@@ -135,11 +126,16 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # Resolves the manifest path and regenerates if requested or absent.
+    # Printing reads an existing manifest snapshot. Generation is a separate step ('manifest create'), so a missing
+    # manifest is a loud error rather than an implicit regeneration.
     project_path = shared.require_project_path()
     manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
-    if regenerate or not manifest_path.exists():
-        generate_project_manifest(project_directory=project_path)
+    if not manifest_path.exists():
+        message = (
+            f"Unable to print the manifest data for the '{project_path.stem}' project. No manifest file exists at "
+            f"'{manifest_path}'. Generate it first with 'slf manifest -pp {project_path} create'."
+        )
+        console.error(message=message, error=FileNotFoundError)
 
     manifest = ProjectManifest(manifest_file=manifest_path)
 
@@ -180,17 +176,22 @@ def print_project_manifest_data(
     ),
 )
 @click.option(
-    "-pr",
-    "--progress",
+    "-np",
+    "--no-progress",
     is_flag=True,
     show_default=True,
     default=False,
-    help="Determines whether to display a preamble message and a progress bar during checksum resolution.",
+    help=(
+        "Determines whether to suppress the preamble message and progress bar during checksum resolution. These "
+        "are displayed by default."
+    ),
 )
-def checksum_command(session_path: Path, *, regenerate_checksum: bool, progress: bool) -> None:
+def checksum_command(session_path: Path, *, regenerate_checksum: bool, no_progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
     integrity checksum to include expected changes.
     """
-    resolve_checksum(session_path=session_path, regenerate_checksum=regenerate_checksum, display_progress=progress)
+    resolve_checksum(
+        session_path=session_path, regenerate_checksum=regenerate_checksum, display_progress=not no_progress
+    )
