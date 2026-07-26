@@ -14,7 +14,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers
+from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers, MesoscopeHardwareState
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 from ataraxis_communication_interface.microcontroller import (
     EXTRACTION_JOB_NAME,
@@ -86,13 +86,35 @@ def _make_session(
     """Builds a lightweight stand-in for SessionData exposing only the attributes the pipeline reads."""
     raw_behavior = tmp_path / "raw_data" / "behavior_data"
     raw_behavior.mkdir(parents=True)
+
+    # Job discovery narrows the extraction filter to the modules the session configured, so the stand-in carries a
+    # hardware state that marks every module the tests exercise as used.
+    hardware_state_path = tmp_path / "raw_data" / "hardware_state.yaml"
+    _make_hardware_state().to_yaml(file_path=hardware_state_path)
+
     return SimpleNamespace(
         session_name="test_session",
         acquisition_system=acquisition_system,
-        raw_data=SimpleNamespace(behavior_data_path=raw_behavior),
+        raw_data=SimpleNamespace(behavior_data_path=raw_behavior, hardware_state_path=hardware_state_path),
         processed_data=SimpleNamespace(
             microcontroller_data_path=tmp_path / "processed_data" / "microcontroller_data",
         ),
+    )
+
+
+def _make_hardware_state() -> MesoscopeHardwareState:
+    """Builds a hardware state marking every module the microcontroller tests exercise as configured and used."""
+    return MesoscopeHardwareState(
+        cm_per_pulse=0.0057652,
+        maximum_brake_strength=11.30234233,
+        minimum_brake_strength=0.42383811,
+        lick_threshold=600,
+        valve_scale_coefficient=2.0e-07,
+        valve_nonlinearity_exponent=1.61941797,
+        torque_per_adc_unit=0.00506377,
+        screens_initially_on=False,
+        recorded_mesoscope_ttl=True,
+        delivered_gas_puffs=True,
     )
 
 

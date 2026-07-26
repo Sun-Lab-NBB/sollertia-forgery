@@ -17,6 +17,7 @@ from .microcontrollers import (
     parse_torque,
     parse_encoder,
     parse_gas_puff,
+    get_eligible_modules,
     parse_mesoscope_frame,
     get_module_event_codes,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "DatasetColumn",
     "PupilColumn",
     "assemble_mesoscope_session",
+    "get_eligible_modules",
     "get_module_event_codes",
     "locate_two_photon_data",
     "parse_brake",

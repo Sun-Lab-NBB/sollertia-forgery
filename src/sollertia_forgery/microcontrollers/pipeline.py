@@ -23,7 +23,11 @@ from ataraxis_communication_interface.microcontroller import (
     execute_job,
 )
 
-from ..registries import resolve_microcontroller_parsers, resolve_microcontroller_event_codes
+from ..registries import (
+    resolve_microcontroller_parsers,
+    resolve_microcontroller_event_codes,
+    resolve_eligible_microcontroller_modules,
+)
 from ..shared_assets import (
     LOG_ARCHIVE_SUFFIX,
     tracked_job,
@@ -90,7 +94,7 @@ def run_microcontroller_processing_pipeline(
     # Looks up the parser function and the extracted event codes for every module this session's acquisition system
     # can parse from the central registries, inferring the system from the session.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
-    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    event_codes = _resolve_eligible_event_codes(session=session)
 
     # Derives the per-controller extraction configurations from the microcontroller manifest and the event codes.
     controllers = _resolve_controllers(session=session, event_codes=event_codes)
@@ -201,7 +205,7 @@ def discover_microcontroller_jobs(
     """
     session = SessionData.load(session_path=session_path)
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
-    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    event_codes = _resolve_eligible_event_codes(session=session)
     controllers = _resolve_controllers(session=session, event_codes=event_codes)
     universe, requested, _, _ = _discover_jobs(
         controllers=controllers,
@@ -234,6 +238,26 @@ def microcontroller_job_prerequisites(
         (job_name, specifier): ((EXTRACTION_JOB_NAME, specifier.split("-")[0]),) if job_name == PARSE_JOB_NAME else ()
         for job_name, specifier in universe
     }
+
+
+def _resolve_eligible_event_codes(session: SessionData) -> dict[tuple[int, int], tuple[int, ...]]:
+    """Resolves the event codes of the hardware modules the target session configured for use.
+
+    Notes:
+        A session records which hardware modules it used, and its acquisition system's parsers skip the modules it
+        did not. Narrowing the event codes to the eligible modules keeps the extraction stage and the parse job
+        universe aligned with those parsers, so an unused module contributes neither an intermediate feather nor a
+        job that completes without writing an output.
+
+    Args:
+        session: The loaded session whose microcontroller logs are being processed.
+
+    Returns:
+        A mapping from each eligible ``(module_type, module_id)`` pair to the tuple of event codes its parser reads.
+    """
+    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    eligible = resolve_eligible_microcontroller_modules(system=session.acquisition_system, session=session)
+    return {module_key: codes for module_key, codes in event_codes.items() if module_key in eligible}
 
 
 def _resolve_controllers(
