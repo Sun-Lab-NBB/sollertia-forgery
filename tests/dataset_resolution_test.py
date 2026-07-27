@@ -16,8 +16,6 @@ import pytest
 from sollertia_shared_assets import DatasetData, SessionTypes, AcquisitionSystems
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-import sollertia_forgery.forging.dataset as dataset_module
-import sollertia_forgery.forging.pipeline as pipeline_module
 from sollertia_forgery.forging import (
     DEFINE_JOB_NAME,
     FORGING_JOB_NAME,
@@ -26,6 +24,8 @@ from sollertia_forgery.forging import (
     resolve_dataset,
     run_forging_pipeline,
 )
+import sollertia_forgery.forging.dataset as dataset_module
+import sollertia_forgery.forging.pipeline as pipeline_module
 from sollertia_forgery.forging.pipeline import _reset_animal_jobs, _resolve_runnable_jobs
 
 _COLUMN_DESCRIPTIONS: dict[str, str] = {"time_us": "Microsecond-precision sample timestamps."}
@@ -505,3 +505,159 @@ def test_run_forging_pipeline_suppresses_definition_arguments_for_other_remote_j
     assert recorded["session_names"] == ()
     assert recorded["force_recreate"] is False
     assert recorded["recreate_animals"] == ()
+
+
+# Tests for which invocation writes the per-animal multi-day configurations
+
+
+def _install_dataset_animals(tmp_path: Path, animals: dict[str, list[str]], configured: set[str]) -> Any:
+    """Builds a dataset stub whose animals resolve to on-disk directories, configuring the named ones.
+
+    Args:
+        tmp_path: The temporary directory the animal directories are created under.
+        animals: The session names to report for each animal, in dataset order.
+        configured: The animals whose multi-recording configuration file is written to disk.
+
+    Returns:
+        A dataset stub exposing the animals, sessions, and lookups the plan helpers read.
+    """
+    dataset_root = tmp_path.joinpath("test_dataset")
+    dataset_animals = []
+    for animal in animals:
+        animal_path = dataset_root.joinpath(animal)
+        animal_path.mkdir(parents=True, exist_ok=True)
+        if animal in configured:
+            animal_path.joinpath("multi_recording_configuration.yaml").write_text("recording_io: {}\n")
+        dataset_animals.append(SimpleNamespace(animal=animal, animal_path=animal_path))
+
+    sessions = tuple(
+        SimpleNamespace(animal=animal, session=session) for animal, names in animals.items() for session in names
+    )
+    return SimpleNamespace(
+        name="test_dataset",
+        acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+        dataset_data_path=dataset_root.joinpath("dataset_data.yaml"),
+        animals=tuple(dataset_animals),
+        sessions=sessions,
+        get_sessions_for_animal=lambda animal: tuple(entry for entry in sessions if entry.animal == animal),
+    )
+
+
+def test_load_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) -> None:
+    """Verifies that reading the plan admits an animal exactly when its configuration is on disk."""
+    dataset = _install_dataset_animals(
+        tmp_path,
+        animals={"animal_a": ["session_1", "session_2"], "animal_b": ["session_3"]},
+        configured={"animal_a"},
+    )
+
+    plan = pipeline_module._load_multiday_plan(dataset=dataset)
+
+    assert set(plan) == {"animal_a"}
+    configuration_path, session_names = plan["animal_a"]
+    assert session_names == ["session_1", "session_2"]
+    assert configuration_path == dataset.animals[0].animal_path.joinpath("multi_recording_configuration.yaml")
+
+
+def test_load_multiday_plan_reports_nothing_without_a_configuration(tmp_path: Path) -> None:
+    """Verifies that a dataset whose animals carry no configuration resolves to an empty plan."""
+    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
+
+    assert pipeline_module._load_multiday_plan(dataset=dataset) == {}
+
+
+def _record_plan_selection(monkeypatch: pytest.MonkeyPatch, dataset: Any) -> list[str]:
+    """Replaces both plan helpers with recorders that halt the run once they capture which path it took.
+
+    Args:
+        monkeypatch: The fixture used to replace the resolver, the assembly-worker registry, and both helpers.
+        dataset: The dataset stub the replaced resolver returns.
+
+    Returns:
+        The list the recorders append the selected plan path to.
+    """
+    calls: list[str] = []
+
+    def _halt(path: str) -> Any:
+        def _record(**_arguments: Any) -> None:
+            calls.append(path)
+            message = "halted after plan selection"
+            raise RuntimeError(message)
+
+        return _record
+
+    monkeypatch.setattr(pipeline_module, "resolve_dataset", lambda **_arguments: dataset)
+    monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", lambda _system: None)
+    monkeypatch.setattr(pipeline_module, "_materialize_multiday_plan", _halt("materialize"))
+    monkeypatch.setattr(pipeline_module, "_load_multiday_plan", _halt("load"))
+    return calls
+
+
+def test_run_forging_pipeline_materializes_the_plan_in_local_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the invocation owning the hierarchy writes the per-animal configurations."""
+    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
+    calls = _record_plan_selection(monkeypatch, dataset)
+
+    with pytest.raises(RuntimeError, match="halted"):
+        run_forging_pipeline(name="test_dataset", session_names=("session_1",), project_root=tmp_path)
+
+    assert calls == ["materialize"]
+
+
+def test_run_forging_pipeline_materializes_the_plan_for_the_definition_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a remote definition job writes the per-animal configurations."""
+    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
+    calls = _record_plan_selection(monkeypatch, dataset)
+    define_id = ProcessingTracker.generate_job_id(job_name=DEFINE_JOB_NAME, specifier="")
+
+    with pytest.raises(RuntimeError, match="halted"):
+        run_forging_pipeline(name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=define_id)
+
+    assert calls == ["materialize"]
+
+
+def test_run_forging_pipeline_reads_the_plan_for_other_remote_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a remote job other than the definition job reads the plan instead of rewriting it."""
+    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured={"animal_a"})
+    calls = _record_plan_selection(monkeypatch, dataset)
+    assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
+
+    with pytest.raises(RuntimeError, match="halted"):
+        run_forging_pipeline(
+            name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=assembly_id
+        )
+
+    assert calls == ["load"]
+
+
+def test_remote_forging_jobs_leave_the_materialized_configuration_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a remote job other than the definition job never rewrites an animal's configuration file."""
+    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured={"animal_a"})
+    configuration_path = dataset.animals[0].animal_path.joinpath("multi_recording_configuration.yaml")
+    original = configuration_path.read_text()
+
+    monkeypatch.setattr(pipeline_module, "resolve_dataset", lambda **_arguments: dataset)
+    monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", lambda _system: None)
+
+    def _fail(**_arguments: Any) -> None:
+        message = "the reading path must not materialize"
+        raise AssertionError(message)
+
+    monkeypatch.setattr(pipeline_module, "_materialize_multiday_plan", _fail)
+    monkeypatch.setattr(pipeline_module, "_build_forging_universe", lambda **_arguments: [])
+
+    assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
+    with pytest.raises(ValueError, match="does not match any forging job"):
+        run_forging_pipeline(
+            name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=assembly_id
+        )
+
+    assert configuration_path.read_text() == original

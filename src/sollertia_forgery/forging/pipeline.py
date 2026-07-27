@@ -17,7 +17,7 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
-from ..shared_assets import tracked_job, multi_recording_dataset_directory
+from ..shared_assets import tracked_job, pinned_worker_threads, multi_recording_dataset_directory
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -118,8 +118,15 @@ def run_forging_pipeline(
     dataset_path = dataset.dataset_data_path.parent
     session_lookup: dict[str, DatasetSession] = {entry.session: entry for entry in dataset.sessions}
 
-    multiday_plan = _resolve_multiday_plan(
-        dataset=dataset, project_root=project_root, workers=workers, display_progress=display_progress
+    # Only the invocation that owns the hierarchy writes the per-animal configurations. Every other invocation reads
+    # the plan those writes left behind, so sibling jobs dispatched against one dataset never rewrite a file another
+    # one is reading.
+    multiday_plan = (
+        _materialize_multiday_plan(
+            dataset=dataset, project_root=project_root, workers=workers, display_progress=display_progress
+        )
+        if defines_hierarchy
+        else _load_multiday_plan(dataset=dataset)
     )
     universe = _build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
     session_to_configuration = {
@@ -219,7 +226,7 @@ def run_forging_pipeline(
     console.echo(message="All forging jobs completed successfully.", level=LogLevel.SUCCESS)
 
 
-def _resolve_multiday_plan(
+def _materialize_multiday_plan(
     dataset: DatasetData, project_root: Path, *, workers: int, display_progress: bool
 ) -> dict[str, tuple[Path, list[str]]]:
     """Resolves the per-animal cindra multi-day plan and materializes each tracked animal's configuration.
@@ -228,6 +235,10 @@ def _resolve_multiday_plan(
         The multi-recording stage registers an animal's recordings against each other, so the plan is resolved once
         per animal. The acquisition system's resolver decides whether the stage applies, and an animal whose
         resolver returns None is omitted.
+
+        Writing a configuration truncates the file in place under no lock, so only the invocation that owns the
+        dataset hierarchy calls this. Every other invocation reads the same plan back through
+        ``_load_multiday_plan``, which keeps concurrently dispatched jobs off the files their siblings read.
 
     Args:
         dataset: The resolved dataset whose animals are planned.
@@ -276,6 +287,33 @@ def _resolve_multiday_plan(
         configuration.save(file_path=configuration_path)
 
         plan[animal] = (configuration_path, [entry.session for entry in animal_entries])
+
+    return plan
+
+
+def _load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]]:
+    """Reads back the per-animal cindra multi-day plan a defining invocation materialized.
+
+    Notes:
+        An animal needs multi-day processing exactly when its configuration is on disk, since that file is written
+        only for the animals whose acquisition system resolves one. Reading the plan this way touches no session
+        marker and resolves no configuration, so an invocation that runs a single job costs a directory listing per
+        animal rather than a load per session.
+
+    Args:
+        dataset: The resolved dataset whose animals are read.
+
+    Returns:
+        A mapping of each tracked animal to a tuple of its configuration path and its session names, in the animal's
+        dataset order. Empty when no animal carries a materialized configuration.
+    """
+    plan: dict[str, tuple[Path, list[str]]] = {}
+    for dataset_animal in dataset.animals:
+        configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
+        if not configuration_path.is_file():
+            continue
+        animal_entries = dataset.get_sessions_for_animal(dataset_animal.animal)
+        plan[dataset_animal.animal] = (configuration_path, [entry.session for entry in animal_entries])
 
     return plan
 
@@ -554,7 +592,9 @@ def _execute_jobs_parallel(
     """
     first_exception: Exception | None = None
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    # Each assembly child re-imports and sizes its library thread pools before any of this code runs inside it, so the
+    # caps are placed around the pool's construction rather than inside its workers.
+    with pinned_worker_threads(), ProcessPoolExecutor(max_workers=workers) as executor:
         future_to_job_id: dict[Future[None], str] = {}
         for session_name in sessions:
             job_id = job_ids[session_name]
