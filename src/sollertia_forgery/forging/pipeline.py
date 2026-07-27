@@ -28,8 +28,8 @@ if TYPE_CHECKING:
 
 DEFINE_JOB_NAME: str = "dataset_definition"
 """The job name identifying the single dataset-definition job in the forging processing tracker. The job records that
-the dataset hierarchy was resolved, which happens before the tracker exists, so it is marked complete on tracker
-setup."""
+the dataset hierarchy was resolved, which happens before the tracker exists, so it is recorded complete without
+running any work of its own."""
 
 MULTIDAY_DISCOVERY_JOB_NAME: str = "multiday_discovery"
 """The job name identifying a per-animal cindra multi-day cross-recording cell-discovery job in the forging tracker.
@@ -96,8 +96,8 @@ def run_forging_pipeline(
             provided list holds for them. Applied by the definition job.
 
     Raises:
-        ValueError: If the dataset's acquisition system has no registered assembly worker, or if the provided job_id
-            does not match any job. The dataset resolution policy raises for a request it cannot satisfy.
+        ValueError: If the dataset's acquisition system is unknown, or if the provided job_id does not match any job.
+            The dataset resolution policy raises for a request it cannot satisfy.
     """
     console.echo(message=f"Initializing the forging pipeline for dataset '{name}'...", level=LogLevel.INFO)
 
@@ -487,7 +487,7 @@ def _execute_jobs_sequential(
     *,
     display_progress: bool,
 ) -> None:
-    """Runs all assembly jobs sequentially in the parent process with an optional progress bar.
+    """Runs the provided assembly jobs sequentially in the parent process with an optional progress bar.
 
     Notes:
         Each job is fully owned by the parent process, so the first exception aborts the remaining jobs.
@@ -535,7 +535,7 @@ def _execute_jobs_parallel(
     *,
     display_progress: bool,
 ) -> None:
-    """Runs all assembly jobs concurrently across a shared ProcessPoolExecutor.
+    """Runs the provided assembly jobs concurrently across a shared ProcessPoolExecutor.
 
     Notes:
         Every dispatched job is tracked individually, and in-flight futures are allowed to finish on failure so the

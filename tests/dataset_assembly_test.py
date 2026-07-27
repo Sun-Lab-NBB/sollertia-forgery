@@ -19,7 +19,7 @@ from sollertia_forgery.shared_assets import multi_recording_dataset_directory
 import sollertia_forgery.mesoscope_vr.forging as dispatcher_module
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import resolve_slowest_camera_clock
-from sollertia_forgery.mesoscope_vr.runtime_dataset import clip_to_runtime_end
+from sollertia_forgery.mesoscope_vr.runtime_dataset import clip_to_session_bounds
 
 _FRAME_TIME_COLUMN: str = "frame_time_us"
 """The single column name each camera timestamp feather carries, matching the video-dataset assembler's contract."""
@@ -140,44 +140,90 @@ def test_dispatch_rejects_window_checking_session(monkeypatch: pytest.MonkeyPatc
         )
 
 
-def _write_runtime_state(directory: Path, timestamps: np.ndarray) -> None:
-    """Writes a runtime-state feather carrying the given runtime-state entry timestamps."""
+def _write_state_streams(directory: Path, system_states: dict[int, int], runtime_times: np.ndarray) -> None:
+    """Writes the system-state and runtime-state feathers the session-bounds clip reads.
+
+    Args:
+        directory: The processed runtime-data directory to write both feathers into.
+        system_states: The system state code to record at each timestamp, keyed by timestamp.
+        runtime_times: The runtime-state entry timestamps, whose last value marks the end of the runtime.
+    """
     pl.DataFrame(
-        {"time_us": timestamps.astype(np.uint64), "runtime_state": np.ones(timestamps.size, dtype=np.uint8)}
+        {
+            "time_us": np.fromiter(system_states.keys(), dtype=np.uint64),
+            "system_state": np.fromiter(system_states.values(), dtype=np.uint8),
+        }
+    ).write_ipc(file=directory.joinpath(BehaviorDataFiles.SYSTEM_STATE))
+    pl.DataFrame(
+        {"time_us": runtime_times.astype(np.uint64), "runtime_state": np.ones(runtime_times.size, dtype=np.uint8)}
     ).write_ipc(file=directory.joinpath(BehaviorDataFiles.RUNTIME_STATE))
 
 
-def test_clip_to_runtime_end_drops_samples_past_the_last_runtime_entry(tmp_path: Path) -> None:
-    """Verifies that samples acquired after the final runtime-state entry are discarded."""
-    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 2_000]))
-    assembled = pl.DataFrame(
-        {"time_us": np.array([0, 1_000, 2_000, 3_000, 4_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0, 4.0, 5.0]}
+def _assembled(timestamps: list[int]) -> pl.DataFrame:
+    """Returns a stand-in assembled dataset carrying the given reference-clock timestamps."""
+    return pl.DataFrame(
+        {"time_us": np.array(timestamps, dtype=np.uint64), "value": [float(value) for value in timestamps]}
     )
 
-    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
+
+def test_clip_to_session_bounds_drops_the_setup_and_teardown_spans(tmp_path: Path) -> None:
+    """Verifies that samples outside the session start and the runtime end are discarded from both ends."""
+    # The system idles through setup and leaves idle at 2_000, which is where the session's data begins.
+    _write_state_streams(
+        directory=tmp_path,
+        system_states={0: 0, 1_000: 0, 2_000: 2, 3_000: 2},
+        runtime_times=np.array([0, 3_000]),
+    )
+
+    clipped = clip_to_session_bounds(
+        assembled_data=_assembled([0, 1_000, 2_000, 3_000, 4_000]), runtime_data_path=tmp_path
+    )
+
+    assert clipped["time_us"].to_list() == [2_000, 3_000]
+
+
+def test_clip_to_session_bounds_anchors_the_head_on_the_first_non_idle_state(tmp_path: Path) -> None:
+    """Verifies that a mid-session return to idle does not move the head anchor.
+
+    The acquisition system re-enters idle whenever a running session pauses, so only the first departure from idle
+    marks the session start.
+    """
+    _write_state_streams(
+        directory=tmp_path,
+        system_states={0: 0, 1_000: 3, 2_000: 0, 3_000: 3},
+        runtime_times=np.array([0, 4_000]),
+    )
+
+    clipped = clip_to_session_bounds(assembled_data=_assembled([0, 1_000, 2_000, 3_000]), runtime_data_path=tmp_path)
+
+    assert clipped["time_us"].to_list() == [1_000, 2_000, 3_000]
+
+
+def test_clip_to_session_bounds_keeps_a_dataset_inside_both_bounds(tmp_path: Path) -> None:
+    """Verifies that a dataset already contained within the session bounds is left whole."""
+    _write_state_streams(directory=tmp_path, system_states={0: 2}, runtime_times=np.array([0, 5_000]))
+
+    clipped = clip_to_session_bounds(assembled_data=_assembled([1_000, 2_000, 3_000]), runtime_data_path=tmp_path)
+
+    assert clipped.height == 3
+
+
+def test_clip_to_session_bounds_keeps_the_head_when_the_session_never_leaves_idle(tmp_path: Path) -> None:
+    """Verifies that a session with no non-idle state keeps its head instead of failing.
+
+    A session terminated during setup never leaves idle, so there is no session start to anchor the head on.
+    """
+    _write_state_streams(directory=tmp_path, system_states={0: 0, 1_000: 0}, runtime_times=np.array([0, 3_000]))
+
+    clipped = clip_to_session_bounds(assembled_data=_assembled([0, 1_000, 2_000]), runtime_data_path=tmp_path)
 
     assert clipped["time_us"].to_list() == [0, 1_000, 2_000]
-    assert clipped["value"].to_list() == [1.0, 2.0, 3.0]
 
 
-def test_clip_to_runtime_end_keeps_a_dataset_ending_with_the_runtime(tmp_path: Path) -> None:
-    """Verifies that a dataset whose final sample coincides with the runtime end is left whole."""
-    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 2_000]))
-    assembled = pl.DataFrame({"time_us": np.array([0, 1_000, 2_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0]})
+def test_clip_to_session_bounds_keeps_the_tail_without_a_runtime_state_entry(tmp_path: Path) -> None:
+    """Verifies that an empty runtime-state stream leaves the tail in place instead of failing."""
+    _write_state_streams(directory=tmp_path, system_states={1_000: 2}, runtime_times=np.array([], dtype=np.uint64))
 
-    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
+    clipped = clip_to_session_bounds(assembled_data=_assembled([0, 1_000, 2_000]), runtime_data_path=tmp_path)
 
-    assert clipped.height == assembled.height
-
-
-def test_clip_to_runtime_end_keeps_a_dataset_ending_before_the_runtime(tmp_path: Path) -> None:
-    """Verifies that a reference clock ending before the runtime does is left whole.
-
-    A camera clock can stop short of the final runtime-state entry, which leaves nothing to clip.
-    """
-    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 5_000]))
-    assembled = pl.DataFrame({"time_us": np.array([0, 1_000, 2_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0]})
-
-    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
-
-    assert clipped.height == assembled.height
+    assert clipped["time_us"].to_list() == [1_000, 2_000]

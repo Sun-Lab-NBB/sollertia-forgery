@@ -28,6 +28,11 @@ _TRIAL_UNDEFINED: int = 65535
 """The sentinel value used to mask the trial column when the system is not in the run state, equal to the maximum
 value of UInt16 so it sits outside the expected trial ID range for any realistic session."""
 
+_SYSTEM_STATE_IDLE: int = 0
+"""The system state code the acquisition system reports while it is not conducting a session. Every session type
+leaves this state once, at its canonical start, so the first entry carrying a different code marks the moment the
+session's data begins."""
+
 
 def assemble_runtime_dataset(
     microcontroller_data_path: Path,
@@ -179,32 +184,50 @@ def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def clip_to_runtime_end(assembled_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame:
-    """Discards the assembled samples acquired after the session's runtime ended.
+def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame:
+    """Discards the assembled samples acquired before the session started and after its runtime ended.
 
     Notes:
-        Session teardown stops the acquisition assets in sequence, so each asset contributes data for a different
-        span past the end of the runtime. The cameras stop about a second after the runtime, the mesoscope continues
-        for several more seconds, and the microcontrollers log for several more minutes. Clipping the fully assembled
-        dataset at the final runtime-state entry removes that span from every column at once, which keeps the
-        sub-dataset assemblers free of teardown-specific handling.
+        The acquisition assets start and stop in sequence around the session itself. The state streams begin at
+        system initialization, and the cameras and the mesoscope begin acquiring during the setup that follows.
+        Teardown then stops the cameras about a second after the runtime, while the mesoscope continues for several
+        more seconds and the microcontrollers log for several more minutes.
 
-        On the fluorescence clock the trailing samples carry the last camera value held constant, so clipping also
-        removes fabricated data. On a camera clock every trailing sample is acquired, so clipping ends the session
-        at the runtime rather than at the camera teardown.
+        The head therefore holds the setup period, which for an experiment session covers the whole mesoscope
+        alignment. The session itself begins when the acquisition system first leaves the idle state, which is the
+        first ``system_state`` entry whose code differs from ``_SYSTEM_STATE_IDLE``. Later idle spans are left in
+        place, since the system also returns to idle when a running session pauses.
+
+        The tail holds the teardown period. On the fluorescence clock its samples carry the last camera value held
+        constant, so clipping there also removes fabricated data. On a camera clock every trailing sample is
+        acquired, so clipping ends the session at the runtime rather than at the camera teardown.
+
+        Clipping the fully assembled dataset trims every column at once, which keeps the sub-dataset assemblers free
+        of setup-specific and teardown-specific handling. A session that never leaves idle keeps its head, and a
+        session with no runtime-state entry keeps its tail, so a partially acquired session still forges.
 
     Args:
         assembled_data: The fully assembled DataFrame, ordered by its session's reference clock.
         runtime_data_path: The path to the session's processed runtime-data directory.
 
     Returns:
-        The DataFrame containing only the samples acquired at or before the end of the runtime.
+        The DataFrame containing only the samples acquired between the session start and the end of the runtime.
     """
+    system_state_data = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True)
     runtime_state_data = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
     )
-    runtime_end_time = runtime_state_data["time_us"][-1]
-    return assembled_data.filter(pl.col("time_us") <= runtime_end_time)
+
+    clipped = assembled_data
+
+    session_start_times = system_state_data.filter(pl.col("system_state") != _SYSTEM_STATE_IDLE)["time_us"]
+    if session_start_times.len() > 0:
+        clipped = clipped.filter(pl.col("time_us") >= session_start_times[0])
+
+    if runtime_state_data.height > 0:
+        clipped = clipped.filter(pl.col("time_us") <= runtime_state_data["time_us"][-1])
+
+    return clipped
 
 
 @njit(cache=True)

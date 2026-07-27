@@ -21,7 +21,7 @@ from sollertia_shared_assets import (
 
 from .video_dataset import assemble_video_dataset
 from ..shared_assets import multi_recording_dataset_directory
-from .runtime_dataset import clip_to_runtime_end, assemble_runtime_dataset, mask_non_run_experiment_data
+from .runtime_dataset import clip_to_session_bounds, assemble_runtime_dataset, mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 from .two_photon_dataset import assemble_cindra_dataset
 
@@ -151,5 +151,5 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         sub_datasets.append(results["video"])
     result = pl.concat(items=sub_datasets, how="horizontal")
     result = mask_non_run_experiment_data(experiment_data=result)
-    result = clip_to_runtime_end(assembled_data=result, runtime_data_path=runtime_data_path)
+    result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)

@@ -40,7 +40,7 @@ def resolve_dataset(
 
     Notes:
         An animal already in the dataset is frozen. Providing a session it does not hold is rejected, because
-        widening an animal's session set often requires to rebuild the entire animal's dataset. Adding an animal
+        widening an animal's session set often requires rebuilding the entire animal's dataset. Adding an animal
         the dataset does not hold stays safe.
 
         Naming an animal in recreate_animals opts that animal out of the freeze. The animal is dropped from the
@@ -164,8 +164,8 @@ def _create_dataset(
         The newly created DatasetData instance.
 
     Raises:
-        FileNotFoundError: If a session name does not resolve to any animal directory under the project root.
-        RuntimeError: If a session name resolves to more than one animal directory under the project root.
+        FileNotFoundError: If a session name does not resolve to any directory under the project root.
+        RuntimeError: If a session name resolves to more than one directory under the project root.
         ValueError: If required_session_type is provided and the first session's type differs from it, or if any
             subsequent session's session type or acquisition system differs from the first session's.
     """
@@ -217,8 +217,8 @@ def _create_dataset(
 
     console.echo(
         message=(
-            f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} sessions from "
-            f"{len(dataset.animals)} animals."
+            f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} session(s) across "
+            f"{len(dataset.animals)} animal(s)."
         ),
         level=LogLevel.SUCCESS,
     )

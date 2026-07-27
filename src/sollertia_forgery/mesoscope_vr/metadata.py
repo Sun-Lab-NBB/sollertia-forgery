@@ -195,19 +195,34 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     ),
     # cindra fluorescence column descriptions.
     DatasetColumn.FRAME: "One-based mesoscope acquisition frame index at each sample.",
-    DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE: "Single-recording raw cell fluorescence trace per ROI.",
-    DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE: "Single-recording raw neuropil fluorescence trace per ROI.",
-    DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE: (
-        "Single-recording neuropil- and baseline-subtracted fluorescence trace per ROI."
+    DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE: (
+        "Single-recording raw cell fluorescence trace per ROI, over the cells detected in this session alone."
     ),
-    DatasetColumn.SINGLE_DAY_SPIKES: "Single-recording OASIS-deconvolved spike rates per ROI.",
-    DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE: "Multi-recording raw cell fluorescence trace per ROI.",
-    DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE: "Multi-recording raw neuropil fluorescence trace per ROI.",
+    DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE: (
+        "Single-recording raw neuropil fluorescence trace per ROI, over the cells detected in this session alone."
+    ),
+    DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE: (
+        "Single-recording neuropil- and baseline-subtracted fluorescence trace per ROI, over the cells detected in "
+        "this session alone."
+    ),
+    DatasetColumn.SINGLE_DAY_SPIKES: (
+        "Single-recording OASIS-deconvolved spike rates per ROI, over the cells detected in this session alone."
+    ),
+    DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE: (
+        "Multi-recording raw cell fluorescence trace per ROI, over the cells tracked across every session of this "
+        "animal in the dataset."
+    ),
+    DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE: (
+        "Multi-recording raw neuropil fluorescence trace per ROI, over the cells tracked across every session of "
+        "this animal in the dataset."
+    ),
     DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE: (
-        "Multi-recording neuropil- and baseline-subtracted fluorescence trace per ROI aligned across recording days."
+        "Multi-recording neuropil- and baseline-subtracted fluorescence trace per ROI, over the cells tracked "
+        "across every session of this animal in the dataset."
     ),
     DatasetColumn.MULTI_DAY_SPIKES: (
-        "Multi-recording OASIS-deconvolved spike rates per ROI aligned across recording days."
+        "Multi-recording OASIS-deconvolved spike rates per ROI, over the cells tracked across every session of this "
+        "animal in the dataset."
     ),
     # Video motion-energy column descriptions.
     DatasetColumn.FACE_CAMERA_MOTION_ENERGY: (
