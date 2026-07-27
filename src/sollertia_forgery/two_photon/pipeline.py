@@ -21,9 +21,14 @@ if TYPE_CHECKING:
 
     from cindra import SingleRecordingConfiguration
 
-_MATERIALIZED_CONFIGURATION_FILENAME: str = "configuration.yaml"
-"""The filename cindra expects for the shared single-recording configuration. The pipeline materializes the
-caller's template under this name in the session's cindra directory (``session.processed_data.cindra_data_path``)."""
+DEFAULT_CINDRA_WORKERS: int = 10
+"""The numba thread count recorded when a caller names none. It matches the lowest count cindra documents as
+supported for per-plane processing, so a configuration written by job discovery alone still names a workable value."""
+
+CINDRA_CONFIGURATION_FILENAME: str = "configuration.yaml"
+"""The filename a locally driven run materializes its single-recording configuration under, inside the session's
+cindra directory (``session.processed_data.cindra_data_path``). A run driven by an external scheduler names its
+copy after the job it executes, so concurrently dispatched jobs each read their own file."""
 
 
 def run_two_photon_processing_pipeline(
@@ -42,8 +47,8 @@ def run_two_photon_processing_pipeline(
     Resolves the session's raw imaging directory (cindra input) through the two-photon data registry and its
     processed-data root (cindra output) from the session hierarchy. Obtains the cindra single-recording configuration
     from the acquisition system's donated resolver, overrides its data path, output path, worker count, and progress
-    flag, and writes the result as the session's cindra ``configuration.yaml``. Then owns the two-photon processing
-    tracker and dispatches each stage to cindra as a single tracked job.
+    flag, and materializes the result in the session's cindra directory. Then owns the two-photon processing tracker
+    and dispatches each stage to cindra as a single tracked job.
 
     Notes:
         The pipeline runs the single binarization job, one processing job per virtual imaging plane, and the single
@@ -77,8 +82,9 @@ def run_two_photon_processing_pipeline(
         combine: Determines whether to run the multi-plane combination stage. Ignored in remote mode.
         target_plane: The imaging plane to process when running the processing stage. Set to -1 to process all planes.
             Ignored in remote mode, where the job to run is selected entirely by job_id.
-        workers: The number of numba worker threads cindra may use. Set to -1 to use all available CPU cores (minus
-            reserved cores).
+        workers: The number of numba worker threads cindra may use, recorded into the session's configuration. Set
+            to -1 to use all available CPU cores minus the reserved cores. Applies in local mode only, since a job
+            selected by identifier reads the configuration its preparation step already wrote.
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
@@ -98,10 +104,11 @@ def run_two_photon_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Resolves the session-bound cindra input and output locations and materializes the run's configuration.yaml,
-    # overriding the resolver's worker count and progress flag with the supplied runtime settings.
+    # Resolves the session-bound cindra input and output locations. A locally driven run owns the session's
+    # configuration and writes it. A run driven by an external scheduler reads the copy its preparation step wrote,
+    # so the worker count that copy records governs, and this run's own worker argument does not apply.
     configuration, materialized_configuration_path = _resolve_configuration(
-        session=session, workers=workers, display_progress=display_progress
+        session=session, workers=workers, display_progress=display_progress, persist=job_id is None
     )
 
     # Recovers the virtual-plane count for the job universe by resolving cindra's per-plane runtime contexts. Persists
@@ -221,7 +228,9 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
             acquisition system's resolver cannot resolve a configuration for the session.
     """
     session = SessionData.load(session_path=session_path)
-    configuration, _ = _resolve_configuration(session=session, workers=-1, display_progress=False)
+    configuration, _ = _resolve_configuration(
+        session=session, workers=DEFAULT_CINDRA_WORKERS, display_progress=False, persist=True
+    )
 
     # Recovers the virtual-plane count by resolving cindra's per-plane runtime contexts. Persisting the bootstrap here
     # primes the recording so its jobs can dispatch, matching cindra's single-threaded prepare step.
@@ -265,8 +274,34 @@ def two_photon_job_prerequisites(
     }
 
 
+def materialize_cindra_configuration(session: SessionData, workers: int) -> Path:
+    """Writes the session's cindra configuration with the worker count its processing jobs will run under.
+
+    Notes:
+        cindra reads the worker count from this file rather than from a call argument, and only its per-plane
+        processing stage consumes the value. An external scheduler therefore prepares this file once, before any job
+        of the session dispatches, and every job of that session reads the same copy.
+
+    Args:
+        session: The loaded session whose configuration is written.
+        workers: The numba thread count each per-plane processing job runs under.
+
+    Returns:
+        The path the configuration was written to.
+
+    Raises:
+        FileNotFoundError: If the session's raw two-photon imaging directory or its acquisition parameters file is
+            not present.
+        ValueError: If the session's acquisition system cannot resolve a two-photon configuration.
+    """
+    _, configuration_path = _resolve_configuration(
+        session=session, workers=workers, display_progress=False, persist=True
+    )
+    return configuration_path
+
+
 def _resolve_configuration(
-    session: SessionData, *, workers: int, display_progress: bool
+    session: SessionData, *, workers: int, display_progress: bool, persist: bool
 ) -> tuple[SingleRecordingConfiguration, Path]:
     """Resolves the session's cindra input and output locations and materializes its single-recording configuration.
 
@@ -283,10 +318,12 @@ def _resolve_configuration(
         workers: The number of numba worker threads to record in the configuration's runtime section.
         display_progress: Determines whether cindra displays progress bars during processing. Recorded in the
             configuration's runtime section.
+        persist: Determines whether the resolved configuration is written to disk. Only the invocation that owns the
+            session's configuration writes it, so a job dispatched alongside its siblings reads a stable file.
 
     Returns:
-        A tuple of the resolved single-recording configuration and the path to the materialized cindra
-        ``configuration.yaml``.
+        A tuple of the resolved single-recording configuration and the path it was materialized to, which is the
+        session's shared ``configuration.yaml`` in local mode and a per-job file in remote mode.
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
@@ -331,6 +368,18 @@ def _resolve_configuration(
     configuration.runtime.display_progress_bars = display_progress
 
     cindra_directory.mkdir(parents=True, exist_ok=True)
-    materialized_configuration_path = cindra_directory.joinpath(_MATERIALIZED_CONFIGURATION_FILENAME)
-    configuration.save(file_path=materialized_configuration_path)
+
+    # cindra reads this file once per job and never writes it, so one copy per session serves every job the session
+    # dispatches. Only the invocation that owns the file writes it, which keeps the single writer outside the window
+    # in which jobs run concurrently.
+    materialized_configuration_path = cindra_directory.joinpath(CINDRA_CONFIGURATION_FILENAME)
+    if persist:
+        configuration.save(file_path=materialized_configuration_path)
+    elif not materialized_configuration_path.is_file():
+        message = (
+            f"Unable to process two-photon data for session '{session.session_name}'. No cindra configuration was "
+            f"found at '{materialized_configuration_path}'. A job dispatched by an external scheduler reads the "
+            f"configuration its preparation step wrote, so that step must run before the job."
+        )
+        console.error(message=message, error=FileNotFoundError)
     return configuration, materialized_configuration_path

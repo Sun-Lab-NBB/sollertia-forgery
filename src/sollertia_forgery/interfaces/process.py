@@ -93,8 +93,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
     show_default=True,
     default=False,
     help=(
-        "Determines whether to suppress the progress bar during processing. The progress bar is displayed by "
-        "default."
+        "Determines whether to suppress the progress bar during processing. The progress bar is displayed by default."
     ),
 )
 @click.pass_context

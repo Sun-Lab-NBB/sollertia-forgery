@@ -341,22 +341,26 @@ class ProjectManifest:
 
         # The pipeline status columns collapse to a binary done indicator for this human-facing view. The detailed
         # labels are retained in the stored manifest columns that the orchestration layer reads.
-        data_frame = self._display_frame().with_columns(
-            # Maps each pipeline status to 1 when completed and 0 otherwise, matching the numeric 'complete' column.
-            *(
-                (pl.col(column) == "completed").cast(pl.UInt8).alias(column)
-                for column in PIPELINE_STATUS_COLUMNS.values()
-            ),
-            # Renders each dataset's completion with the same 0/1 convention rather than a boolean.
-            pl.col("datasets")
-            .list.eval(
-                pl.struct(
-                    pl.element().struct.field("name").alias("name"),
-                    pl.element().struct.field("complete").cast(pl.UInt8).alias("complete"),
+        data_frame = (
+            self._display_frame()
+            .with_columns(
+                # Maps each pipeline status to 1 when completed and 0 otherwise, matching the numeric 'complete' column.
+                *(
+                    (pl.col(column) == "completed").cast(pl.UInt8).alias(column)
+                    for column in PIPELINE_STATUS_COLUMNS.values()
+                ),
+                # Renders each dataset's completion with the same 0/1 convention rather than a boolean.
+                pl.col("datasets")
+                .list.eval(
+                    pl.struct(
+                        pl.element().struct.field("name").alias("name"),
+                        pl.element().struct.field("complete").cast(pl.UInt8).alias("complete"),
+                    )
                 )
+                .alias("datasets"),
             )
-            .alias("datasets"),
-        ).select(summary_cols)
+            .select(summary_cols)
+        )
 
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))

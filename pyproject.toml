@@ -44,7 +44,7 @@ dependencies = [
     # Sollertia Libraries
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6.0.2,<7",
-    "ataraxis-data-structures>=6.1.1,<7",
+    "ataraxis-data-structures>=6.1.2,<7",
     "sollertia-shared-assets>=9.1.0rc3,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
@@ -58,6 +58,9 @@ dependencies = [
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
     "opencv-python>=4.13,<5",
+
+    # System Introspection (reads the host's physical memory when sizing a processing batch)
+    "psutil>=6,<8",
 
     # Data Processing
     "polars>=1,<2",
@@ -105,6 +108,7 @@ dev = [
     "ataraxis-automation>=8.1.1,<9",
 
     # Types
+    "types-psutil",
     "types-filelock>=3,<4",
     "types-tabulate>=0,<1",
     "types-paramiko>=5,<6",
@@ -141,6 +145,7 @@ lint.ignore = [
     "PLR0912", # Sometimes complex functions are necessary
     "PLR0915", # Sometimes complex type definitions are necessary
     "PLR0911", # Sometimes complex return graphs are necessary
+    "PLR0917", # Call sites pass keyword arguments, so the positional count is immaterial
     "TID252",  # Conflicts with the project's import management strategy
     "BLE001",  # Catching blind exceptions is necessary for the functioning of this library
     "COM812",  # Conflicts with the formatter
@@ -150,6 +155,7 @@ lint.ignore = [
     "D107",    # __init__ is documented inside the main class docstring where applicable
     "D205",    # Bugs out for file descriptions
     "PLW0603", # While global statement usage is not ideal, it streamlines certain development patterns
+    "CPY001",  # The license is declared in the LICENSE file and the project metadata
 ]
 
 # Additional formatting configurations
