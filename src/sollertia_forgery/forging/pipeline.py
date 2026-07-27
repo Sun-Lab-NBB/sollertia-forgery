@@ -13,7 +13,7 @@ from cindra import MultiRecordingJobNames, execute_multi_recording_job
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
@@ -33,13 +33,11 @@ setup."""
 
 MULTIDAY_DISCOVERY_JOB_NAME: str = "multiday_discovery"
 """The job name identifying a per-animal cindra multi-day cross-recording cell-discovery job in the forging tracker.
-The job's specifier is the animal identifier, so each animal's shared discovery stage is an independently tracked
-job."""
+The job's specifier is the animal identifier."""
 
 MULTIDAY_EXTRACTION_JOB_NAME: str = "multiday_extraction"
 """The job name identifying a per-session cindra multi-day aligned-fluorescence extraction job in the forging tracker.
-The job's specifier is the session name, so each session's extraction is an independently tracked job that runs after
-its animal's discovery job."""
+The job's specifier is the session name, and the job runs after its animal's discovery job."""
 
 FORGING_JOB_NAME: str = "session_data_assembly"
 """The job name identifying per-session assembly jobs in the forging processing tracker."""
@@ -58,28 +56,33 @@ def run_forging_pipeline(
     workers: int = -1,
     display_progress: bool = False,
     force_recreate: bool = False,
+    recreate_animals: tuple[str, ...] = (),
 ) -> None:
     """Defines the dataset hierarchy, runs the cindra multi-day cell-tracking stages, and assembles the target sessions.
 
     Notes:
-        This is the system-agnostic forging entry point. The forging tracker records every stage as a job: one
-        dataset-definition job, one cindra multi-day discovery job per tracked animal, one multi-day extraction job
-        per that animal's session, and one assembly job per session. The multi-day jobs exist only for animals whose
-        acquisition system returns a multi-recording configuration, so training-session datasets carry only the
-        definition and assembly jobs. The per-session assembly worker is resolved via
-        ``resolve_forging_assembly_worker`` from the dataset's acquisition system, so the pipeline stays
-        system-agnostic and never names a system-specific type.
+        The forging tracker records every stage as a job: one dataset-definition job, one cindra multi-day discovery
+        job per tracked animal, one multi-day extraction job per that animal's session, and one assembly job per
+        session. The multi-day jobs exist only for animals whose acquisition system returns a multi-recording
+        configuration, so training-session datasets carry only the definition and assembly jobs.
 
-        In local mode (``job_id`` is None), every stage runs in sequence: definition, then each animal's discovery and
-        its per-session extractions, then the assembly jobs across a parallel pool. In remote mode (``job_id`` is
-        provided) only the single job matching the identifier runs, so an external scheduler drives cross-job ordering
-        by dispatching each identifier in prerequisite order.
+        Every stage the tracker already records as succeeded is skipped, so an invocation runs only the jobs still
+        outstanding. Rebuilding an animal resets that animal's jobs first.
+
+        In local mode (``job_id`` is None), every outstanding stage runs in sequence: definition, then each animal's
+        discovery and its per-session extractions, then the assembly jobs across a parallel pool. In remote mode
+        (``job_id`` is provided) only the single job matching the identifier runs, so an external scheduler drives
+        cross-job ordering by dispatching each identifier in prerequisite order.
+
+        The definition job owns the hierarchy in both modes, so ``session_names``, ``force_recreate``, and
+        ``recreate_animals`` take effect on that job alone. A remote run may therefore pass one set of arguments with
+        every dispatched job and still define the hierarchy exactly once.
 
     Args:
         name: The unique name of the dataset.
-        session_names: The session names to include in the dataset. When the dataset already exists and a non-empty
-            list is provided, the set is verified against the existing definition. Pass an empty tuple to work with
-            an already-defined dataset without triggering verification.
+        session_names: The session names the dataset must contain. A session the dataset does not hold is appended,
+            subject to the resolution policy. Pass an empty tuple to work with an already-defined dataset without
+            changing its session set. Applied by the definition job.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
         job_id: The hexadecimal identifier of the single job to execute (remote mode). If not provided, the whole
@@ -87,30 +90,34 @@ def run_forging_pipeline(
         workers: The number of workers to use. A value less than 1 uses all available CPU cores (minus reserved
             cores), and 1 forces sequential assembly.
         display_progress: Determines whether to display progress bars during the multi-day and assembly stages.
-        force_recreate: Determines whether to allow deletion of the existing dataset hierarchy when the provided
-            session list does not match the existing definition.
+        force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
+            provided session list. Applied by the definition job.
+        recreate_animals: The identifiers of animals already in the dataset to rebuild from the sessions the
+            provided list holds for them. Applied by the definition job.
 
     Raises:
-        ValueError: If the dataset does not exist and no sessions were provided to create it, if the provided session
-            list does not match the existing dataset and force_recreate is False, if the dataset's acquisition system
-            has no registered assembly worker, or if the provided job_id does not match any job.
+        ValueError: If the dataset's acquisition system has no registered assembly worker, or if the provided job_id
+            does not match any job. The dataset resolution policy raises for a request it cannot satisfy.
     """
     console.echo(message=f"Initializing the forging pipeline for dataset '{name}'...", level=LogLevel.INFO)
 
-    # Stage 1: resolves the dataset hierarchy (create, load, verify, or recreate). Any error propagates unchanged.
+    # The definition job's identifier follows from the job name alone, so it resolves before the dataset is loaded.
+    define_id = ProcessingTracker.generate_job_id(job_name=DEFINE_JOB_NAME, specifier="")
+    defines_hierarchy = job_id is None or job_id == define_id
+
     dataset = resolve_dataset(
-        name=name, session_names=session_names, project_root=project_root, force_recreate=force_recreate
+        name=name,
+        session_names=session_names if defines_hierarchy else (),
+        project_root=project_root,
+        force_recreate=force_recreate and defines_hierarchy,
+        recreate_animals=recreate_animals if defines_hierarchy else (),
     )
 
-    # Resolves the per-session assembly worker for the dataset's acquisition system from the central registry. The
-    # system is inferred from the data, so the pipeline never names a system-specific type.
     worker = resolve_forging_assembly_worker(dataset.acquisition_system)
 
     dataset_path = dataset.dataset_data_path.parent
     session_lookup: dict[str, DatasetSession] = {entry.session: entry for entry in dataset.sessions}
 
-    # Resolves the per-animal multi-day plan (materializing each tracked animal's cindra configuration) and builds the
-    # full stage-job universe. The plan is empty for datasets whose sessions need no multi-day processing.
     multiday_plan = _resolve_multiday_plan(
         dataset=dataset, project_root=project_root, workers=workers, display_progress=display_progress
     )
@@ -119,12 +126,20 @@ def run_forging_pipeline(
         session: configuration_path for configuration_path, sessions in multiday_plan.values() for session in sessions
     }
 
-    console.echo(message=f"Prepared {len(universe)} forging job(s).")
-
-    # Creates and aligns the forging tracker against the full stage universe.
     dataset_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
-    tracker.align_jobs(jobs=universe, universe=universe)
+
+    # A job belonging to a session the rebuild dropped falls outside the universe, so align_jobs discards it below.
+    if recreate_animals and defines_hierarchy:
+        _reset_animal_jobs(tracker=tracker, dataset=dataset, animals=recreate_animals)
+
+    # Requesting only the outstanding jobs while declaring the full universe preserves the recorded state of every
+    # job this invocation skips.
+    runnable = _resolve_runnable_jobs(tracker=tracker, universe=universe)
+    tracker.align_jobs(jobs=runnable, universe=universe)
+    runnable_jobs = set(runnable)
+
+    console.echo(message=f"Prepared {len(runnable)} outstanding forging job(s) out of {len(universe)} total.")
 
     if job_id is not None:
         _execute_remote_forging_job(
@@ -142,29 +157,37 @@ def run_forging_pipeline(
         return
 
     # Local mode. The dataset was resolved above, so the definition job is recorded complete before the tracked stages.
-    define_id = ProcessingTracker.generate_job_id(job_name=DEFINE_JOB_NAME, specifier="")
-    tracker.start_job(job_id=define_id)
-    tracker.complete_job(job_id=define_id)
+    if (DEFINE_JOB_NAME, "") in runnable_jobs:
+        tracker.start_job(job_id=define_id)
+        tracker.complete_job(job_id=define_id)
 
-    # Runs each tracked animal's shared discovery job followed by its per-session extraction jobs.
+    # cindra persists the shared bootstrap to disk, so an outstanding extraction runs correctly even when its
+    # animal's discovery job is skipped.
     for animal, (configuration_path, sessions) in multiday_plan.items():
-        discovery_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal)
-        _run_discovery_job(configuration_path=configuration_path, animal=animal, tracker=tracker, job_id=discovery_id)
+        if (MULTIDAY_DISCOVERY_JOB_NAME, animal) in runnable_jobs:
+            discovery_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal)
+            _run_discovery_job(
+                configuration_path=configuration_path, animal=animal, tracker=tracker, job_id=discovery_id
+            )
         for session in sessions:
+            if (MULTIDAY_EXTRACTION_JOB_NAME, session) not in runnable_jobs:
+                continue
             extraction_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_EXTRACTION_JOB_NAME, specifier=session)
             _run_extraction_job(
                 configuration_path=configuration_path, session=session, tracker=tracker, job_id=extraction_id
             )
 
-    # Runs the per-session assembly jobs across a shared worker pool, falling back to sequential execution when a
-    # single worker or a single job makes a pool pointless.
-    dataset_session_names = [entry.session for entry in dataset.sessions]
+    dataset_session_names = [
+        entry.session for entry in dataset.sessions if (FORGING_JOB_NAME, entry.session) in runnable_jobs
+    ]
     assembly_job_ids = {
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
         for session in dataset_session_names
     }
     resolved_workers = resolve_worker_count(requested_workers=workers)
-    if resolved_workers > 1 and len(dataset_session_names) > 1:
+    if not dataset_session_names:
+        console.echo(message="Every session in the dataset is already assembled.", level=LogLevel.INFO)
+    elif resolved_workers > 1 and len(dataset_session_names) > 1:
         _execute_jobs_parallel(
             sessions=dataset_session_names,
             session_lookup=session_lookup,
@@ -202,12 +225,9 @@ def _resolve_multiday_plan(
     """Resolves the per-animal cindra multi-day plan and materializes each tracked animal's configuration.
 
     Notes:
-        Cross-recording cell tracking registers cells within one brain, so the plan is resolved once per animal. The
-        acquisition system's resolver returns the multi-recording configuration for an animal or None, so the system
-        decides whether tracking applies and an animal whose resolver returns None is omitted. For a tracked animal
-        the configuration is pointed at every one of the animal's session cindra output directories, the cindra
-        dataset name is qualified with the animal identifier so per-animal outputs do not collide, and the result is
-        saved so the discovery and extraction jobs consume it.
+        The multi-recording stage registers an animal's recordings against each other, so the plan is resolved once
+        per animal. The acquisition system's resolver decides whether the stage applies, and an animal whose
+        resolver returns None is omitted.
 
     Args:
         dataset: The resolved dataset whose animals are planned.
@@ -236,20 +256,16 @@ def _resolve_multiday_plan(
             SessionData.load(session_path=project_root.joinpath(animal, entry.session)) for entry in animal_entries
         ]
 
-        # The system decides whether cross-recording tracking applies to this animal. A None result means it does not,
-        # so the animal contributes no multi-day jobs.
         configuration = resolve_multi_recording_configuration(animal_sessions[0])
         if configuration is None:
             continue
 
-        # Points the configuration at every one of the animal's session cindra output directories, each of which holds
-        # the combined_metadata.npz written by single-recording processing that the multi-day stage consumes.
+        # Each cindra output directory holds the combined_metadata.npz the multi-day stage consumes.
         configuration.recording_io.recording_directories = tuple(
             session.processed_data.cindra_data_path for session in animal_sessions
         )
-        # Qualifies the cindra dataset name with the animal identifier, matching how the assembler resolves each
-        # session's multi-recording output directory. The helper applies the same lowercasing cindra does, so the
-        # written output directory and the assembler's read path agree.
+        # The helper applies the same lowercasing cindra does, so the written output directory and the path the
+        # assembler reads back agree.
         configuration.recording_io.dataset_name = multi_recording_dataset_directory(
             animal_id=animal, dataset_name=dataset.name
         )
@@ -289,13 +305,72 @@ def _build_forging_universe(
     return universe
 
 
+def _resolve_runnable_jobs(tracker: ProcessingTracker, universe: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Resolves the subset of the job universe the tracker does not already record as succeeded.
+
+    Notes:
+        Reading the tracker leaves a file that does not yet exist uncreated, so a dataset forged for the first time
+        reports its whole universe as outstanding.
+
+    Args:
+        tracker: The forging processing tracker to read the recorded job states from.
+        universe: Every ``(job_name, specifier)`` pair the dataset could produce.
+
+    Returns:
+        The outstanding pairs, in the order the universe lists them.
+    """
+    snapshot = tracker.snapshot()
+    return [
+        (job_name, specifier)
+        for job_name, specifier in universe
+        if (state := snapshot.get(ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier))) is None
+        or state.status != ProcessingStatus.SUCCEEDED
+    ]
+
+
+def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals: tuple[str, ...]) -> None:
+    """Resets every tracked forging job belonging to the specified animals back to the scheduled state.
+
+    Notes:
+        A rebuilt animal has a new session set, so its discovery stage is outstanding again, along with the multi-day
+        extraction and assembly stages of every session it now holds, including the sessions it kept across the
+        rebuild. Only the identifiers the tracker already holds are reset, since a tracker rejects a request naming a
+        job it does not track.
+
+    Args:
+        tracker: The forging processing tracker whose job states to reset.
+        dataset: The dataset as it stands after the rebuild, used to resolve each animal's current session set.
+        animals: The identifiers of the animals whose jobs to reset.
+    """
+    snapshot = tracker.snapshot()
+    if not snapshot:
+        return
+
+    targets: list[str] = []
+    for animal in animals:
+        targets.append(ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal))
+        targets.extend(
+            ProcessingTracker.generate_job_id(job_name=job_name, specifier=entry.session)
+            for entry in dataset.get_sessions_for_animal(animal)
+            for job_name in (MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME)
+        )
+
+    tracked_targets = [target for target in targets if target in snapshot]
+    if tracked_targets:
+        tracker.reset_jobs(job_ids=tracked_targets)
+        console.echo(
+            message=f"Reset {len(tracked_targets)} tracked job(s) for the rebuilt animal(s) {natsorted(animals)}.",
+            level=LogLevel.INFO,
+        )
+
+
 def _run_discovery_job(configuration_path: Path, animal: str, tracker: ProcessingTracker, job_id: str) -> None:
     """Runs the cindra cross-recording cell-discovery stage for one animal as a tracked forging job.
 
     Notes:
-        cindra records this job's start, completion, and failure directly on the forging tracker under job_id, and
-        writes the shared multi-recording bootstrap the animal's extraction jobs then read. This is the animal's first
-        multi-day job and runs single-threaded, so it is the one that persists the bootstrap.
+        cindra records this job's state directly on the forging tracker under job_id. The job runs single-threaded
+        ahead of its animal's extraction jobs, so it is the one that persists the shared multi-recording bootstrap
+        those jobs read.
 
     Args:
         configuration_path: The path to the animal's materialized cindra multi-recording configuration.
@@ -319,9 +394,8 @@ def _run_extraction_job(configuration_path: Path, session: str, tracker: Process
 
     Notes:
         cindra identifies each recording by the unique component of its recording directory path, which for the
-        forging layout is the session name, so the session name is passed directly as the target recording. cindra
-        records this job's start, completion, and failure directly on the forging tracker under job_id, and reads the
-        shared bootstrap the animal's discovery job already wrote.
+        forging layout is the session name. cindra records this job's state directly on the forging tracker under
+        job_id, and reads the shared bootstrap the animal's discovery job wrote.
 
     Args:
         configuration_path: The path to the owning animal's materialized cindra multi-recording configuration.
@@ -416,8 +490,7 @@ def _execute_jobs_sequential(
     """Runs all assembly jobs sequentially in the parent process with an optional progress bar.
 
     Notes:
-        Selected automatically when the resolved worker count is 1 or only a single job is discovered. Each job is
-        fully owned by the parent process, so the first exception aborts the remaining jobs.
+        Each job is fully owned by the parent process, so the first exception aborts the remaining jobs.
 
     Args:
         sessions: The ordered list of session names to assemble.
@@ -533,10 +606,6 @@ def _execute_job(
 ) -> None:
     """Executes a single session assembly job in-process with full tracker state management.
 
-    Notes:
-        Used by the remote (single-job) execution path and by the sequential local path. The parallel path calls
-        ``_forge_session`` directly from worker processes and manages tracker state separately in the parent.
-
     Args:
         session_name: The name of the session whose data to assemble.
         session_lookup: The mapping from session name to its DatasetSession metadata.
@@ -569,14 +638,11 @@ def _forge_session(
 
     Notes:
         The atomic unit dispatched to worker processes by the parallel path, so it must stay importable at module
-        level and accept only picklable arguments. These shared assets are system-agnostic, so the pipeline
-        hard-defines their handling rather than delegating it to the system worker. The session descriptor is written
-        by every acquisition runtime, but the VR and experiment configurations are present only for the session types
-        that carry them (sessions that use VR and experiment sessions, respectively). The session's own required-asset
-        policy decides which of them are mandatory, so a session missing a required asset (e.g., a session that uses VR
-        without its VR configuration) fails fast before any expensive work, while session types that carry neither
-        configuration still forge into a self-contained session. Whichever assets the session actually holds are
-        re-exported alongside the assembled feather.
+        level and accept only picklable arguments. The session descriptor is written by every acquisition runtime,
+        while the VR and experiment configurations are present only for the session types that carry them. The
+        session's own required-asset policy decides which of them are mandatory, and a session missing a required
+        asset fails before any expensive work. Whichever assets the session holds are re-exported alongside the
+        assembled feather.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
@@ -587,8 +653,6 @@ def _forge_session(
     Raises:
         FileNotFoundError: If a shared asset the session is required to carry is missing from the source session.
     """
-    # Resolves the shared assets the forged session re-exports. The session descriptor is universal. The VR and
-    # experiment configurations are present only for some session types, so each is re-exported only when present.
     session = SessionData.load(session_path=source_session_path)
     reexported_assets = {
         RawDataFiles.SESSION_DESCRIPTOR: session.raw_data.session_descriptor_path,
@@ -596,8 +660,7 @@ def _forge_session(
         RawDataFiles.EXPERIMENT_CONFIGURATION: session.raw_data.experiment_configuration_path,
     }
 
-    # Validates the assets this session is required to carry before any expensive work. The session's required-asset
-    # policy is the single source of truth for which re-exported assets are mandatory for its session type.
+    # The session's required-asset policy is the single source of truth for which re-exported assets are mandatory.
     required_filenames = {filename for filename, _ in session.required_raw_assets()}
     for filename, source_path in reexported_assets.items():
         if filename in required_filenames and not source_path.is_file():
@@ -607,11 +670,8 @@ def _forge_session(
             )
             console.error(message=message, error=FileNotFoundError)
 
-    # Stage 3: assembles the session data (data.feather + the system data-format descriptor).
     worker(source_session_path, output_path, dataset_name)
 
-    # Stage 4: re-exports each shared asset the session actually carries alongside the assembled feather, so session
-    # types that do not run an experiment or use VR still forge into a self-contained session directory.
     output_directory = output_path.parent
     output_directory.mkdir(parents=True, exist_ok=True)
     for filename, source_path in reexported_assets.items():

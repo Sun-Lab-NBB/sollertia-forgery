@@ -32,7 +32,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--session",
     type=str,
     multiple=True,
-    help="The session name to include in the dataset. Can be specified multiple times.",
+    help="The session name the dataset must contain. A session the dataset does not hold is appended to it. Can be "
+    "specified multiple times.",
 )
 @click.option(
     "-id",
@@ -50,20 +51,31 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     help="The number of worker processes to use for parallel assembly. Set to -1 for automatic resolution.",
 )
 @click.option(
-    "-pr",
-    "--progress",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help="Determines whether to display a progress bar during assembly.",
-)
-@click.option(
     "-f",
     "--force-recreate",
     is_flag=True,
     show_default=True,
     default=False,
-    help="Determines whether to delete any existing dataset hierarchy before creating it fresh.",
+    help="Determines whether to delete the whole existing dataset hierarchy and rebuild it from the provided sessions.",
+)
+@click.option(
+    "-ra",
+    "--recreate-animal",
+    type=str,
+    multiple=True,
+    help="The identifier of an animal already in the dataset to rebuild from the sessions provided for it, leaving "
+    "every other animal untouched. Can be specified multiple times.",
+)
+@click.option(
+    "-np",
+    "--no-progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to suppress the progress bars during the multi-day and assembly stages. These are "
+        "displayed by default."
+    ),
 )
 def forge_command(
     dataset_name: str,
@@ -71,11 +83,17 @@ def forge_command(
     session: tuple[str, ...],
     job_id: str | None,
     workers: int,
+    recreate_animal: tuple[str, ...],
     *,
-    progress: bool,
     force_recreate: bool,
+    no_progress: bool,
 ) -> None:
     """Forges a dataset by assembling per-session data from a project's processed sessions.
+
+    Provided sessions the dataset does not hold are appended to it, so a dataset grows by naming the sessions to add.
+    An animal already in the dataset is frozen, because widening its session set invalidates the outputs already
+    forged for it and requires rebuilding the animal as a whole. Name that animal with --recreate-animal to rebuild
+    it from the provided sessions while every other animal keeps its data.
 
     The forging pipeline is system-agnostic: it resolves the dataset's system-specific assembly worker internally
     from the central registry and infers the acquisition system from the resolved dataset, so the command carries no
@@ -87,6 +105,7 @@ def forge_command(
         project_root=project_path,
         job_id=job_id,
         workers=workers,
-        display_progress=progress,
+        display_progress=not no_progress,
         force_recreate=force_recreate,
+        recreate_animals=recreate_animal,
     )
