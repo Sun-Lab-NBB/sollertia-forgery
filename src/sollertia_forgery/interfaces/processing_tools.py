@@ -4,6 +4,7 @@ they will cost, running them as one local batch, and checking, canceling, or res
 
 from __future__ import annotations
 
+from time import time_ns
 from uuid import uuid4
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
@@ -11,7 +12,7 @@ from threading import Thread
 from collections import deque
 
 from ataraxis_base_utilities import resolve_worker_count
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
+from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker, delete_directory
 
 from .mcp_instance import mcp
 from ..orchestration import (
@@ -293,26 +294,44 @@ def execute_jobs_tool(
 
 
 @mcp.tool()
-def get_processing_status_tool(status_filter: str | None = None, *, include_jobs: bool = False) -> dict[str, Any]:
+def get_processing_status_tool(
+    status_filter: str | None = None,
+    session_paths: list[str] | None = None,
+    job_ids: list[str] | None = None,
+    job_names: list[str] | None = None,
+    pipelines: list[str] | None = None,
+    *,
+    include_jobs: bool = False,
+) -> dict[str, Any]:
     """Reports the live status of the active batch by re-reading the processing trackers of every job it holds.
 
     Reports counts by default, because a batch spanning many sessions holds more jobs than a single response can
     carry. The ``breakdown`` resolves those counts per pipeline and job type, which is what tracking a run needs,
     and every failed job is always named in full so a failure is never hidden behind a count.
 
+    Naming any filter narrows the reported jobs and returns them without asking for the listing separately, which is
+    how a caller reads one job in full. Filters combine, so a session and a job name together name a single job. The
+    counts and the breakdown always span the whole batch, so narrowing what is listed never distorts what is
+    reported.
+
     Args:
-        include_jobs: Determines whether the response carries an entry for every job the batch holds. A large batch
-            omits them, since the counts and the failures answer what a run is doing.
         status_filter: Restricts the reported jobs to one status, one of ``succeeded``, ``failed``, ``running``, or
-            ``scheduled``. Applies to the ``jobs`` list alone, leaving the counts over the whole batch.
+            ``scheduled``.
+        session_paths: Restricts the reported jobs to these session root directories.
+        job_ids: Restricts the reported jobs to these tracker job identifiers.
+        job_names: Restricts the reported jobs to these job type names, such as ``motion_energy``.
+        pipelines: Restricts the reported jobs to these pipelines.
+        include_jobs: Determines whether the response carries an entry for every job the batch holds when no filter
+            narrows them. A large batch omits them, since the counts and the failures answer what a run is doing.
 
     Returns:
         A response dict with ``active`` (whether the manager thread is still running), ``canceled``, a ``summary``
         counting succeeded, failed, running, and scheduled jobs, a ``breakdown`` of those counts per pipeline and
-        job type, and ``failed_jobs`` naming every failure with its error message. Carries a per-job ``jobs`` list
-        when requested. A batch that could not dispatch some jobs also carries ``blocked_jobs`` and a
-        ``blocked_reason`` naming the upstream failure. If no batch has run, ``active`` is False with an
-        explanatory ``message``.
+        job type, and ``failed_jobs`` naming every failure. Carries a ``jobs`` list, each entry holding the job's
+        identity, its allocated cores and memory, its options and prerequisites, and the tracker's whole record of
+        it, whenever a filter is named or the listing is requested. A batch that could not dispatch some jobs also
+        carries ``blocked_jobs`` and a ``blocked_reason`` naming the upstream failure. If no batch has run,
+        ``active`` is False with an explanatory ``message``.
     """
     state = _EXECUTION_STATE
     if state is None:
@@ -343,8 +362,23 @@ def get_processing_status_tool(status_filter: str | None = None, *, include_jobs
         breakdown=breakdown,
         failed_jobs=[entry for entry in per_job if entry["status"] == "failed"],
     )
-    if include_jobs:
-        response["jobs"] = [entry for entry in per_job if status_filter is None or entry["status"] == status_filter]
+
+    selectors: dict[str, list[str] | None] = {
+        "status": [status_filter] if status_filter is not None else None,
+        "session_path": session_paths,
+        "job_id": job_ids,
+        "job_name": job_names,
+        "pipeline": pipelines,
+    }
+    narrowed = any(values is not None for values in selectors.values())
+    if narrowed or include_jobs:
+        matches = [
+            entry
+            for entry in per_job
+            if all(values is None or entry[field] in values for field, values in selectors.items())
+        ]
+        response["jobs"] = matches
+        response["matched_jobs"] = len(matches)
     if state.blocked_jobs:
         response["blocked_jobs"] = [
             {
@@ -426,6 +460,105 @@ def reset_processing_jobs_tool(pipeline: str, tracker_path: str, job_ids: list[s
 
     tracker.reset_jobs(job_ids=target_ids)
     return _ok_response(pipeline=dispatch.pipeline.value, tracker_path=tracker_path, jobs_reset=target_ids)
+
+
+@mcp.tool()
+def describe_jobs_tool(
+    pipeline: str,
+    session_paths: list[str],
+    job_ids: list[str] | None = None,
+    job_names: list[str] | None = None,
+    status_filter: str | None = None,
+) -> dict[str, Any]:
+    """Reports everything the processing trackers record about a pipeline's jobs for the named sessions.
+
+    Reads the trackers on disk rather than a running batch, so it answers for work this server never dispatched and
+    for runs that finished long ago. That makes it the tool for inspecting one job in full, while
+    ``get_processing_status_tool`` follows a batch that is currently running.
+
+    Every job the tracker holds is reported, whether the pipeline would resolve it as runnable today, so a
+    stage that stopped being applicable stays visible. Sessions are read independently, and one that cannot be read
+    is reported in its own entry without aborting the others.
+
+    Args:
+        pipeline: The pipeline whose tracker to read, one of ``checksum``, ``runtime``, ``microcontroller``,
+            ``video``, ``two_photon``.
+        session_paths: The session root directories to describe.
+        job_ids: Restricts the reported jobs to these tracker job identifiers.
+        job_names: Restricts the reported jobs to these job type names.
+        status_filter: Restricts the reported jobs to one status, one of ``succeeded``, ``failed``, ``running``, or
+            ``scheduled``.
+
+    Returns:
+        A response dict with ``pipeline``, ``total_units``, ``total_jobs`` matched across sessions, an aggregate
+        ``summary`` of their statuses, and a ``units`` list. Each unit carries its ``session_path``,
+        ``session_name``, ``tracker_path``, whether the tracker ``tracker_exists``, and a ``jobs`` list holding each
+        job's identity, the executor that ran it, its start and completion timestamps, its elapsed seconds, and any
+        recorded error, or an ``error`` when the session could not be read.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    if dispatch is None:
+        return _error_response(message=_unsupported_message(pipeline=pipeline))
+
+    if status_filter is not None and status_filter not in _STATUS_COUNT_KEYS.values():
+        return _error_response(
+            message=f"Unknown status '{status_filter}'. Available: {', '.join(sorted(_STATUS_COUNT_KEYS.values()))}."
+        )
+
+    units: list[dict[str, Any]] = []
+    counts = {"succeeded": 0, "failed": 0, "running": 0, "scheduled": 0}
+    total_jobs = 0
+    for session_path in session_paths:
+        try:
+            session, _, _ = dispatch.discover(Path(session_path))
+        except Exception as exception:
+            units.append({"session_path": session_path, "error": str(exception)})
+            continue
+
+        tracker_path = dispatch.tracker_path(session)
+        snapshot = ProcessingTracker(file_path=tracker_path).snapshot() if tracker_path.is_file() else {}
+
+        jobs: list[dict[str, Any]] = []
+        for job_id, job_state in snapshot.items():
+            status = job_state.status.name.lower()
+            if job_ids is not None and job_id not in job_ids:
+                continue
+            if job_names is not None and job_state.job_name not in job_names:
+                continue
+            if status_filter is not None and status != status_filter:
+                continue
+            counts[_STATUS_COUNT_KEYS.get(job_state.status, "scheduled")] += 1
+            jobs.append(
+                {
+                    "job_id": job_id,
+                    "pipeline": dispatch.pipeline.value,
+                    "job_name": job_state.job_name,
+                    "specifier": job_state.specifier,
+                    "session_path": session_path,
+                    "tracker_path": str(tracker_path),
+                    "status": status,
+                    **_job_state_record(job_state=job_state),
+                }
+            )
+
+        total_jobs += len(jobs)
+        units.append(
+            {
+                "session_path": session_path,
+                "session_name": session.session_name,
+                "tracker_path": str(tracker_path),
+                "tracker_exists": tracker_path.is_file(),
+                "jobs": jobs,
+            }
+        )
+
+    return _ok_response(
+        pipeline=dispatch.pipeline.value,
+        units=units,
+        total_units=len(units),
+        total_jobs=total_jobs,
+        summary={"total": total_jobs, **counts},
+    )
 
 
 @mcp.tool()
@@ -569,8 +702,55 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
                 "session_path": str(job.unit_path),
                 "tracker_path": str(tracker_path),
                 "status": status.name.lower(),
+                "cores": job.core_weight,
+                "memory_mb": job.memory_mb,
+                "options": dict(job.options),
+                "prerequisite_ids": list(job.prerequisite_ids),
             }
-            if job_state is not None and job_state.error_message is not None:
-                entry["error_message"] = job_state.error_message
+            entry.update(_job_state_record(job_state=job_state))
             per_job.append(entry)
     return per_job, {"total": len(per_job), **counts}
+
+
+def _job_state_record(job_state: JobState | None) -> dict[str, Any]:
+    """Renders a tracker's record of one job as a response payload.
+
+    Notes:
+        Reports the whole record rather than the status alone, because a caller asking about one job wants which
+        executor ran it, when it started, and how long it took. A job the tracker does not know yet reports empty
+        timing rather than an absent key, so every entry carries the same shape.
+
+    Args:
+        job_state: The tracker's record of the job, or None when the tracker holds no entry for it.
+
+    Returns:
+        A dictionary carrying the executor identifier, the start and completion timestamps, the elapsed seconds, and
+        any recorded error message.
+    """
+    if job_state is None:
+        return {"executor_id": None, "started_at": None, "completed_at": None, "elapsed_seconds": None}
+
+    record: dict[str, Any] = {
+        "executor_id": job_state.executor_id,
+        "started_at": job_state.started_at,
+        "completed_at": job_state.completed_at,
+        "elapsed_seconds": _elapsed_seconds(job_state=job_state),
+    }
+    if job_state.error_message is not None:
+        record["error_message"] = job_state.error_message
+    return record
+
+
+def _elapsed_seconds(job_state: JobState) -> float | None:
+    """Resolves how long a job has run, measuring a finished job to its completion and a running one to now.
+
+    Args:
+        job_state: The tracker's record of the job.
+
+    Returns:
+        The elapsed seconds, or None when the job has not started.
+    """
+    if job_state.started_at is None:
+        return None
+    end = job_state.completed_at if job_state.completed_at is not None else time_ns() // 1000
+    return round((end - job_state.started_at) / 1_000_000, 3)
