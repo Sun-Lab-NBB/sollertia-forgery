@@ -12,14 +12,24 @@ from concurrent.futures import Future
 
 import pytest
 
+from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
+    BATCH_PIPELINES,
     JobExecutionState,
+    ProcessingPipelines,
+    resolve_dispatch,
+    build_pending_job,
     resolve_host_memory_mb,
     resolve_core_allocations,
 )
 from sollertia_forgery.orchestration.local import PendingJob, _admit_pending_jobs
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
-from sollertia_forgery.orchestration.footprints import _MEMORY_ESTIMATE_TOLERANCE, _apply_tolerance
+from sollertia_forgery.orchestration.footprints import (
+    _CHECKSUM_READER_MEMORY_MB,
+    _MEMORY_ESTIMATE_TOLERANCE,
+    _apply_tolerance,
+    _estimate_checksum_memory,
+)
 
 CORE_BUDGET = 64
 """The core budget the admission tests weigh their jobs against."""
@@ -253,3 +263,48 @@ def test_every_dispatched_job_type_declares_a_core_allocation() -> None:
     assert _JOB_CORE_ALLOCATIONS
     for job_name, cores in _JOB_CORE_ALLOCATIONS.items():
         assert cores >= 1, f"{job_name} declares a non-positive core count"
+
+
+def test_checksum_is_a_registered_batch_pipeline() -> None:
+    """Verifies that the checksum pipeline is dispatchable and declares the quartet the batch tools drive it with."""
+    assert ProcessingPipelines.CHECKSUM in BATCH_PIPELINES
+
+    dispatch = resolve_dispatch(pipeline="checksum")
+    assert dispatch is not None
+    assert dispatch.pipeline is ProcessingPipelines.CHECKSUM
+    assert CHECKSUM_JOB_NAME in _JOB_CORE_ALLOCATIONS
+
+    # The pipeline resolves one job per session with no upstream stage, so every job maps to an empty ordering.
+    universe = [(CHECKSUM_JOB_NAME, "a_session")]
+    assert dispatch.prerequisites(universe) == {(CHECKSUM_JOB_NAME, "a_session"): ()}
+
+
+def test_job_options_round_trip_from_descriptor_to_worker() -> None:
+    """Verifies that pipeline-specific parameters survive the descriptor hop into the dispatched job."""
+    descriptor = {
+        "tracker_path": str(TRACKER),
+        "job_id": "a_job",
+        "session_path": "/nonexistent/session",
+        "job_name": CHECKSUM_JOB_NAME,
+        "pipeline": ProcessingPipelines.CHECKSUM.value,
+        "cores": 8,
+        "memory_mb": 1024,
+        "options": {"regenerate_checksum": True},
+    }
+    assert build_pending_job(job=descriptor).options == {"regenerate_checksum": True}
+
+    # A descriptor that names no options yields an empty mapping rather than None, so a worker reads it unguarded.
+    del descriptor["options"]
+    assert build_pending_job(job=descriptor).options == {}
+
+
+def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
+    """Verifies that the checksum estimate tracks the cores a job holds rather than the bytes it reads.
+
+    Every other estimator scales a per-byte ratio off an input file. A checksum worker streams its file in fixed
+    chunks, so the session's size does not enter the estimate and only the reader count does.
+    """
+    single = _estimate_checksum_memory(cores=1)
+    doubled = _estimate_checksum_memory(cores=2)
+    assert doubled - single == pytest.approx(_CHECKSUM_READER_MEMORY_MB * _MEMORY_ESTIMATE_TOLERANCE, rel=0.01)
+    assert _estimate_checksum_memory(cores=8) > single

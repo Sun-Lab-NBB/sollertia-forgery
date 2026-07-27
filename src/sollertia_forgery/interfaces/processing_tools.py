@@ -50,7 +50,9 @@ _STATUS_COUNT_KEYS: dict[ProcessingStatus, str] = {
 
 
 @mcp.tool()
-def prepare_batch_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any]:
+def prepare_batch_tool(
+    pipeline: str, session_paths: list[str], options: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Discovers and tracker-aligns the batch jobs for a session pipeline over one or more sessions.
 
     For each session, resolves the pipeline's runnable jobs, aligns the session's processing tracker so the job
@@ -58,8 +60,13 @@ def prepare_batch_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any
     own entry with an ``error`` key and does not abort the others.
 
     Args:
-        pipeline: The batch pipeline to prepare, one of ``runtime``, ``microcontroller``, ``video``, ``two_photon``.
+        pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
+            ``two_photon``.
         session_paths: The session root directories to prepare jobs for.
+        options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this
+            call returns. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting re-baselining
+            of the stored value over verification against it, which defaults to verification. The other pipelines
+            take no parameters.
 
     Returns:
         A response dict with ``pipeline``, ``total_units``, and a ``units`` list, one entry per session carrying its
@@ -74,7 +81,7 @@ def prepare_batch_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any
     total_jobs = 0
     for session_path in session_paths:
         try:
-            prepared = prepare_pipeline_jobs(dispatch=dispatch, session_path=Path(session_path))
+            prepared = prepare_pipeline_jobs(dispatch=dispatch, session_path=Path(session_path), options=options)
         except Exception as exception:
             units.append({"session_path": session_path, "error": str(exception), "jobs": []})
             continue
@@ -86,7 +93,9 @@ def prepare_batch_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any
 
 
 @mcp.tool()
-def inspect_job_resources_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any]:
+def inspect_job_resources_tool(
+    pipeline: str, session_paths: list[str], options: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Reports the cores and memory every runnable job of a pipeline will need, without executing any of them.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a
@@ -95,8 +104,11 @@ def inspect_job_resources_tool(pipeline: str, session_paths: list[str]) -> dict[
     created and aligned to its job universe.
 
     Args:
-        pipeline: The pipeline to inspect, one of ``runtime``, ``microcontroller``, ``video``, ``two_photon``.
+        pipeline: The pipeline to inspect, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
+            ``two_photon``.
         session_paths: The session root directories to inspect.
+        options: The pipeline-specific parameters the inspected jobs would run with, forwarded to preparation. See
+            ``prepare_batch_tool`` for the keys each pipeline reads.
 
     Returns:
         A response dict with the host's ``total_memory_mb``, the batch-available ``total_cores`` left after the
@@ -105,7 +117,7 @@ def inspect_job_resources_tool(pipeline: str, session_paths: list[str]) -> dict[
         ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``, the maxima being taken
         independently over the same job list.
     """
-    prepared = prepare_batch_tool(pipeline=pipeline, session_paths=session_paths)
+    prepared = prepare_batch_tool(pipeline=pipeline, session_paths=session_paths, options=options)
     if not prepared["success"]:
         return prepared
 
@@ -141,8 +153,8 @@ def execute_jobs_tool(
 
     Args:
         jobs: The job descriptors from ``prepare_batch_tool``, each carrying ``tracker_path``, ``job_id``,
-            ``session_path``, ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``, and
-            ``prerequisite_ids``.
+            ``session_path``, ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``,
+            ``prerequisite_ids``, and ``options``.
         core_budget_override: The cores the batch may use in total. A non-positive value auto-resolves to all cores
             minus the reserved system cores.
         memory_budget_mb: The memory the batch may use in total. A non-positive value auto-resolves to a share of
@@ -296,8 +308,8 @@ def reset_processing_jobs_tool(pipeline: str, tracker_path: str, job_ids: list[s
     the tracker are ignored. When ``job_ids`` is omitted, every job in the tracker is reset.
 
     Args:
-        pipeline: The batch pipeline the tracker belongs to, one of ``runtime``, ``microcontroller``, ``video``,
-            ``two_photon``.
+        pipeline: The batch pipeline the tracker belongs to, one of ``checksum``, ``runtime``, ``microcontroller``,
+            ``video``, ``two_photon``.
         tracker_path: The absolute path to the pipeline's processing tracker file.
         job_ids: The job identifiers to reset. Omit to reset every job in the tracker.
 

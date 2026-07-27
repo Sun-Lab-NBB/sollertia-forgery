@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import click
 from ataraxis_base_utilities import console
 
-from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
+from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -176,6 +176,17 @@ def print_project_manifest_data(
     ),
 )
 @click.option(
+    "-w",
+    "--workers",
+    type=int,
+    show_default=True,
+    default=-1,
+    help=(
+        "The number of parallel worker processes to use for hashing the session's files. Values below 1 request all "
+        "available cores minus the reserved system cores, and a value of 1 disables parallelism."
+    ),
+)
+@click.option(
     "-np",
     "--no-progress",
     is_flag=True,
@@ -186,12 +197,15 @@ def print_project_manifest_data(
         "are displayed by default."
     ),
 )
-def checksum_command(session_path: Path, *, regenerate_checksum: bool, no_progress: bool) -> None:
+def checksum_command(session_path: Path, workers: int, *, regenerate_checksum: bool, no_progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
     integrity checksum to include expected changes.
     """
-    resolve_checksum(
-        session_path=session_path, regenerate_checksum=regenerate_checksum, display_progress=not no_progress
+    run_checksum_processing_pipeline(
+        session_path=session_path,
+        regenerate_checksum=regenerate_checksum,
+        workers=workers,
+        display_progress=not no_progress,
     )

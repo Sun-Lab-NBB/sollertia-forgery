@@ -5,7 +5,7 @@ dispatches them in their pipelines' dependency order.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Lock, Thread
 import contextlib
@@ -133,6 +133,10 @@ class GenericPendingJob(PendingJob):
     identifier, a controller-module triple, or a plane index."""
     project_root: Path | None = None
     """The project root directory, carried for workers that resolve their output location above the unit path."""
+    options: dict[str, Any] = field(default_factory=dict)
+    """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
+    The execution engine never reads this mapping, so a pipeline's worker interprets whichever keys it declares and
+    ignores the rest. A pipeline that takes no parameters leaves it empty."""
 
 
 @dataclass(slots=True)

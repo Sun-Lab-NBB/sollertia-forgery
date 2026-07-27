@@ -15,6 +15,7 @@ from cindra.io import TIFF_EXTENSIONS, PARAMETERS_FILENAME
 
 from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
+from ..managing import CHECKSUM_JOB_NAME
 from .pipelines import ProcessingPipelines
 from ..registries import resolve_two_photon_data_locator, resolve_single_recording_configuration_resolver
 from ..shared_assets import LOG_ARCHIVE_SUFFIX
@@ -75,6 +76,12 @@ deviation holds the frames, their difference, and the squared difference at once
 _BINARIZATION_BATCH_COPIES: int = 2
 """The number of copies of a raw frame batch binarization holds. Indexing each plane out of the batch allocates a
 second full batch alongside the one that was read."""
+
+_CHECKSUM_READER_MEMORY_MB: int = 56
+"""The resident memory one checksum worker holds, covering its fixed read chunk and the small module its target
+function lives in. It replaces the general per-child allowance for this stage, because a checksum worker re-imports
+only the hashing module rather than this package's import graph. Measured at 49 MB per worker across a sweep from
+one to sixty-four workers, then rounded up."""
 
 _COMBINATION_MEMORY_MB: int = 16384
 """The memory the combination job is charged. The stage concatenates every plane's traces into dense arrays, so its
@@ -158,6 +165,8 @@ def estimate_session_job_memory(
                 if geometry is not None and configuration is not None
                 else _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
             )
+        elif job_name == CHECKSUM_JOB_NAME:
+            modeled = _estimate_checksum_memory(cores=cores)
         elif job_name in {RUNTIME_JOB_NAME, EXTRACTION_JOB_NAME, TIMESTAMP_JOB_NAME}:
             archive = behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
             modeled = _estimate_archive_reader_memory(archive_path=archive, cores=cores)
@@ -291,6 +300,24 @@ def _estimate_archive_reader_memory(archive_path: Path, cores: int) -> int:
         return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
     per_reader = _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
     return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * (per_reader + _SUBPROCESS_MEMORY_MB))
+
+
+def _estimate_checksum_memory(cores: int) -> int:
+    """Estimates the memory one raw-data checksum job holds.
+
+    Notes:
+        The only estimator here that does not scale with the size of its input. Each worker streams its file in
+        fixed chunks and holds one at a time, so a session of a few megabytes and one of eighty gigabytes cost the
+        same. The parent retains one pending result per file, which the largest session in this corpus keeps under a
+        megabyte, so it stays below the rounding this estimate already carries.
+
+    Args:
+        cores: The cores the job is allocated, which is how many files it hashes at once.
+
+    Returns:
+        The reportable memory in megabytes.
+    """
+    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * _CHECKSUM_READER_MEMORY_MB)
 
 
 def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:

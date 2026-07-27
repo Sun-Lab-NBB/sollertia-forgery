@@ -29,6 +29,12 @@ from ..runtime import (
     runtime_job_prerequisites,
     run_runtime_processing_pipeline,
 )
+from ..managing import (
+    CHECKSUM_JOB_NAME,
+    discover_checksum_jobs,
+    checksum_job_prerequisites,
+    run_checksum_processing_pipeline,
+)
 from .pipelines import ProcessingPipelines
 from .footprints import estimate_session_job_memory
 from ..two_photon import (
@@ -53,6 +59,7 @@ if TYPE_CHECKING:
 
 BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
     {
+        ProcessingPipelines.CHECKSUM,
         ProcessingPipelines.RUNTIME,
         ProcessingPipelines.MICROCONTROLLER,
         ProcessingPipelines.VIDEO,
@@ -63,6 +70,9 @@ BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
 
 
 _JOB_CORE_ALLOCATIONS: dict[str, int] = {
+    # Hashes one file per worker, streaming each in fixed chunks, so the stage is bound by how fast the storage
+    # delivers bytes rather than by how fast a core hashes them.
+    CHECKSUM_JOB_NAME: 8,
     # Decode falls back to a serial path on any archive below its own parallelism threshold, and a runtime archive
     # always is one, so the job is single-core by construction.
     RUNTIME_JOB_NAME: 1,
@@ -92,7 +102,8 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     str(SingleRecordingJobNames.COMBINE): 1,
 }
 """The cores one job of each type occupies, keyed by the tracker job name. Each value follows from how that stage
-parallelizes, and every value is safe to retune. A job type absent from this map falls back to a single core."""
+parallelizes, and every value is safe to retune. Preparing a session that resolves a job type absent from this map
+fails for that session, since dispatching it would run it at a width nobody chose."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,7 +170,9 @@ def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch | 
     return _pipeline_dispatch().get(member)
 
 
-def prepare_pipeline_jobs(dispatch: PipelineDispatch, session_path: Path) -> dict[str, Any]:
+def prepare_pipeline_jobs(
+    dispatch: PipelineDispatch, session_path: Path, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Discovers a session's runnable jobs, aligns the pipeline tracker, and returns the job descriptors.
 
     Notes:
@@ -168,14 +181,21 @@ def prepare_pipeline_jobs(dispatch: PipelineDispatch, session_path: Path) -> dic
         neither wipes sibling jobs nor discards the recorded state of any job the pipeline can still produce. The
         returned descriptors carry everything the execute tool needs to dispatch each job.
 
+        Any options the caller supplies are stamped onto every descriptor unchanged and reach the pipeline's worker
+        at dispatch. They do not reach discovery, so the jobs a session resolves stay a property of the data on disk
+        rather than of the parameters a run was launched with. That keeps one tracker slot per job however the job
+        is parameterized, which is what lets a multimode pipeline record one integrity state per session.
+
     Args:
         dispatch: The pipeline's dispatch entry.
         session_path: The path to the session root to discover jobs for.
+        options: The pipeline-specific parameters to run these jobs with, such as the mode a multi-mode pipeline
+            runs in. Pipelines that take no parameters ignore this mapping.
 
     Returns:
         A dictionary with the session name, the tracker path, and a list of job descriptors, each carrying
         ``job_id``, ``job_name``, ``specifier``, ``session_path``, ``tracker_path``, ``pipeline``, its allocated
-        ``cores``, its estimated ``memory_mb``, a ``memory_modeled`` flag, and ``prerequisite_ids``.
+        ``cores``, its estimated ``memory_mb``, a ``memory_modeled`` flag, ``prerequisite_ids``, and ``options``.
     """
     session, universe, runnable = dispatch.discover(session_path)
     tracker_path = dispatch.tracker_path(session)
@@ -233,6 +253,7 @@ def prepare_pipeline_jobs(dispatch: PipelineDispatch, session_path: Path) -> dic
                 ProcessingTracker.generate_job_id(job_name=upstream_name, specifier=upstream_specifier)
                 for upstream_name, upstream_specifier in ordering.get((job_name, specifier), ())
             ],
+            "options": dict(options or {}),
         }
         for job_name, specifier in runnable
     ]
@@ -244,7 +265,8 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
 
     Args:
         job: A job descriptor carrying ``tracker_path``, ``job_id``, ``session_path``, ``cores``, and
-            ``memory_mb``, and optionally ``job_name``, ``specifier``, ``pipeline``, and ``prerequisite_ids``.
+            ``memory_mb``, and optionally ``job_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``, and
+            ``options``.
 
     Returns:
         The pending job the batch engine dispatches to a worker.
@@ -262,6 +284,26 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         core_weight=int(job["cores"]),
         memory_mb=int(job["memory_mb"]),
         prerequisite_ids=tuple(job.get("prerequisite_ids", ())),
+        options=dict(job.get("options") or {}),
+    )
+
+
+def _run_checksum_job(job: GenericPendingJob) -> None:
+    """Runs the raw-data integrity pipeline for one session as a batch job.
+
+    Notes:
+        The checksum pipeline is single-job, so it takes no job identifier. Its mode rides on the job's options,
+        where ``regenerate_checksum`` selects re-baselining over verification. An absent key verifies, which is the
+        mode a batch wants by default, since re-baselining is a deliberate correction rather than a routine pass.
+
+    Args:
+        job: The pending job carrying the session root in ``unit_path``, its planned cores in ``core_weight``, and
+            its mode in ``options``.
+    """
+    run_checksum_processing_pipeline(
+        session_path=job.unit_path,
+        regenerate_checksum=bool(job.options.get("regenerate_checksum", False)),
+        workers=job.core_weight,
     )
 
 
@@ -324,6 +366,13 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
         The dispatch entry for each supported pipeline, keyed by pipeline.
     """
     return {
+        ProcessingPipelines.CHECKSUM: PipelineDispatch(
+            pipeline=ProcessingPipelines.CHECKSUM,
+            discover=discover_checksum_jobs,
+            worker=_run_checksum_job,
+            prerequisites=checksum_job_prerequisites,
+            tracker_path=lambda session: session.raw_data.checksum_tracker_path,
+        ),
         ProcessingPipelines.RUNTIME: PipelineDispatch(
             pipeline=ProcessingPipelines.RUNTIME,
             discover=discover_runtime_jobs,
