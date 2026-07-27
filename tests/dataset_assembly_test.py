@@ -17,8 +17,9 @@ from sollertia_shared_assets import SessionTypes
 
 from sollertia_forgery.shared_assets import multi_recording_dataset_directory
 import sollertia_forgery.mesoscope_vr.forging as dispatcher_module
-from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles
+from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import resolve_slowest_camera_clock
+from sollertia_forgery.mesoscope_vr.runtime_dataset import clip_to_runtime_end
 
 _FRAME_TIME_COLUMN: str = "frame_time_us"
 """The single column name each camera timestamp feather carries, matching the video-dataset assembler's contract."""
@@ -137,3 +138,46 @@ def test_dispatch_rejects_window_checking_session(monkeypatch: pytest.MonkeyPatc
             output_path=Path("/out/data.feather"),
             dataset_name="ds",
         )
+
+
+def _write_runtime_state(directory: Path, timestamps: np.ndarray) -> None:
+    """Writes a runtime-state feather carrying the given runtime-state entry timestamps."""
+    pl.DataFrame(
+        {"time_us": timestamps.astype(np.uint64), "runtime_state": np.ones(timestamps.size, dtype=np.uint8)}
+    ).write_ipc(file=directory.joinpath(BehaviorDataFiles.RUNTIME_STATE))
+
+
+def test_clip_to_runtime_end_drops_samples_past_the_last_runtime_entry(tmp_path: Path) -> None:
+    """Verifies that samples acquired after the final runtime-state entry are discarded."""
+    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 2_000]))
+    assembled = pl.DataFrame(
+        {"time_us": np.array([0, 1_000, 2_000, 3_000, 4_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0, 4.0, 5.0]}
+    )
+
+    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
+
+    assert clipped["time_us"].to_list() == [0, 1_000, 2_000]
+    assert clipped["value"].to_list() == [1.0, 2.0, 3.0]
+
+
+def test_clip_to_runtime_end_keeps_a_dataset_ending_with_the_runtime(tmp_path: Path) -> None:
+    """Verifies that a dataset whose final sample coincides with the runtime end is left whole."""
+    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 2_000]))
+    assembled = pl.DataFrame({"time_us": np.array([0, 1_000, 2_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0]})
+
+    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
+
+    assert clipped.height == assembled.height
+
+
+def test_clip_to_runtime_end_keeps_a_dataset_ending_before_the_runtime(tmp_path: Path) -> None:
+    """Verifies that a reference clock ending before the runtime does is left whole.
+
+    A camera clock can stop short of the final runtime-state entry, which leaves nothing to clip.
+    """
+    _write_runtime_state(directory=tmp_path, timestamps=np.array([0, 1_000, 5_000]))
+    assembled = pl.DataFrame({"time_us": np.array([0, 1_000, 2_000], dtype=np.uint64), "value": [1.0, 2.0, 3.0]})
+
+    clipped = clip_to_runtime_end(assembled_data=assembled, runtime_data_path=tmp_path)
+
+    assert clipped.height == assembled.height

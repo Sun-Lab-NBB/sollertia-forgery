@@ -1,4 +1,5 @@
 """Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline.
+
 The worker combines a mesoscope experiment session's fluorescence, behavior, runtime, and video sub-datasets on the
 fluorescence reference clock into the session's unified ``data.feather``.
 """
@@ -18,10 +19,9 @@ from sollertia_shared_assets import (
     MesoscopeExperimentConfiguration,
 )
 
-from .metadata import BehaviorDataFiles
 from .video_dataset import assemble_video_dataset
 from ..shared_assets import multi_recording_dataset_directory
-from .runtime_dataset import assemble_runtime_dataset, mask_non_run_experiment_data
+from .runtime_dataset import clip_to_runtime_end, assemble_runtime_dataset, mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 from .two_photon_dataset import assemble_cindra_dataset
 
@@ -151,30 +151,5 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         sub_datasets.append(results["video"])
     result = pl.concat(items=sub_datasets, how="horizontal")
     result = mask_non_run_experiment_data(experiment_data=result)
-    result = _clip_to_runtime_end(experiment_data=result, runtime_data_path=runtime_data_path)
+    result = clip_to_runtime_end(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)
-
-
-def _clip_to_runtime_end(experiment_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame:
-    """Discards the assembled samples acquired after the session's runtime ended.
-
-    Notes:
-        Session teardown stops the acquisition assets in sequence, so each asset contributes data for a different
-        span past the end of the runtime. The cameras stop about a second after the runtime, the mesoscope continues
-        for several more seconds, and the microcontrollers log for several more minutes. Every sub-dataset aligns to
-        the fluorescence clock, so the samples in that trailing span carry the last camera value held constant rather
-        than acquired data. Clipping the fully assembled dataset at the final runtime-state entry removes that span
-        from every column at once, which keeps the sub-dataset assemblers free of teardown-specific handling.
-
-    Args:
-        experiment_data: The fully assembled and masked experiment DataFrame, ordered by the fluorescence clock.
-        runtime_data_path: The path to the session's processed runtime-data directory.
-
-    Returns:
-        The experiment DataFrame containing only the samples acquired at or before the end of the runtime.
-    """
-    runtime_state_data = pl.read_ipc(
-        source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
-    )
-    runtime_end_time = runtime_state_data["time_us"][-1]
-    return experiment_data.filter(pl.col("time_us") <= runtime_end_time)

@@ -179,6 +179,34 @@ def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def clip_to_runtime_end(assembled_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame:
+    """Discards the assembled samples acquired after the session's runtime ended.
+
+    Notes:
+        Session teardown stops the acquisition assets in sequence, so each asset contributes data for a different
+        span past the end of the runtime. The cameras stop about a second after the runtime, the mesoscope continues
+        for several more seconds, and the microcontrollers log for several more minutes. Clipping the fully assembled
+        dataset at the final runtime-state entry removes that span from every column at once, which keeps the
+        sub-dataset assemblers free of teardown-specific handling.
+
+        On the fluorescence clock the trailing samples carry the last camera value held constant, so clipping also
+        removes fabricated data. On a camera clock every trailing sample is acquired, so clipping ends the session
+        at the runtime rather than at the camera teardown.
+
+    Args:
+        assembled_data: The fully assembled DataFrame, ordered by its session's reference clock.
+        runtime_data_path: The path to the session's processed runtime-data directory.
+
+    Returns:
+        The DataFrame containing only the samples acquired at or before the end of the runtime.
+    """
+    runtime_state_data = pl.read_ipc(
+        source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
+    )
+    runtime_end_time = runtime_state_data["time_us"][-1]
+    return assembled_data.filter(pl.col("time_us") <= runtime_end_time)
+
+
 @njit(cache=True)
 def _check_trigger_zones(
     traversed_distance: NDArray[np.float64],
