@@ -128,6 +128,10 @@ class PipelineDispatch:
     """Resolves each job's upstream jobs, producing the ordering the batch engine dispatches jobs in."""
     tracker_path: Callable[[SessionData], Path]
     """Resolves the pipeline's processing tracker path from a loaded session."""
+    output_path: Callable[[SessionData], Path | None]
+    """Resolves the directory this pipeline owns outright, which is what a cleanup may remove to return the session
+    to its unprocessed state. Resolves to None for a pipeline that writes into a directory it shares with the
+    acquired data, since removing that directory would take the inputs with it."""
 
 
 def run_batch_job(job: GenericPendingJob) -> None:
@@ -372,6 +376,9 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
             worker=_run_checksum_job,
             prerequisites=checksum_job_prerequisites,
             tracker_path=lambda session: session.raw_data.checksum_tracker_path,
+            # Writes its stored checksum into raw_data, which holds the acquired data itself, so it owns no
+            # directory a cleanup may remove.
+            output_path=lambda _session: None,
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch(
             pipeline=ProcessingPipelines.RUNTIME,
@@ -379,6 +386,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
             worker=_run_runtime_job,
             prerequisites=runtime_job_prerequisites,
             tracker_path=lambda session: session.processed_data.runtime_tracker_path,
+            output_path=lambda session: session.processed_data.runtime_data_path,
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch(
             pipeline=ProcessingPipelines.MICROCONTROLLER,
@@ -386,6 +394,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
             worker=_run_microcontroller_job,
             prerequisites=microcontroller_job_prerequisites,
             tracker_path=lambda session: session.processed_data.microcontroller_tracker_path,
+            output_path=lambda session: session.processed_data.microcontroller_data_path,
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch(
             pipeline=ProcessingPipelines.VIDEO,
@@ -393,6 +402,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
             worker=_run_video_job,
             prerequisites=video_job_prerequisites,
             tracker_path=lambda session: session.processed_data.video_tracker_path,
+            output_path=lambda session: session.processed_data.video_data_path,
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch(
             pipeline=ProcessingPipelines.TWO_PHOTON,
@@ -400,6 +410,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
             worker=_run_two_photon_job,
             prerequisites=two_photon_job_prerequisites,
             tracker_path=lambda session: session.processed_data.two_photon_tracker_path,
+            output_path=lambda session: session.processed_data.cindra_data_path,
         ),
     }
 

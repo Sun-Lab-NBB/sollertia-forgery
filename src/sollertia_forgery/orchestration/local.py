@@ -255,9 +255,15 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
     with ProcessPoolExecutor(
         max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
     ) as pool:
-        # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
-        # stages still sees the earlier stages a previous run already completed.
         with state.lock:
+            # Clears the recorded outcome of every job this batch holds, so the trackers report this run rather than
+            # whatever a previous one left behind. Queuing a job is the caller stating it wants that job to run
+            # again, which makes its prior outcome history rather than progress.
+            _reset_queued_jobs(state=state)
+
+            # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
+            # stages still sees the earlier stages a previous run already completed. The reset above leaves those
+            # earlier stages untouched, since a batch never queues them.
             _refresh_job_outcomes(state=state)
 
         while True:
@@ -341,6 +347,26 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
 
     numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)
+
+
+def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
+    """Returns every job this batch holds to the scheduled state on its tracker.
+
+    Notes:
+        Runs once, before the first admission. Without it a queued job whose tracker still records an earlier
+        success reports as succeeded from the moment the batch starts, which makes a run's progress
+        indistinguishable from its history and lets a status reader call a batch complete before it has dispatched
+        anything. Resetting is safe because a caller queues a job precisely to have it run again.
+
+        Jobs are grouped by tracker so each file is rewritten once, however many of its jobs the batch holds.
+
+    Args:
+        state: The active job execution state whose jobs are reset. Its trackers are rewritten in place.
+    """
+    for tracker_path, jobs in group_jobs_by_tracker(state=state).items():
+        if not tracker_path.is_file():
+            continue
+        ProcessingTracker(file_path=tracker_path).reset_jobs(job_ids=[job.job_id for job in jobs])
 
 
 def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:

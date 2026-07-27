@@ -4,13 +4,14 @@ they will cost, running them as one local batch, and checking, canceling, or res
 
 from __future__ import annotations
 
+from uuid import uuid4
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
 from collections import deque
 
 from ataraxis_base_utilities import resolve_worker_count
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
 
 from .mcp_instance import mcp
 from ..orchestration import (
@@ -34,6 +35,12 @@ _EXECUTION_STATE: JobExecutionState[GenericPendingJob] | None = None
 """The single batch execution state. One pool serves every pipeline, so a batch may hold any mix of jobs and the
 engine packs them against one pair of budgets."""
 
+_PREPARED_BATCHES: dict[str, list[dict[str, Any]]] = {}
+"""The job descriptors every preparation produced, keyed by the identifier it returned. Execution resolves its jobs
+from here when the caller names a batch, so dispatching a large batch costs one identifier rather than a copy of
+every descriptor. Preparing one pipeline at a time yields one identifier each, and execution accepts them together,
+which is how a single pool run comes to hold every pipeline."""
+
 _MEMORY_BUDGET_FRACTION: float = 0.85
 """The share of the host's memory a batch commits when the caller does not name one."""
 
@@ -51,45 +58,67 @@ _STATUS_COUNT_KEYS: dict[ProcessingStatus, str] = {
 
 @mcp.tool()
 def prepare_batch_tool(
-    pipeline: str, session_paths: list[str], options: dict[str, Any] | None = None
+    pipeline: str,
+    session_paths: list[str],
+    options: dict[str, Any] | None = None,
+    *,
+    include_job_descriptors: bool = True,
 ) -> dict[str, Any]:
     """Discovers and tracker-aligns the batch jobs for a session pipeline over one or more sessions.
 
     For each session, resolves the pipeline's runnable jobs, aligns the session's processing tracker so the job
-    slots exist, and returns the dispatchable job descriptors. A session that cannot be prepared is reported in its
-    own entry with an ``error`` key and does not abort the others.
+    slots exist, and registers the dispatchable job descriptors under a returned ``batch_id``. A session that cannot
+    be prepared is reported in its own entry with an ``error`` key and does not abort the others.
+
+    Pass the returned ``batch_id`` to ``execute_jobs_tool`` to dispatch the batch. Preparing several pipelines
+    yields one identifier each, and execution accepts them together, which is how one pool run holds every pipeline.
 
     Args:
         pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``.
         session_paths: The session root directories to prepare jobs for.
         options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this
-            call returns. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting re-baselining
-            of the stored value over verification against it, which defaults to verification. The other pipelines
-            take no parameters.
+            call registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting
+            re-baselining of the stored value over verification against it, which defaults to verification. The
+            other pipelines take no parameters.
+        include_job_descriptors: Determines whether each unit carries its full ``jobs`` list. Dispatch reads the
+            descriptors from the identifier rather than from this response, so a batch spanning many sessions can
+            omit them and report counts alone.
 
     Returns:
-        A response dict with ``pipeline``, ``total_units``, and a ``units`` list, one entry per session carrying its
-        ``session_path``, ``session_name``, ``tracker_path``, and ``jobs``, or an ``error``. ``total_jobs`` counts
-        the dispatchable jobs across sessions.
+        A response dict with ``batch_id``, ``pipeline``, ``total_units``, ``total_jobs``, and a ``units`` list, one
+        entry per session carrying its ``session_path``, ``session_name``, ``tracker_path``, and its ``job_count``,
+        or an ``error``. Each unit also carries its ``jobs`` list unless the descriptors were omitted.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
         return _error_response(message=_unsupported_message(pipeline=pipeline))
 
     units: list[dict[str, Any]] = []
-    total_jobs = 0
+    descriptors: list[dict[str, Any]] = []
     for session_path in session_paths:
         try:
             prepared = prepare_pipeline_jobs(dispatch=dispatch, session_path=Path(session_path), options=options)
         except Exception as exception:
-            units.append({"session_path": session_path, "error": str(exception), "jobs": []})
+            units.append({"session_path": session_path, "error": str(exception), "job_count": 0, "jobs": []})
             continue
         prepared["session_path"] = session_path
+        descriptors.extend(prepared["jobs"])
+        prepared["job_count"] = len(prepared["jobs"])
+        if not include_job_descriptors:
+            del prepared["jobs"]
         units.append(prepared)
-        total_jobs += len(prepared["jobs"])
 
-    return _ok_response(pipeline=dispatch.pipeline.value, units=units, total_units=len(units), total_jobs=total_jobs)
+    batch_id = uuid4().hex[:16]
+    _PREPARED_BATCHES[batch_id] = descriptors
+
+    return _ok_response(
+        batch_id=batch_id,
+        pipeline=dispatch.pipeline.value,
+        units=units,
+        total_units=len(units),
+        total_jobs=len(descriptors),
+    )
 
 
 @mcp.tool()
@@ -139,7 +168,8 @@ def inspect_job_resources_tool(
 
 @mcp.tool()
 def execute_jobs_tool(
-    jobs: list[dict[str, Any]],
+    jobs: list[dict[str, Any]] | None = None,
+    batch_ids: list[str] | None = None,
     *,
     core_budget_override: int = -1,
     memory_budget_mb: int = -1,
@@ -151,10 +181,14 @@ def execute_jobs_tool(
     budgets, refilling the capacity a finished job frees as soon as it is released. Jobs run in their pipeline's
     own dependency order, so a batch may safely hold every stage of a pipeline at once.
 
+    Name the batches to dispatch by their identifiers, which is what keeps the cost of starting a large run flat.
+    Passing descriptors directly stays available for a caller that assembled or filtered its own job list.
+
     Args:
-        jobs: The job descriptors from ``prepare_batch_tool``, each carrying ``tracker_path``, ``job_id``,
-            ``session_path``, ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``,
-            ``prerequisite_ids``, and ``options``.
+        jobs: The job descriptors to dispatch, each carrying ``tracker_path``, ``job_id``, ``session_path``,
+            ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``, ``prerequisite_ids``, and
+            ``options``. Supply this or ``batch_ids``, or both to dispatch their union.
+        batch_ids: The identifiers ``prepare_batch_tool`` returned, whose registered descriptors are dispatched.
         core_budget_override: The cores the batch may use in total. A non-positive value auto-resolves to all cores
             minus the reserved system cores.
         memory_budget_mb: The memory the batch may use in total. A non-positive value auto-resolves to a share of
@@ -175,9 +209,22 @@ def execute_jobs_tool(
             message="A batch is already running. Wait for it to finish or cancel it before starting another."
         )
 
+    unknown = sorted(batch for batch in (batch_ids or []) if batch not in _PREPARED_BATCHES)
+    if unknown:
+        return _error_response(
+            message=(
+                f"No prepared batch exists for identifier(s) {unknown}. Prepare the pipeline again to register its "
+                f"jobs, since identifiers live only for the lifetime of the server that issued them."
+            )
+        )
+
+    descriptors: list[dict[str, Any]] = list(jobs or [])
+    for batch in batch_ids or []:
+        descriptors.extend(_PREPARED_BATCHES[batch])
+
     pending: list[GenericPendingJob] = []
     invalid_jobs: list[dict[str, Any]] = []
-    for job in jobs:
+    for job in descriptors:
         try:
             pending.append(build_pending_job(job=job))
         except (KeyError, TypeError) as exception:
@@ -246,25 +293,67 @@ def execute_jobs_tool(
 
 
 @mcp.tool()
-def get_processing_status_tool() -> dict[str, Any]:
+def get_processing_status_tool(status_filter: str | None = None, *, include_jobs: bool = False) -> dict[str, Any]:
     """Reports the live status of the active batch by re-reading the processing trackers of every job it holds.
 
+    Reports counts by default, because a batch spanning many sessions holds more jobs than a single response can
+    carry. The ``breakdown`` resolves those counts per pipeline and job type, which is what tracking a run needs,
+    and every failed job is always named in full so a failure is never hidden behind a count.
+
+    Args:
+        include_jobs: Determines whether the response carries an entry for every job the batch holds. A large batch
+            omits them, since the counts and the failures answer what a run is doing.
+        status_filter: Restricts the reported jobs to one status, one of ``succeeded``, ``failed``, ``running``, or
+            ``scheduled``. Applies to the ``jobs`` list alone, leaving the counts over the whole batch.
+
     Returns:
-        A response dict with ``active`` (whether the manager thread is still running), ``canceled``, a per-job
-        ``jobs`` list, and a ``summary`` counting succeeded, failed, running, and scheduled jobs. A batch that could
-        not dispatch some jobs also carries ``blocked_jobs`` and a ``blocked_reason`` naming the upstream failure.
-        If no batch has run, ``active`` is False with an explanatory ``message``.
+        A response dict with ``active`` (whether the manager thread is still running), ``canceled``, a ``summary``
+        counting succeeded, failed, running, and scheduled jobs, a ``breakdown`` of those counts per pipeline and
+        job type, and ``failed_jobs`` naming every failure with its error message. Carries a per-job ``jobs`` list
+        when requested. A batch that could not dispatch some jobs also carries ``blocked_jobs`` and a
+        ``blocked_reason`` naming the upstream failure. If no batch has run, ``active`` is False with an
+        explanatory ``message``.
     """
     state = _EXECUTION_STATE
     if state is None:
         return _ok_response(active=False, message="No batch has been executed yet.")
 
+    if status_filter is not None and status_filter not in _STATUS_COUNT_KEYS.values():
+        return _error_response(
+            message=f"Unknown status '{status_filter}'. Available: {', '.join(sorted(_STATUS_COUNT_KEYS.values()))}."
+        )
+
     per_job, summary = _collect_status(state=state)
     running = state.manager_thread is not None and state.manager_thread.is_alive()
-    response = _ok_response(active=running, canceled=state.canceled, jobs=per_job, summary=summary)
+
+    # Counts each pipeline's job types by status, which tracks a run at a size the response can always carry.
+    tallies: dict[tuple[str, str, str], int] = {}
+    for entry in per_job:
+        key = (entry["pipeline"], entry["job_name"], entry["status"])
+        tallies[key] = tallies.get(key, 0) + 1
+    breakdown = [
+        {"pipeline": pipeline, "job_name": job_name, "status": status, "count": count}
+        for (pipeline, job_name, status), count in sorted(tallies.items())
+    ]
+
+    response = _ok_response(
+        active=running,
+        canceled=state.canceled,
+        summary=summary,
+        breakdown=breakdown,
+        failed_jobs=[entry for entry in per_job if entry["status"] == "failed"],
+    )
+    if include_jobs:
+        response["jobs"] = [entry for entry in per_job if status_filter is None or entry["status"] == status_filter]
     if state.blocked_jobs:
         response["blocked_jobs"] = [
-            {"job_id": job.job_id, "pipeline": job.pipeline, "job_name": job.job_name, "specifier": job.specifier}
+            {
+                "job_id": job.job_id,
+                "pipeline": job.pipeline,
+                "job_name": job.job_name,
+                "specifier": job.specifier,
+                "session_path": str(job.unit_path),
+            }
             for job in state.blocked_jobs
         ]
         response["blocked_reason"] = (
@@ -339,6 +428,100 @@ def reset_processing_jobs_tool(pipeline: str, tracker_path: str, job_ids: list[s
     return _ok_response(pipeline=dispatch.pipeline.value, tracker_path=tracker_path, jobs_reset=target_ids)
 
 
+@mcp.tool()
+def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any]:
+    """Removes a pipeline's output and processing tracker for one or more sessions, returning them to an unprocessed
+    state.
+
+    Deletes the directory the pipeline owns outright alongside its tracker, so a subsequent preparation rediscovers
+    every job from the acquired data rather than resuming a partial run. Sessions are cleaned independently, and one
+    that cannot be cleaned is reported in its own entry without aborting the others.
+
+    The ``checksum`` pipeline owns no directory, because it writes its stored value into the acquired data itself.
+    Cleaning it removes its tracker and leaves that stored value in place, so the session keeps the baseline a later
+    verification compares against.
+
+    Args:
+        pipeline: The batch pipeline to clean, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
+            ``two_photon``.
+        session_paths: The session root directories to clean.
+
+    Returns:
+        A response dict with ``pipeline``, ``total_units``, ``removed_bytes`` freed across every session, and a
+        ``units`` list carrying each session's ``removed_paths`` and ``removed_bytes``, or an ``error``. Returns an
+        error when a batch is running, since removing the output of a job in flight would fail that job.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    if dispatch is None:
+        return _error_response(message=_unsupported_message(pipeline=pipeline))
+
+    # A running batch holds open the very files this removes, so cleaning waits for the pool to drain.
+    state = _EXECUTION_STATE
+    if state is not None and state.manager_thread is not None and state.manager_thread.is_alive():
+        return _error_response(
+            message="A batch is currently running. Wait for it to finish or cancel it before cleaning output."
+        )
+
+    units: list[dict[str, Any]] = []
+    total_removed = 0
+    for session_path in session_paths:
+        try:
+            session, _, _ = dispatch.discover(Path(session_path))
+        except Exception as exception:
+            units.append({"session_path": session_path, "error": str(exception)})
+            continue
+
+        targets = [dispatch.tracker_path(session)]
+        owned = dispatch.output_path(session)
+        if owned is not None:
+            targets.append(owned)
+
+        removed_paths: list[str] = []
+        removed_bytes = 0
+        for target in targets:
+            if not target.exists():
+                continue
+            removed_bytes += _directory_size(path=target)
+            if target.is_dir():
+                delete_directory(directory_path=target)
+            else:
+                target.unlink()
+                # The tracker's lock file is bookkeeping beside it rather than tracked output of its own.
+                target.with_suffix(target.suffix + ".lock").unlink(missing_ok=True)
+            removed_paths.append(str(target))
+
+        total_removed += removed_bytes
+        units.append(
+            {
+                "session_path": session_path,
+                "session_name": session.session_name,
+                "removed_paths": removed_paths,
+                "removed_bytes": removed_bytes,
+            }
+        )
+
+    return _ok_response(
+        pipeline=dispatch.pipeline.value,
+        units=units,
+        total_units=len(units),
+        removed_bytes=total_removed,
+    )
+
+
+def _directory_size(path: Path) -> int:
+    """Sums the bytes a path holds, counting a directory's whole tree and a file's own size.
+
+    Args:
+        path: The file or directory to measure.
+
+    Returns:
+        The size in bytes.
+    """
+    if path.is_file():
+        return path.stat().st_size
+    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+
+
 def _ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
     """Constructs a successful response dict with a ``success`` flag set to True."""
     return {"success": True, **payload}
@@ -361,6 +544,11 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
     Args:
         state: The batch execution state whose jobs to report.
 
+    Notes:
+        Every entry names the unit it belongs to, because a job identifier is derived from the job name and the
+        specifier alone. A pipeline whose specifier does not vary by session therefore gives every session's copy of
+        that stage one identifier, and the entries would be indistinguishable without the unit that separates them.
+
     Returns:
         A tuple of the per-job status entries and a summary dict counting succeeded, failed, running, and scheduled
         jobs alongside the total.
@@ -378,6 +566,8 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
                 "pipeline": job.pipeline,
                 "job_name": job.job_name,
                 "specifier": job.specifier,
+                "session_path": str(job.unit_path),
+                "tracker_path": str(tracker_path),
                 "status": status.name.lower(),
             }
             if job_state is not None and job_state.error_message is not None:
