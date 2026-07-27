@@ -41,12 +41,11 @@ def run_runtime_processing_pipeline(
         session's raw behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. It then
         hands that table to the registered runtime parser, which writes the system's behavior feathers into the
         session's processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and
-        parser are resolved via ``resolve_runtime_binding`` by the session's acquisition system, keeping the pipeline
-        system-agnostic.
+        parser come from the session's acquisition system.
 
-        The runtime job is the only job this pipeline produces, so it always runs. Its processing tracker is aligned
-        against the single-job universe, preserving any prior state. The registered parser may additionally raise
-        system-specific errors (for example ``ValueError`` or ``RuntimeError``) that propagate unchanged.
+        The runtime job is the only job this pipeline produces, so it always runs. The registered parser may
+        additionally raise system-specific errors (for example ``ValueError`` or ``RuntimeError``) that propagate
+        unchanged.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -65,16 +64,15 @@ def run_runtime_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Recovers the source id from the single-job universe and re-resolves the parser that interprets the decoded
-    # messages. The system is inferred from the session, so the pipeline stays system-agnostic.
+    # The single-job universe carries the source id as its specifier.
     source_id = universe[0][1]
     _, parser = resolve_runtime_binding(session.acquisition_system)
 
     log_directory = session.raw_data.behavior_data_path
     output_directory = session.processed_data.runtime_data_path
 
-    # The runtime job is runnable only when its DataLogger archive is present. This single-job pipeline has no other
-    # work, so an absent archive is a hard error here even though the resolver reports it as merely unrunnable.
+    # The resolver reports an absent archive as unrunnable, which this single-job pipeline escalates to a failure
+    # because it leaves nothing to run.
     if not runnable:
         message = (
             f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
@@ -86,8 +84,6 @@ def run_runtime_processing_pipeline(
     archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
-    # Co-locates the tracker with the parsed output in ``runtime_data`` and aligns its single job against the universe,
-    # preserving any prior job state.
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
     tracker.align_jobs(jobs=runnable, universe=universe)
@@ -112,8 +108,8 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
         The runtime pipeline produces exactly one job, so the universe is always the single
         ``(RUNTIME_JOB_NAME, source_id)`` pair, where the source id is resolved from the session's acquisition system.
         That job is runnable only when its DataLogger archive is present on disk. This is pure discovery that loads no
-        message data and mutates nothing. It reports an absent archive as an empty runnable subset rather than raising,
-        so a batch layer can align the tracker slot against the universe and skip the unrunnable job.
+        message data and mutates nothing. An absent archive yields an empty runnable subset, so a batch layer can
+        align the tracker slot against the universe and skip the job.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -140,8 +136,7 @@ def runtime_job_prerequisites(
 
     Notes:
         The runtime pipeline produces a single job with no upstream dependency, so every job maps to an empty
-        prerequisite tuple. This mirrors the prerequisite contract the other worker packages publish, so a batch
-        layer can validate ordering uniformly across pipelines.
+        prerequisite tuple.
 
     Args:
         universe: The job universe as returned by ``discover_runtime_jobs``.
@@ -156,12 +151,11 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
     """Decodes the runtime log archive into a raw ``(time_us, payload)`` message table.
 
     Notes:
-        This is the system-agnostic decode stage. It reads the DataLogger archive via ``LogArchiveReader``, which
-        resolves the onset timestamp and yields each message's absolute timestamp and raw payload bytes. When the
-        reader splits the archive into more than one batch and more than one worker is available, the batches are
-        decoded across a worker pool (each worker reuses the pre-discovered onset timestamp). Otherwise, the archive
-        is read in a single in-process bulk pass. The returned table carries the timestamps unchanged and the
-        payloads as opaque bytes, leaving every system-specific interpretation to the registered parser.
+        Reads the DataLogger archive via ``LogArchiveReader``, which resolves the onset timestamp and yields each
+        message's absolute timestamp and raw payload bytes. When the reader splits the archive into more than one
+        batch and more than one worker is available, the batches are decoded across a worker pool, each worker
+        reusing the pre-discovered onset timestamp. A single batch or a single worker reads the archive in one
+        in-process bulk pass. The returned table carries the timestamps unchanged and the payloads as opaque bytes.
 
     Args:
         archive_path: The path to the runtime ``{source_id}_log.npz`` archive.

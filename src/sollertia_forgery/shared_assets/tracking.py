@@ -19,10 +19,8 @@ def summarize_tracker(jobs: dict[str, JobState]) -> dict[str, Any]:
     """Converts a processing tracker's job registry into structured per-job details and summary counts.
 
     Notes:
-        Emits every field ``JobState`` carries, so consumers that snapshot tracker state (such as the project
-        manifest) can serialize a job faithfully rather than a lossy projection of it. ``error_message`` is
-        included only when the job recorded a failure reason, matching the convention the acquisition libraries'
-        status tools already use.
+        Emits every field ``JobState`` carries, so a consumer that snapshots tracker state can serialize a job
+        faithfully. ``error_message`` is included only when the job recorded a failure reason.
 
     Args:
         jobs: The tracker's job registry, as returned by ``ProcessingTracker.snapshot``.
@@ -105,11 +103,9 @@ def tracked_job(tracker: ProcessingTracker, job_id: str) -> Iterator[None]:
     """Runs a single tracked processing job, recording its start, completion, or failure on the processing tracker.
 
     Notes:
-        The system-agnostic counterpart to the acquisition libraries' ``execute_job`` bindings (such as
-        ataraxis-video-system's and ataraxis-communication-interface's): it owns the tracker state machine (start,
-        then complete on normal return or fail on exception) and leaves the job body to the caller. The job is
-        completed only when the wrapped block returns normally. Any exception marks the job failed (recording its
-        message) and is re-raised unchanged.
+        Owns the tracker state machine and leaves the job body to the caller. The job is completed only when the
+        wrapped block returns normally. Any exception marks the job failed, recording its message, and is re-raised
+        unchanged.
 
     Args:
         tracker: The processing tracker that records this job's state transitions.

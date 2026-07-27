@@ -333,10 +333,8 @@ def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | 
     """Locates the raw log archive for a controller, if it is present under the log directory.
 
     Notes:
-        Searches recursively for the ``{controller_id}_log.npz`` archive (the same recursive glob the
-        ataraxis-communication-interface log reader uses). Unlike that reader, it returns None when no archive is
-        present so an unstaged controller is skipped rather than failing the session, and it takes the first match
-        when several exist.
+        Searches recursively for the ``{controller_id}_log.npz`` archive and takes the first match when several
+        exist. An absent archive yields None, so an unstaged controller is skipped and the session continues.
 
     Args:
         log_directory: The session's raw behavior data directory holding the controller log archives.
@@ -476,14 +474,11 @@ def _run_extraction_stage(
     """Runs Stage 1: extracts each present controller's log archive into raw per-module feathers.
 
     Notes:
-        Controllers are extracted one at a time within a session. Each archive already fans its message decoding across
-        the shared process pool, so a single controller saturates the session's worker budget, matching how the
-        acquisition library orchestrates a multi-controller directory. Parallelism across sessions is handled by the
-        orchestration layer, which runs independent sessions concurrently under a per-session worker cap. Extracting a
-        session's controllers sequentially therefore avoids oversubscribing cores across those concurrent sessions. The
-        shared tracker is file-lock guarded and safe under concurrent access, so this ordering is a throughput choice
-        rather than a correctness constraint. The pool is owned by the caller and shared with the parse stage, so this
-        helper neither creates nor shuts it down.
+        Controllers are extracted one at a time within a session. Each archive already fans its message decoding
+        across the shared process pool, so a single controller saturates the session's worker budget. Sequential
+        extraction therefore keeps cores available to the sessions the orchestration layer runs concurrently. The
+        pool is owned by the caller and shared with the parse stage, so this helper neither creates nor shuts it
+        down.
 
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
@@ -498,10 +493,9 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
-    # Declares every extraction job up front, then runs a clean progress bar, mirroring the parse stage. The
-    # acquisition binding also announces each job as it runs, which would bisect the bar, so its console output is
-    # silenced for the duration of each extraction. console.error still raises while the console is disabled, so a
-    # failing extraction surfaces rather than being swallowed.
+    # The acquisition binding announces each job as it runs, which would bisect the progress bar, so its console
+    # output is silenced for the duration of each extraction. console.error still raises while the console is
+    # disabled, so a failing extraction still surfaces.
     extraction_job_ids = {
         controller_id: ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
         for controller_id in extraction_archives

@@ -176,9 +176,8 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "microcontroller": [],
                 # The rolled-up status label of the video (timestamp, tracking, motion energy) pipeline.
                 "video": [],
-                # The complete job registry of every per-session pipeline's tracker, one entry per job. This is a
-                # faithful serialization of the trackers rather than a derived view, so an orchestrator can read
-                # per-job status, failure reasons, executor identifiers, and timing without touching the trackers.
+                # The complete job registry of every per-session pipeline's tracker, one entry per job, carrying
+                # per-job status, failure reasons, executor identifiers, and timing.
                 "jobs": [],
                 # Maps each pipeline to its tracker's location relative to the project root, so a consumer can
                 # reset or inspect a tracker without re-deriving the session hierarchy.
@@ -349,7 +348,7 @@ class ProjectManifest:
                     (pl.col(column) == "completed").cast(pl.UInt8).alias(column)
                     for column in PIPELINE_STATUS_COLUMNS.values()
                 ),
-                # Renders each dataset's completion with the same 0/1 convention rather than a boolean.
+                # Each dataset's completion follows the same 0/1 convention as the pipeline status columns.
                 pl.col("datasets")
                 .list.eval(
                     pl.struct(
@@ -516,9 +515,7 @@ class ProjectManifest:
         # Counts sessions marked complete from the boolean (UInt8) completeness column.
         complete_count = int(data.filter(pl.col("complete") == 1).height)
 
-        # Builds the per-pipeline status distribution from the status-label columns. Reporting the full
-        # distribution rather than a single completion count is what lets a consumer see how many sessions failed
-        # a pipeline as opposed to simply not having run it yet.
+        # The full distribution separates the sessions that failed a pipeline from those that have not run it.
         pipeline_status_counts: dict[str, dict[str, int]] = {}
         for pipeline, column in PIPELINE_STATUS_COLUMNS.items():
             if column not in data.columns:
@@ -725,9 +722,7 @@ def _build_session_row(session_data: SessionData, project_directory: Path) -> di
 def _relative_path(path: Path, project_directory: Path) -> str:
     """Expresses a path under the project hierarchy relative to the project root, using forward slashes.
 
-    Storing hierarchy locations relative rather than absolute is what lets a manifest generated against one data
-    root be consumed against another, which matters because the manifest is the artifact an orchestrator reads to
-    map rows back to directories.
+    Relative locations let a manifest generated against one data root be consumed against another.
 
     Args:
         path: The absolute path to express relative to the project root.

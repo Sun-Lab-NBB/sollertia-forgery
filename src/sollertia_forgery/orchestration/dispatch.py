@@ -113,9 +113,8 @@ class PipelineDispatch:
     Notes:
         ``discover`` is the pipeline's job resolver, ``worker`` is the picklable callable the process pool
         dispatches per job, ``prerequisites`` is the pipeline's own intra-pipeline job ordering, and ``tracker_path``
-        resolves the pipeline's processing tracker from a loaded session. Cores belong to the job type rather than
-        to the pipeline, since one pipeline mixes job types that parallelize very differently, so they come from
-        ``_JOB_CORE_ALLOCATIONS``.
+        resolves the pipeline's processing tracker from a loaded session. Cores belong to the job type, since one
+        pipeline mixes job types that parallelize very differently.
     """
 
     pipeline: ProcessingPipelines
@@ -207,9 +206,9 @@ def prepare_pipeline_jobs(
     tracker = ProcessingTracker(file_path=tracker_path)
     tracker.align_jobs(jobs=runnable, universe=universe)
 
-    # Resolves the pipeline's own job ordering over the full universe, so a job's upstream stages are named even when
-    # this batch does not queue them. The engine then treats an unqueued prerequisite as satisfied only if the
-    # tracker already records it as succeeded.
+    # Ordering resolves over the full universe, so a job's upstream stages are named even when this batch does not
+    # queue them. The engine then treats an unqueued prerequisite as satisfied only if the tracker already records
+    # it as succeeded.
     ordering = dispatch.prerequisites(universe)
 
     # cindra reads its worker count from the session's configuration rather than from a call argument, and only its
@@ -225,8 +224,7 @@ def prepare_pipeline_jobs(
             ),
         )
 
-    # Sizes each job from the data it will process, at the cores its type is allocated, so the same figures drive
-    # local admission and any remote submission that reads the descriptor.
+    # One set of figures drives both local admission and any remote submission that reads the descriptor.
     unregistered = sorted({job_name for job_name, _ in runnable if job_name not in _JOB_CORE_ALLOCATIONS})
     if unregistered:
         message = (
@@ -362,9 +360,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
     """Builds the dispatch entry for every session-processing pipeline the generic batch tools support.
 
     Notes:
-        Built on first use rather than at import, so the workers it binds are ordinary private definitions rather
-        than names the module has to define ahead of its own constants. The result is cached, so every caller shares
-        one table.
+        Built on first use and cached, so every caller shares one table.
 
     Returns:
         The dispatch entry for each supported pipeline, keyed by pipeline.

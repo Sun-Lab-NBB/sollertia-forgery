@@ -73,7 +73,6 @@ def assemble_behavior_dataset(
     inverted_mapping = {value: key for key, value in state_mapping.items()}
     state_enum = pl.Enum(list(state_mapping.keys()))
 
-    # Loads the core behavior data present for all session types.
     valve_data_frame = pl.read_ipc(source=microcontroller_data_path.joinpath(BehaviorDataFiles.VALVE), memory_map=True)
     system_state_data_frame = pl.read_ipc(
         source=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True
@@ -121,10 +120,8 @@ def assemble_behavior_dataset(
         encoder_time = encoder_data_frame["time_us"].to_numpy()
         encoder_distance = encoder_data_frame["traveled_distance_cm"].to_numpy()
 
-        # Calculates the running speed using the original encoder sampling rate.
         running_speed = _calculate_running_speed(sample_time=encoder_time, distance=encoder_distance)
 
-        # Downsamples the running speed and the traveled distance.
         aligned_data["distance_cm"] = interpolate_data(
             source_coordinates=encoder_time,
             source_values=encoder_distance,
@@ -184,9 +181,7 @@ def assemble_behavior_dataset(
     # Cleans up minor inconsistencies and data formatting issues that result from the interpolation process. Also
     # reformats certain data columns to improve downstream processing.
     behavior_data = (
-        behavior_data
-        # Converts system_state to Enum, adds elapsed session time, and flags active tone regions.
-        .with_columns(
+        behavior_data.with_columns(
             pl.col("system_state").replace_strict(inverted_mapping, return_dtype=pl.Utf8).cast(state_enum),
             ((pl.col("time_us") - pl.col("time_us").min()) / _MICROSECONDS_PER_MINUTE)
             .round(2)
@@ -194,14 +189,12 @@ def assemble_behavior_dataset(
             .alias("elapsed_minutes"),
             (pl.col("_tone_state") > 0).alias("_tone_active"),
         )
-        # Uses the tone column to discover reward events.
         .with_columns(
             (pl.col("_tone_active") != pl.col("_tone_active").shift(1))
             .fill_null(value=False)
             .cum_sum()
             .alias("_reward_event_id")
         )
-        # Calculates dispensed water volume per reward event.
         .with_columns(
             pl.col("water_uL").sum().over("_reward_event_id").alias("_reward_event_water_uL"),
         )
@@ -225,7 +218,6 @@ def assemble_behavior_dataset(
             pl.when(pl.col("system_state") == "run").then(0.0).otherwise(pl.col("torque_N_cm")).alias("torque_N_cm")
         )
 
-    # Handles distance_cm cleanup if the encoder data column exists.
     if "distance_cm" in behavior_data.columns:
         behavior_data = (
             behavior_data
@@ -241,13 +233,11 @@ def assemble_behavior_dataset(
                 .forward_fill()
                 .fill_null(0.0)
                 .alias("distance_cm"),
-                # Fixes running speed at the same time.
                 pl.when(pl.col("system_state") == "run").then(pl.col("speed_cm_s")).otherwise(0.0).alias("speed_cm_s"),
             )
             .drop("_past_idle")
         )
 
-    # Ensures a particular column order and optimizes column datatypes.
     final_columns = [
         "time_us",
         "elapsed_minutes",
@@ -264,7 +254,6 @@ def assemble_behavior_dataset(
 
     columns_to_select = [column for column in final_columns if column in behavior_data.columns]
 
-    # If requested, drops the time columns before returning the dataset to the caller.
     if drop_time_columns:
         columns_to_select = columns_to_select[2:]
 
@@ -288,36 +277,27 @@ def _calculate_running_speed(
     Returns:
         The calculated running speed in centimeters per second for each time-point.
     """
-    # Pre-allocates the output running speed array based on the requested number of time-points for which to compute
-    # the running speed.
     value_count = len(sample_time)
     running_speed: NDArray[np.float32] = np.zeros(value_count, dtype=np.float32)
 
-    # If there are no data points to process, returns early.
     if not value_count:
         return running_speed
 
-    # Pre-computes the microsecond-to-second conversion constant.
     microseconds_to_seconds = np.float64(1.0 / _MICROSECONDS_PER_SECOND)
 
     # Maintains a sliding window start index that advances monotonically through the data.
     # Avoids redundant searching and reduces complexity from O(n^2) to O(n).
     window_start_index = 0
 
-    # Processes each time point to calculate its running speed.
     for time_point_index in range(value_count):
-        # Defines the target start time for the current window.
         window_start_time = sample_time[time_point_index] - window_size_us
 
-        # Advances the window start index until it reaches the first point within the window.
         while window_start_index < time_point_index and sample_time[window_start_index] < window_start_time:
             window_start_index += 1
 
-        # Calculates the speed only if there are distinct distance-points in the window.
         if window_start_index < time_point_index:
             time_delta = sample_time[time_point_index] - sample_time[window_start_index]
 
-            # Calculates the running speed using the full available window.
             if time_delta > 0:
                 distance_delta = distance[time_point_index] - distance[window_start_index]
                 speed = distance_delta / (time_delta * microseconds_to_seconds)

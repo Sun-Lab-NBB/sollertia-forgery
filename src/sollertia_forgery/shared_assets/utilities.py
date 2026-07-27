@@ -7,8 +7,7 @@ DELAY_TIMER: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.MILLISECO
 
 LOG_ARCHIVE_SUFFIX: str = "_log.npz"
 """The filename suffix of the raw log archives written by the ataraxis DataLogger. Every archive is named
-``{source_id}_log.npz`` after the DataLogger source id that produced it. Declared once here so the library's
-system-agnostic log-processing workers build their discovery globs and archive paths from a single definition."""
+``{source_id}_log.npz`` after the DataLogger source id that produced it."""
 
 
 def delay_terminal() -> None:

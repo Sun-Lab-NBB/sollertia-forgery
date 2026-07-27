@@ -249,11 +249,10 @@ def run_video_processing_pipeline(
 
     console.echo(message=f"Running {len(jobs)} camera video-processing job(s).")
 
-    # Resolves the worker count once and creates a single ProcessPoolExecutor shared across every parse and energy
-    # job, mirroring the ataraxis-video-system pipeline. Amortizes the cost of spawning and tearing down worker
-    # processes across all cameras instead of paying it once per camera. The shared pool requires a positive,
-    # pre-resolved worker count because the extraction binding sizes its batch submissions to match the pool. Jobs run
-    # one at a time, so each in turn has the whole pool to itself. The renaming and tracking jobs ignore it.
+    # One pool shared across every parse and energy job pays the process spawn and teardown cost once for the whole
+    # session. The shared pool requires a positive, pre-resolved worker count because the extraction binding sizes
+    # its batch submissions to match the pool. Jobs run one at a time, so each in turn has the whole pool to itself.
+    # The renaming and tracking jobs ignore it.
     resolved_workers = resolve_worker_count(requested_workers=workers)
 
     # Caps the worker threading layers for the whole life of the shared pool, so a run given N workers occupies N
@@ -529,8 +528,7 @@ def _dispatch_job(
             tracker=tracker,
         )
     else:
-        # Named explicitly rather than falling through to a handler, so that an unrecognized job name surfaces instead
-        # of silently running whichever job happens to sit in the catch-all branch.
+        # Every job name is matched explicitly, so an unrecognized name surfaces here as a failure.
         message = (
             f"Unable to execute the camera video-processing job '{job_name}'. The name does not identify any "
             f"pipeline job."
@@ -575,9 +573,8 @@ def _run_motion_energy(
     """Measures one camera's recording into a per-frame motion-energy feather, as one tracked job.
 
     Locates the camera's recording in the session's raw camera-data directory and writes its motion energy into the
-    processed video-data directory. A camera whose recording is absent is skipped rather than failing, mirroring how
-    the tracking job no-ops without predictions. A rig that ran one of its cameras must not wedge the shared video
-    tracker on the camera it did not run.
+    processed video-data directory. A camera whose recording is absent is skipped, so a rig that ran one of its
+    cameras leaves the shared video tracker clear on the camera it did not run.
 
     Args:
         session: The loaded session whose raw camera-data directory supplies the recording.

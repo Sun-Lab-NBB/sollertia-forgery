@@ -401,8 +401,8 @@ def _energy_chunk(
             message = f"Unable to open '{video_path}' to decode motion-energy frames {start_frame} onward."
             console.error(message=message, error=ValueError)
 
-        # Hands back the decoded planes untouched instead of interleaving them into a color image. For this
-        # monochrome source that yields the single plane the measurement needs, at no conversion cost.
+        # The decoder hands back its planes untouched, which for this monochrome source is the single plane the
+        # measurement needs, at no conversion cost.
         capture.set(propId=cv2.CAP_PROP_CONVERT_RGB, value=0)
 
         previous = None

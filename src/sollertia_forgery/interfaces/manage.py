@@ -139,7 +139,6 @@ def print_project_manifest_data(
 
     manifest = ProjectManifest(manifest_file=manifest_path)
 
-    # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
@@ -147,11 +146,9 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # If requested, prints the experimenter note view of the manifest data.
     if notes:
         manifest.print_notes(animal=animal)
 
-    # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
 
