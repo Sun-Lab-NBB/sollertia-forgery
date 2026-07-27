@@ -9,6 +9,7 @@ from .utilities import (
     DELAY_TIMER,
     LOG_ARCHIVE_SUFFIX,
     delay_terminal,
+    pinned_worker_threads,
     multi_recording_dataset_directory,
 )
 from .microcontroller import (
@@ -32,6 +33,7 @@ __all__ = [
     "multi_recording_dataset_directory",
     "parse_module_feather_name",
     "partition_events",
+    "pinned_worker_threads",
     "summarize_tracker",
     "tracked_job",
 ]

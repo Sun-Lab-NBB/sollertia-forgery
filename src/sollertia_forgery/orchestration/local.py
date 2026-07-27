@@ -39,11 +39,18 @@ _PINNED_THREAD_VARIABLES: tuple[str, ...] = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
-    "NUMBA_NUM_THREADS",
     "POLARS_MAX_THREADS",
     "OPENCV_FFMPEG_THREADS",
 )
-"""The threading-layer environment variables a pool worker pins when it starts."""
+"""The threading-layer environment variables a pool worker pins when it starts.
+
+Notes:
+    ``NUMBA_NUM_THREADS`` is deliberately absent. numba reads that variable once, when it is imported, and treats the
+    value it read as the ceiling for the rest of the process. It then re-reads the variable on every compilation and
+    raises if the two disagree once its thread pool has started. A worker imports numba before this pin could run, so
+    writing the variable here would guarantee that disagreement and fail every job that compiles a numba function.
+    The worker sets numba's thread count through its runtime API instead, which is the supported way to change it.
+"""
 
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
@@ -256,9 +263,7 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
         max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
     ) as pool:
         with state.lock:
-            # Clears the recorded outcome of every job this batch holds, so the trackers report this run rather than
-            # whatever a previous one left behind. Queuing a job is the caller stating it wants that job to run
-            # again, which makes its prior outcome history rather than progress.
+            # Clears the recorded outcome of every job this batch holds, so the trackers report this run alone.
             _reset_queued_jobs(state=state)
 
             # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
@@ -336,6 +341,12 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         its maximum thread count from the unpinned environment before this runs. The runtime setters are therefore
         called alongside the variables. A job that needs more threads raises its own count once it starts, which
         numba permits up to the count latched at import.
+
+        numba and OpenCV are pinned through their runtime setters alone, leaving the environment they read at import
+        untouched. Both already hold the count they read when the worker imported them, so rewriting those variables
+        would change nothing they consult again. For numba it would actively break the worker, since it compares the
+        variable against the latched count on every compilation and rejects a disagreement once its threads have
+        started, which is exactly the state a late pin creates.
 
     Args:
         thread_ceiling: The number of threads each library thread pool is pinned to.

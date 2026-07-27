@@ -22,7 +22,11 @@ from sollertia_forgery.orchestration import (
     resolve_host_memory_mb,
     resolve_core_allocations,
 )
-from sollertia_forgery.orchestration.local import PendingJob, _admit_pending_jobs
+from sollertia_forgery.orchestration.local import (
+    _PINNED_THREAD_VARIABLES,
+    PendingJob,
+    _admit_pending_jobs,
+)
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
 from sollertia_forgery.orchestration.footprints import (
     _CHECKSUM_READER_MEMORY_MB,
@@ -308,3 +312,17 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     doubled = _estimate_checksum_memory(cores=2)
     assert doubled - single == pytest.approx(_CHECKSUM_READER_MEMORY_MB * _MEMORY_ESTIMATE_TOLERANCE, rel=0.01)
     assert _estimate_checksum_memory(cores=8) > single
+
+
+def test_worker_initializer_leaves_the_numba_thread_variable_alone() -> None:
+    """Verifies that the worker initializer controls numba through its runtime setter rather than its environment.
+
+    numba reads NUMBA_NUM_THREADS once at import and compares the variable against that latched count on every
+    compilation, rejecting a disagreement once its thread pool has started. A worker imports numba before the
+    initializer runs, so pinning the variable there would fail every job that compiles a numba function.
+    """
+    assert "NUMBA_NUM_THREADS" not in _PINNED_THREAD_VARIABLES
+
+    # The other threading layers stay pinned, since they read their variables when the job itself starts.
+    assert "OMP_NUM_THREADS" in _PINNED_THREAD_VARIABLES
+    assert "POLARS_MAX_THREADS" in _PINNED_THREAD_VARIABLES

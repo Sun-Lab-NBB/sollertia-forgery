@@ -16,7 +16,7 @@ from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
 
 from ..registries import resolve_runtime_binding
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, pinned_worker_threads
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -221,7 +221,9 @@ def _decode_batches(
     timestamp_chunks: list[NDArray[np.uint64]] = [np.array([], dtype=np.uint64) for _ in batches]
     payload_chunks: list[list[bytes]] = [[] for _ in batches]
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    # Each decode child re-imports and sizes its library thread pools before any of this code runs inside it, so the
+    # caps are placed around the pool's construction rather than inside its workers.
+    with pinned_worker_threads(), ProcessPoolExecutor(max_workers=workers) as executor:
         future_to_index: dict[Future[tuple[NDArray[np.uint64], list[bytes]]], int] = {
             executor.submit(_decode_batch, archive_path=archive_path, onset_us=onset_us, keys=batch): index
             for index, batch in enumerate(batches)

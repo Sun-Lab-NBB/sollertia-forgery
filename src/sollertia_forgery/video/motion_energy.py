@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 from enum import StrEnum
 from typing import TYPE_CHECKING
-from contextlib import nullcontext, contextmanager
+from contextlib import nullcontext
 from concurrent.futures import ProcessPoolExecutor
 
 import cv2
@@ -17,9 +17,10 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 
+from ..shared_assets import pinned_worker_threads
+
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Iterator
 
     from numpy.typing import NDArray
 
@@ -41,20 +42,6 @@ _MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
 preceding keyframe, so each chunk discards up to one group of frames worth of decoded frames. At roughly sixteen
 times the typical keyframe interval, that waste stays under seven percent of the chunk."""
-
-_WORKER_THREAD_VARIABLES: tuple[str, ...] = (
-    "OMP_NUM_THREADS",
-    "OPENBLAS_NUM_THREADS",
-    "MKL_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS",
-    "NUMBA_NUM_THREADS",
-    "POLARS_MAX_THREADS",
-    "OPENCV_FFMPEG_THREADS",
-)
-"""The environment variables that cap each threading layer a worker process can start a pool for. Most of these
-libraries size their pool to the machine's core count on first import, so a worker that inherits the defaults reserves
-far more of the machine than the one core it was budgeted. ``OPENCV_FFMPEG_THREADS`` is the exception: the decoder
-reads it when a capture is constructed rather than at import, so a worker re-sets it for itself."""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count that identifies a decoded frame as a single grayscale plane. A frame matching it is used as-is,
@@ -81,33 +68,6 @@ class MotionEnergyColumn(StrEnum):
     """Mean intensity of the same binned frame, in gray levels. It separates a scene-illumination change from a behavior
     change, since a whole-field brightness shift inflates ``motion_energy`` without anything moving. Use its slow
     session-scale drift to detrend energy across a recording. Defined at every frame."""
-
-
-@contextmanager
-def pinned_worker_threads() -> Iterator[None]:
-    """Caps every threading layer to a single thread for the duration of the block, then restores the environment.
-
-    Worker processes are started with the environment they inherit at spawn time. Each scientific library sizes its
-    thread pool when it is first imported, which, because a worker re-imports rather than inheriting the parent's
-    modules, happens before any code in the worker runs. Setting the caps inside the worker is therefore too late
-    for those libraries. They have to be in place in the parent before the pool starts its children. Wrapping only
-    the pool's lifetime, rather than setting the caps at import, keeps the restriction off the rest of the library:
-    its two-photon pipeline drives cindra's multithreaded numba kernels, and a process-wide cap set here would
-    silently serialize them.
-
-    Yields:
-        None. The caps are in effect for the duration of the block.
-    """
-    previous = {variable: os.environ.get(variable) for variable in _WORKER_THREAD_VARIABLES}
-    os.environ.update(dict.fromkeys(_WORKER_THREAD_VARIABLES, "1"))
-    try:
-        yield
-    finally:
-        for variable, value in previous.items():
-            if value is None:
-                os.environ.pop(variable, default=None)
-            else:
-                os.environ[variable] = value
 
 
 def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_name: str) -> Path | None:

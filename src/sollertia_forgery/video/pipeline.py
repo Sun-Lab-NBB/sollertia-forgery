@@ -22,10 +22,9 @@ from ..registries import resolve_video_tracking
 from .motion_energy import (
     MOTION_ENERGY_SUFFIX,
     resolve_camera_video,
-    pinned_worker_threads,
     compute_camera_motion_energy,
 )
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, pinned_worker_threads
 
 if TYPE_CHECKING:
     from pathlib import Path

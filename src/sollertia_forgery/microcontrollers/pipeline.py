@@ -33,6 +33,7 @@ from ..shared_assets import (
     tracked_job,
     partition_events,
     find_module_feathers,
+    pinned_worker_threads,
     parse_module_feather_name,
 )
 
@@ -147,9 +148,12 @@ def run_microcontroller_processing_pipeline(
     else:
         # Resolves the worker budget once and creates a single process pool that spans BOTH stages. The stages run
         # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
-        # parse stage (one future per module), avoiding a worker re-spawn between them.
+        # parse stage (one future per module), avoiding a worker re-spawn between them. The caps are placed around
+        # the pool's construction, since each child sizes its library thread pools while importing, before any code
+        # of this pipeline runs inside it.
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
+        with pinned_worker_threads():
+            shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
         try:
             _run_extraction_stage(
                 extraction_archives=extraction_archives,

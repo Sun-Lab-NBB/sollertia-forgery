@@ -30,18 +30,18 @@ from sollertia_forgery.video import (
     pipeline as pipeline_module,
     run_video_processing_pipeline,
 )
+from sollertia_forgery.shared_assets import pinned_worker_threads
 from sollertia_forgery.video.motion_energy import (
     _SPATIAL_BIN_SIZE,
     MOTION_ENERGY_SUFFIX,
     _MINIMUM_CHUNK_FRAMES,
-    _WORKER_THREAD_VARIABLES,
     _bin_frame,
     _plan_chunks,
     _energy_chunk,
     resolve_camera_video,
-    pinned_worker_threads,
     compute_camera_motion_energy,
 )
+from sollertia_forgery.shared_assets.utilities import _WORKER_THREAD_VARIABLES
 
 _FRAME_HEIGHT: int = 100
 """The fixture frame height. Not a multiple of the spatial bin size, so the block-mean crop path always runs."""

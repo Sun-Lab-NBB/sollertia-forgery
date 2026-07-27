@@ -8,6 +8,8 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
+from ..shared_assets import pinned_worker_threads
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -91,14 +93,17 @@ def run_checksum_processing_pipeline(
         # Resolves the process count and calculates the checksum for the raw_data directory. If the
         # 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check below
         # succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated value.
+        # Hashing fans one file per worker across a pool of its own, and each of those workers sizes its library
+        # thread pools while importing, so the caps are placed here rather than inside them.
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        calculated_checksum = calculate_directory_checksum(
-            directory=session.raw_data_path,
-            num_processes=resolved_workers,
-            progress=display_progress,
-            save_checksum=regenerate_checksum,
-            excluded_files=_CHECKSUM_EXCLUDED_FILES,
-        )
+        with pinned_worker_threads():
+            calculated_checksum = calculate_directory_checksum(
+                directory=session.raw_data_path,
+                num_processes=resolved_workers,
+                progress=display_progress,
+                save_checksum=regenerate_checksum,
+                excluded_files=_CHECKSUM_EXCLUDED_FILES,
+            )
 
         # Loads the checksum stored inside the ax_checksum.txt file.
         with checksum_path.open() as file:
