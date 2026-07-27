@@ -87,27 +87,29 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
     ),
 )
 @click.option(
-    "-pr",
-    "--progress",
+    "-np",
+    "--no-progress",
     is_flag=True,
     show_default=True,
     default=False,
-    help="Determines whether to display a progress bar during processing.",
+    help=(
+        "Determines whether to suppress the progress bar during processing. The progress bar is displayed by default."
+    ),
 )
 @click.pass_context
 def process_cli(
-    context: click.Context, session_path: Path | None, job_id: str | None, workers: int, *, progress: bool
+    context: click.Context, session_path: Path | None, job_id: str | None, workers: int, *, no_progress: bool
 ) -> None:
     """Runs the requested data extraction pipelines on a single session.
 
-    The session path, job id, worker budget, and progress flag are parsed on this group and shared by every
+    The session path, job id, worker budget, and no-progress flag are parsed on this group and shared by every
     subcommand, so they must be given before the subcommand name.
     """
     context.obj = _SharedProcessingParameters(
         session_path=session_path,
         job_id=job_id,
         workers=workers,
-        display_progress=progress,
+        display_progress=not no_progress,
     )
 
 

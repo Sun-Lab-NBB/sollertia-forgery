@@ -25,7 +25,7 @@ from .motion_energy import (
     pinned_worker_threads,
     compute_camera_motion_energy,
 )
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, prepare_tracker
+from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -169,7 +169,7 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
 
-        prepare_tracker(tracker=tracker, jobs=universe, universe=universe)
+        tracker.align_jobs(jobs=universe, universe=universe)
 
         job_name, specifier = id_to_job[job_id]
         if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
@@ -245,7 +245,7 @@ def run_video_processing_pipeline(
 
     # Detects foreign entries against the full universe rather than the requested subset, so a partial invocation (a
     # single job kind, or a partial discovery) aligns the tracker without wiping the previously completed sibling jobs.
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=universe)
+    tracker.align_jobs(jobs=jobs, universe=universe)
 
     console.echo(message=f"Running {len(jobs)} camera video-processing job(s).")
 
@@ -282,6 +282,85 @@ def run_video_processing_pipeline(
             )
 
     console.echo(message="All camera video-processing jobs completed successfully.", level=LogLevel.SUCCESS)
+
+
+def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolves the video pipeline's job universe and runnable subset for the target session.
+
+    Notes:
+        The universe is the full acquisition-time job set the camera manifest defines. It holds one timestamp job and
+        one motion-energy job per registered camera, plus the single rename and tracking jobs. The runnable subset is
+        the job set a full local run dispatches. A timestamp job is runnable only when its camera's
+        ``{source_id}_log.npz`` archive is on disk, and the rename job joins them when at least one is runnable. The
+        tracking and energy jobs are always runnable because they read only their own inputs and complete with no
+        output when those are absent. A camera with a recording but no log archive therefore keeps its energy job
+        runnable while its timestamp job stays in the universe alone. This is discovery only, reading the manifest and
+        globbing for archives while decoding no data and mutating nothing.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        subset of that universe. Timestamp and energy specifiers are camera source IDs, and the rename and tracking
+        specifiers are empty.
+
+    Raises:
+        FileNotFoundError: If the session's camera manifest is not present.
+        ValueError: If the camera manifest registers no cameras.
+    """
+    session = SessionData.load(session_path=session_path)
+    log_directory = session.raw_data.behavior_data_path
+    camera_names = _resolve_camera_names(data_directory=log_directory)
+    if not camera_names:
+        message = (
+            f"Unable to resolve video processing jobs for session '{session.session_name}'. The camera manifest in "
+            f"'{log_directory}' does not register any cameras."
+        )
+        console.error(message=message, error=ValueError)
+
+    universe = [(TIMESTAMP_JOB_NAME, str(source_id)) for source_id in camera_names]
+    universe.append((RENAME_JOB_NAME, ""))
+    universe.append((TRACKING_JOB_NAME, ""))
+    universe.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+
+    log_paths: dict[int, Path] = {
+        source_id: log_path
+        for log_path in _find_camera_logs(data_directory=log_directory)
+        if (source_id := _extract_camera_source_id(log_path=log_path)) in camera_names
+    }
+
+    runnable: list[tuple[str, str]] = [(TIMESTAMP_JOB_NAME, str(source_id)) for source_id in log_paths]
+    if log_paths:
+        runnable.append((RENAME_JOB_NAME, ""))
+    runnable.append((TRACKING_JOB_NAME, ""))
+    runnable.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+
+    return session, universe, runnable
+
+
+def video_job_prerequisites(
+    universe: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the video pipeline.
+
+    Notes:
+        The rename job hardlinks the parsed timestamp feathers under their canonical names, so it must run after the
+        timestamp parse jobs that write them and depends on every timestamp job present in the given set. The tracking
+        and energy jobs read only their own inputs and have no upstream dependency. Passing the runnable subset scopes
+        the rename job to the timestamp jobs that can actually produce feathers, while passing the full universe scopes
+        it to all registered cameras.
+
+    Args:
+        universe: The job set to build ordering over, as returned by ``discover_video_jobs`` (either the universe or
+            its runnable subset).
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs. The rename job maps to the timestamp jobs in the set,
+        and every other job maps to an empty tuple.
+    """
+    timestamp_jobs = tuple(job for job in universe if job[0] == TIMESTAMP_JOB_NAME)
+    return {job: (timestamp_jobs if job[0] == RENAME_JOB_NAME else ()) for job in universe}
 
 
 def _resolve_camera_names(data_directory: Path) -> dict[int, str]:

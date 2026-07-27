@@ -1,37 +1,45 @@
-"""Provides the unified orchestration layer: the in-process batch job-execution engine and the remote SLURM pipeline
-engine.
+"""Provides the local orchestration layer: the shared batch job-execution engine, its resource estimators, the
+pipeline dispatch table, and the pipeline-identity enumeration.
 """
 
 from .local import (
     RESERVED_CORES,
     ActiveJob,
     PendingJob,
+    JobAllocation,
     GenericPendingJob,
     JobExecutionState,
-    ConcurrencyDescriptor,
-    read_tracker_status,
-    analyze_feather_file,
-    derive_tracker_status,
     group_jobs_by_tracker,
     job_execution_manager,
-    clean_output_subdirectory,
+    resolve_core_allocations,
 )
-from .pipeline import ProcessingPipeline, execute_pipelines, check_session_eligibility
+from .dispatch import (
+    BATCH_PIPELINES,
+    PipelineDispatch,
+    run_batch_job,
+    resolve_dispatch,
+    build_pending_job,
+    prepare_pipeline_jobs,
+)
+from .pipelines import ProcessingPipelines
+from .footprints import resolve_host_memory_mb
 
 __all__ = [
+    "BATCH_PIPELINES",
     "RESERVED_CORES",
     "ActiveJob",
-    "ConcurrencyDescriptor",
     "GenericPendingJob",
+    "JobAllocation",
     "JobExecutionState",
     "PendingJob",
-    "ProcessingPipeline",
-    "analyze_feather_file",
-    "check_session_eligibility",
-    "clean_output_subdirectory",
-    "derive_tracker_status",
-    "execute_pipelines",
+    "PipelineDispatch",
+    "ProcessingPipelines",
+    "build_pending_job",
     "group_jobs_by_tracker",
     "job_execution_manager",
-    "read_tracker_status",
+    "prepare_pipeline_jobs",
+    "resolve_core_allocations",
+    "resolve_dispatch",
+    "resolve_host_memory_mb",
+    "run_batch_job",
 ]

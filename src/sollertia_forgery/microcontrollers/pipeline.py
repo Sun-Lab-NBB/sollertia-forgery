@@ -23,11 +23,14 @@ from ataraxis_communication_interface.microcontroller import (
     execute_job,
 )
 
-from ..registries import resolve_microcontroller_parsers, resolve_microcontroller_event_codes
+from ..registries import (
+    resolve_microcontroller_parsers,
+    resolve_microcontroller_event_codes,
+    resolve_eligible_microcontroller_modules,
+)
 from ..shared_assets import (
     LOG_ARCHIVE_SUFFIX,
     tracked_job,
-    prepare_tracker,
     partition_events,
     find_module_feathers,
     parse_module_feather_name,
@@ -91,7 +94,7 @@ def run_microcontroller_processing_pipeline(
     # Looks up the parser function and the extracted event codes for every module this session's acquisition system
     # can parse from the central registries, inferring the system from the session.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
-    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    event_codes = _resolve_eligible_event_codes(session=session)
 
     # Derives the per-controller extraction configurations from the microcontroller manifest and the event codes.
     controllers = _resolve_controllers(session=session, event_codes=event_codes)
@@ -124,7 +127,7 @@ def run_microcontroller_processing_pipeline(
     tracker_directory = session.processed_data.microcontroller_data_path
     tracker_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=tracker_directory / ProcessingTrackers.MICROCONTROLLER)
-    prepare_tracker(tracker=tracker, jobs=requested, universe=universe)
+    tracker.align_jobs(jobs=requested, universe=universe)
 
     if job_id is not None:
         _execute_remote_job(
@@ -173,6 +176,88 @@ def run_microcontroller_processing_pipeline(
                 shared_executor.shutdown(wait=True)
 
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
+
+
+def discover_microcontroller_jobs(
+    session_path: Path,
+) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
+    """Resolves the microcontroller pipeline's job universe and runnable subset for the target session.
+
+    Notes:
+        The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
+        controller that declares at least one module the acquisition system parses, plus one parse job per such
+        module. The runnable subset narrows the universe to controllers whose log archive is present on disk, since a
+        controller with no archive can be neither extracted nor parsed. This is discovery only, reading the manifest
+        and globbing for archives while decoding no data and mutating nothing.
+
+    Args:
+        session_path: The path to the root session directory containing the session data hierarchy.
+
+    Returns:
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        subset of that universe. Extraction specifiers are controller IDs and parse specifiers are
+        ``"{controller_id}-{module_type}-{module_id}"``.
+
+    Raises:
+        FileNotFoundError: If the session's microcontroller manifest is not present.
+        ValueError: If the session's acquisition system is unknown, or if no manifest controller declares a module the
+            acquisition system extracts.
+    """
+    session = SessionData.load(session_path=session_path)
+    parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
+    event_codes = _resolve_eligible_event_codes(session=session)
+    controllers = _resolve_controllers(session=session, event_codes=event_codes)
+    universe, requested, _, _ = _discover_jobs(
+        controllers=controllers,
+        parsers=parsers,
+        log_directory=session.raw_data.behavior_data_path,
+        extraction_job_name=EXTRACTION_JOB_NAME,
+    )
+    return session, universe, requested
+
+
+def microcontroller_job_prerequisites(
+    universe: list[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
+    """Returns the intra-pipeline job ordering for the microcontroller pipeline.
+
+    Notes:
+        Each parse job reads the raw per-module feather its controller's extraction job writes, so every parse job
+        requires that extraction job to have succeeded. Extraction jobs read the raw archive directly and have no
+        upstream dependency. Extraction jobs use the acquisition library's ``EXTRACTION_JOB_NAME`` and each parse
+        specifier encodes its controller as the leading ``"{controller_id}-..."`` segment.
+
+    Args:
+        universe: The job universe as returned by ``discover_microcontroller_jobs``.
+
+    Returns:
+        A mapping of each job to its tuple of prerequisite jobs. Parse jobs map to their controller's extraction job,
+        and extraction jobs map to an empty tuple.
+    """
+    return {
+        (job_name, specifier): ((EXTRACTION_JOB_NAME, specifier.split("-")[0]),) if job_name == PARSE_JOB_NAME else ()
+        for job_name, specifier in universe
+    }
+
+
+def _resolve_eligible_event_codes(session: SessionData) -> dict[tuple[int, int], tuple[int, ...]]:
+    """Resolves the event codes of the hardware modules the target session configured for use.
+
+    Notes:
+        A session records which hardware modules it used, and its acquisition system's parsers skip the modules it
+        did not. Narrowing the event codes to the eligible modules keeps the extraction stage and the parse job
+        universe aligned with those parsers, so an unused module contributes neither an intermediate feather nor a
+        job that completes without writing an output.
+
+    Args:
+        session: The loaded session whose microcontroller logs are being processed.
+
+    Returns:
+        A mapping from each eligible ``(module_type, module_id)`` pair to the tuple of event codes its parser reads.
+    """
+    event_codes = resolve_microcontroller_event_codes(system=session.acquisition_system)
+    eligible = resolve_eligible_microcontroller_modules(system=session.acquisition_system, session=session)
+    return {module_key: codes for module_key, codes in event_codes.items() if module_key in eligible}
 
 
 def _resolve_controllers(
@@ -413,6 +498,19 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
+    # Declares every extraction job up front, then runs a clean progress bar, mirroring the parse stage. The
+    # acquisition binding also announces each job as it runs, which would bisect the bar, so its console output is
+    # silenced for the duration of each extraction. console.error still raises while the console is disabled, so a
+    # failing extraction surfaces rather than being swallowed.
+    extraction_job_ids = {
+        controller_id: ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
+        for controller_id in extraction_archives
+    }
+    for controller_id, extraction_job_id in extraction_job_ids.items():
+        console.echo(
+            message=f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
+        )
+
     progress_context = (
         console.progress(
             total=len(extraction_archives), description="Extracting microcontroller logs", unit="controller"
@@ -423,23 +521,25 @@ def _run_extraction_stage(
 
     with progress_context as progress_bar:
         for controller_id, archive_path in extraction_archives.items():
-            extraction_job_id = ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
-            console.echo(
-                message=(
-                    f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
+            # Silences the binding's per-controller announcement so it does not bisect the bar, restoring the
+            # console's prior state once the extraction returns.
+            console_enabled = console.enabled
+            console.disable()
+            try:
+                _extract_controller(
+                    archive_path=archive_path,
+                    output_directory=extraction_output,
+                    controller_id=controller_id,
+                    controller_config=controllers[controller_id],
+                    job_id=extraction_job_ids[controller_id],
+                    tracker=tracker,
+                    workers=workers,
+                    display_progress=False,
+                    executor=executor,
                 )
-            )
-            _extract_controller(
-                archive_path=archive_path,
-                output_directory=extraction_output,
-                controller_id=controller_id,
-                controller_config=controllers[controller_id],
-                job_id=extraction_job_id,
-                tracker=tracker,
-                workers=workers,
-                display_progress=False,
-                executor=executor,
-            )
+            finally:
+                if console_enabled:
+                    console.enable()
             if progress_bar is not None:
                 progress_bar.update(1)
 

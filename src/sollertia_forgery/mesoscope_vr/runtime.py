@@ -12,7 +12,7 @@ import numpy as np
 import polars as pl
 from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba type introspection
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SessionTypes, MesoscopeExperimentConfiguration
+from sollertia_shared_assets import SessionTypes, TaskTemplate, MesoscopeExperimentConfiguration
 
 from .metadata import BehaviorDataFiles
 
@@ -20,11 +20,7 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Iterable
 
-    from sollertia_shared_assets import (
-        SessionData,
-        MesoscopeGasPuffTrial as GasPuffTrial,
-        MesoscopeWaterRewardTrial as WaterRewardTrial,
-    )
+    from sollertia_shared_assets import SessionData, TrialStructure
 
 RUNTIME_SOURCE_ID: str = "1"
 """The source ID used by the Mesoscope-VR runtime DataLogger for its log archive. Every processable session
@@ -67,11 +63,13 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
         session: The loaded session, from which the experiment configuration is resolved.
 
     Raises:
-        FileNotFoundError: If the session is an experiment session but its experiment configuration YAML is missing.
+        FileNotFoundError: If the session is an experiment session but its experiment configuration or VR task
+            template YAML file is missing.
         ValueError: If the recorded VR wall cue sequences are absent or their distance breakpoints are inconsistent.
         RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
     experiment_configuration = _resolve_experiment_configuration(session=session)
+    task_template = _resolve_task_template(session=session, experiment_configuration=experiment_configuration)
     messages = (
         (timestamp, np.frombuffer(payload, dtype=np.uint8))
         for timestamp, payload in zip(
@@ -79,7 +77,10 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
         )
     )
     _export_runtime_data(
-        messages=messages, output_directory=output_directory, experiment_configuration=experiment_configuration
+        messages=messages,
+        output_directory=output_directory,
+        experiment_configuration=experiment_configuration,
+        task_template=task_template,
     )
 
 
@@ -87,6 +88,7 @@ def _export_runtime_data(
     messages: Iterable[tuple[np.uint64, NDArray[np.uint8]]],
     output_directory: Path,
     experiment_configuration: MesoscopeExperimentConfiguration | None,
+    task_template: TaskTemplate | None,
 ) -> None:
     """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
 
@@ -100,6 +102,8 @@ def _export_runtime_data(
         output_directory: The path to the directory where to save the extracted data as uncompressed .feather files.
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
+        task_template: The VR task template supplying the trial geometry for the processed session. Present exactly
+            when experiment_configuration is present, since only experiment sessions decode trial geometry.
     """
     system_states: list[np.uint8] = []
     system_timestamps: list[np.uint64] = []
@@ -147,8 +151,9 @@ def _export_runtime_data(
     runtime_dataframe = pl.DataFrame({"time_us": runtime_timestamps, "runtime_state": runtime_states})
     runtime_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.RUNTIME_STATE, compression="uncompressed")
 
-    # Exports experiment-specific data only for experiment sessions.
-    if experiment_configuration is not None:
+    # Exports experiment-specific data only for experiment sessions. The task template is present exactly when the
+    # experiment configuration is, so the combined guard also narrows the template to non-None for the geometry join.
+    if experiment_configuration is not None and task_template is not None:
         if reinforcing_guidance_states:
             reinforcing_dataframe = pl.DataFrame(
                 {"time_us": reinforcing_guidance_timestamps, "reinforcing_guidance_state": reinforcing_guidance_states}
@@ -168,6 +173,7 @@ def _export_runtime_data(
         # Decomposes cue sequences into trials, handling single or multiple sequences.
         trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
             experiment_configuration=experiment_configuration,
+            task_template=task_template,
             cue_sequences=cue_sequences,
             distance_breakpoints=distance_snapshots,
         )
@@ -175,6 +181,7 @@ def _export_runtime_data(
         # Processes the trial sequence to extract cue, trigger zone, and trial start metadata.
         cue_sequence, distance_sequence, trigger_start, trigger_end, trial_start = _process_trial_sequence(
             experiment_configuration=experiment_configuration,
+            task_template=task_template,
             trial_types=trial_types,
             trial_distances=trial_distances,
         )
@@ -221,8 +228,74 @@ def _resolve_experiment_configuration(session: SessionData) -> MesoscopeExperime
     return MesoscopeExperimentConfiguration.from_yaml(file_path=experiment_configuration_path)
 
 
+def _resolve_task_template(
+    session: SessionData, experiment_configuration: MesoscopeExperimentConfiguration | None
+) -> TaskTemplate | None:
+    """Loads the VR task template geometry for experiment sessions or returns None otherwise.
+
+    Notes:
+        The task template is the session's ``vr_configuration.yaml`` snapshot. It holds the spatial trial geometry the
+        runtime parser needs: the cue catalog, the corridor cue offset, and each trial's cue sequence and trigger
+        zone. The experiment configuration carries only the stimulus parameters, so the two are joined by trial name.
+
+    Args:
+        session: The loaded session whose runtime data is being parsed.
+        experiment_configuration: The resolved experiment configuration, or None for non-experiment sessions. The
+            template is loaded only when this is present, since only experiment sessions decode trial geometry.
+
+    Returns:
+        The loaded TaskTemplate instance for experiment sessions, or None for non-experiment sessions.
+
+    Raises:
+        FileNotFoundError: If the session is an experiment session but no VR task template YAML file is present at the
+            session's canonical location.
+    """
+    if experiment_configuration is None:
+        return None
+
+    vr_configuration_path = session.raw_data.vr_configuration_path
+    if not vr_configuration_path.is_file():
+        message = (
+            f"Unable to load the VR task template for session '{session.session_name}'. No VR configuration YAML "
+            f"file was found at '{vr_configuration_path}'."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
+    return TaskTemplate.from_yaml(file_path=vr_configuration_path)
+
+
+def _resolve_trial_geometries(task_template: TaskTemplate, trial_names: list[str]) -> list[TrialStructure]:
+    """Joins each experiment trial to its spatial geometry in the VR task template, ordered by trial name.
+
+    Notes:
+        The runtime parser indexes trials by their position in the experiment configuration, so the returned
+        geometries follow that same order. Each trial's geometry is looked up from the task template by trial name,
+        the shared key between the two configurations.
+
+    Args:
+        task_template: The VR task template holding the per-trial spatial geometry.
+        trial_names: The experiment configuration's trial names, in their canonical order.
+
+    Returns:
+        The list of TrialStructure geometries, one per trial name in the given order.
+
+    Raises:
+        ValueError: If the experiment configuration references a trial name absent from the task template.
+    """
+    missing = [name for name in trial_names if name not in task_template.trial_structures]
+    if missing:
+        message = (
+            f"Unable to resolve trial geometry for the runtime parser. The experiment configuration references "
+            f"trial(s) {missing} absent from the VR task template. Available template trials: "
+            f"{sorted(task_template.trial_structures)}."
+        )
+        console.error(message=message, error=ValueError)
+    return [task_template.trial_structures[name] for name in trial_names]
+
+
 def _decompose_multiple_cue_sequences_into_trials(
     experiment_configuration: MesoscopeExperimentConfiguration,
+    task_template: TaskTemplate,
     cue_sequences: list[NDArray[np.uint8]],
     distance_breakpoints: list[np.float64],
 ) -> tuple[NDArray[np.int32], NDArray[np.float64]]:
@@ -233,7 +306,9 @@ def _decompose_multiple_cue_sequences_into_trials(
         Uses distance breakpoints to stitch sequences together correctly.
 
     Args:
-        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session.
+        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
+            defines the canonical trial ordering that trial_type_index refers to.
+        task_template: The VR task template supplying each trial's cue motif and length, joined by trial name.
         cue_sequences: The Virtual Reality environment cue sequences in the order they were used during runtime.
         distance_breakpoints: The cumulative distances, in centimeters, at which each sequence ends. Should have
             the same number of elements as the number of cue sequences minus one.
@@ -261,11 +336,22 @@ def _decompose_multiple_cue_sequences_into_trials(
         )
         console.error(message=message, error=ValueError)
 
-    trials: list[WaterRewardTrial | GasPuffTrial] = list(experiment_configuration.trial_structures.values())
+    # The experiment configuration defines the canonical trial ordering that trial_type_index refers to, and the VR
+    # task template supplies each trial's spatial geometry. The two are joined by trial name.
+    trial_names = list(experiment_configuration.trial_structures.keys())
+    trial_geometries = _resolve_trial_geometries(task_template=task_template, trial_names=trial_names)
+    cue_code_by_name = {cue.name: cue.code for cue in task_template.cues}
+    cue_length_by_name = {cue.name: cue.length_cm for cue in task_template.cues}
 
-    # Extracts trial motifs and their corresponding distances in centimeters.
-    trial_motifs: list[NDArray[np.uint8]] = [np.asarray(trial.cue_sequence).astype(np.uint8) for trial in trials]
-    trial_distances: list[float] = [float(trial.trial_length_cm) for trial in trials]
+    # Extracts each trial's cue motif as cue codes, matching the runtime cue stream, and its length in centimeters as
+    # the sum of its cues' lengths.
+    trial_motifs: list[NDArray[np.uint8]] = [
+        np.array([cue_code_by_name[name] for name in geometry.cue_sequence], dtype=np.uint8)
+        for geometry in trial_geometries
+    ]
+    trial_distances: list[float] = [
+        float(sum(cue_length_by_name[name] for name in geometry.cue_sequence)) for geometry in trial_geometries
+    ]
 
     # Prepares the flattened motif data for numba-accelerated decomposition.
     motifs_flat, motif_starts, motif_lengths, motif_indices, distances_array = _prepare_motif_data(
@@ -451,6 +537,7 @@ def _decompose_sequence_numba_flat(
 
 def _process_trial_sequence(
     experiment_configuration: MesoscopeExperimentConfiguration,
+    task_template: TaskTemplate,
     trial_types: NDArray[np.int32],
     trial_distances: NDArray[np.float64],
 ) -> tuple[NDArray[np.uint8], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
@@ -461,7 +548,10 @@ def _process_trial_sequence(
         trial-based downstream processing.
 
     Args:
-        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session.
+        experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session, which
+            defines the canonical trial ordering the trial_types indices refer to.
+        task_template: The VR task template supplying each trial's cue sequence and trigger zone, the cue catalog,
+            and the corridor cue offset, joined by trial name.
         trial_types: The indices used to query the trial data for each trial experienced by the animal during runtime.
         trial_distances: The cumulative traveled distance, in centimeters, at which the animal fully completed each
             trial during runtime. The elements in this array use the same order as elements in the trial_types array.
@@ -474,11 +564,15 @@ def _process_trial_sequence(
         traveled by the animal when it left each trial's trigger zone. The fifth array stores the cumulative
         distance traveled by the animal at the start of each trial.
     """
-    trials: list[WaterRewardTrial | GasPuffTrial] = list(experiment_configuration.trial_structures.values())
+    # The experiment configuration defines the canonical trial ordering, and the VR task template supplies each
+    # trial's cue sequence, trigger zone, and the cue catalog, joined by trial name.
+    trial_names = list(experiment_configuration.trial_structures.keys())
+    trial_geometries = _resolve_trial_geometries(task_template=task_template, trial_names=trial_names)
 
-    # Extracts the cue-to-length mapping and the starting position offset.
-    cue_offset = experiment_configuration.cue_offset_cm
-    cue_map = {cue.code: cue.length_cm for cue in experiment_configuration.cues}
+    # Extracts the cue-name-to-length and cue-name-to-code mappings and the starting position offset.
+    cue_offset = task_template.vr_environment.cue_offset_cm
+    cue_code_by_name = {cue.name: cue.code for cue in task_template.cues}
+    cue_length_by_name = {cue.name: cue.length_cm for cue in task_template.cues}
 
     distances_list: list[np.float64] = []
     cues_list: list[np.uint8] = []
@@ -493,15 +587,16 @@ def _process_trial_sequence(
     index: int
     trial: np.int32
     for index, trial in enumerate(trial_types):
-        trial_type = trials[trial]
+        trial_geometry = trial_geometries[trial]
         trial_start_distances_list.append(previous_trial_end_distance)
 
         actual_trial_distance = trial_distances[index] - previous_trial_end_distance
-        trial_cue_sequence = trial_type.cue_sequence
+        trial_cue_sequence = trial_geometry.cue_sequence
         distance_within_trial = np.float64(0)
 
-        for cue_index, cue_id in enumerate(trial_cue_sequence):
-            cue_length = cue_map[int(cue_id)]
+        for cue_index, cue_name in enumerate(trial_cue_sequence):
+            cue_code = cue_code_by_name[cue_name]
+            cue_length = cue_length_by_name[cue_name]
 
             # Applies the starting position offset for the first cue after a sequence start or restart.
             if apply_offset_to_next_cue and cue_index == 0:
@@ -512,20 +607,20 @@ def _process_trial_sequence(
 
             # Handles trial truncation when the trial was abruptly ended before completion.
             if distance_within_trial + effective_distance_to_next_cue > actual_trial_distance:
-                cues_list.append(np.uint8(cue_id))
+                cues_list.append(np.uint8(cue_code))
                 distances_list.append(cumulative_distance)
                 cumulative_distance = previous_trial_end_distance + actual_trial_distance
                 apply_offset_to_next_cue = True
                 break
 
-            cues_list.append(np.uint8(cue_id))
+            cues_list.append(np.uint8(cue_code))
             distances_list.append(cumulative_distance)
             cumulative_distance += effective_distance_to_next_cue
             distance_within_trial += effective_distance_to_next_cue
 
         # Computes absolute trigger zone boundaries from trial-relative positions.
-        trigger_start_relative = trial_type.stimulus_trigger_zone_start_cm
-        trigger_end_relative = trial_type.stimulus_trigger_zone_end_cm
+        trigger_start_relative = trial_geometry.stimulus_trigger_zone_start_cm
+        trigger_end_relative = trial_geometry.stimulus_trigger_zone_end_cm
         trigger_start_absolute = previous_trial_end_distance + trigger_start_relative
         trigger_end_absolute = previous_trial_end_distance + trigger_end_relative
 

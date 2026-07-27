@@ -13,10 +13,19 @@ from sollertia_shared_assets import (
 )
 
 from .dataset import resolve_dataset
-from .pipeline import FORGING_JOB_NAME, run_forging_pipeline
+from .pipeline import (
+    DEFINE_JOB_NAME,
+    FORGING_JOB_NAME,
+    MULTIDAY_DISCOVERY_JOB_NAME,
+    MULTIDAY_EXTRACTION_JOB_NAME,
+    run_forging_pipeline,
+)
 
 __all__ = [
+    "DEFINE_JOB_NAME",
     "FORGING_JOB_NAME",
+    "MULTIDAY_DISCOVERY_JOB_NAME",
+    "MULTIDAY_EXTRACTION_JOB_NAME",
     "DatasetAnimal",
     "DatasetData",
     "DatasetFiles",

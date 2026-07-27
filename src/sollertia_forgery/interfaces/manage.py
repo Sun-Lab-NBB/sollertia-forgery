@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import click
 from ataraxis_base_utilities import console
 
-from ..managing import ProjectManifest, resolve_checksum, generate_project_manifest
+from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -16,7 +16,7 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @dataclass(frozen=True, slots=True)
 class _SharedManifestParameters:
-    """Bundles the option parsed on the ``manifest`` group and shared across its ``generate`` and ``print``
+    """Bundles the option parsed on the ``manifest`` group and shared across its ``create`` and ``print``
     subcommands.
 
     The group callback builds one of these from its option and stores it on the Click context, and each subcommand
@@ -57,13 +57,24 @@ def manifest_cli(context: click.Context, project_path: Path | None) -> None:
 
 
 @manifest_cli.command("create", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-np",
+    "--no-progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to suppress the preamble and completion messages during manifest generation. These "
+        "messages are displayed by default."
+    ),
+)
 @_pass_shared_parameters
-def create_manifest(shared: _SharedManifestParameters) -> None:
+def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> None:
     """Creates the manifest .feather file that captures the snapshot of the target project's state.
 
     An existing manifest for the project is recreated (overwritten) with a fresh snapshot.
     """
-    generate_project_manifest(project_directory=shared.require_project_path())
+    generate_project_manifest(project_directory=shared.require_project_path(), display_progress=not no_progress)
 
 
 @manifest_cli.command("print", context_settings=_CONTEXT_SETTINGS)
@@ -99,17 +110,6 @@ def create_manifest(shared: _SharedManifestParameters) -> None:
         "for tracking the data processing state of each data acquisition session conducted for the target project."
     ),
 )
-@click.option(
-    "-r",
-    "--regenerate",
-    is_flag=True,
-    show_default=True,
-    default=False,
-    help=(
-        "Determines whether to regenerate the manifest file before loading it. Use this option to ensure the manifest "
-        "reflects the latest state of the project's data."
-    ),
-)
 @_pass_shared_parameters
 def print_project_manifest_data(
     shared: _SharedManifestParameters,
@@ -117,7 +117,6 @@ def print_project_manifest_data(
     animal: int | None,
     notes: bool,
     summary: bool,
-    regenerate: bool,
 ) -> None:
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
     if not summary and not notes:
@@ -127,11 +126,16 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # Resolves the manifest path and regenerates if requested or absent.
+    # Printing reads an existing manifest snapshot. Generation is a separate step ('manifest create'), so a missing
+    # manifest is a loud error rather than an implicit regeneration.
     project_path = shared.require_project_path()
     manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
-    if regenerate or not manifest_path.exists():
-        generate_project_manifest(project_directory=project_path)
+    if not manifest_path.exists():
+        message = (
+            f"Unable to print the manifest data for the '{project_path.stem}' project. No manifest file exists at "
+            f"'{manifest_path}'. Generate it first with 'slf manifest -pp {project_path} create'."
+        )
+        console.error(message=message, error=FileNotFoundError)
 
     manifest = ProjectManifest(manifest_file=manifest_path)
 
@@ -171,10 +175,37 @@ def print_project_manifest_data(
         "the command is called with this flag, it re-checksums the data instead of verifying its integrity."
     ),
 )
-def checksum_command(session_path: Path, *, regenerate_checksum: bool) -> None:
+@click.option(
+    "-w",
+    "--workers",
+    type=int,
+    show_default=True,
+    default=-1,
+    help=(
+        "The number of parallel worker processes to use for hashing the session's files. Values below 1 request all "
+        "available cores minus the reserved system cores, and a value of 1 disables parallelism."
+    ),
+)
+@click.option(
+    "-np",
+    "--no-progress",
+    is_flag=True,
+    show_default=True,
+    default=False,
+    help=(
+        "Determines whether to suppress the preamble message and progress bar during checksum resolution. These "
+        "are displayed by default."
+    ),
+)
+def checksum_command(session_path: Path, workers: int, *, regenerate_checksum: bool, no_progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
     This command can be used to either verify the integrity of the session's data or to update the session's data
     integrity checksum to include expected changes.
     """
-    resolve_checksum(session_path=session_path, regenerate_checksum=regenerate_checksum)
+    run_checksum_processing_pipeline(
+        session_path=session_path,
+        regenerate_checksum=regenerate_checksum,
+        workers=workers,
+        display_progress=not no_progress,
+    )

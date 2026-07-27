@@ -187,6 +187,30 @@ def _is_module_eligible(module_type: int, module_id: int, hardware_state: Mesosc
     return specification.check_eligibility(hardware_state=hardware_state)
 
 
+def get_eligible_modules(session: SessionData) -> set[tuple[int, int]]:
+    """Returns the Mesoscope-VR hardware modules the target session configured for use.
+
+    Notes:
+        This is the Mesoscope-VR system's donation to the microcontroller eligibility registry ('registries.py'). The
+        system-agnostic microcontroller pipeline narrows each controller's extraction filter to the modules returned
+        here, so a module the session records as unused is left out of both the extraction stage and the parse job
+        universe. Every parser applies the same eligibility check before writing its feather, so the pipeline and the
+        parsers agree on which modules a session carries.
+
+    Args:
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Returns:
+        The ``(module_type, module_id)`` pairs the session configured for use.
+    """
+    hardware_state = _resolve_hardware_state(session=session)
+    return {
+        module_key
+        for module_key in _MODULE_REGISTRY
+        if _is_module_eligible(module_type=module_key[0], module_id=module_key[1], hardware_state=hardware_state)
+    }
+
+
 def get_module_event_codes() -> dict[tuple[int, int], tuple[int, ...]]:
     """Returns the axci event codes each Mesoscope-VR hardware module's parser reads.
 

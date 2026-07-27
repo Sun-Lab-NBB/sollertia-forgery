@@ -10,8 +10,10 @@ from datetime import UTC, datetime
 import polars as pl
 from natsort import natsorted
 from filelock import FileLock
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    DatasetData,
+    SessionData,
     SessionTypes,
     ProcessingTrackers,
     iterate_sessions,
@@ -19,22 +21,61 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingTracker
 from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
-from ..shared_assets import prepare_tracker
+from ..shared_assets import (
+    summarize_tracker,
+    derive_tracker_status,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sollertia_shared_assets import SessionData
-
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
+
+PIPELINE_STATUS_COLUMNS: dict[str, str] = {
+    "checksum": "integrity",
+    "runtime": "runtime",
+    "microcontroller": "microcontroller",
+    "video": "video",
+    "two_photon": "two_photon",
+}
+"""Maps each per-session pipeline to the manifest column that carries its rolled-up status. The checksum pipeline's
+status lives under the ``integrity`` column, so the mapping's keys differ from its values."""
+
+JOB_STRUCT: pl.Struct = pl.Struct(
+    {
+        "pipeline": pl.String,
+        "job_id": pl.String,
+        "job_name": pl.String,
+        "specifier": pl.String,
+        "status": pl.String,
+        "executor_id": pl.String,
+        "error_message": pl.String,
+        "started_at": pl.UInt64,
+        "completed_at": pl.UInt64,
+    }
+)
+"""The element type of the manifest's ``jobs`` column. Mirrors the per-job entry that ``summarize_tracker`` emits,
+which carries every ``ataraxis_data_structures.JobState`` field plus the ``job_id`` registry key, with a
+``pipeline`` discriminator prepended. Exploding the column yields one row per tracked job across every pipeline of a
+session."""
+
+DATASET_STRUCT: pl.Struct = pl.Struct(
+    {
+        "name": pl.String,
+        "complete": pl.Boolean,
+    }
+)
+"""The element type of the manifest's ``datasets`` column. Each struct pairs the name of a forged dataset the
+session belongs to with that dataset's forging completion status, so a session's dataset membership stays
+self-describing within a single column."""
 
 
 def project_manifest_path(project_directory: Path) -> Path:
     """Resolves the path to the project manifest .feather file under the target project's root directory.
 
     This is the single source of truth for the manifest filename, so both the manifest writer and any consumer that
-    locates the manifest (such as the project mirror) derive the same path.
+    locates the manifest derive the same path.
 
     Args:
         project_directory: The path to the project's root directory.
@@ -45,7 +86,7 @@ def project_manifest_path(project_directory: Path) -> Path:
     return project_directory.joinpath(f"{project_directory.stem}_manifest.feather")
 
 
-def generate_project_manifest(project_directory: Path) -> None:
+def generate_project_manifest(project_directory: Path, *, display_progress: bool = False) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
     The manifest captures one row per session with its acquisition metadata and per-pipeline processing status. A
@@ -54,6 +95,8 @@ def generate_project_manifest(project_directory: Path) -> None:
 
     Args:
         project_directory: The path to the processed project's root directory.
+        display_progress: Determines whether to emit a preamble message when generation starts and a completion
+            message when the manifest is written. Generation is fast enough that no progress bar is displayed.
 
     Raises:
         FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
@@ -68,9 +111,14 @@ def generate_project_manifest(project_directory: Path) -> None:
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Discovers and loads every session under the project once. Both the multi-recording registry and the
-    # per-session manifest rows consume this list, avoiding a second project-wide scan and redundant
-    # SessionData loads.
+    if display_progress:
+        console.echo(
+            message=f"Generating the project manifest for the '{project_directory.stem}' project...",
+            level=LogLevel.INFO,
+        )
+
+    # Discovers and loads every session under the project once, so the per-session manifest rows are built without
+    # redundant SessionData loads.
     sessions: list[SessionData] = list(iterate_sessions(root_path=project_directory))
 
     if not sessions:
@@ -90,7 +138,7 @@ def generate_project_manifest(project_directory: Path) -> None:
     # entry detection so that foreign or outdated job entries are reset before the new job is registered.
     tracker = ProcessingTracker(file_path=project_directory.joinpath(ProcessingTrackers.MANIFEST))
     jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
-    prepare_tracker(tracker=tracker, jobs=jobs, universe=jobs)
+    tracker.align_jobs(jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
     # Acquires the lock file, ensuring only this specific process can work with the manifest data.
@@ -103,7 +151,11 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "animal": [],
                 # Session names.
                 "session": [],
-                # Session acquisition time as a timezone-aware datetime in the host machine's local time.
+                # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored
+                # relative rather than absolute so a manifest generated on one machine resolves against any data
+                # root, which is what lets an orchestrator map a manifest row back to a directory to process.
+                "session_path": [],
+                # Session acquisition time as a timezone-aware UTC datetime, matching the UTC session name.
                 "date": [],
                 # The session type, a SessionTypes enumeration value.
                 "type": [],
@@ -113,137 +165,68 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "notes": [],
                 # Determines whether the session's data is complete and ready for unsupervised processing.
                 "complete": [],
-                # Determines whether the session's data integrity has been verified.
+                # The rolled-up status label of the checksum (data-integrity) pipeline. A label rather than a
+                # boolean, so a failed pipeline is distinguishable from one that has not started.
                 "integrity": [],
-                # Determines whether the session has been processed with the two-photon (cindra) processing pipeline.
+                # The rolled-up status label of the two-photon (cindra) processing pipeline.
                 "two_photon": [],
-                # Determines whether the session has been processed with the runtime processing pipeline.
+                # The rolled-up status label of the runtime processing pipeline.
                 "runtime": [],
-                # Determines whether the session has been processed with the video (pose tracking) pipeline.
+                # The rolled-up status label of the microcontroller processing pipeline.
+                "microcontroller": [],
+                # The rolled-up status label of the video (timestamp, tracking, motion energy) pipeline.
                 "video": [],
-                # Stores the cindra multi-recording dataset names the session belongs to (empty list if none).
-                "multi_recording_datasets": [],
-                # Stores per-dataset completion status, aligned by index with multi_recording_datasets.
-                "multi_recording_complete": [],
+                # The complete job registry of every per-session pipeline's tracker, one entry per job. This is a
+                # faithful serialization of the trackers rather than a derived view, so an orchestrator can read
+                # per-job status, failure reasons, executor identifiers, and timing without touching the trackers.
+                "jobs": [],
+                # Maps each pipeline to its tracker's location relative to the project root, so a consumer can
+                # reset or inspect a tracker without re-deriving the session hierarchy.
+                "tracker_paths": [],
+                # The forged datasets the session belongs to, one struct per dataset pairing the dataset name with
+                # its forging completion status. Empty list when the session joins no forged dataset.
+                "datasets": [],
             }
 
-            # Builds the cindra multi-recording dataset completion registry from the canonical
-            # ``cindra/multi_recording`` subdirectory of every session, rather than rescanning the whole
-            # project. The tracker only lives on the main recording, so the registry later resolves
-            # completion status for datasets discovered on non-main sessions.
-            multi_recording_registry: dict[str, bool] = {}
-            for session_data in sessions:
-                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
-                if not multi_recording_root.is_dir():
+            # Builds a map from each session to the forged datasets it belongs to. A forged dataset is a top-level
+            # directory carrying a ``dataset.yaml`` marker under the project root. Its member sessions come from the
+            # dataset hierarchy, and its completion is the roll-up of its forging tracker, shared by every session in
+            # the dataset.
+            session_datasets: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for dataset_directory in natsorted(project_directory.iterdir(), key=lambda path: path.name):
+                if not dataset_directory.is_dir() or not dataset_directory.joinpath("dataset.yaml").is_file():
                     continue
-                for dataset_dir in multi_recording_root.iterdir():
-                    if not dataset_dir.is_dir():
-                        continue
-                    tracker_path = dataset_dir.joinpath(ProcessingTrackers.CINDRA_MULTI_RECORDING)
-                    if not tracker_path.is_file():
-                        continue
-                    # The forging pipeline writes the dataset directory as ``{animal_id}_{base_name}`` for
-                    # collision avoidance when batching multiple animals under one forged dataset. The manifest
-                    # surfaces the unqualified base name, so the animal_id prefix is stripped here.
-                    dataset_name = _strip_animal_prefix(
-                        qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
+                dataset = DatasetData.load(dataset_path=dataset_directory)
+                forging_jobs = ProcessingTracker(
+                    file_path=dataset_directory.joinpath(ProcessingTrackers.FORGING)
+                ).snapshot()
+                complete = bool(
+                    forging_jobs
+                    and derive_tracker_status(summary=summarize_tracker(jobs=forging_jobs)["summary"]) == "completed"
+                )
+                for dataset_session in dataset.sessions:
+                    session_datasets.setdefault((dataset_session.animal, dataset_session.session), []).append(
+                        {"name": dataset.name, "complete": complete}
                     )
-                    multi_recording_registry[dataset_name] = ProcessingTracker(file_path=tracker_path).complete
 
             # Loops over each session of every animal in the project and extracts session ID information and
             # information about which processing steps have been successfully applied to the session.
             for session_data in sessions:
-                # Skips processing directories without files (sessions with empty raw_data directories).
+                # Skips sessions whose raw_data directory is empty. A fully acquired session carries its marker and
+                # acquired data under raw_data, so an empty raw_data marks an aborted or not-yet-acquired session
+                # that must not enter the manifest.
                 if not any(session_data.raw_data_path.glob("*")):
                     continue
 
-                # Extracts ID and data path information from the SessionData instance.
-                manifest["animal"].append(session_data.animal_id)
-                manifest["session"].append(session_data.session_name)
-                manifest["type"].append(session_data.session_type)
-                manifest["system"].append(session_data.acquisition_system)
+                for column, value in _build_session_row(
+                    session_data=session_data, project_directory=project_directory
+                ).items():
+                    manifest[column].append(value)
 
-                # Parses the session name (a UTC timestamp) into a timezone-aware datetime in the host machine's
-                # local time.
-                date_time_components = session_data.session_name.split("-")
-                date_time = datetime(
-                    year=int(date_time_components[0]),
-                    month=int(date_time_components[1]),
-                    day=int(date_time_components[2]),
-                    hour=int(date_time_components[3]),
-                    minute=int(date_time_components[4]),
-                    second=int(date_time_components[5]),
-                    microsecond=int(date_time_components[6]),
-                    tzinfo=UTC,
-                ).astimezone()
-                manifest["date"].append(date_time)
-
-                # Loads the session descriptor to extract experimenter notes and completeness status. Every session
-                # carries a valid descriptor, so a missing or unparseable descriptor propagates as an error.
-                descriptor_path = session_data.raw_data.session_descriptor_path
-                descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
-                if descriptor_class is None:
-                    message = (
-                        f"Unable to generate the manifest file for the '{project_directory.stem}' project. An "
-                        f"unsupported session type '{session_data.session_type}' was encountered for session "
-                        f"'{session_data.session_name}'. Currently, only the following session types are supported: "
-                        f"{tuple(SessionTypes)}."
-                    )
-                    console.error(message=message, error=ValueError)
-
-                # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields the
-                # manifest reads (every registered descriptor declares them) need an attribute-defined ignore.
-                descriptor = descriptor_class.from_yaml(file_path=descriptor_path)
-                is_complete = not descriptor.incomplete  # type: ignore[attr-defined]
-                manifest["notes"].append(descriptor.experimenter_notes)  # type: ignore[attr-defined]
-
-                manifest["complete"].append(is_complete)
-
-                # Resolves data integrity verification status from the canonical checksum tracker path.
-                checksum_tracker = _load_tracker_if_exists(tracker_path=session_data.raw_data.checksum_tracker_path)
-                is_verified = checksum_tracker.complete if checksum_tracker is not None else False
-                manifest["integrity"].append(is_verified)
-
-                # If the session is incomplete or unverified, marks all processing steps as FALSE, as automatic
-                # processing is disabled for incomplete sessions and, therefore, it could not have been processed.
-                if not is_complete or not is_verified:
-                    manifest["two_photon"].append(False)
-                    manifest["runtime"].append(False)
-                    manifest["video"].append(False)
-                    manifest["multi_recording_datasets"].append([])
-                    manifest["multi_recording_complete"].append([])
-                    continue
-
-                # Resolves two-photon, runtime, and video processing status from canonical tracker paths
-                # exposed by SessionData.
-                two_photon_tracker = _load_tracker_if_exists(
-                    tracker_path=session_data.processed_data.two_photon_tracker_path
+                # Attaches the forged-dataset membership resolved above, keyed on the session's animal and name.
+                manifest["datasets"].append(
+                    session_datasets.get((str(session_data.animal_id), session_data.session_name), [])
                 )
-                manifest["two_photon"].append(two_photon_tracker.complete if two_photon_tracker is not None else False)
-
-                runtime_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.runtime_tracker_path)
-                manifest["runtime"].append(runtime_tracker.complete if runtime_tracker is not None else False)
-
-                video_tracker = _load_tracker_if_exists(tracker_path=session_data.processed_data.video_tracker_path)
-                manifest["video"].append(video_tracker.complete if video_tracker is not None else False)
-
-                # Resolves multi-recording dataset membership by enumerating the session's
-                # ``cindra/multi_recording`` subdirectories, then looks up each dataset's completion status
-                # from the project-wide registry built above.
-                multi_recording_root = session_data.processed_data.cindra_multi_recording_path
-                session_datasets: list[str] = []
-                session_dataset_complete: list[bool] = []
-                if multi_recording_root.is_dir():
-                    for dataset_dir in natsorted(multi_recording_root.iterdir()):
-                        if not dataset_dir.is_dir():
-                            continue
-                        dataset_name = _strip_animal_prefix(
-                            qualified_name=dataset_dir.name, animal_id=str(session_data.animal_id)
-                        )
-                        session_datasets.append(dataset_name)
-                        session_dataset_complete.append(multi_recording_registry.get(dataset_name, False))
-                manifest["multi_recording_datasets"].append(session_datasets)
-                manifest["multi_recording_complete"].append(session_dataset_complete)
 
             # Converts animal IDs from strings to integers for proper numeric sorting.
             manifest["animal"] = [int(animal) for animal in manifest["animal"]]
@@ -253,16 +236,19 @@ def generate_project_manifest(project_directory: Path) -> None:
                 "animal": pl.UInt64,
                 "date": pl.Datetime,
                 "session": pl.String,
+                "session_path": pl.String,
                 "type": pl.String,
                 "system": pl.String,
                 "notes": pl.String,
                 "complete": pl.UInt8,
-                "integrity": pl.UInt8,
-                "two_photon": pl.UInt8,
-                "runtime": pl.UInt8,
-                "video": pl.UInt8,
-                "multi_recording_datasets": pl.List(pl.String),
-                "multi_recording_complete": pl.List(pl.UInt8),
+                "integrity": pl.String,
+                "two_photon": pl.String,
+                "runtime": pl.String,
+                "microcontroller": pl.String,
+                "video": pl.String,
+                "jobs": pl.List(JOB_STRUCT),
+                "tracker_paths": pl.Struct(dict.fromkeys(PIPELINE_STATUS_COLUMNS, pl.String)),
+                "datasets": pl.List(DATASET_STRUCT),
             }
             manifest_frame = pl.DataFrame(data=manifest, schema=schema, strict=False)
 
@@ -277,9 +263,15 @@ def generate_project_manifest(project_directory: Path) -> None:
 
             tracker.complete_job(job_id=job_id)
 
-        except Exception:
+            if display_progress:
+                console.echo(
+                    message=f"Project '{project_directory.stem}' manifest: Generated.",
+                    level=LogLevel.SUCCESS,
+                )
+
+        except Exception as exception:
             # Records the manifest job as failed before re-raising so the tracker reflects the aborted run.
-            tracker.fail_job(job_id=job_id)
+            tracker.fail_job(job_id=job_id, error_message=str(exception))
             raise
 
 
@@ -308,12 +300,12 @@ class ProjectManifest:
     def print_data(self) -> None:
         """Prints the entire contents of the manifest file to the terminal."""
         with pl.Config(
-            set_tbl_rows=-1,  # Displays all rows (-1 means unlimited)
-            set_tbl_cols=-1,  # Displays all columns (-1 means unlimited)
+            set_tbl_rows=-1,
+            set_tbl_cols=-1,
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="LEFT",
             set_tbl_width_chars=250,
-            set_fmt_str_lengths=600,  # Allows longer strings to display properly (default is 30)
+            set_fmt_str_lengths=600,
         ):
             console.echo(message=str(self._data), raw=True)
 
@@ -322,7 +314,11 @@ class ProjectManifest:
         each session.
 
         This data view is optimized for tracking which processing steps have been applied to each of the project's data
-        acquisition sessions.
+        acquisition sessions. The 'session' column shows the per-animal 1-based session index, and the 'date' column
+        shows the UTC acquisition time truncated to the second. Every pipeline status column and each dataset's
+        completion flag collapse to 1 (completed) or 0 (otherwise), matching the numeric 'complete' column, so the
+        operator reads a single done or not-done convention. The stored manifest keeps the full status labels for the
+        orchestration layer.
 
         Args:
             animal: The unique identifier of the animal for which to display the data. If provided, this method only
@@ -330,22 +326,42 @@ class ProjectManifest:
         """
         summary_cols = [
             "animal",
-            "date",
             "session",
+            "date",
             "type",
             "system",
             "complete",
             "integrity",
             "two_photon",
             "runtime",
+            "microcontroller",
             "video",
-            "multi_recording_datasets",
-            "multi_recording_complete",
+            "datasets",
         ]
 
-        data_frame = self._data.select(summary_cols)
+        # The pipeline status columns collapse to a binary done indicator for this human-facing view. The detailed
+        # labels are retained in the stored manifest columns that the orchestration layer reads.
+        data_frame = (
+            self._display_frame()
+            .with_columns(
+                # Maps each pipeline status to 1 when completed and 0 otherwise, matching the numeric 'complete' column.
+                *(
+                    (pl.col(column) == "completed").cast(pl.UInt8).alias(column)
+                    for column in PIPELINE_STATUS_COLUMNS.values()
+                ),
+                # Renders each dataset's completion with the same 0/1 convention rather than a boolean.
+                pl.col("datasets")
+                .list.eval(
+                    pl.struct(
+                        pl.element().struct.field("name").alias("name"),
+                        pl.element().struct.field("complete").cast(pl.UInt8).alias("complete"),
+                    )
+                )
+                .alias("datasets"),
+            )
+            .select(summary_cols)
+        )
 
-        # Optionally filters the data for the target animal.
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
@@ -360,20 +376,20 @@ class ProjectManifest:
             console.echo(message=str(data_frame), raw=True)
 
     def print_notes(self, animal: int | None = None) -> None:
-        """Prints the animal ID, session date, session ID, session type, acquisition system, and experimenter notes
-        data for each project's session to the terminal.
+        """Prints the animal ID, per-animal session index, session date, session type, acquisition system, and
+        experimenter notes data for each project's session to the terminal.
 
         This data view is optimized for determining what data acquisition sessions have been carried out and checking
-        the outcomes of each session recorded in the experimenter notes.
+        the outcomes of each session recorded in the experimenter notes. The 'session' column shows the per-animal
+        1-based session index, and the 'date' column shows the UTC acquisition time truncated to the second.
 
         Args:
             animal: The unique identifier of the animal for which to display the data. If provided, this method only
                 displays the data for that animal. Otherwise, it displays the data for all animals.
         """
         # Pre-selects the columns to display.
-        data_frame = self._data.select(["animal", "date", "session", "type", "system", "notes"])
+        data_frame = self._display_frame().select(["animal", "session", "date", "type", "system", "notes"])
 
-        # Optionally filters the data for the target animal.
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
@@ -383,8 +399,8 @@ class ProjectManifest:
             set_tbl_cols=-1,
             set_tbl_hide_column_data_types=True,
             set_tbl_cell_alignment="LEFT",
-            set_tbl_width_chars=170,  # Wider columns for notes
-            set_fmt_str_lengths=2000,  # Allows very long strings for notes
+            set_tbl_width_chars=170,
+            set_fmt_str_lengths=2000,
         ):
             console.echo(message=str(data_frame), raw=True)
 
@@ -425,9 +441,10 @@ class ProjectManifest:
             session: The unique identifier of the session for which to retrieve the data.
 
         Returns:
-            A Polars DataFrame containing all manifest columns for the specified session, including 'animal', 'date',
-            'session', 'type', 'system', 'notes', 'complete', 'integrity', 'two_photon', 'runtime', 'video',
-            'multi_recording_datasets', and 'multi_recording_complete'.
+            A Polars DataFrame containing all manifest columns for the specified session: 'animal', 'date',
+            'session', 'session_path', 'type', 'system', 'notes', 'complete', the per-pipeline status columns
+            ('integrity', 'two_photon', 'runtime', 'microcontroller', 'video'), 'jobs', 'tracker_paths', and
+            'datasets'.
         """
         return self._data.filter(pl.col("session").eq(session))
 
@@ -484,24 +501,32 @@ class ProjectManifest:
     def summarize(self) -> dict[str, Any]:
         """Returns a structured summary of the project manifest for programmatic consumption.
 
-        Computes aggregate statistics across all sessions including per-pipeline completion counts and
-        multi-recording dataset membership. Designed for MCP tool responses where a structured dictionary is
+        Computes aggregate statistics across all sessions including per-pipeline status distributions and
+        forged dataset membership. Designed for MCP tool responses where a structured dictionary is
         more useful than a printed table.
 
         Returns:
             A dictionary containing ``total_sessions``, ``total_animals``, ``animals``, ``session_types``,
-            ``acquisition_systems``, per-pipeline completion counts, ``multi_recording_datasets`` summary,
-            ``columns``, and ``total_rows``.
+            ``acquisition_systems``, ``complete_count``, ``pipeline_status_counts`` (the per-status session
+            distribution of every per-session pipeline), the ``datasets`` summary, ``columns``, and ``total_rows``.
         """
         data = self._data
         total_rows = data.height
 
-        # Computes per-pipeline completion counts from the boolean (UInt8) status columns.
+        # Counts sessions marked complete from the boolean (UInt8) completeness column.
         complete_count = int(data.filter(pl.col("complete") == 1).height)
-        integrity_count = int(data.filter(pl.col("integrity") == 1).height)
-        two_photon_count = int(data.filter(pl.col("two_photon") == 1).height)
-        runtime_count = int(data.filter(pl.col("runtime") == 1).height)
-        video_count = int(data.filter(pl.col("video") == 1).height)
+
+        # Builds the per-pipeline status distribution from the status-label columns. Reporting the full
+        # distribution rather than a single completion count is what lets a consumer see how many sessions failed
+        # a pipeline as opposed to simply not having run it yet.
+        pipeline_status_counts: dict[str, dict[str, int]] = {}
+        for pipeline, column in PIPELINE_STATUS_COLUMNS.items():
+            if column not in data.columns:
+                continue
+            distribution: dict[str, int] = {}
+            for value in data.select(column).to_series().to_list():
+                distribution[str(value)] = distribution.get(str(value), 0) + 1
+            pipeline_status_counts[pipeline] = distribution
 
         # Computes session type distribution.
         session_types: dict[str, int] = {}
@@ -513,27 +538,25 @@ class ProjectManifest:
         for row in data.select("system").to_series().to_list():
             acquisition_systems[str(row)] = acquisition_systems.get(str(row), 0) + 1
 
-        # Builds the multi-recording dataset summary by exploding the list columns and grouping by dataset
-        # name. Each dataset entry reports the number of sessions it spans and its completion status.
+        # Builds the dataset summary by exploding the datasets column into one struct per membership and grouping
+        # by dataset name. Each dataset entry reports the number of sessions it spans and its forging completion.
         dataset_summary: dict[str, Any] = {"total_datasets": 0, "datasets": []}
-        if "multi_recording_datasets" in data.columns and "multi_recording_complete" in data.columns:
-            # Filters to rows that have at least one dataset entry, then explodes both list columns in
-            # parallel so each row represents a single (session, dataset, complete) triple.
-            has_datasets = data.filter(pl.col("multi_recording_datasets").list.len() > 0)
+        if "datasets" in data.columns:
+            # Filters to rows that belong to at least one dataset, then explodes and unnests the struct list so
+            # each row represents a single (session, name, complete) triple.
+            has_datasets = data.filter(pl.col("datasets").list.len() > 0)
             if has_datasets.height > 0:
-                exploded = has_datasets.select(
-                    "session", "multi_recording_datasets", "multi_recording_complete"
-                ).explode("multi_recording_datasets", "multi_recording_complete")
+                exploded = has_datasets.select("session", "datasets").explode("datasets").unnest("datasets")
 
                 # Groups by dataset name to compute per-dataset session count and completion status.
-                grouped = exploded.group_by("multi_recording_datasets").agg(
+                grouped = exploded.group_by("name").agg(
                     pl.col("session").count().alias("session_count"),
-                    pl.col("multi_recording_complete").max().alias("complete"),
+                    pl.col("complete").max().alias("complete"),
                 )
 
                 datasets: list[dict[str, Any]] = [
                     {
-                        "name": row["multi_recording_datasets"],
+                        "name": row["name"],
                         "session_count": int(row["session_count"]),
                         "complete": bool(row["complete"]),
                     }
@@ -552,11 +575,8 @@ class ProjectManifest:
             "session_types": session_types,
             "acquisition_systems": acquisition_systems,
             "complete_count": complete_count,
-            "integrity_verified_count": integrity_count,
-            "two_photon_processed_count": two_photon_count,
-            "runtime_processed_count": runtime_count,
-            "video_processed_count": video_count,
-            "multi_recording_datasets": dataset_summary,
+            "pipeline_status_counts": pipeline_status_counts,
+            "datasets": dataset_summary,
             "columns": data.columns,
             "total_rows": total_rows,
         }
@@ -565,6 +585,18 @@ class ProjectManifest:
     def data(self) -> pl.DataFrame:
         """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
         return self._data
+
+    def _display_frame(self) -> pl.DataFrame:
+        """Returns a manifest copy prepared for terminal display, with the session name replaced by a per-animal
+        1-based session index and the acquisition date truncated to the second as a timezone-aware UTC datetime.
+
+        The stored 'session' and 'date' columns are left untouched on the underlying data, so this transformation
+        only affects the printed views and never the identifiers the other query methods resolve against.
+        """
+        return self._data.sort(by=["animal", "session"]).with_columns(
+            pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
+            pl.col("date").dt.truncate("1s").alias("date"),
+        )
 
     def _get_filtered_sessions(
         self,
@@ -590,7 +622,6 @@ class ProjectManifest:
         """
         data = self._data
 
-        # Filters by animal if specified.
         if animal is not None:
             if animal not in self.animals:
                 message = (
@@ -601,45 +632,133 @@ class ProjectManifest:
 
             data = data.filter(pl.col("animal") == animal)
 
-        # Optionally filters out incomplete sessions.
         if exclude_incomplete:
             data = data.filter(pl.col("complete") == 1)
 
-        # Formats and returns session IDs to the caller.
         sessions = data.select("session").sort("session").to_series().to_list()
         return tuple(sessions)
 
 
-def _strip_animal_prefix(qualified_name: str, animal_id: str) -> str:
-    """Strips the ``{animal_id}_`` prefix from a cindra multi-recording dataset directory name.
+def _build_session_row(session_data: SessionData, project_directory: Path) -> dict[str, Any]:
+    """Builds every manifest column for a single session except the dataset-membership column.
 
-    The slf forging pipeline prepends the animal identifier to the dataset name to produce collision-free
-    output directories when batching multiple animals with the same forged dataset. This helper reverses that
-    qualification so manifest consumers see the logical base name instead of the filesystem-qualified name.
+    Notes:
+        The dataset-membership column is excluded here because it resolves against a project-wide dataset map rather
+        than the session alone, so the caller appends it after this returns.
 
-    Args:
-        qualified_name: The on-disk directory name produced by the forging pipeline.
-        animal_id: The animal identifier prepended to qualify the on-disk dataset directory name.
-
-    Returns:
-        The dataset name with the ``{animal_id}_`` prefix removed when present, or the input unchanged when
-        the prefix is absent.
-    """
-    prefix = f"{animal_id}_"
-    if qualified_name.startswith(prefix):
-        return qualified_name[len(prefix) :]
-    return qualified_name
-
-
-def _load_tracker_if_exists(tracker_path: Path) -> ProcessingTracker | None:
-    """Returns a ProcessingTracker bound to the target path when it exists, or None otherwise.
+        Every pipeline is read for every session regardless of completeness or integrity. Suppressing processing
+        state for an incomplete session would make an unprocessable session indistinguishable from an unprocessed
+        one, which is exactly the distinction an orchestrator needs.
 
     Args:
-        tracker_path: The canonical path to the processing tracker YAML file.
+        session_data: The loaded session to snapshot.
+        project_directory: The project's root directory, used to relativize the emitted paths.
 
     Returns:
-        A ProcessingTracker instance when the file is present on disk, or None when it is missing.
+        A mapping of manifest column name to that column's value for this session.
+
+    Raises:
+        ValueError: If the session's type has no registered descriptor class.
     """
-    if not tracker_path.is_file():
-        return None
-    return ProcessingTracker(file_path=tracker_path)
+    # Parses the session name, a UTC timestamp, into a timezone-aware UTC datetime.
+    date_time_components = session_data.session_name.split("-")
+    date_time = datetime(
+        year=int(date_time_components[0]),
+        month=int(date_time_components[1]),
+        day=int(date_time_components[2]),
+        hour=int(date_time_components[3]),
+        minute=int(date_time_components[4]),
+        second=int(date_time_components[5]),
+        microsecond=int(date_time_components[6]),
+        tzinfo=UTC,
+    )
+
+    # Loads the session descriptor to extract experimenter notes and completeness status. Every session carries a
+    # valid descriptor, so a missing or unparseable descriptor propagates as an error.
+    descriptor_class = DESCRIPTOR_REGISTRY.get(SessionTypes(session_data.session_type))
+    if descriptor_class is None:
+        message = (
+            f"Unable to generate the manifest file for the '{project_directory.stem}' project. An unsupported "
+            f"session type '{session_data.session_type}' was encountered for session "
+            f"'{session_data.session_name}'. Currently, only the following session types are supported: "
+            f"{tuple(SessionTypes)}."
+        )
+        console.error(message=message, error=ValueError)
+
+    # DESCRIPTOR_REGISTRY types its values as the base YamlConfig, so the shared descriptor fields the manifest
+    # reads (every registered descriptor declares them) need an attribute-defined ignore.
+    descriptor = descriptor_class.from_yaml(file_path=session_data.raw_data.session_descriptor_path)
+
+    # Resolves the canonical tracker path of every per-session pipeline from the SessionData grammar.
+    session_trackers: dict[str, Path] = {
+        "checksum": session_data.raw_data.checksum_tracker_path,
+        "runtime": session_data.processed_data.runtime_tracker_path,
+        "microcontroller": session_data.processed_data.microcontroller_tracker_path,
+        "video": session_data.processed_data.video_tracker_path,
+        "two_photon": session_data.processed_data.two_photon_tracker_path,
+    }
+
+    row: dict[str, Any] = {
+        "animal": session_data.animal_id,
+        "session": session_data.session_name,
+        "session_path": f"{session_data.animal_id}/{session_data.session_name}",
+        "date": date_time,
+        "type": session_data.session_type,
+        "system": session_data.acquisition_system,
+        "notes": descriptor.experimenter_notes,  # type: ignore[attr-defined]
+        "complete": not descriptor.incomplete,  # type: ignore[attr-defined]
+    }
+
+    session_jobs: list[dict[str, Any]] = []
+    tracker_locations: dict[str, str] = {}
+    for pipeline, tracker_path in session_trackers.items():
+        status, pipeline_jobs = _read_pipeline_state(pipeline=pipeline, tracker_path=tracker_path)
+        row[PIPELINE_STATUS_COLUMNS[pipeline]] = status
+        session_jobs.extend(pipeline_jobs)
+        tracker_locations[pipeline] = _relative_path(path=tracker_path, project_directory=project_directory)
+
+    row["jobs"] = session_jobs
+    row["tracker_paths"] = tracker_locations
+    return row
+
+
+def _relative_path(path: Path, project_directory: Path) -> str:
+    """Expresses a path under the project hierarchy relative to the project root, using forward slashes.
+
+    Storing hierarchy locations relative rather than absolute is what lets a manifest generated against one data
+    root be consumed against another, which matters because the manifest is the artifact an orchestrator reads to
+    map rows back to directories.
+
+    Args:
+        path: The absolute path to express relative to the project root.
+        project_directory: The project's root directory.
+
+    Returns:
+        The path relative to the project root as a forward-slash string, or the unchanged absolute path as a string
+        when it does not lie under the project root.
+    """
+    try:
+        return path.relative_to(project_directory).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _read_pipeline_state(pipeline: str, tracker_path: Path) -> tuple[str, list[dict[str, Any]]]:
+    """Reads one pipeline's processing tracker into a rolled-up status label and its per-job entries.
+
+    Args:
+        pipeline: The pipeline identifier recorded on each emitted job entry.
+        tracker_path: The canonical path to the pipeline's processing tracker YAML file.
+
+    Returns:
+        A tuple of the rolled-up status label and the list of per-job entries, each carrying the ``pipeline``
+        discriminator alongside the full ``JobState`` payload. A tracker that does not exist yields ``not_started``
+        and no entries.
+    """
+    jobs = ProcessingTracker(file_path=tracker_path).snapshot()
+    if not jobs:
+        return "not_started", []
+
+    status_payload = summarize_tracker(jobs=jobs)
+    entries = [{"pipeline": pipeline, **entry} for entry in status_payload["jobs"]]
+    return derive_tracker_status(summary=status_payload["summary"]), entries

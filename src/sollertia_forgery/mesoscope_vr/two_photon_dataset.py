@@ -4,11 +4,13 @@ processing pipeline outputs.
 
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING
+from itertools import permutations
 
 import numpy as np
 import polars as pl
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import MesoscopeDirectories
 
 from .metadata import DatasetColumn, BehaviorDataFiles
@@ -51,6 +53,19 @@ ScanImage-recorded frame timestamps in the fallback alignment path."""
 _SI_ANCHOR_SEARCH_LIMIT: int = 10
 """The maximum number of leading TTL pulses considered as candidate clock-offset anchors in the fallback alignment
 path."""
+
+_SI_ACQUISITION_NUMBER_KEY: str = "acquisitionNumbers"
+"""The key name of the per-frame ScanImage acquisition index inside the frame_variant_metadata archive."""
+
+_PULSE_RUN_GAP_FACTOR: float = 3.0
+"""The multiple of the median pulse period above which an interval starts a new pulse run. Splitting a continuous
+acquisition is harmless, since the run-to-acquisition matching rejoins the pieces, so this is deliberately eager."""
+
+_MINIMUM_SPLITTABLE_PULSE_COUNT: int = 3
+"""The smallest number of pulses from which a median period, and therefore a run boundary, can be derived."""
+
+_UNMATCHED_COST: int = sys.maxsize
+"""The sentinel cost standing for a run-span assignment that leaves at least one acquisition unplaced."""
 
 
 def assemble_cindra_dataset(
@@ -145,6 +160,12 @@ def assemble_cindra_dataset(
         .sort("frame")
     )
 
+    # Manually triggering the mesoscope outside the acquisition emits pulse runs that image no frame. Discards them
+    # before the counts below are compared, so an operator's stray scanning cannot displace real frames.
+    frame_aligned_data = _discard_unacquired_pulse_runs(
+        frame_aligned_data=frame_aligned_data, raw_data_path=raw_data_path
+    )
+
     # When the log has more in-window pulses than the cindra fluorescence frame count, the front of the log is
     # clipped because aberrant frames must come from a period before the main experiment runtime. When the log has
     # fewer in-window pulses than the cindra frame count, the duration filter has rejected real frames whose TTL
@@ -233,6 +254,184 @@ def _load_cindra_fluorescence(
         transposed = np.ascontiguousarray(fluorescence.T, dtype=np.float32)
 
     return pl.Series(name=column_name, values=transposed)
+
+
+def _resolve_acquisition_sizes(raw_data_path: Path) -> list[int]:
+    """Returns the frame count of every mesoscope acquisition that contributed to the session, in descending order.
+
+    Notes:
+        Sessions preprocessed with acquisition-aware frame numbering carry an explicit per-frame acquisition index,
+        which is read directly. Older sessions number every acquisition from one, so a frame number appearing in the
+        archive N times was produced by N separate acquisitions. Counting how many frame numbers survive each
+        successive peel of that multiset recovers the same sizes from the multiset alone, which holds for any row
+        order the archive happens to carry.
+
+    Args:
+        raw_data_path: The path to the session's raw_data directory.
+
+    Returns:
+        The per-acquisition frame counts, or an empty list when the ScanImage metadata archive is absent.
+    """
+    metadata_path = raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA, _FRAME_VARIANT_METADATA_FILENAME)
+    if not metadata_path.is_file():
+        return []
+
+    with np.load(file=metadata_path) as metadata:
+        if _SI_ACQUISITION_NUMBER_KEY in metadata:
+            acquisitions = np.asarray(metadata[_SI_ACQUISITION_NUMBER_KEY])
+            if np.unique(acquisitions).size > 1:
+                return sorted((int(count) for count in np.unique(acquisitions, return_counts=True)[1]), reverse=True)
+        frame_numbers = np.asarray(metadata[_SI_FRAME_NUMBER_KEY])
+
+    counts = np.unique(frame_numbers, return_counts=True)[1]
+    sizes: list[int] = []
+    while counts.max(initial=0) > 0:
+        sizes.append(int(np.count_nonzero(counts)))
+        counts = np.maximum(counts - 1, 0)
+    return sizes
+
+
+def _discard_unacquired_pulse_runs(frame_aligned_data: pl.DataFrame, raw_data_path: Path) -> pl.DataFrame:
+    """Drops the runs of TTL pulses that imaged no frame, keeping the runs that make up the session's acquisitions.
+
+    Notes:
+        Triggering the mesoscope by hand outside the acquisition emits a run of scan pulses that ScanImage never
+        saves, so the log holds more pulses than there are frames. Splitting the log at its idle gaps and keeping the
+        run grouping whose pulse counts best account for the known acquisition sizes separates the stray runs from
+        the acquisitions. The pulse counts carry that distinction even when a stray run and an acquisition happen to
+        be of a similar length.
+
+        A session whose pulses form a single run, which is the overwhelming majority, is returned unchanged.
+
+    Args:
+        frame_aligned_data: The duration-filtered pulses, with the ``frame`` and ``time_us`` columns, sorted by frame.
+        raw_data_path: The path to the session's raw_data directory.
+
+    Returns:
+        The pulses belonging to the session's acquisitions.
+    """
+    pulse_times = frame_aligned_data["time_us"].to_numpy().astype(np.int64)
+    if pulse_times.size < _MINIMUM_SPLITTABLE_PULSE_COUNT:
+        return frame_aligned_data
+
+    periods = np.diff(pulse_times)
+    breaks = np.flatnonzero(periods > np.median(periods) * _PULSE_RUN_GAP_FACTOR)
+    if breaks.size == 0:
+        return frame_aligned_data
+
+    sizes = _resolve_acquisition_sizes(raw_data_path=raw_data_path)
+    if not sizes:
+        return frame_aligned_data
+
+    bounds = [0, *(int(index) + 1 for index in breaks), len(pulse_times)]
+    runs = [(bounds[index], bounds[index + 1]) for index in range(len(bounds) - 1)]
+    plan = _match_runs_to_acquisitions(run_lengths=[end - start for start, end in runs], acquisition_sizes=sizes)
+    if plan is None:
+        return frame_aligned_data
+
+    keep = np.zeros(len(pulse_times), dtype=np.bool_)
+    for first_run, last_run in plan:
+        keep[runs[first_run][0] : runs[last_run][1]] = True
+    if bool(keep.all()):
+        return frame_aligned_data
+
+    message = (
+        f"Discarded {int((~keep).sum())} of {len(pulse_times)} mesoscope TTL pulses that imaged no frame while "
+        f"assembling the cindra dataset for '{raw_data_path.parent.name}'. The mesoscope was likely triggered by "
+        f"hand outside the acquisition."
+    )
+    console.echo(message=message, level=LogLevel.WARNING)
+    return frame_aligned_data.filter(pl.Series(values=keep))
+
+
+def _match_runs_to_acquisitions(run_lengths: list[int], acquisition_sizes: list[int]) -> list[tuple[int, int]] | None:
+    """Assigns each acquisition the consecutive run span whose pulse count best accounts for its frame count.
+
+    Notes:
+        An acquisition emits one pulse per frame, plus a small surplus from the scanner arming and minus the pulses
+        the duration filter rejected, so the assignment minimizes the total count difference rather than requiring an
+        exact match. A brief hiccup can split one acquisition across several runs, which is why an acquisition claims
+        a consecutive span rather than a single run.
+
+    Args:
+        run_lengths: The pulse count of every run, in acquisition order.
+        acquisition_sizes: The frame count of every acquisition.
+
+    Returns:
+        The inclusive (first run, last run) span claimed by each acquisition, or None when no assignment covers every
+        acquisition.
+    """
+    run_count, acquisition_count = len(run_lengths), len(acquisition_sizes)
+    if acquisition_count == 0 or acquisition_count > run_count:
+        return None
+
+    best: tuple[int, list[tuple[int, int]]] = (_UNMATCHED_COST, [])
+    for order in permutations(range(acquisition_count)):
+        best = _search_run_spans(
+            run_lengths=run_lengths,
+            acquisition_sizes=acquisition_sizes,
+            order=order,
+            run_index=0,
+            position=0,
+            claimed=[],
+            cost=0,
+            best=best,
+        )
+    return None if best[0] == _UNMATCHED_COST else sorted(best[1])
+
+
+def _search_run_spans(
+    run_lengths: list[int],
+    acquisition_sizes: list[int],
+    order: tuple[int, ...],
+    run_index: int,
+    position: int,
+    claimed: list[tuple[int, int]],
+    cost: int,
+    best: tuple[int, list[tuple[int, int]]],
+) -> tuple[int, list[tuple[int, int]]]:
+    """Extends a partial run-span assignment by one acquisition, returning the cheapest assignment found.
+
+    Notes:
+        Abandons any branch whose accumulated cost already matches the cheapest complete assignment, which keeps the
+        search over run spans tractable as the run count grows.
+
+    Args:
+        run_lengths: The pulse count of every run, in acquisition order.
+        acquisition_sizes: The frame count of every acquisition.
+        order: The order in which the acquisitions claim their run spans.
+        run_index: The first run available to the acquisition being placed.
+        position: The index into ``order`` of the acquisition being placed.
+        claimed: The run spans claimed by the acquisitions already placed.
+        cost: The total count difference accumulated by the acquisitions already placed.
+        best: The cheapest complete assignment found so far, paired with its cost.
+
+    Returns:
+        The cheapest complete assignment found, paired with its cost.
+    """
+    if cost >= best[0]:
+        return best
+    if position == len(acquisition_sizes):
+        return cost, list(claimed)
+
+    target = acquisition_sizes[order[position]]
+    for first_run in range(run_index, len(run_lengths)):
+        total = 0
+        for last_run in range(first_run, len(run_lengths)):
+            total += run_lengths[last_run]
+            best = _search_run_spans(
+                run_lengths=run_lengths,
+                acquisition_sizes=acquisition_sizes,
+                order=order,
+                run_index=last_run + 1,
+                position=position + 1,
+                claimed=[*claimed, (first_run, last_run)],
+                cost=cost + abs(total - target),
+                best=best,
+            )
+            if total > target:
+                break
+    return best
 
 
 def _align_pulses_to_scanimage(

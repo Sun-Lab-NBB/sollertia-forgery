@@ -28,6 +28,7 @@ from .mesoscope_vr import (
     parse_encoder,
     parse_runtime,
     parse_gas_puff,
+    get_eligible_modules,
     parse_mesoscope_frame,
     get_module_event_codes,
     locate_two_photon_data,
@@ -51,6 +52,7 @@ __all__ = [
     "RuntimeParser",
     "TwoPhotonDataLocator",
     "VideoTracker",
+    "resolve_eligible_microcontroller_modules",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
     "resolve_microcontroller_event_codes",
@@ -144,6 +146,13 @@ _MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict
 """Maps each acquisition system to the module-level accessor returning its ``(module_type, module_id) -> event
 codes`` mapping for every module the system parses. The agnostic microcontroller pipeline derives each controller's
 extraction filter from this mapping, so a system's event codes live next to the parsers that read them."""
+
+_MICROCONTROLLER_ELIGIBILITY_REGISTRY: dict[AcquisitionSystems, Callable[[SessionData], set[tuple[int, int]]]] = {
+    AcquisitionSystems.MESOSCOPE_VR: get_eligible_modules,
+}
+"""Maps each acquisition system to the module-level accessor returning the hardware modules a given session
+configured for use. The agnostic microcontroller pipeline narrows each controller's extraction filter to these
+modules, so a system's eligibility rules live next to the parsers that apply them."""
 
 _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
     AcquisitionSystems.MESOSCOPE_VR: _ForgingAssemblyAsset(
@@ -282,6 +291,30 @@ def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dic
         ValueError: If the acquisition system is unknown.
     """
     return _MICROCONTROLLER_EVENT_CODE_REGISTRY[_resolve_system(system=system)]()
+
+
+def resolve_eligible_microcontroller_modules(
+    system: str | AcquisitionSystems, session: SessionData
+) -> set[tuple[int, int]]:
+    """Resolves the microcontroller modules the target session configured for use.
+
+    Notes:
+        This helper invokes the registered accessor, so any system-specific exception the accessor raises propagates
+        unchanged.
+
+    Args:
+        system: The acquisition system that recorded the session being processed, for example the value carried by
+            ``SessionData.acquisition_system``.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Returns:
+        The ``(module_type, module_id)`` pairs the session configured for use. The agnostic microcontroller pipeline
+        narrows every controller's extraction filter to these modules.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _MICROCONTROLLER_ELIGIBILITY_REGISTRY[_resolve_system(system=system)](session)
 
 
 def resolve_microcontroller_parsers(system: str | AcquisitionSystems) -> dict[tuple[int, int], MicrocontrollerParser]:

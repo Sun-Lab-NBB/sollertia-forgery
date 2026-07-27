@@ -1,57 +1,71 @@
-"""Provides generic batch-orchestration primitives shared across every package's Model Context Protocol tools."""
+"""Provides the shared batch execution engine that admits queued jobs against a core and a memory budget and
+dispatches them in their pipelines' dependency order.
+"""
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Lock, Thread
 import contextlib
 from collections import deque
 from dataclasses import field, dataclass
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 
-import numpy as np
-import polars as pl
-from ataraxis_time import TimeUnits, PrecisionTimer, TimerPrecisions, convert_time
-from sollertia_shared_assets import validate_directory
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, delete_directory
+import cv2
+import numba
+from ataraxis_base_utilities import console
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+
 RESERVED_CORES: int = 2
-"""The number of CPU cores reserved for system operations. Each package's ``execute_*_jobs_tool`` subtracts this
-value from the available core count when resolving the worker budget."""
+"""The number of CPU cores held back for host-system operations when the core budget auto-resolves. The batch tools
+forward this to ``resolve_worker_count``, which applies it only to a non-positive budget and honors an explicit
+budget up to the logical core count."""
+
+
+_WORKER_THREAD_CEILING: int = 1
+"""The number of threads each pool worker pins its library thread pools to. Every job type either runs
+single-threaded, raises its own thread count once it starts, or fans out into a sub-pool whose children each cost the
+single core the allocation budgeted for them."""
+
+
+_PINNED_THREAD_VARIABLES: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "NUMBA_NUM_THREADS",
+    "POLARS_MAX_THREADS",
+    "OPENCV_FFMPEG_THREADS",
+)
+"""The threading-layer environment variables a pool worker pins when it starts."""
+
+
+_LIVENESS_WAIT_SECONDS: float = 10 * 60
+"""The longest the manager blocks on a running job before looking at its state again. A job finishing is the only
+event the loop acts on, so this bound never governs a healthy batch and exists so a future that never resolves
+cannot stall the manager for good."""
+
+
+_TIFF_DECODE_THREAD_CEILING: int = 4
+"""The thread ceiling applied to the hidden image-decode pool some readers open. That pool otherwise sizes itself
+from the host's core count entirely outside the batch's allocation."""
 
 
 @dataclass(frozen=True, slots=True)
-class ConcurrencyDescriptor:
-    """Describes the per-pipeline concurrency policy consulted by the generic ``execute_jobs_tool``.
-
-    Notes:
-        ``cores_per_job`` is the number of CPU cores a single worker subprocess consumes. The generic tool floors
-        the user-supplied parallel-job cap by ``worker_budget // cores_per_job``. ``default_max_parallel`` is the
-        fallback hard cap applied when the caller does not request an explicit parallel-job ceiling. This descriptor
-        is system-agnostic so both the system-specific batch adapters and the agnostic forging adapters can declare
-        their concurrency policy with one shared type.
-    """
+class JobAllocation:
+    """Describes the cores one job type receives and how many of its jobs the core budget alone would allow."""
 
     cores_per_job: int
-    """The number of CPU cores a single worker subprocess of this pipeline consumes."""
-    default_max_parallel: int
-    """The default hard cap on concurrently executing jobs when the caller does not request one. A non-positive
-    value defers concurrency to the resolved worker budget alone."""
-
-
-_MINIMUM_ROWS_FOR_INTERVALS: int = 2
-"""The minimum number of rows required in a feather file to compute inter-row timing intervals."""
-
-_TIME_COLUMN_CANDIDATES: tuple[str, ...] = ("timestamp_us", "time_us", "frame_time_us")
-"""Column names, in priority order, that ``analyze_feather_file`` recognizes as the canonical time axis
-when computing timing summaries. The first matching column present in the dataframe is used, which lets the
-helper cover every feather variant produced across the Sollertia stack: ``timestamp_us`` (raw axci module
-feathers), ``time_us`` (forgery runtime and microcontroller outputs), and ``frame_time_us`` (axvs camera
-timestamp feathers)."""
+    """The cores each job of this type occupies while it runs."""
+    maximum_parallel: int
+    """The jobs of this type the core budget alone would allow. Reported for the caller's planning, since admission
+    weighs each running job against both budgets directly."""
 
 
 @dataclass(slots=True)
@@ -59,15 +73,24 @@ class PendingJob:
     """Describes a single batch processing job tracked by a ``ProcessingTracker`` file.
 
     Notes:
-        Packages subclass this dataclass with additional fields required by their domain-specific worker
-        callables. The base fields are sufficient for the shared execution manager to group jobs by tracker,
-        read their status from disk, and cancel or reset them without knowing any domain-specific details.
+        Subclasses extend this dataclass with the additional fields their worker callables need. The base fields
+        carry everything the shared execution manager needs, which is the tracker a job is recorded on, the cores and
+        memory it occupies, and the jobs it waits for. That leaves the manager free of any domain-specific detail.
     """
 
     tracker_path: Path
     """The path to the ``ProcessingTracker`` YAML file that tracks this job."""
     job_id: str
     """The unique hexadecimal identifier for this job in the tracker."""
+    job_name: str = ""
+    """The pipeline job type name registered in the ``ProcessingTracker``, which keys this job's core allocation."""
+    core_weight: int = 1
+    """The cores this job occupies while it runs, assigned from its type's allocation before dispatch."""
+    memory_mb: int = 0
+    """The memory this job occupies while it runs, estimated from the data it will process."""
+    prerequisite_ids: tuple[str, ...] = ()
+    """The identifiers of the jobs that must succeed before this job may be dispatched. Resolved from the pipeline's
+    own job ordering, and empty for a job that depends on nothing."""
 
     @property
     def dispatch_key(self) -> tuple[str, str]:
@@ -76,34 +99,44 @@ class PendingJob:
         """
         return str(self.tracker_path), self.job_id
 
+    @property
+    def prerequisite_keys(self) -> tuple[tuple[str, str], ...]:
+        """Returns the dispatch keys of this job's upstream jobs.
+
+        Notes:
+            A job identifier is derived from the job name and specifier alone, so the same stage of two different
+            sessions shares one identifier. Pairing each identifier with this job's tracker keeps a batch spanning
+            many sessions from treating one session's completed stage as every session's.
+        """
+        return tuple((str(self.tracker_path), prerequisite) for prerequisite in self.prerequisite_ids)
+
 
 @dataclass(slots=True)
 class GenericPendingJob(PendingJob):
     """Describes a single batch processing job for the system-agnostic processing tools.
 
     Notes:
-        Extends the shared ``PendingJob`` base with the small descriptor set shared by every registered
-        pipeline worker, so a single descriptor replaces the former per-pipeline ``PendingJob`` subclasses. The
-        picklable workers in the worker registry map these fields onto each pipeline's call convention (the
-        behavior worker uses ``unit_path``, while the forging worker uses ``name`` and ``project_root``). Fields that
-        do not apply to a given pipeline are left at their defaults, and the processing tools assert the
-        required fields per pipeline before dispatch.
+        Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so one
+        descriptor serves every pipeline. The shared worker routes on ``pipeline`` and each session pipeline's worker
+        reads ``unit_path`` and ``job_id``. Fields a pipeline does not use stay at their defaults, and a descriptor
+        missing a field the engine requires is rejected before dispatch.
     """
 
+    pipeline: str = ""
+    """The pipeline this job belongs to, which the shared worker routes on so one pool serves every pipeline."""
     name: str = ""
-    """The human-readable unit name (the session name for behavior jobs or the dataset name for forging jobs)
-    used for logging and status reporting."""
+    """The human-readable unit name used for logging and status reporting."""
     unit_path: Path = field(default_factory=Path)
-    """The path to the processing unit this job operates on (the session root for behavior jobs)."""
-    job_name: str = ""
-    """The pipeline job type name registered in the ``ProcessingTracker`` (paired with ``specifier`` to derive
-    the job ID)."""
+    """The path to the processing unit this job operates on (the session root for session jobs)."""
     specifier: str = ""
-    """The job-specific specifier that differentiates jobs of the same type within a unit (the system ID, the
-    controller-type-id triple, or the session name for forging assembly jobs)."""
+    """The specifier that differentiates jobs of the same type within one unit, such as a camera or controller source
+    identifier, a controller-module triple, or a plane index."""
     project_root: Path | None = None
-    """The project root directory passed to the forging worker. Unused by pipelines that resolve their output
-    location from the unit path alone."""
+    """The project root directory, carried for workers that resolve their output location above the unit path."""
+    options: dict[str, Any] = field(default_factory=dict)
+    """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
+    The execution engine never reads this mapping, so a pipeline's worker interprets whichever keys it declares and
+    ignores the rest. A pipeline that takes no parameters leaves it empty."""
 
 
 @dataclass(slots=True)
@@ -118,17 +151,17 @@ class ActiveJob[PendingJobT: PendingJob]:
 
 @dataclass(slots=True, kw_only=True)
 class JobExecutionState[PendingJobT: PendingJob]:
-    """Tracks runtime state for a batch execution session with budget-bounded concurrency.
+    """Tracks runtime state for one batch execution session budgeted by both cores and memory.
 
-    The state stores the pending and active job queues, the worker callable used to dispatch each job to a
-    subprocess, the lock that serializes state mutations, and the cancellation flag consulted by the manager
-    thread. Each package that exposes MCP batch tools keeps its own module-level state variable so that status
-    and cancel tools can read it directly. The manager owns a single ``ProcessPoolExecutor`` sized to
-    ``worker_budget`` and dispatches each pending job as an independent future.
+    The state stores the job queues, the worker callable, the two budgets, the recorded outcomes that resolve
+    ordering, the lock that serializes mutations, and the cancellation flag. The batch tools keep a single one of
+    these, so one pool serves every pipeline and the status and cancel tools read it directly. The manager owns one
+    ``ProcessPoolExecutor`` and admits each pending job once the running set has room for both its cores and its
+    memory.
 
-    The generic type parameter ``PendingJobT`` is the package-specific ``PendingJob`` subclass. Subclasses
-    carry fields such as session paths, output directories, and job specifiers that the worker callable needs
-    at dispatch time.
+    Notes:
+        The generic type parameter ``PendingJobT`` is a ``PendingJob`` subclass. Subclasses carry the fields a worker
+        callable needs at dispatch time, such as the path of the unit the job processes.
     """
 
     worker: Callable[[PendingJobT], None]
@@ -136,79 +169,136 @@ class JobExecutionState[PendingJobT: PendingJob]:
     Must accept a single argument of the pending job subclass associated with this state."""
     all_jobs: dict[tuple[str, str], PendingJobT] = field(default_factory=dict)
     """All submitted jobs keyed by ``(tracker_path, job_id)`` dispatch key."""
-    pending_queue: deque[PendingJobT] = field(default_factory=deque)
-    """Jobs awaiting dispatch."""
+    pending_jobs: deque[PendingJobT] = field(default_factory=deque)
+    """Jobs awaiting dispatch, held in the order the next admission pass considers them."""
     active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
     """Jobs currently executing on the shared process pool."""
-    worker_budget: int = 1
-    """Total CPU cores available for the execution session."""
-    max_parallel_jobs: int = -1
-    """Hard cap on concurrently executing jobs. Set to -1 to defer to ``worker_budget``. Tools where each
-    job consumes multiple cores internally set this to bound memory footprint independently of CPU
-    allocation."""
+    core_budget: int = 1
+    """The cores the batch may commit across all concurrently running jobs."""
+    memory_budget_mb: int = 1024
+    """The memory the batch may commit across all concurrently running jobs."""
+    pool_size: int = 1
+    """The number of worker processes the pool spawns."""
+    thread_ceiling: int = _WORKER_THREAD_CEILING
+    """The thread count each worker pins its library thread pools to."""
+    succeeded_job_keys: set[tuple[str, str]] = field(default_factory=set)
+    """The dispatch keys of the jobs known to have succeeded, seeded from the trackers and extended as jobs finish."""
+    failed_job_keys: set[tuple[str, str]] = field(default_factory=set)
+    """The dispatch keys of the jobs known to have failed, whose dependents can never become runnable."""
+    blocked_jobs: list[PendingJobT] = field(default_factory=list)
+    """Jobs dropped without dispatch because a prerequisite failed or never ran."""
     lock: Lock = field(default_factory=Lock)
-    """Thread synchronization lock for execution state access."""
+    """The lock guarding every mutation of the job queues and the recorded outcomes."""
     manager_thread: Thread | None = None
     """Background execution manager thread reference."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
 
 
-def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
-    """Dispatches queued jobs against a shared ``ProcessPoolExecutor``.
+def resolve_core_allocations(
+    job_cores: dict[str, int], job_names: set[str], core_budget: int
+) -> dict[str, JobAllocation]:
+    """Resolves how many cores each queued job type receives and how many of its jobs run at once.
 
     Notes:
-        Runs as a daemon thread for the lifetime of a single execution session. Each poll cycle collects
-        completed futures, frees their budget, and dispatches new jobs from the pending queue while the number
-        of active jobs stays below the worker budget. Exits when the queue is empty and no jobs remain in
-        flight. Cancellation stops new dispatches but lets already-running futures finish naturally. The manager
-        calls ``state.worker`` via ``ProcessPoolExecutor.submit``, so the worker must be a picklable
-        module-level function that accepts a single pending-job argument.
+        A type's core count is its declared allocation, narrowed to the budget so a small host never promises a job
+        more cores than it has. The concurrency that follows is simply the budget divided by that count, which the
+        engine treats as a guide, since admission weighs every running job against the same budget.
+
+        A job type with no registered allocation stops the batch, since dispatching it would run it at a width
+        nobody chose.
+
+    Raises:
+        ValueError: If any queued job type has no registered core allocation.
+
+    Args:
+        job_cores: The cores one job of each type occupies, keyed by tracker job name.
+        job_names: The job type names present in the batch.
+        core_budget: The cores the batch may commit across all concurrently running jobs.
+
+    Returns:
+        A dictionary mapping each job name to its resolved allocation.
+    """
+    unregistered = sorted(name for name in job_names if name not in job_cores)
+    if unregistered:
+        message = (
+            f"Unable to resolve core allocations for the batch. No core allocation is registered for job "
+            f"type(s) {unregistered}. Every dispatched job type must declare the cores one of its jobs occupies."
+        )
+        console.error(message=message, error=ValueError)
+
+    allocations: dict[str, JobAllocation] = {}
+    for job_name in job_names:
+        cores = max(1, min(job_cores[job_name], core_budget))
+        allocations[job_name] = JobAllocation(cores_per_job=cores, maximum_parallel=max(1, core_budget // cores))
+    return allocations
+
+
+def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
+    """Dispatches queued jobs against a shared ``ProcessPoolExecutor`` under the batch's core and memory budgets.
+
+    Notes:
+        Runs as a daemon thread for the lifetime of a single execution session. The loop wakes when a running job
+        finishes, so capacity is refilled the moment it is released and a long-running batch costs nothing while its
+        jobs run. Each pass reaps finished futures, refreshes the recorded outcomes when one finished, and admits
+        whatever the freed capacity and the pipelines' own orderings allow. Cancellation stops new admissions but
+        lets running futures finish naturally.
+
+        A pass that admits nothing while nothing is running means every remaining job waits on a prerequisite that
+        neither succeeded nor is queued. The remainder is recorded as blocked and the session ends rather than
+        waiting forever.
 
     Args:
         state: The active job execution state containing the pending queue, active jobs, worker callable, and
-            worker budget. Mutated under ``state.lock`` as jobs move between queues.
+            budgets. Mutated under ``state.lock`` as jobs move between queues.
     """
-    poll_timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
+    with ProcessPoolExecutor(
+        max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
+    ) as pool:
+        # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
+        # stages still sees the earlier stages a previous run already completed.
+        with state.lock:
+            _refresh_job_outcomes(state=state)
 
-    # Resolves the concurrency cap. A non-positive ``max_parallel_jobs`` defers to the CPU budget alone.
-    concurrency_limit = (
-        state.worker_budget if state.max_parallel_jobs <= 0 else min(state.worker_budget, state.max_parallel_jobs)
-    )
-
-    # Creates a single ProcessPoolExecutor sized to the concurrency limit. The executor is reused across
-    # every dispatch cycle so worker subprocesses are spawned once per execution session rather than per job.
-    with ProcessPoolExecutor(max_workers=concurrency_limit) as pool:
         while True:
             with state.lock:
-                # Reaps completed futures and frees their budget. Draining each future's result surfaces any
-                # worker exception so the daemon thread does not silently lose failures. The tracker
-                # remains the authoritative source for per-job outcomes since the worker is expected to
-                # transition its job to a terminal state before returning.
+                # Reaps finished futures and frees their share of both budgets. Each result is drained and its
+                # exception discarded, because a worker records its own outcome on the tracker before returning and
+                # the tracker is what the status tool and the ordering logic both read.
                 still_active: list[ActiveJob[PendingJobT]] = []
+                completed_any = False
                 for active in state.active_jobs:
                     if active.future.done():
                         with contextlib.suppress(Exception):
                             active.future.result()
+                        completed_any = True
                     else:
                         still_active.append(active)
                 state.active_jobs = still_active
 
-                # Exits when there is no more work to do.
-                if not state.pending_queue and not state.active_jobs:
+                if not state.pending_jobs and not state.active_jobs:
                     break
 
-                # Dispatches as many pending jobs as the remaining budget allows. Cancellation suppresses new
-                # dispatches but lets the already-running futures continue to completion.
-                if not state.canceled:
-                    available = concurrency_limit - len(state.active_jobs)
-                    while state.pending_queue and available > 0:
-                        job = state.pending_queue.popleft()
-                        future = pool.submit(state.worker, job)
-                        state.active_jobs.append(ActiveJob(job=job, future=future))
-                        available -= 1
+                # Re-reads the trackers only when something finished, since that is the only event that can newly
+                # satisfy a prerequisite from inside this batch.
+                if completed_any:
+                    _refresh_job_outcomes(state=state)
 
-            poll_timer.delay(delay=1, allow_sleep=True)
+                if not state.canceled:
+                    _admit_pending_jobs(state=state, pool=pool)
+
+                if not state.active_jobs and state.pending_jobs:
+                    state.blocked_jobs.extend(state.pending_jobs)
+                    state.pending_jobs.clear()
+                    break
+
+                pending_futures = [active.future for active in state.active_jobs]
+
+            # Blocks until a running job finishes. A job completing is the only event that frees capacity or
+            # satisfies a prerequisite, so the loop has nothing to do until one does. The loop breaks above whenever
+            # the active set empties, so a future is always in flight to wait on, and the bound is a liveness
+            # backstop rather than a polling interval.
+            wait(pending_futures, timeout=_LIVENESS_WAIT_SECONDS, return_when=FIRST_COMPLETED)
 
 
 def group_jobs_by_tracker[PendingJobT: PendingJob](
@@ -231,202 +321,102 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     return tracker_jobs
 
 
-def read_tracker_status(tracker_path: Path) -> dict[str, Any]:
-    """Reads a processing tracker file and returns structured per-job status information.
+def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> None:
+    """Pins a pool worker's library thread pools when the worker process starts.
+
+    Notes:
+        Runs as the ``ProcessPoolExecutor`` initializer in every spawned child. Setting the environment variables
+        alone is not sufficient, because the package imports numba to select its threading layer, so numba latches
+        its maximum thread count from the unpinned environment before this runs. The runtime setters are therefore
+        called alongside the variables. A job that needs more threads raises its own count once it starts, which
+        numba permits up to the count latched at import.
 
     Args:
-        tracker_path: The path to the ``ProcessingTracker`` YAML file.
-
-    Returns:
-        A dictionary containing per-job status details in ``jobs`` and summary counts in ``summary``. Each job
-        entry has ``job_id``, ``job_name``, ``specifier``, ``status``, and optionally ``error_message`` keys.
+        thread_ceiling: The number of threads each library thread pool is pinned to.
     """
-    tracker = ProcessingTracker.from_yaml(file_path=tracker_path)
+    ceiling = max(1, thread_ceiling)
+    for variable in _PINNED_THREAD_VARIABLES:
+        os.environ[variable] = str(ceiling)
+    os.environ["TIFFFILE_NUM_THREADS"] = str(min(_TIFF_DECODE_THREAD_CEILING, ceiling))
 
-    job_details: list[dict[str, Any]] = []
-    succeeded_count = 0
-    failed_count = 0
-    running_count = 0
-    scheduled_count = 0
-
-    for job_id, job_state in tracker.jobs.items():
-        status = job_state.status
-
-        if status == ProcessingStatus.SUCCEEDED:
-            succeeded_count += 1
-        elif status == ProcessingStatus.FAILED:
-            failed_count += 1
-        elif status == ProcessingStatus.RUNNING:
-            running_count += 1
-        else:
-            scheduled_count += 1
-
-        entry: dict[str, Any] = {
-            "job_id": job_id,
-            "job_name": job_state.job_name,
-            "specifier": job_state.specifier,
-            "status": status.name,
-        }
-        if job_state.error_message is not None:
-            entry["error_message"] = job_state.error_message
-        job_details.append(entry)
-
-    return {
-        "jobs": job_details,
-        "summary": {
-            "total": len(tracker.jobs),
-            "succeeded": succeeded_count,
-            "failed": failed_count,
-            "running": running_count,
-            "scheduled": scheduled_count,
-        },
-    }
+    numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
+    cv2.setNumThreads(ceiling)
 
 
-def derive_tracker_status(summary: dict[str, Any]) -> str:
-    """Derives a high-level processing status label from a tracker summary's job counts.
+def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
+    """Re-reads the batch's trackers and records which jobs have succeeded or failed.
 
-    Applies a fixed priority: ``failed`` if any job failed, ``completed`` if all succeeded, ``processing`` if
-    any are running, ``not_started`` if all are scheduled, and ``in_progress`` otherwise.
+    Notes:
+        The trackers are the authoritative record of every job's outcome, so prerequisite satisfaction is read from
+        them rather than inferred from the futures. Reading them also picks up prerequisites that succeeded in an
+        earlier batch and were never queued in this one. That is how a run asking only for a pipeline's later stages
+        still resolves its ordering. Outcomes are keyed by tracker as well as identifier, so one session's completed
+        stage never satisfies another session's.
 
     Args:
-        summary: A dictionary containing ``total``, ``succeeded``, ``failed``, ``running``, and ``scheduled``
-            counts.
-
-    Returns:
-        A status string: one of ``failed``, ``completed``, ``processing``, ``not_started``, or ``in_progress``.
+        state: The active job execution state whose tracker files are re-read. Its outcome sets are updated in place.
     """
-    total = summary.get("total", 0)
-    if summary.get("failed", 0) > 0:
-        return "failed"
-    if summary.get("succeeded", 0) == total and total > 0:
-        return "completed"
-    if summary.get("running", 0) > 0:
-        return "processing"
-    if summary.get("scheduled", 0) == total and total > 0:
-        return "not_started"
-    return "in_progress"
+    for tracker_path in {job.tracker_path for job in state.all_jobs.values()}:
+        if not tracker_path.is_file():
+            continue
+        for job_id, job_state in ProcessingTracker(file_path=tracker_path).snapshot().items():
+            if job_state.status is ProcessingStatus.SUCCEEDED:
+                state.succeeded_job_keys.add((str(tracker_path), job_id))
+            elif job_state.status is ProcessingStatus.FAILED:
+                state.failed_job_keys.add((str(tracker_path), job_id))
 
 
-def clean_output_subdirectory(output_directory: str, subdirectory_name: str) -> dict[str, Any]:
-    """Deletes a named subdirectory under a single output directory.
+def _admit_pending_jobs[PendingJobT: PendingJob](
+    state: JobExecutionState[PendingJobT], pool: ProcessPoolExecutor
+) -> None:
+    """Admits every queued job whose prerequisites are met and whose cores and memory the budgets still allow.
 
-    Removes the ``<output_directory>/<subdirectory_name>`` tree via
-    ``ataraxis_data_structures.delete_directory``, which performs parallel file deletion with platform-safe
-    retry logic. Returns structured outcome information suitable for inclusion in MCP tool responses.
+    Notes:
+        A job is weighed against both budgets, and the one that runs out first is whichever the batch's mix makes
+        scarce. Committed totals are recomputed from the running set on each pass, so a job that fails or is dropped
+        releases its share automatically. This running total is the batch's main resource guard, so a heavy job and
+        a crowd of light ones share the host while committed cores and memory stay within both budgets.
+
+        The scan considers the heaviest job first and continues past anything that does not fit, so large jobs are
+        admitted as soon as the budgets allow. Small jobs backfill whatever capacity the large ones leave spare. A
+        job is admitted alone when nothing is running, so a job larger than the whole budget still makes progress.
+        That floor holds the prerequisite check, since dispatching a job before its input exists would fail rather
+        than progress.
 
     Args:
-        output_directory: The absolute path to the parent output directory containing the subdirectory to
-            delete.
-        subdirectory_name: The name of the subdirectory to delete under ``output_directory``.
-
-    Returns:
-        A dictionary containing ``output_directory``, a ``cleaned`` flag, and either ``data_path`` (the path
-        that was removed) or ``error`` (a human-readable failure description).
+        state: The active job execution state. Its pending queue is rebuilt from the jobs that were not admitted.
+        pool: The process pool the admitted jobs are submitted into.
     """
-    error = validate_directory(output_directory)
-    if error is not None:
-        return {"output_directory": output_directory, "cleaned": False, "error": error}
+    used_cores = sum(active.job.core_weight for active in state.active_jobs)
+    used_memory = sum(active.job.memory_mb for active in state.active_jobs)
 
-    data_path = Path(output_directory) / subdirectory_name
+    admitted_any = False
+    deferred: deque[PendingJobT] = deque()
+    candidates = sorted(state.pending_jobs, key=lambda pending: pending.memory_mb, reverse=True)
+    state.pending_jobs = deque(candidates)
 
-    if not data_path.exists():
-        return {"output_directory": output_directory, "cleaned": True, "message": "Nothing to clean."}
+    while state.pending_jobs:
+        job = state.pending_jobs.popleft()
 
-    try:
-        delete_directory(directory_path=data_path)
-    except Exception as error:
-        return {
-            "output_directory": output_directory,
-            "cleaned": False,
-            "data_path": str(data_path),
-            "error": f"Unable to delete: {error}",
-        }
+        if any(prerequisite in state.failed_job_keys for prerequisite in job.prerequisite_keys):
+            state.blocked_jobs.append(job)
+            continue
+        if not all(prerequisite in state.succeeded_job_keys for prerequisite in job.prerequisite_keys):
+            deferred.append(job)
+            continue
 
-    return {"output_directory": output_directory, "cleaned": True, "data_path": str(data_path)}
-
-
-def analyze_feather_file(feather_file: str, max_sample_rows: int) -> dict[str, Any]:
-    """Reads a single feather file and computes generic summary statistics.
-
-    Computes the total row count, the list of columns, inter-row timing statistics (when a ``timestamp_us``
-    column is present), and a configurable number of sample rows. Columns whose dtype is ``polars.Binary``
-    are replaced in the sample rows by a boolean ``<column>_has_data`` flag so the payload stays
-    JSON-serializable.
-
-    Args:
-        feather_file: The absolute path to the feather file.
-        max_sample_rows: The maximum number of sample rows to include.
-
-    Returns:
-        A dictionary containing ``file``, ``summary``, ``inter_row_timing``, and ``sample_rows`` keys, or
-        ``file`` and ``error`` keys if the file cannot be read.
-    """
-    file_path = Path(feather_file)
-
-    if not file_path.exists():
-        return {"file": feather_file, "error": f"File does not exist: {feather_file}"}
-
-    if not file_path.is_file():
-        return {"file": feather_file, "error": f"Path is not a file: {feather_file}"}
-
-    try:
-        dataframe = pl.read_ipc(source=file_path)
-    except Exception as error:
-        return {"file": feather_file, "error": f"Unable to read feather file: {error}"}
-
-    total_rows = dataframe.height
-
-    summary: dict[str, Any] = {"total_rows": total_rows, "columns": dataframe.columns}
-
-    inter_row_timing: dict[str, Any] = {}
-    time_column = next((name for name in _TIME_COLUMN_CANDIDATES if name in dataframe.columns), None)
-    if time_column is not None and total_rows >= _MINIMUM_ROWS_FOR_INTERVALS:
-        timestamps = dataframe[time_column].to_numpy().astype(np.int64)
-        first_timestamp_us = int(timestamps[0])
-        last_timestamp_us = int(timestamps[-1])
-        duration_us = last_timestamp_us - first_timestamp_us
-        summary["first_timestamp_us"] = first_timestamp_us
-        summary["last_timestamp_us"] = last_timestamp_us
-        summary["duration_us"] = duration_us
-        summary["duration_seconds"] = (
-            round(
-                convert_time(
-                    time=duration_us, from_units=TimeUnits.MICROSECOND, to_units=TimeUnits.SECOND, as_float=True
-                ),
-                6,
-            )
-            if duration_us > 0
-            else 0.0
+        forced = not state.active_jobs and not admitted_any
+        fits = (
+            used_cores + job.core_weight <= state.core_budget and used_memory + job.memory_mb <= state.memory_budget_mb
         )
+        if not (fits or forced):
+            deferred.append(job)
+            continue
 
-        intervals_us = np.diff(timestamps)
-        inter_row_timing = {
-            "mean_us": round(float(np.mean(intervals_us)), 2),
-            "median_us": round(float(np.median(intervals_us)), 2),
-            "std_us": round(float(np.std(intervals_us)), 2),
-            "min_us": int(np.min(intervals_us)),
-            "max_us": int(np.max(intervals_us)),
-        }
+        future = pool.submit(state.worker, job)
+        state.active_jobs.append(ActiveJob(job=job, future=future))
+        used_cores += job.core_weight
+        used_memory += job.memory_mb
+        admitted_any = True
 
-    sample_rows: list[dict[str, Any]] = []
-    sample_count = min(max_sample_rows, total_rows)
-    if sample_count > 0:
-        sample_df = dataframe.head(sample_count)
-        binary_columns = {name for name, dtype in dataframe.schema.items() if dtype == pl.Binary}
-
-        for row in sample_df.iter_rows(named=True):
-            sample_entry: dict[str, Any] = {}
-            for column, value in row.items():
-                if column in binary_columns:
-                    sample_entry[f"{column}_has_data"] = value is not None
-                else:
-                    sample_entry[column] = value
-            sample_rows.append(sample_entry)
-
-    return {
-        "file": feather_file,
-        "summary": summary,
-        "inter_row_timing": inter_row_timing,
-        "sample_rows": sample_rows,
-    }
+    state.pending_jobs = deferred
