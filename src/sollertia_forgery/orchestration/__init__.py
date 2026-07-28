@@ -20,6 +20,7 @@ from .dispatch import (
     run_batch_job,
     resolve_dispatch,
     build_pending_job,
+    resolve_job_cores,
     prepare_pipeline_jobs,
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
@@ -47,5 +48,6 @@ __all__ = [
     "resolve_dispatch",
     "resolve_dispatch_priorities",
     "resolve_host_memory_mb",
+    "resolve_job_cores",
     "run_batch_job",
 ]

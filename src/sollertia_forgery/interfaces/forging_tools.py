@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any
 from pathlib import Path
 
-from ..forging import forging_tracker_path, define_forging_dataset
+from ..forging import MULTIDAY_EXTRACTION_JOB_NAME, forging_tracker_path, define_forging_dataset
 from .mcp_instance import mcp
+from ..orchestration import resolve_job_cores
 
 
 @mcp.tool()
@@ -23,7 +24,8 @@ def define_forging_dataset_tool(
     Every forging job runs against a hierarchy this tool established, so a dataset is defined here before its jobs
     are prepared, and preparing a dataset this tool has not built reports an error. A per-animal configuration is
     written only for the animals whose acquisition system resolves a multi-recording configuration, which is the
-    case for sessions carrying two-photon imaging data.
+    case for sessions carrying two-photon imaging data. Each configuration names the thread count the batch layer
+    budgets a cross-recording job, since those stages read that count from the file rather than from a call.
 
     Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
     animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
@@ -50,6 +52,7 @@ def define_forging_dataset_tool(
             name=dataset_name,
             session_names=tuple(session_names),
             project_root=Path(project_path),
+            workers=resolve_job_cores(job_name=MULTIDAY_EXTRACTION_JOB_NAME),
             force_recreate=force_recreate,
             recreate_animals=tuple(recreate_animals or ()),
         )

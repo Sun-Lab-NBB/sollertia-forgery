@@ -110,12 +110,12 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     str(SingleRecordingJobNames.PROCESS): 16,
     # A single-threaded concatenation over every plane's extracted traces.
     str(SingleRecordingJobNames.COMBINE): 1,
-    # Registers an animal's recordings against each other across a thread pool it sizes from this allocation. cindra
-    # runs its own cross-recording stages at roughly thirty cores and treats them as compute-bound.
+    # Registers an animal's recordings against each other across a thread pool it sizes from this allocation, and
+    # keeps every thread busy for the whole pass.
     MULTIDAY_DISCOVERY_JOB_NAME: 30,
-    # Gathers each tracked region's pixels through a numba kernel that parallelizes over regions, on the same
-    # compute-bound terms cindra applies to the stage itself.
-    MULTIDAY_EXTRACTION_JOB_NAME: 30,
+    # Gathers each tracked region's pixels through a numba kernel that parallelizes over regions. Every batch the
+    # kernel consumes is read serially before it runs, so the stage plateaus well below the width it is given.
+    MULTIDAY_EXTRACTION_JOB_NAME: 16,
     # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
     # threads, so the stage gains nothing from a wider allocation.
     FORGING_JOB_NAME: 1,
@@ -266,6 +266,33 @@ def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch | 
     except ValueError:
         return None
     return _pipeline_dispatch().get(member)
+
+
+def resolve_job_cores(job_name: str) -> int:
+    """Resolves the cores one job of the named type occupies, narrowed to what this host can supply.
+
+    Notes:
+        A stage that reads its own thread count from a configuration file needs this before its jobs dispatch, so
+        the file names the width the batch budgeted rather than the host's whole core count.
+
+    Args:
+        job_name: The tracker job name whose allocation to resolve.
+
+    Returns:
+        The cores one job of that type occupies, or the host's available cores when the type declares no allocation.
+
+    Raises:
+        ValueError: If the job type declares no core allocation.
+    """
+    if job_name not in _JOB_CORE_ALLOCATIONS:
+        message = (
+            f"Unable to resolve the cores for job type '{job_name}'. Every job type a pipeline resolves must "
+            f"declare the cores one of its jobs occupies in _JOB_CORE_ALLOCATIONS."
+        )
+        console.error(message=message, error=ValueError)
+    return min(
+        _JOB_CORE_ALLOCATIONS[job_name], resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES)
+    )
 
 
 def resolve_concurrency_limits(job_names: set[str]) -> dict[str, int]:

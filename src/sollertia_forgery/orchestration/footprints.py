@@ -115,27 +115,34 @@ _DISCOVERY_PLANES_PER_RECORDING: int = 12
 recording's accumulated and cached deformation fields, its scale-space pyramid, its transformed reference images, and
 the per-thread warp transients live alongside them."""
 
-_DISCOVERY_CLUSTERING_MEMORY_MB: int = 8192
+_DISCOVERY_CLUSTERING_MEMORY_MB: int = 2048
 """The memory the cross-recording clustering stage is charged. The stage builds a pairwise matrix over the regions
 falling inside one spatial bin, so its size follows local region crowding, which no reading of the processed data
-predicts. The allowance covers the crowding this corpus produces, so the estimate tolerance does not apply on top."""
+predicts. The allowance covers the crowding this corpus produces."""
 
-_EXTRACTION_TRACE_COPIES: int = 8
-"""The copies of a recording's traces live at the extraction peak. The peak is the skewness update rather than the
-extraction loop, because the four returned traces stay resident while the neuropil correction and the moment
-computation allocate four more arrays of the same shape."""
+_EXTRACTION_TRACE_COPIES: int = 4
+"""The copies of a recording's traces the extraction stage retains, which are the cell, neuropil, subtracted, and
+spike arrays it returns together. The stages that derive the later three release their working arrays, so the
+retained set rather than any transient peak sizes this term."""
 
-_EXTRACTION_BATCH_BYTES_PER_PIXEL: int = 10
-"""The memory an extraction batch holds per combined pixel. Reading a batch materializes it at its stored width and
-then converts it to single precision, and the previous batch is still bound while both are allocated."""
+_EXTRACTION_BATCH_BYTES_PER_PIXEL: int = 6
+"""The memory one extraction batch holds per combined pixel, covering the batch at its stored width and the
+single-precision copy the kernel consumes."""
+
+_EXTRACTION_BATCH_RETENTION: int = 20
+"""The batch working sets an extraction job holds at its peak. The stage reads its recording in batches and releases
+each one, but the allocator returns little of that memory between iterations, so the peak settles far above the
+working set of any single batch. The retained multiple varies between runs of identical work, so this covers the
+widest settling point rather than a typical one."""
 
 _ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
 """The fluorescence columns an experiment assembly retains at once. Every column is attached under its own name and
 none replaces another, so each stays live in the assembled frame for the rest of the job."""
 
-_ASSEMBLY_WRITE_COPIES: int = 2
-"""The copies of the assembled fluorescence volume live when the job writes its output. Writing rechunks a frame the
-earlier stages left fragmented, which materializes the whole frame a second time beside the one already resident."""
+_ASSEMBLY_WRITE_COPIES: int = 3
+"""The copies of the assembled fluorescence volume charged at the write. Writing rechunks a frame the earlier stages
+left fragmented, which materializes the whole frame a second time beside the one already resident, and the allocator
+holds a further share of what the column builds released."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the behavior, runtime, and video sub-datasets hold per sample of the clock they are placed on. Each
@@ -713,8 +720,8 @@ def _resolve_tracked_regions(
 
     Notes:
         Reads the multi-day array directly once it exists. Before the animal's discovery job has run it does not.
-        Tracking keeps a cluster whenever it appears in enough of the animal's recordings, so the animal's pooled
-        region count divided by that minimum bounds the templates the stage can produce.
+        Tracking keeps a cluster whenever it appears in enough of the animal's recordings, so the pooled region count
+        divided by that minimum bounds the templates, narrowed again to the widest single recording the animal holds.
 
     Args:
         dataset: The resolved dataset the session belongs to.
@@ -748,7 +755,10 @@ def _resolve_tracked_regions(
 
     prevalence = configuration.roi_tracking.mask_prevalence if configuration is not None else 0.0
     minimum_recordings = max(1, math.ceil(prevalence / _PERCENT * len(geometries)))
-    return max(1, sum(geometry.regions for geometry in geometries) // minimum_recordings)
+    pooled = sum(geometry.regions for geometry in geometries) // minimum_recordings
+    # A template is one cluster of regions drawn from several recordings, so the count settles at the scale of a
+    # single recording's own regions rather than the pooled total the prevalence term alone allows.
+    return max(1, min(pooled, max(geometry.regions for geometry in geometries)))
 
 
 def _estimate_discovery_memory(dataset: DatasetData, animal: str, project_root: Path) -> tuple[int, bool]:
@@ -801,7 +811,8 @@ def _estimate_extraction_memory(
 
     traces = _EXTRACTION_TRACE_COPIES * regions * geometry.samples * _SINGLE_PRECISION_BYTES
     batch = configuration.signal_extraction.batch_size * geometry.pixels * _EXTRACTION_BATCH_BYTES_PER_PIXEL
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=traces + batch)), True
+    retained = _EXTRACTION_BATCH_RETENTION * batch
+    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=traces + retained)), True
 
 
 def _estimate_assembly_memory(geometry: _RecordingGeometry | None, regions: int) -> tuple[int, bool]:
