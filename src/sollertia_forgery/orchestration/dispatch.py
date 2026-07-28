@@ -24,6 +24,7 @@ from ..video import (
     video_job_prerequisites,
     run_video_processing_pipeline,
 )
+from ..forging import FORGING_JOB_CONCURRENCY_LIMITS
 from ..runtime import (
     RUNTIME_JOB_NAME,
     discover_runtime_jobs,
@@ -114,24 +115,59 @@ _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     EXTRACTION_JOB_NAME: 8,
     # Splits its archive across a worker pool on the same re-opening terms as controller extraction.
     TIMESTAMP_JOB_NAME: 8,
+    # Decoder throughput across the host peaks near forty-eight concurrent decoders and falls away past it, and this
+    # stage opens one decoder per core it holds. Three jobs at its core allocation sit on that peak, so this ceiling
+    # keeps the stage at its best aggregate rate while leaving the cores it would otherwise idle to other work.
+    ENERGY_JOB_NAME: 3,
     # Reads a recording's full image set and writes a binary of comparable size, so it holds a read and a write stream
     # open for its whole duration. Its two-core allocation would otherwise let the budget admit dozens at once.
     str(SingleRecordingJobNames.BINARIZE): 4,
     # Reads every plane's extracted output and writes the merged result, on a single core that the budget would
     # otherwise admit in unlimited numbers.
     str(SingleRecordingJobNames.COMBINE): 4,
+    # The forging pipeline declares its own storage-bound types, since it owns their job names.
+    **FORGING_JOB_CONCURRENCY_LIMITS,
 }
 """The jobs of each type that may run at once regardless of the cores the budget could still supply, keyed by the
 tracker job name.
 
 Notes:
-    This is an admission term separate from the two budgets. The core and memory budgets bound what the host can
-    supply, while this bounds how many streams a job type opens against the storage array. A job type whose pace is
-    set by storage throughput gains nothing past a handful of concurrent jobs and costs the whole batch the seek
-    contention, which is what this table prevents.
+    This is an admission term separate from the two budgets, and it is a hard ceiling. The core and memory budgets
+    bound what the host can supply, while this bounds how many streams a job type opens against the storage array. A
+    job type whose pace is set by storage throughput gains nothing past a handful of concurrent jobs and costs the
+    whole batch the seek contention, which is what this table prevents.
+
+    Spare cores and spare memory never lift a ceiling recorded here. A storage-bound type widened into idle capacity
+    would run no faster, because the resource it waits on is already saturated, so the batch would trade contention
+    for nothing. Job types that do convert spare capacity into progress belong in
+    ``_JOB_CONCURRENCY_RESERVATIONS`` instead.
 
     A job type absent from this map is limited by the budgets alone. Every value is safe to retune, and a value below
     one is raised to one so a limit can never stall a batch.
+"""
+
+
+_JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
+    # Holds back part of the core budget so the stages that wait on no other job keep a share of the host while this
+    # one runs. Its cores are the batch's scarcest resource once the two-photon chain opens, and it converts spare
+    # capacity into progress, so the hold is released whenever nothing else can use what it gives up.
+    str(SingleRecordingJobNames.PROCESS): 5,
+}
+"""The jobs of each type that run at once while other work can still use the capacity the type gives up, keyed by
+the tracker job name.
+
+Notes:
+    This is a soft counterpart to ``_JOB_CONCURRENCY_LIMITS``. A reservation exists to leave room for other jobs
+    rather than because the type stops gaining from concurrency, so it binds only while other jobs can take that
+    room. Admission offers the reserved capacity to every other runnable job first, then releases the reservation
+    over whatever capacity remains.
+
+    That release is what keeps a reservation from idling the host. A wide compute stage held to a reservation while
+    cores sit unused and its own queue is deep would waste the very capacity the reservation was meant to protect,
+    which is the failure this two-pass admission avoids.
+
+    A job type may appear in both tables, where the ceiling stands in every pass and the reservation applies only to
+    the first. A job type absent from this map competes for capacity at its full core-derived width.
 """
 
 
@@ -231,6 +267,27 @@ def resolve_concurrency_limits(job_names: set[str]) -> dict[str, int]:
         job_name: max(1, _JOB_CONCURRENCY_LIMITS[job_name])
         for job_name in job_names
         if job_name in _JOB_CONCURRENCY_LIMITS
+    }
+
+
+def resolve_concurrency_reservations(job_names: set[str]) -> dict[str, int]:
+    """Resolves the concurrency each queued job type is held to while other work can use the capacity it gives up.
+
+    Notes:
+        Only the job types that declare a reservation appear in the result, so a caller reads an absent name as
+        competing at its full core-derived width. Declared reservations are raised to one, since a reservation of
+        zero would keep a type out of the first admission pass entirely.
+
+    Args:
+        job_names: The job type names present in the batch.
+
+    Returns:
+        A dictionary mapping each reserved job name to the jobs of that type admitted before the reservation lifts.
+    """
+    return {
+        job_name: max(1, _JOB_CONCURRENCY_RESERVATIONS[job_name])
+        for job_name in job_names
+        if job_name in _JOB_CONCURRENCY_RESERVATIONS
     }
 
 

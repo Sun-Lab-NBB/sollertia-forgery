@@ -14,6 +14,7 @@ from .pipeline import (
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
+    FORGING_JOB_CONCURRENCY_LIMITS,
     load_multiday_plan,
     forging_tracker_path,
     run_forging_pipeline,
@@ -26,6 +27,7 @@ from .pipeline import (
 
 __all__ = [
     "DEFINE_JOB_NAME",
+    "FORGING_JOB_CONCURRENCY_LIMITS",
     "FORGING_JOB_NAME",
     "MULTIDAY_DISCOVERY_JOB_NAME",
     "MULTIDAY_EXTRACTION_JOB_NAME",

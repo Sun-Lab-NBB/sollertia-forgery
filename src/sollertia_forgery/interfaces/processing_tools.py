@@ -28,6 +28,7 @@ from ..orchestration import (
     resolve_host_memory_mb,
     resolve_core_allocations,
     resolve_concurrency_limits,
+    resolve_concurrency_reservations,
 )
 
 if TYPE_CHECKING:
@@ -254,11 +255,13 @@ def execute_jobs_tool(
     # tell its pipeline to fan out wider than this host can supply. The concurrency limits enter here too, so the
     # reported maximum for a storage-bound job type is the one admission will actually hold it to.
     concurrency_limits = resolve_concurrency_limits(job_names={job.job_name for job in pending})
+    concurrency_reservations = resolve_concurrency_reservations(job_names={job.job_name for job in pending})
     allocations = resolve_core_allocations(
         job_cores={job.job_name: job.core_weight for job in pending},
         job_names={job.job_name for job in pending},
         core_budget=core_budget,
         job_limits=concurrency_limits,
+        job_reservations=concurrency_reservations,
     )
     for pending_job in pending:
         pending_job.core_weight = allocations[pending_job.job_name].cores_per_job
@@ -275,6 +278,7 @@ def execute_jobs_tool(
         core_budget=core_budget,
         memory_budget_mb=resolved_memory,
         concurrency_limits=concurrency_limits,
+        concurrency_reservations=concurrency_reservations,
         pool_size=pool_size,
     )
     _EXECUTION_STATE = state
@@ -294,6 +298,7 @@ def execute_jobs_tool(
                 "cores_per_job": allocation.cores_per_job,
                 "maximum_parallel": allocation.maximum_parallel,
                 "concurrency_limit": allocation.concurrency_limit,
+                "concurrency_reservation": allocation.concurrency_reservation,
             }
             for job_name, allocation in allocations.items()
         },

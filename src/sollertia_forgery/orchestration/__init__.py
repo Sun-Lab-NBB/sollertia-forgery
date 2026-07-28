@@ -12,6 +12,7 @@ from .local import (
     group_jobs_by_tracker,
     job_execution_manager,
     resolve_core_allocations,
+    resolve_dispatch_priorities,
 )
 from .dispatch import (
     BATCH_PIPELINES,
@@ -21,6 +22,7 @@ from .dispatch import (
     build_pending_job,
     prepare_pipeline_jobs,
     resolve_concurrency_limits,
+    resolve_concurrency_reservations,
 )
 from .pipelines import ProcessingPipelines
 from .footprints import resolve_host_memory_mb
@@ -40,8 +42,10 @@ __all__ = [
     "job_execution_manager",
     "prepare_pipeline_jobs",
     "resolve_concurrency_limits",
+    "resolve_concurrency_reservations",
     "resolve_core_allocations",
     "resolve_dispatch",
+    "resolve_dispatch_priorities",
     "resolve_host_memory_mb",
     "run_batch_job",
 ]

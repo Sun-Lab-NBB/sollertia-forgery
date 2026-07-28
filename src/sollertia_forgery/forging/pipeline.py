@@ -47,6 +47,25 @@ VERIFY_JOB_NAME: str = "data_description_verification"
 holds the dataset's data-description contract against the composed dataset, so it runs once every session is
 assembled and carries no specifier."""
 
+FORGING_JOB_CONCURRENCY_LIMITS: dict[str, int] = {
+    # Reads every fluorescence array and sub-dataset feather its session holds, then writes the merged result, and
+    # computes almost nothing between the two. Four matches the ceiling cindra applies to its own storage-bound
+    # stages, which open the same shape of read and write streams against the same array.
+    FORGING_JOB_NAME: 4,
+}
+"""The jobs of each forging type that may run at once regardless of the cores a budget could still supply, keyed by
+the tracker job name.
+
+Notes:
+    Only assembly is bound by storage throughput. cindra classifies its own cross-recording discovery and
+    aligned-fluorescence extraction as compute-bound and runs them at roughly thirty cores each, so both take a wide
+    core allocation and let the core budget set their concurrency rather than a ceiling declared here.
+
+    The definition and verification jobs are absent because a dataset resolves exactly one of each, so no limit can
+    bind them. This mapping is the single source for both the local assembly pool and the shared batch layer, which
+    merges it into its own concurrency table.
+"""
+
 _MULTI_RECORDING_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
 """The filename under which the per-animal cindra multi-recording configuration is materialized in the animal's forged
 dataset directory before the multi-day cell-tracking stage runs."""
@@ -199,7 +218,11 @@ def run_forging_pipeline(
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
         for session in dataset_session_names
     }
-    resolved_workers = resolve_worker_count(requested_workers=workers)
+    # Narrowed to the assembly type's concurrency ceiling, since the stage is bound by how fast the array serves its
+    # fluorescence arrays and feathers rather than by cores. A wider pool multiplies seek pressure at flat throughput.
+    resolved_workers = min(
+        resolve_worker_count(requested_workers=workers), FORGING_JOB_CONCURRENCY_LIMITS[FORGING_JOB_NAME]
+    )
     if not dataset_session_names:
         console.echo(message="Every session in the dataset is already assembled.", level=LogLevel.INFO)
     elif resolved_workers > 1 and len(dataset_session_names) > 1:
