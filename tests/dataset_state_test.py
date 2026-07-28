@@ -8,10 +8,10 @@ manifest.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-import pytest
 import polars as pl
+import pytest
 from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.forging import (
@@ -27,6 +27,9 @@ from sollertia_forgery.forging import (
     generate_dataset_state,
 )
 from sollertia_forgery.forging.state import _build_job_rows
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 FIRST_SESSION: str = "2026-01-02-03-04-05-000006"
 """The session the tracked animal holds, used for both of its session-scoped jobs."""

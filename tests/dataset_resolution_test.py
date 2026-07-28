@@ -26,6 +26,7 @@ from sollertia_forgery.forging import (
     define_forging_dataset,
     forging_job_prerequisites,
 )
+from sollertia_forgery.shared_assets import ProcessingPipelines
 import sollertia_forgery.forging.dataset as dataset_module
 import sollertia_forgery.forging.pipeline as pipeline_module
 from sollertia_forgery.forging.pipeline import _reset_animal_jobs, _resolve_runnable_jobs
@@ -36,12 +37,46 @@ _COLUMN_DESCRIPTIONS: dict[str, str] = {"time_us": "Microsecond-precision sample
 _SURGERY_FILENAME: str = "surgery_metadata.yaml"
 """The per-animal metadata filename the resolution policy copies into each animal's dataset directory."""
 
+_ADMISSION_TRACKERS: dict[ProcessingPipelines, tuple[str, str]] = {
+    ProcessingPipelines.CHECKSUM: ("raw_data", "checksum_tracker.yaml"),
+    ProcessingPipelines.RUNTIME: ("processed_data", "runtime_tracker.yaml"),
+    ProcessingPipelines.MICROCONTROLLER: ("processed_data", "microcontroller_tracker.yaml"),
+    ProcessingPipelines.VIDEO: ("processed_data", "video_tracker.yaml"),
+    ProcessingPipelines.TWO_PHOTON: ("processed_data", "two_photon_tracker.yaml"),
+}
+"""The tracker location the stand-in session reports for each pipeline forging admission can require. The stand-in
+replaces the shared hierarchy's own accessors, so these names need only agree between the writer and the reader here."""
+
+
+def _tracker_path(session_path: Path, pipeline: ProcessingPipelines) -> Path:
+    """Returns the stand-in tracker path one pipeline records against for a session."""
+    directory, filename = _ADMISSION_TRACKERS[pipeline]
+    return session_path.joinpath(directory, filename)
+
+
+def _mark_processed(session_path: Path) -> None:
+    """Writes a completed tracker for every pipeline forging admission can require.
+
+    Admission holds a session out of a dataset until its required pipelines report every job as succeeded, so a
+    session standing in for a processed one has to carry those trackers.
+    """
+    for pipeline in _ADMISSION_TRACKERS:
+        tracker_path = _tracker_path(session_path=session_path, pipeline=pipeline)
+        tracker_path.parent.mkdir(parents=True, exist_ok=True)
+        tracker = ProcessingTracker(file_path=tracker_path)
+        jobs = [(f"{pipeline.value}_stage", "")]
+        tracker.align_jobs(jobs=jobs, universe=jobs)
+        job_id = ProcessingTracker.generate_job_id(job_name=f"{pipeline.value}_stage", specifier="")
+        tracker.start_job(job_id=job_id)
+        tracker.complete_job(job_id=job_id)
+
 
 def _install_project(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     sessions: dict[str, list[str]],
     session_types: dict[str, SessionTypes] | None = None,
+    unprocessed: frozenset[str] = frozenset(),
     *,
     write_surgery: bool = True,
 ) -> Path:
@@ -53,6 +88,8 @@ def _install_project(
         sessions: The session names to create for each animal.
         session_types: The session type to report for individual sessions, keyed by session name. Sessions absent
             from the mapping report the Mesoscope experiment type.
+        unprocessed: The session names to leave without completed processing trackers, which forging admission
+            rejects. Every other session is marked as fully processed.
         write_surgery: Determines whether each created session carries a surgery metadata snapshot.
 
     Returns:
@@ -67,6 +104,8 @@ def _install_project(
             session_path.mkdir(parents=True)
             if write_surgery:
                 session_path.joinpath(_SURGERY_FILENAME).write_text(f"animal: {animal}")
+            if session_name not in unprocessed:
+                _mark_processed(session_path=session_path)
             session_paths.append(session_path)
 
     def _discover_sessions(root_path: Path) -> list[Path]:  # noqa: ARG001
@@ -76,9 +115,19 @@ def _install_project(
     def _load(session_path: Path) -> SimpleNamespace:
         """Returns a stand-in session carrying the fields the resolution policy reads."""
         return SimpleNamespace(
+            session_name=session_path.name,
             session_type=resolved_types.get(session_path.name, SessionTypes.MESOSCOPE_EXPERIMENT),
             acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
-            raw_data=SimpleNamespace(surgery_metadata_path=session_path.joinpath(_SURGERY_FILENAME)),
+            raw_data=SimpleNamespace(
+                surgery_metadata_path=session_path.joinpath(_SURGERY_FILENAME),
+                checksum_tracker_path=_tracker_path(session_path, ProcessingPipelines.CHECKSUM),
+            ),
+            processed_data=SimpleNamespace(
+                runtime_tracker_path=_tracker_path(session_path, ProcessingPipelines.RUNTIME),
+                microcontroller_tracker_path=_tracker_path(session_path, ProcessingPipelines.MICROCONTROLLER),
+                video_tracker_path=_tracker_path(session_path, ProcessingPipelines.VIDEO),
+                two_photon_tracker_path=_tracker_path(session_path, ProcessingPipelines.TWO_PHOTON),
+            ),
         )
 
     monkeypatch.setattr(dataset_module, "discover_sessions", _discover_sessions)
@@ -164,6 +213,51 @@ def test_resolve_dataset_rejects_widening_a_frozen_animal(tmp_path: Path, monkey
 
     reloaded = DatasetData.load(dataset_path=project_root.joinpath("test_dataset"))
     assert _membership(reloaded) == {"animal_a": {"session_1"}}
+
+
+def test_resolve_dataset_rejects_an_unprocessed_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a session carrying no completed trackers never enters a dataset."""
+    project_root = _install_project(
+        tmp_path, monkeypatch, {"animal_a": ["session_1"]}, unprocessed=frozenset({"session_1"})
+    )
+
+    with pytest.raises(ValueError, match="Unable to admit session"):
+        resolve_dataset(name="test_dataset", session_names=("session_1",), project_root=project_root)
+
+    # Rejection precedes hierarchy creation, so a refused definition leaves nothing behind.
+    assert not project_root.joinpath("test_dataset").exists()
+
+
+def test_resolve_dataset_rejects_a_session_whose_pipeline_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that one failed job in one required pipeline is enough to hold a session out."""
+    project_root = _install_project(tmp_path, monkeypatch, {"animal_a": ["session_1"]})
+    tracker_path = _tracker_path(
+        session_path=project_root.joinpath("animal_a", "session_1"), pipeline=ProcessingPipelines.VIDEO
+    )
+    tracker = ProcessingTracker(file_path=tracker_path)
+    failing_id = next(iter(tracker.snapshot()))
+    tracker.fail_job(job_id=failing_id, error_message="motion energy failed")
+
+    with pytest.raises(ValueError, match="Unable to admit session"):
+        resolve_dataset(name="test_dataset", session_names=("session_1",), project_root=project_root)
+
+
+def test_resolve_dataset_admits_a_training_session_without_imaging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a training session joins a dataset with no two-photon tracker, since it records no imaging."""
+    project_root = _install_project(
+        tmp_path, monkeypatch, {"animal_a": ["session_1"]}, session_types={"session_1": SessionTypes.RUN_TRAINING}
+    )
+    _tracker_path(
+        session_path=project_root.joinpath("animal_a", "session_1"), pipeline=ProcessingPipelines.TWO_PHOTON
+    ).unlink()
+
+    dataset = resolve_dataset(name="test_dataset", session_names=("session_1",), project_root=project_root)
+
+    assert _membership(dataset) == {"animal_a": {"session_1"}}
 
 
 def test_resolve_dataset_rejects_a_session_of_a_differing_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,6 +31,7 @@ from .pipeline import (
     forging_job_prerequisites,
     materialize_multiday_plan,
 )
+from .admission import verify_session_admissibility
 
 __all__ = [
     "ANIMAL_SCOPE",
@@ -57,4 +58,5 @@ __all__ = [
     "resolve_dataset",
     "resolve_multiday_plan",
     "run_forging_pipeline",
+    "verify_session_admissibility",
 ]

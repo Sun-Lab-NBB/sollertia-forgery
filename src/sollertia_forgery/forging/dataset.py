@@ -16,6 +16,7 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import delete_directory
 
+from .admission import verify_session_admissibility
 from ..registries import resolve_forging_column_descriptions
 
 if TYPE_CHECKING:
@@ -171,7 +172,10 @@ def _create_dataset(
     """
     session_paths = _resolve_session_paths(sessions=sessions, project_root=project_root)
 
+    # Holds an under-processed session out before any of the hierarchy is built, so a rejected definition leaves
+    # nothing behind to clean up.
     first_session_data = SessionData.load(session_path=session_paths[0])
+    verify_session_admissibility(session=first_session_data)
     if required_session_type is not None and first_session_data.session_type != required_session_type:
         message = (
             f"Unable to define dataset '{name}'. Dataset creation for this acquisition system is supported only "
@@ -184,6 +188,7 @@ def _create_dataset(
     # on every other session matching it.
     for session_path in session_paths[1:]:
         session_data = SessionData.load(session_path=session_path)
+        verify_session_admissibility(session=session_data)
         if session_data.session_type != first_session_data.session_type:
             message = (
                 f"Unable to define dataset '{name}'. All sessions in a dataset must share the same session "
@@ -372,6 +377,7 @@ def _verify_session_compatibility(dataset: DatasetData, session_paths: list[Path
     """
     for session_path in session_paths:
         session_data = SessionData.load(session_path=session_path)
+        verify_session_admissibility(session=session_data)
         if session_data.session_type != dataset.session_type:
             message = (
                 f"Unable to add session '{session_path.name}' to the '{dataset.name}' dataset. All sessions in a "
