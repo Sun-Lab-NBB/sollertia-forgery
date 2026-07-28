@@ -85,11 +85,11 @@ def run_forging_pipeline(
     """Defines the dataset hierarchy, runs the cindra multi-day cell-tracking stages, and assembles the target sessions.
 
     Notes:
-        The forging tracker records every stage as a job: one dataset-definition job, one cindra multi-day discovery
-        job per tracked animal, one multi-day extraction job per that animal's session, one assembly job per session,
-        and the single column-description verification job that closes the dataset. The multi-day jobs exist only for
-        animals whose acquisition system returns a multi-recording configuration, so training-session datasets carry
-        only the definition, assembly, and verification jobs.
+        The forging tracker records every stage as a job. There is one dataset-definition job, one cindra multi-day
+        discovery job per tracked animal, one multi-day extraction job per that animal's session, one assembly job per
+        session, and the single column-description verification job that closes the dataset. The multi-day jobs exist
+        only for animals whose acquisition system returns a multi-recording configuration, so training-session
+        datasets carry only the definition, assembly, and verification jobs.
 
         The definition job roots the ordering. It resolves the hierarchy from the requested session list and writes
         each animal's multi-recording configuration, so no other job may run before it succeeds.
@@ -275,12 +275,9 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     """Resolves the forging pipeline's job universe and runnable subset for an already-defined dataset.
 
     Notes:
-        Mutates nothing and creates nothing. Resolving the plan rather than reading materialized configurations keeps
-        the universe correct while the definition job is still outstanding, which lets a batch queue every stage of a
-        dataset in one pass.
-
-        The runnable subset excludes whatever the tracker records as succeeded, so preparing a dataset twice queues
-        only the outstanding jobs rather than repeating completed cindra work.
+        Mutates nothing and creates nothing, and stays correct while the definition job is still outstanding. The
+        runnable subset holds whatever the tracker does not record as succeeded, so preparing a dataset twice queues
+        only the jobs still outstanding.
 
     Args:
         dataset_path: The path to the dataset's root directory inside the project hierarchy.
@@ -304,9 +301,9 @@ def resolve_multiday_plan(dataset: DatasetData, project_root: Path) -> dict[str,
     """Resolves which animals need multi-day processing without writing anything.
 
     Notes:
-        Asking the acquisition system's resolver rather than looking for a materialized configuration is what lets
-        the job universe be known before the definition job has run, so a batch can queue every stage of a dataset it
-        has not yet defined. Only each animal's first session is loaded, since the resolver decides per animal.
+        The acquisition system's resolver decides whether the stage applies, so the job universe is known before the
+        definition job has run. That is what lets a batch queue every stage of a dataset it has not yet defined. Only
+        each animal's first session is loaded, since the resolver decides per animal.
 
     Args:
         dataset: The dataset whose animals are planned.
