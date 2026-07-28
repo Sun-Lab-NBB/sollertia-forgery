@@ -26,13 +26,16 @@ from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
 from ..forging import MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
 from ..managing import CHECKSUM_JOB_NAME
-from .pipelines import ProcessingPipelines
 from ..registries import (
     resolve_two_photon_data_locator,
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, multi_recording_dataset_directory
+from ..shared_assets import (
+    LOG_ARCHIVE_SUFFIX,
+    ProcessingPipelines,
+    multi_recording_dataset_directory,
+)
 from ..microcontrollers import PARSE_JOB_NAME, EXTRACTION_JOB_NAME
 
 if TYPE_CHECKING:

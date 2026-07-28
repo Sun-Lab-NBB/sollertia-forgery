@@ -21,13 +21,13 @@ from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
     JobExecutionState,
-    ProcessingPipelines,
     resolve_dispatch,
     build_pending_job,
     resolve_host_memory_mb,
     resolve_core_allocations,
     resolve_concurrency_limits,
 )
+from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.local import (
     _PINNED_THREAD_VARIABLES,
     PendingJob,

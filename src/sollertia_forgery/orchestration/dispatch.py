@@ -45,7 +45,6 @@ from ..managing import (
     checksum_job_prerequisites,
     run_checksum_processing_pipeline,
 )
-from .pipelines import ProcessingPipelines
 from .footprints import estimate_dataset_job_memory, estimate_session_job_memory
 from ..two_photon import (
     SingleRecordingJobNames,
@@ -54,6 +53,7 @@ from ..two_photon import (
     materialize_cindra_configuration,
     run_two_photon_processing_pipeline,
 )
+from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from ..microcontrollers import (
     PARSE_JOB_NAME,
     EXTRACTION_JOB_NAME,
@@ -521,6 +521,18 @@ def _session_memory(pipeline: ProcessingPipelines) -> Callable[[SessionData, lis
     return lambda session, jobs: estimate_session_job_memory(pipeline=pipeline, session=session, jobs=jobs)
 
 
+def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], Path]:
+    """Binds the shared session tracker-path resolver to one pipeline.
+
+    Args:
+        pipeline: The pipeline whose tracker the bound resolver locates.
+
+    Returns:
+        The tracker resolver that pipeline's dispatch entry declares.
+    """
+    return lambda session: resolve_session_tracker_path(session=session, pipeline=pipeline)
+
+
 def _materialize_two_photon_configuration(session: SessionData) -> None:
     """Writes a session's two-photon configuration with the thread count its processing jobs will run under.
 
@@ -577,7 +589,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_checksum_jobs,
             worker=_run_checksum_job,
             prerequisites=checksum_job_prerequisites,
-            tracker_path=lambda session: session.raw_data.checksum_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.CHECKSUM),
             # Writes its stored checksum into raw_data, which holds the acquired data itself, so it owns no
             # directory a cleanup may remove.
             output_path=lambda _session: None,
@@ -589,7 +601,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_runtime_jobs,
             worker=_run_runtime_job,
             prerequisites=runtime_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.runtime_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.RUNTIME),
             output_path=lambda session: session.processed_data.runtime_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.RUNTIME),
@@ -599,7 +611,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_microcontroller_jobs,
             worker=_run_microcontroller_job,
             prerequisites=microcontroller_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.microcontroller_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.MICROCONTROLLER),
             output_path=lambda session: session.processed_data.microcontroller_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.MICROCONTROLLER),
@@ -609,7 +621,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_video_jobs,
             worker=_run_video_job,
             prerequisites=video_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.video_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.VIDEO),
             output_path=lambda session: session.processed_data.video_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.VIDEO),
@@ -619,7 +631,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_two_photon_jobs,
             worker=_run_two_photon_job,
             prerequisites=two_photon_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.two_photon_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.TWO_PHOTON),
             output_path=lambda session: session.processed_data.cindra_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),

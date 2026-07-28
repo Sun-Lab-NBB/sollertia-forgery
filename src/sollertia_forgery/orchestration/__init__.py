@@ -1,5 +1,5 @@
-"""Provides the local orchestration layer: the shared batch job-execution engine, its resource estimators, the
-pipeline dispatch table, and the pipeline-identity enumeration.
+"""Provides the local orchestration layer: the shared batch job-execution engine, its resource estimators, and the
+pipeline dispatch table.
 """
 
 from .local import (
@@ -25,7 +25,6 @@ from .dispatch import (
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
 )
-from .pipelines import ProcessingPipelines
 from .footprints import resolve_host_memory_mb
 
 __all__ = [
@@ -37,7 +36,6 @@ __all__ = [
     "JobExecutionState",
     "PendingJob",
     "PipelineDispatch",
-    "ProcessingPipelines",
     "build_pending_job",
     "group_jobs_by_tracker",
     "job_execution_manager",

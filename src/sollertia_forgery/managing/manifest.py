@@ -22,8 +22,11 @@ from ataraxis_data_structures import ProcessingTracker
 from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
 from ..shared_assets import (
+    SESSION_PIPELINES,
+    ProcessingPipelines,
     summarize_tracker,
     derive_tracker_status,
+    resolve_session_tracker_path,
 )
 
 if TYPE_CHECKING:
@@ -32,15 +35,17 @@ if TYPE_CHECKING:
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
-PIPELINE_STATUS_COLUMNS: dict[str, str] = {
-    "checksum": "integrity",
-    "runtime": "runtime",
-    "microcontroller": "microcontroller",
-    "video": "video",
-    "two_photon": "two_photon",
+PIPELINE_STATUS_COLUMNS: dict[ProcessingPipelines, str] = {
+    ProcessingPipelines.CHECKSUM: "integrity",
+    ProcessingPipelines.RUNTIME: "runtime",
+    ProcessingPipelines.MICROCONTROLLER: "microcontroller",
+    ProcessingPipelines.VIDEO: "video",
+    ProcessingPipelines.TWO_PHOTON: "two_photon",
 }
 """Maps each per-session pipeline to the manifest column that carries its rolled-up status. The checksum pipeline's
-status lives under the ``integrity`` column, so the mapping's keys differ from its values."""
+status lives under the ``integrity`` column, so the mapping's values differ from its keys. Every pipeline in
+``SESSION_PIPELINES`` declares a column here, since the manifest reports one status column per pipeline a session
+carries a tracker for."""
 
 JOB_STRUCT: pl.Struct = pl.Struct(
     {
@@ -246,7 +251,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "microcontroller": pl.String,
                 "video": pl.String,
                 "jobs": pl.List(JOB_STRUCT),
-                "tracker_paths": pl.Struct(dict.fromkeys(PIPELINE_STATUS_COLUMNS, pl.String)),
+                "tracker_paths": pl.Struct({pipeline.value: pl.String for pipeline in SESSION_PIPELINES}),
                 "datasets": pl.List(DATASET_STRUCT),
             }
             manifest_frame = pl.DataFrame(data=manifest, schema=schema, strict=False)
@@ -523,7 +528,7 @@ class ProjectManifest:
             distribution: dict[str, int] = {}
             for value in data.select(column).to_series().to_list():
                 distribution[str(value)] = distribution.get(str(value), 0) + 1
-            pipeline_status_counts[pipeline] = distribution
+            pipeline_status_counts[pipeline.value] = distribution
 
         # Computes session type distribution.
         session_types: dict[str, int] = {}
@@ -686,15 +691,6 @@ def _build_session_row(session_data: SessionData, project_directory: Path) -> di
     # reads (every registered descriptor declares them) need an attribute-defined ignore.
     descriptor = descriptor_class.from_yaml(file_path=session_data.raw_data.session_descriptor_path)
 
-    # Resolves the canonical tracker path of every per-session pipeline from the SessionData grammar.
-    session_trackers: dict[str, Path] = {
-        "checksum": session_data.raw_data.checksum_tracker_path,
-        "runtime": session_data.processed_data.runtime_tracker_path,
-        "microcontroller": session_data.processed_data.microcontroller_tracker_path,
-        "video": session_data.processed_data.video_tracker_path,
-        "two_photon": session_data.processed_data.two_photon_tracker_path,
-    }
-
     row: dict[str, Any] = {
         "animal": session_data.animal_id,
         "session": session_data.session_name,
@@ -708,11 +704,12 @@ def _build_session_row(session_data: SessionData, project_directory: Path) -> di
 
     session_jobs: list[dict[str, Any]] = []
     tracker_locations: dict[str, str] = {}
-    for pipeline, tracker_path in session_trackers.items():
+    for pipeline in SESSION_PIPELINES:
+        tracker_path = resolve_session_tracker_path(session=session_data, pipeline=pipeline)
         status, pipeline_jobs = _read_pipeline_state(pipeline=pipeline, tracker_path=tracker_path)
         row[PIPELINE_STATUS_COLUMNS[pipeline]] = status
         session_jobs.extend(pipeline_jobs)
-        tracker_locations[pipeline] = _relative_path(path=tracker_path, project_directory=project_directory)
+        tracker_locations[pipeline.value] = _relative_path(path=tracker_path, project_directory=project_directory)
 
     row["jobs"] = session_jobs
     row["tracker_paths"] = tracker_locations
@@ -738,11 +735,11 @@ def _relative_path(path: Path, project_directory: Path) -> str:
         return str(path)
 
 
-def _read_pipeline_state(pipeline: str, tracker_path: Path) -> tuple[str, list[dict[str, Any]]]:
+def _read_pipeline_state(pipeline: ProcessingPipelines, tracker_path: Path) -> tuple[str, list[dict[str, Any]]]:
     """Reads one pipeline's processing tracker into a rolled-up status label and its per-job entries.
 
     Args:
-        pipeline: The pipeline identifier recorded on each emitted job entry.
+        pipeline: The pipeline whose identifier is recorded on each emitted job entry.
         tracker_path: The canonical path to the pipeline's processing tracker YAML file.
 
     Returns:
@@ -755,5 +752,30 @@ def _read_pipeline_state(pipeline: str, tracker_path: Path) -> tuple[str, list[d
         return "not_started", []
 
     status_payload = summarize_tracker(jobs=jobs)
-    entries = [{"pipeline": pipeline, **entry} for entry in status_payload["jobs"]]
+    entries = [{"pipeline": pipeline.value, **entry} for entry in status_payload["jobs"]]
     return derive_tracker_status(summary=status_payload["summary"]), entries
+
+
+def _assert_status_column_coverage() -> None:
+    """Verifies that every pipeline a session carries a tracker for declares a manifest status column.
+
+    Notes:
+        Runs at import, so a pipeline added to ``SESSION_PIPELINES`` without a status column here fails the moment
+        this module loads rather than partway through a generation pass over a project.
+
+    Raises:
+        RuntimeError: If a per-session pipeline declares no status column, or a column names a pipeline that no
+            session carries a tracker for.
+    """
+    declared = frozenset(PIPELINE_STATUS_COLUMNS)
+    carried = frozenset(SESSION_PIPELINES)
+    if declared != carried:
+        message = (
+            f"Unable to validate the manifest's pipeline status columns. Every pipeline in SESSION_PIPELINES must "
+            f"declare a status column and no column may name a pipeline outside it, but the sets differ by "
+            f"{sorted(member.value for member in declared ^ carried)}."
+        )
+        console.error(message=message, error=RuntimeError)
+
+
+_assert_status_column_coverage()
