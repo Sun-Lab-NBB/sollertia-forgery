@@ -9,8 +9,6 @@ from sollertia_shared_assets import (
 
 from .dataset import resolve_dataset
 from .pipeline import (
-    DEFINE_JOB_NAME,
-    VERIFY_JOB_NAME,
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
@@ -21,22 +19,22 @@ from .pipeline import (
     discover_forging_jobs,
     resolve_multiday_plan,
     build_forging_universe,
+    define_forging_dataset,
     forging_job_prerequisites,
     materialize_multiday_plan,
 )
 
 __all__ = [
-    "DEFINE_JOB_NAME",
     "FORGING_JOB_CONCURRENCY_LIMITS",
     "FORGING_JOB_NAME",
     "MULTIDAY_DISCOVERY_JOB_NAME",
     "MULTIDAY_EXTRACTION_JOB_NAME",
-    "VERIFY_JOB_NAME",
     "DatasetAnimal",
     "DatasetData",
     "DatasetFiles",
     "DatasetSession",
     "build_forging_universe",
+    "define_forging_dataset",
     "discover_forging_jobs",
     "forging_job_prerequisites",
     "forging_tracker_path",

@@ -1,5 +1,5 @@
-"""Provides the pipeline dispatch table that binds each session-processing pipeline to its job resolver, its
-picklable batch worker, its job ordering, and its processing tracker, alongside the cores each job type occupies.
+"""Provides the pipeline dispatch table that binds each processing pipeline to its job resolver, its picklable batch
+worker, its job ordering, and its processing tracker, alongside the cores each job type occupies.
 """
 
 from __future__ import annotations
@@ -9,9 +9,8 @@ from pathlib import Path
 from functools import cache
 from dataclasses import dataclass
 
-from cindra import SingleRecordingJobNames
 from ataraxis_base_utilities import console, resolve_worker_count
-from sollertia_shared_assets import SessionData
+from sollertia_shared_assets import DatasetData, SessionData
 from ataraxis_data_structures import ProcessingTracker
 
 from .local import RESERVED_CORES, GenericPendingJob
@@ -24,7 +23,16 @@ from ..video import (
     video_job_prerequisites,
     run_video_processing_pipeline,
 )
-from ..forging import FORGING_JOB_CONCURRENCY_LIMITS
+from ..forging import (
+    FORGING_JOB_NAME,
+    MULTIDAY_DISCOVERY_JOB_NAME,
+    MULTIDAY_EXTRACTION_JOB_NAME,
+    FORGING_JOB_CONCURRENCY_LIMITS,
+    forging_tracker_path,
+    run_forging_pipeline,
+    discover_forging_jobs,
+    forging_job_prerequisites,
+)
 from ..runtime import (
     RUNTIME_JOB_NAME,
     discover_runtime_jobs,
@@ -38,8 +46,9 @@ from ..managing import (
     run_checksum_processing_pipeline,
 )
 from .pipelines import ProcessingPipelines
-from .footprints import estimate_session_job_memory
+from .footprints import estimate_dataset_job_memory, estimate_session_job_memory
 from ..two_photon import (
+    SingleRecordingJobNames,
     discover_two_photon_jobs,
     two_photon_job_prerequisites,
     materialize_cindra_configuration,
@@ -64,6 +73,7 @@ BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
         ProcessingPipelines.MICROCONTROLLER,
         ProcessingPipelines.VIDEO,
         ProcessingPipelines.TWO_PHOTON,
+        ProcessingPipelines.FORGING,
     }
 )
 """The pipelines the generic batch tools support. An import-time check holds this to the dispatch table."""
@@ -100,6 +110,15 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     str(SingleRecordingJobNames.PROCESS): 16,
     # A single-threaded concatenation over every plane's extracted traces.
     str(SingleRecordingJobNames.COMBINE): 1,
+    # Registers an animal's recordings against each other across a thread pool it sizes from this allocation. cindra
+    # runs its own cross-recording stages at roughly thirty cores and treats them as compute-bound.
+    MULTIDAY_DISCOVERY_JOB_NAME: 30,
+    # Gathers each tracked region's pixels through a numba kernel that parallelizes over regions, on the same
+    # compute-bound terms cindra applies to the stage itself.
+    MULTIDAY_EXTRACTION_JOB_NAME: 30,
+    # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
+    # threads, so the stage gains nothing from a wider allocation.
+    FORGING_JOB_NAME: 1,
 }
 """The cores one job of each type occupies, keyed by the tracker job name. Each value follows from how that stage
 parallelizes, and every value is safe to retune. Preparing a session that resolves a job type absent from this map
@@ -422,8 +441,7 @@ def _run_runtime_job(job: GenericPendingJob) -> None:
     """Runs the runtime pipeline for one session as a batch job.
 
     Notes:
-        The runtime pipeline is single-job, so it takes no job identifier. Every job the batch layer dispatches for
-        it runs the whole runtime pipeline for its session.
+        The runtime pipeline is single-job, so it takes no job identifier.
 
     Args:
         job: The pending job carrying the session root in ``unit_path`` and its planned cores in ``core_weight``.
@@ -477,12 +495,12 @@ def _session_memory(pipeline: ProcessingPipelines) -> Callable[[SessionData, lis
 
 
 def _materialize_two_photon_configuration(session: SessionData) -> None:
-    """Writes a session's cindra configuration with the thread count its processing jobs will run under.
+    """Writes a session's two-photon configuration with the thread count its processing jobs will run under.
 
     Notes:
-        cindra reads this count from the configuration rather than from a call argument, and only its per-plane
-        processing stage consumes it. The host's core count bounds the value, since a session prepared on a larger
-        machine would otherwise name more threads than this one can run.
+        The two-photon pipeline reads this count from the configuration rather than from a call argument, and only
+        its per-plane processing stage consumes it. The host's core count bounds the value, since a session prepared
+        on a larger machine would otherwise name more threads than this one can run.
 
     Args:
         session: The loaded session whose configuration is written.
@@ -493,6 +511,26 @@ def _materialize_two_photon_configuration(session: SessionData) -> None:
             _JOB_CORE_ALLOCATIONS[str(SingleRecordingJobNames.PROCESS)],
             resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES),
         ),
+    )
+
+
+def _run_forging_job(job: GenericPendingJob) -> None:
+    """Runs a single forging multi-day or assembly job for one dataset.
+
+    Notes:
+        The dataset is named by the unit directory the job carries, which sits under the project root the pipeline
+        resolves its sessions from. The hierarchy the job runs against is built beforehand, so the job takes no
+        parameters of its own.
+
+    Args:
+        job: The pending job carrying the dataset root in ``unit_path``, the target job in ``job_id``, and its
+            planned cores in ``core_weight``.
+    """
+    run_forging_pipeline(
+        name=job.unit_path.name,
+        project_root=job.unit_path.parent,
+        job_id=job.job_id,
+        workers=job.core_weight,
     )
 
 
@@ -559,6 +597,17 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),
             materialize=_materialize_two_photon_configuration,
+        ),
+        ProcessingPipelines.FORGING: PipelineDispatch[DatasetData](
+            pipeline=ProcessingPipelines.FORGING,
+            discover=discover_forging_jobs,
+            worker=_run_forging_job,
+            prerequisites=forging_job_prerequisites,
+            tracker_path=forging_tracker_path,
+            # Owns the dataset hierarchy outright, which holds the assembled feathers and the tracker beside them.
+            output_path=lambda dataset: dataset.dataset_data_path.parent,
+            unit_name=lambda dataset: dataset.name,
+            estimate_memory=estimate_dataset_job_memory,
         ),
     }
 

@@ -12,6 +12,11 @@ from concurrent.futures import Future
 
 import pytest
 
+from sollertia_forgery.forging import (
+    FORGING_JOB_NAME,
+    MULTIDAY_DISCOVERY_JOB_NAME,
+    MULTIDAY_EXTRACTION_JOB_NAME,
+)
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
@@ -21,6 +26,7 @@ from sollertia_forgery.orchestration import (
     build_pending_job,
     resolve_host_memory_mb,
     resolve_core_allocations,
+    resolve_concurrency_limits,
 )
 from sollertia_forgery.orchestration.local import (
     _PINNED_THREAD_VARIABLES,
@@ -355,3 +361,32 @@ def test_only_the_two_photon_pipeline_materializes_before_dispatch() -> None:
         member.value for member in BATCH_PIPELINES if resolve_dispatch(pipeline=member.value).materialize is not None
     }
     assert materializing == {ProcessingPipelines.TWO_PHOTON.value}
+
+
+def test_forging_is_a_registered_batch_pipeline() -> None:
+    """Verifies that the dataset-scoped pipeline is dispatchable and declares a core allocation for every stage."""
+    assert ProcessingPipelines.FORGING in BATCH_PIPELINES
+
+    dispatch = resolve_dispatch(pipeline="forging")
+    assert dispatch is not None
+    assert dispatch.pipeline is ProcessingPipelines.FORGING
+
+    # The hierarchy is built by a dedicated tool before any job is prepared, so the pipeline declares no hook.
+    assert dispatch.materialize is None
+
+    for job_name in (MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME):
+        assert job_name in _JOB_CORE_ALLOCATIONS, f"{job_name} declares no core allocation"
+
+
+def test_only_assembly_carries_a_forging_concurrency_limit() -> None:
+    """Verifies that the storage-bound forging stage is capped while the compute-bound stages are budget-bound.
+
+    cindra treats its own cross-recording discovery and extraction as compute-bound and runs them at a wide core
+    allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain from.
+    """
+    limits = resolve_concurrency_limits(
+        job_names={MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME}
+    )
+    assert set(limits) == {FORGING_JOB_NAME}
+    assert _JOB_CORE_ALLOCATIONS[MULTIDAY_DISCOVERY_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
+    assert _JOB_CORE_ALLOCATIONS[MULTIDAY_EXTRACTION_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]

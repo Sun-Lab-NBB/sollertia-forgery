@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from ..forging import run_forging_pipeline
+from ..forging import run_forging_pipeline, define_forging_dataset
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -99,13 +99,22 @@ def forge_command(
     from the central registry and infers the acquisition system from the resolved dataset, so the command carries no
     system selector.
     """
+    # Defining the hierarchy precedes the tracked jobs, so a command naming sessions or a rebuild builds it first.
+    if session or force_recreate or recreate_animal:
+        define_forging_dataset(
+            name=dataset_name,
+            session_names=session,
+            project_root=project_path,
+            workers=workers,
+            display_progress=not no_progress,
+            force_recreate=force_recreate,
+            recreate_animals=recreate_animal,
+        )
+
     run_forging_pipeline(
         name=dataset_name,
-        session_names=session,
         project_root=project_path,
         job_id=job_id,
         workers=workers,
         display_progress=not no_progress,
-        force_recreate=force_recreate,
-        recreate_animals=recreate_animal,
     )

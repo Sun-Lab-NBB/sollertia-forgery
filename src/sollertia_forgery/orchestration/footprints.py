@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 from typing import TYPE_CHECKING
+from functools import cache
 from dataclasses import dataclass
 
 import cv2
@@ -22,12 +23,7 @@ from numpy.lib.format import read_magic, read_array_header_1_0, read_array_heade
 from sollertia_shared_assets import SessionData
 
 from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
-from ..forging import (
-    DEFINE_JOB_NAME,
-    VERIFY_JOB_NAME,
-    MULTIDAY_DISCOVERY_JOB_NAME,
-    MULTIDAY_EXTRACTION_JOB_NAME,
-)
+from ..forging import MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
 from ..managing import CHECKSUM_JOB_NAME
 from .pipelines import ProcessingPipelines
@@ -109,7 +105,7 @@ _COMBINED_METADATA_FILENAME: str = "combined_metadata.npz"
 """The cindra archive reporting the combined field extent every multi-day stage works at."""
 
 _MULTI_RECORDING_DIRECTORY: str = "multi_recording"
-"""The cindra output subdirectory holding each animal's multi-day results, one directory per tracked dataset."""
+"""The processed-output subdirectory holding an animal's multi-day results, one directory per tracked dataset."""
 
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
@@ -147,11 +143,6 @@ emits one array per column and the interpolation that aligns them holds double-p
 
 _PERCENT: float = 100.0
 """The divisor converting a percentage into a fraction."""
-
-_DEFINITION_MEMORY_MB: int = 1024
-"""The memory the dataset-definition job is charged. The job reads session markers and writes configuration files,
-whose size follows the dataset's session count rather than its data volume. The allowance covers a session count well
-past this corpus, so the estimate tolerance does not apply on top."""
 
 _COMBINATION_MEMORY_MB: int = 16384
 """The memory the combination job is charged. The stage concatenates every plane's traces into dense arrays, so its
@@ -574,8 +565,8 @@ def estimate_dataset_job_memory(
 
     Notes:
         Reads array headers and the recording metadata alone, so estimating a dataset decodes no fluorescence and
-        opens no binary. Every stage scales with the processed data it will read, which exists because the
-        single-recording pipeline that wrote it is a prerequisite of forging.
+        opens no binary. Each two-photon stage scales with the processed data the single-recording pipeline wrote for
+        the sessions that carry two-photon data.
 
         Every job receives a figure, since a remote scheduler reserves memory per job and one submitted at the worker
         baseline it does not need would be killed.
@@ -594,11 +585,7 @@ def estimate_dataset_job_memory(
 
     estimates: dict[tuple[str, str], tuple[int, bool]] = {}
     for job_name, specifier, _cores in jobs:
-        if job_name == DEFINE_JOB_NAME:
-            estimates[job_name, specifier] = (_DEFINITION_MEMORY_MB, False)
-        elif job_name == VERIFY_JOB_NAME:
-            estimates[job_name, specifier] = (_apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False)
-        elif job_name == MULTIDAY_DISCOVERY_JOB_NAME:
+        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
             estimates[job_name, specifier] = _estimate_discovery_memory(
                 dataset=dataset, animal=specifier, project_root=project_root
             )
@@ -624,7 +611,7 @@ def estimate_dataset_job_memory(
 
 @dataclass(frozen=True, slots=True)
 class _RecordingGeometry:
-    """Describes the shape of a processed recording as its cindra output reports it."""
+    """Describes the shape of a two-photon recording as its processing output reports it."""
 
     regions: int
     """The regions the single-recording pipeline detected."""
@@ -632,6 +619,25 @@ class _RecordingGeometry:
     """The samples each region's trace holds."""
     pixels: int
     """The pixels one combined multi-plane frame holds, which every multi-day stage works at."""
+
+
+@cache
+def _two_photon_output_directory(project_root: Path, animal: str, session: str) -> Path:
+    """Resolves a session's single-recording two-photon output directory through the session hierarchy.
+
+    Notes:
+        Cached, because one dataset's estimates resolve the same session from several stages and each resolution
+        otherwise re-reads that session's marker.
+
+    Args:
+        project_root: The path to the project's root directory.
+        animal: The animal the session belongs to.
+        session: The session name whose output directory is resolved.
+
+    Returns:
+        The path to the session's cindra output directory.
+    """
+    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.cindra_data_path
 
 
 def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -> _RecordingGeometry | None:
@@ -645,7 +651,7 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
     Returns:
         The recording's geometry, or None when the session holds no processed imaging output.
     """
-    directory = SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.cindra_data_path
+    directory = _two_photon_output_directory(project_root=project_root, animal=animal, session=session)
     traces = _read_array_shape(array_path=directory.joinpath(_FLUORESCENCE_FILENAME))
     metadata_path = directory.joinpath(_COMBINED_METADATA_FILENAME)
     if traces is None or not metadata_path.is_file():
@@ -679,8 +685,8 @@ def _resolve_tracking_configuration(dataset: DatasetData, project_root: Path) ->
     """Resolves the multi-recording configuration the dataset's acquisition system donates.
 
     Notes:
-        Read from the system registry rather than from the file the definition job materializes, so the parameters
-        are available while that job is still outstanding.
+        Read from the system registry rather than from the file ``define_forging_dataset`` materializes, so the
+        parameters are available for a dataset whose configurations have not been written yet.
 
     Args:
         dataset: The resolved dataset whose acquisition system donates the configuration.
@@ -731,9 +737,7 @@ def _resolve_tracked_regions(
         return 1
 
     tracked = _read_array_shape(
-        array_path=SessionData.load(
-            session_path=project_root.joinpath(animal, session)
-        ).processed_data.cindra_data_path.joinpath(
+        array_path=_two_photon_output_directory(project_root=project_root, animal=animal, session=session).joinpath(
             _MULTI_RECORDING_DIRECTORY,
             multi_recording_dataset_directory(animal_id=animal, dataset_name=dataset.name),
             _FLUORESCENCE_FILENAME,

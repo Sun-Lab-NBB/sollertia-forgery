@@ -17,14 +17,13 @@ from sollertia_shared_assets import DatasetData, SessionTypes, AcquisitionSystem
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.forging import (
-    DEFINE_JOB_NAME,
-    VERIFY_JOB_NAME,
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
     resolve_dataset,
     run_forging_pipeline,
     build_forging_universe,
+    define_forging_dataset,
     forging_job_prerequisites,
 )
 import sollertia_forgery.forging.dataset as dataset_module
@@ -348,7 +347,7 @@ def _make_tracker(tmp_path: Path, universe: list[tuple[str, str]]) -> Processing
 
 def test_resolve_runnable_jobs_reports_the_whole_universe_for_an_unwritten_tracker(tmp_path: Path) -> None:
     """Verifies that a tracker that has never been written reports every job as outstanding."""
-    universe = [(VERIFY_JOB_NAME, ""), (FORGING_JOB_NAME, "session_1")]
+    universe = [(MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"), (FORGING_JOB_NAME, "session_1")]
     tracker = ProcessingTracker(file_path=tmp_path.joinpath("forging_tracker.yaml"))
 
     assert _resolve_runnable_jobs(tracker=tracker, universe=universe) == universe
@@ -380,7 +379,6 @@ def test_resolve_runnable_jobs_includes_failed_jobs(tmp_path: Path) -> None:
 def test_reset_animal_jobs_targets_only_the_named_animals(tmp_path: Path) -> None:
     """Verifies that a rebuilt animal's stages are reset while every other animal keeps its recorded state."""
     universe = [
-        (VERIFY_JOB_NAME, ""),
         (MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_1"),
         (FORGING_JOB_NAME, "session_1"),
@@ -422,20 +420,17 @@ def test_reset_animal_jobs_leaves_an_unwritten_tracker_alone(tmp_path: Path) -> 
     assert not tracker.file_path.exists()
 
 
-# Tests for which invocation applies the dataset-definition arguments
+# Tests for the dataset-definition entry point
 
 
 def _record_resolution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Replaces the pipeline's dataset resolver with a recorder that halts the run once it captures its arguments.
-
-    The recorder stands in for the resolution policy, so the policy's own argument rules do not apply to what the
-    tests pass. That keeps each test on the single question of which arguments reach the resolver.
+    """Replaces the definition entry point's dataset resolver with a recorder that halts once it captures arguments.
 
     Args:
         monkeypatch: The fixture used to replace the resolver the pipeline module calls.
 
     Returns:
-        The mapping the recorder fills with the keyword arguments the pipeline passed to the resolver.
+        The mapping the recorder fills with the keyword arguments the entry point passed to the resolver.
     """
     recorded: dict[str, Any] = {}
 
@@ -448,186 +443,36 @@ def _record_resolution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return recorded
 
 
-def test_run_forging_pipeline_applies_definition_arguments_in_local_mode(
+def test_define_forging_dataset_applies_every_definition_argument(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that a local run applies the session list and the rebuild arguments."""
+    """Verifies that the definition entry point forwards the session list and the rebuild arguments."""
     recorded = _record_resolution(monkeypatch)
 
     with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(
-            name="test_dataset",
-            session_names=("session_1",),
-            project_root=tmp_path,
-            recreate_animals=("animal_a",),
-        )
-
-    assert recorded["session_names"] == ("session_1",)
-    assert recorded["recreate_animals"] == ("animal_a",)
-
-
-def test_run_forging_pipeline_suppresses_definition_arguments_for_other_remote_jobs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that a remote job other than the definition job loads the hierarchy without redefining it."""
-    recorded = _record_resolution(monkeypatch)
-    assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
-
-    with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(
+        define_forging_dataset(
             name="test_dataset",
             session_names=("session_1", "session_2"),
             project_root=tmp_path,
-            job_id=assembly_id,
             force_recreate=True,
-            recreate_animals=("animal_a",),
         )
+
+    assert recorded["session_names"] == ("session_1", "session_2")
+    assert recorded["force_recreate"] is True
+
+
+def test_run_forging_pipeline_never_redefines_the_hierarchy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that running the pipeline loads the dataset without changing its session set.
+
+    The hierarchy is built by the definition entry point before any job is prepared, so a run that could widen it
+    would let a dispatched job mutate the universe its siblings were planned against.
+    """
+    recorded = _record_resolution(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="halted"):
+        run_forging_pipeline(name="test_dataset", project_root=tmp_path)
 
     assert recorded["session_names"] == ()
-    assert recorded["force_recreate"] is False
-    assert recorded["recreate_animals"] == ()
-
-
-# Tests for which invocation writes the per-animal multi-day configurations
-
-
-def _install_dataset_animals(tmp_path: Path, animals: dict[str, list[str]], configured: set[str]) -> Any:
-    """Builds a dataset stub whose animals resolve to on-disk directories, configuring the named ones.
-
-    Args:
-        tmp_path: The temporary directory the animal directories are created under.
-        animals: The session names to report for each animal, in dataset order.
-        configured: The animals whose multi-recording configuration file is written to disk.
-
-    Returns:
-        A dataset stub exposing the animals, sessions, and lookups the plan helpers read.
-    """
-    dataset_root = tmp_path.joinpath("test_dataset")
-    dataset_animals = []
-    for animal in animals:
-        animal_path = dataset_root.joinpath(animal)
-        animal_path.mkdir(parents=True, exist_ok=True)
-        if animal in configured:
-            animal_path.joinpath("multi_recording_configuration.yaml").write_text("recording_io: {}\n")
-        dataset_animals.append(SimpleNamespace(animal=animal, animal_path=animal_path))
-
-    sessions = tuple(
-        SimpleNamespace(animal=animal, session=session) for animal, names in animals.items() for session in names
-    )
-    return SimpleNamespace(
-        name="test_dataset",
-        acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
-        dataset_data_path=dataset_root.joinpath("dataset_data.yaml"),
-        animals=tuple(dataset_animals),
-        sessions=sessions,
-        get_sessions_for_animal=lambda animal: tuple(entry for entry in sessions if entry.animal == animal),
-    )
-
-
-def testload_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) -> None:
-    """Verifies that reading the plan admits an animal exactly when its configuration is on disk."""
-    dataset = _install_dataset_animals(
-        tmp_path,
-        animals={"animal_a": ["session_1", "session_2"], "animal_b": ["session_3"]},
-        configured={"animal_a"},
-    )
-
-    plan = pipeline_module.load_multiday_plan(dataset=dataset)
-
-    assert set(plan) == {"animal_a"}
-    configuration_path, session_names = plan["animal_a"]
-    assert session_names == ["session_1", "session_2"]
-    assert configuration_path == dataset.animals[0].animal_path.joinpath("multi_recording_configuration.yaml")
-
-
-def testload_multiday_plan_reports_nothing_without_a_configuration(tmp_path: Path) -> None:
-    """Verifies that a dataset whose animals carry no configuration resolves to an empty plan."""
-    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
-
-    assert pipeline_module.load_multiday_plan(dataset=dataset) == {}
-
-
-def _record_plan_selection(monkeypatch: pytest.MonkeyPatch, dataset: Any) -> list[str]:
-    """Replaces both plan helpers with recorders that halt the run once they capture which path it took.
-
-    Args:
-        monkeypatch: The fixture used to replace the resolver, the assembly-worker registry, and both helpers.
-        dataset: The dataset stub the replaced resolver returns.
-
-    Returns:
-        The list the recorders append the selected plan path to.
-    """
-    calls: list[str] = []
-
-    def _halt(path: str) -> Any:
-        def _record(**_arguments: Any) -> None:
-            calls.append(path)
-            message = "halted after plan selection"
-            raise RuntimeError(message)
-
-        return _record
-
-    monkeypatch.setattr(pipeline_module, "resolve_dataset", lambda **_arguments: dataset)
-    monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", lambda _system: None)
-    monkeypatch.setattr(pipeline_module, "materialize_multiday_plan", _halt("materialize"))
-    monkeypatch.setattr(pipeline_module, "load_multiday_plan", _halt("load"))
-    return calls
-
-
-def test_run_forging_pipeline_materializes_the_plan_in_local_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that the invocation owning the hierarchy writes the per-animal configurations."""
-    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
-    calls = _record_plan_selection(monkeypatch, dataset)
-
-    with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(name="test_dataset", session_names=("session_1",), project_root=tmp_path)
-
-    assert calls == ["materialize"]
-
-
-def test_run_forging_pipeline_reads_the_plan_for_other_remote_jobs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that a remote job other than the definition job reads the plan instead of rewriting it."""
-    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured={"animal_a"})
-    calls = _record_plan_selection(monkeypatch, dataset)
-    assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
-
-    with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(
-            name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=assembly_id
-        )
-
-    assert calls == ["load"]
-
-
-def test_remote_forging_jobs_leave_the_materialized_configuration_untouched(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that a remote job other than the definition job never rewrites an animal's configuration file."""
-    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured={"animal_a"})
-    configuration_path = dataset.animals[0].animal_path.joinpath("multi_recording_configuration.yaml")
-    original = configuration_path.read_text()
-
-    monkeypatch.setattr(pipeline_module, "resolve_dataset", lambda **_arguments: dataset)
-    monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", lambda _system: None)
-
-    def _fail(**_arguments: Any) -> None:
-        message = "the reading path must not materialize"
-        raise AssertionError(message)
-
-    monkeypatch.setattr(pipeline_module, "materialize_multiday_plan", _fail)
-    monkeypatch.setattr(pipeline_module, "build_forging_universe", lambda **_arguments: [])
-
-    assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
-    with pytest.raises(ValueError, match="does not match any forging job"):
-        run_forging_pipeline(
-            name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=assembly_id
-        )
-
-    assert configuration_path.read_text() == original
 
 
 # Tests for the forging job universe and its ordering
@@ -637,19 +482,26 @@ _MULTIDAY_PLAN: dict[str, tuple[Path, list[str]]] = {
     "animal_a": (Path("animal_a/multi_recording_configuration.yaml"), ["session_1", "session_2"]),
     "animal_b": (Path("animal_b/multi_recording_configuration.yaml"), ["session_3"]),
 }
-"""A two-animal multi-day plan standing in for what a materialized dataset leaves on disk."""
+"""A two-animal multi-day plan standing in for what a defined dataset leaves on disk."""
+
+_SESSION_ANIMALS: dict[str, str] = {"session_1": "animal_a", "session_2": "animal_a", "session_3": "animal_b"}
+"""The animal owning each session in the plan, which the ordering resolves an extraction's discovery through."""
+
+
+def _dataset_stub(*sessions: str) -> Any:
+    """Returns a dataset stub carrying the session and animal pairs the universe and ordering read."""
+    return SimpleNamespace(
+        sessions=tuple(
+            SimpleNamespace(session=session, animal=_SESSION_ANIMALS.get(session, "animal_a")) for session in sessions
+        )
+    )
 
 
 def test_build_forging_universe_covers_every_stage() -> None:
-    """Verifies that the universe holds each animal's discovery, every extraction and assembly, and verification."""
-    dataset = SimpleNamespace(
-        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
-    )
+    """Verifies that the universe holds each animal's discovery alongside every extraction and assembly."""
+    dataset = _dataset_stub("session_1", "session_2", "session_3")
 
-    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
-
-    assert universe == [
-        (DEFINE_JOB_NAME, ""),
+    assert build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN) == [
         (MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_1"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_2"),
@@ -658,82 +510,56 @@ def test_build_forging_universe_covers_every_stage() -> None:
         (FORGING_JOB_NAME, "session_1"),
         (FORGING_JOB_NAME, "session_2"),
         (FORGING_JOB_NAME, "session_3"),
-        (VERIFY_JOB_NAME, ""),
     ]
 
 
 def test_build_forging_universe_omits_multiday_jobs_without_a_plan() -> None:
-    """Verifies that a dataset needing no multi-day processing carries only assembly and verification jobs."""
-    dataset = SimpleNamespace(sessions=(SimpleNamespace(session="session_1"),))
+    """Verifies that a dataset needing no multi-day processing carries assembly jobs alone."""
+    dataset = _dataset_stub("session_1")
 
-    assert build_forging_universe(dataset=dataset, multiday_plan={}) == [
-        (DEFINE_JOB_NAME, ""),
-        (FORGING_JOB_NAME, "session_1"),
-        (VERIFY_JOB_NAME, ""),
-    ]
+    assert build_forging_universe(dataset=dataset, multiday_plan={}) == [(FORGING_JOB_NAME, "session_1")]
 
 
 def test_forging_job_prerequisites_chains_each_session_through_its_own_animal() -> None:
     """Verifies that an extraction waits on its own animal's discovery and an assembly waits on its extraction."""
-    dataset = SimpleNamespace(
-        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
-    )
+    dataset = _dataset_stub("session_1", "session_2", "session_3")
     universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
 
-    ordering = forging_job_prerequisites(multiday_plan=_MULTIDAY_PLAN, universe=universe)
+    ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
-    assert ordering[DEFINE_JOB_NAME, ""] == ()
-    assert ordering[MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"] == ((DEFINE_JOB_NAME, ""),)
+    assert ordering[MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"] == ()
     assert ordering[MULTIDAY_EXTRACTION_JOB_NAME, "session_2"] == ((MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),)
     assert ordering[MULTIDAY_EXTRACTION_JOB_NAME, "session_3"] == ((MULTIDAY_DISCOVERY_JOB_NAME, "animal_b"),)
     assert ordering[FORGING_JOB_NAME, "session_3"] == ((MULTIDAY_EXTRACTION_JOB_NAME, "session_3"),)
 
 
-def test_forging_job_prerequisites_gates_verification_on_every_assembly() -> None:
-    """Verifies that the verification job waits on every assembly job the universe holds."""
-    dataset = SimpleNamespace(sessions=(SimpleNamespace(session="session_1"), SimpleNamespace(session="session_2")))
+def test_forging_job_prerequisites_leaves_a_training_assembly_unordered() -> None:
+    """Verifies that a session with no multi-day stage carries no upstream job."""
+    dataset = _dataset_stub("session_1", "session_2")
     universe = build_forging_universe(dataset=dataset, multiday_plan={})
 
-    ordering = forging_job_prerequisites(multiday_plan={}, universe=universe)
+    ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
-    assert ordering[VERIFY_JOB_NAME, ""] == (
-        (FORGING_JOB_NAME, "session_1"),
-        (FORGING_JOB_NAME, "session_2"),
-    )
-    # A dataset needing no multi-day processing carries the definition requirement on its assembly jobs instead.
-    assert ordering[FORGING_JOB_NAME, "session_1"] == ((DEFINE_JOB_NAME, ""),)
+    assert ordering[FORGING_JOB_NAME, "session_1"] == ()
+    assert ordering[FORGING_JOB_NAME, "session_2"] == ()
 
 
 def test_forging_job_prerequisites_covers_the_whole_universe() -> None:
     """Verifies that every job in the universe receives an ordering entry."""
-    dataset = SimpleNamespace(
-        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
-    )
+    dataset = _dataset_stub("session_1", "session_2", "session_3")
     universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
 
-    assert set(forging_job_prerequisites(multiday_plan=_MULTIDAY_PLAN, universe=universe)) == set(universe)
+    assert set(forging_job_prerequisites(dataset=dataset, universe=universe)) == set(universe)
 
 
-@pytest.mark.parametrize("plan", [_MULTIDAY_PLAN, {}], ids=["multiday", "training"])
-def test_every_forging_job_reaches_the_definition_job(plan: dict[str, tuple[Path, list[str]]]) -> None:
-    """Verifies that every job depends on the definition job along some path."""
-    dataset = SimpleNamespace(
-        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
-    )
-    universe = build_forging_universe(dataset=dataset, multiday_plan=plan)
-    ordering = forging_job_prerequisites(multiday_plan=plan, universe=universe)
-    define_job = (DEFINE_JOB_NAME, "")
+def test_every_multiday_session_reaches_its_own_animals_discovery() -> None:
+    """Verifies that each assembly's upstream chain terminates at the discovery of the animal owning its session."""
+    dataset = _dataset_stub("session_1", "session_2", "session_3")
+    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+    ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
-    def _reaches_definition(job: tuple[str, str], seen: frozenset[tuple[str, str]]) -> bool:
-        """Reports whether a job's upstream chain terminates at the definition job."""
-        upstream = ordering[job]
-        assert upstream or job == define_job, f"{job} has no upstream and is not the definition job"
-        return all(
-            parent == define_job or (parent not in seen and _reaches_definition(parent, seen | {parent}))
-            for parent in upstream
-        )
-
-    for job in universe:
-        if job == define_job:
-            continue
-        assert _reaches_definition(job, frozenset({job})), f"{job} does not depend on the definition job"
+    for session, animal in _SESSION_ANIMALS.items():
+        chain = [(FORGING_JOB_NAME, session)]
+        while ordering[chain[-1]]:
+            chain.append(ordering[chain[-1]][0])
+        assert chain[-1] == (MULTIDAY_DISCOVERY_JOB_NAME, animal), f"{session} does not reach its animal's discovery"

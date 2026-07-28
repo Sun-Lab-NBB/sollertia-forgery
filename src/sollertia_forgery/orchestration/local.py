@@ -176,8 +176,8 @@ class JobExecutionState[PendingJobT: PendingJob]:
     memory.
 
     Notes:
-        The generic type parameter ``PendingJobT`` is a ``PendingJob`` subclass. Subclasses carry the fields a worker
-        callable needs at dispatch time, such as the path of the unit the job processes.
+        Subclasses of ``PendingJob`` carry the fields a worker callable needs at dispatch time, such as the path of
+        the unit the job processes.
     """
 
     worker: Callable[[PendingJobT], None]
@@ -441,8 +441,8 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
 
         numba and OpenCV are pinned through their runtime setters alone, leaving the environment they read at import
         untouched. Both already hold the count they read when the worker imported them, so rewriting those variables
-        would change nothing they consult again. For numba it would actively break the worker, since it compares the
-        variable against the latched count on every compilation and rejects a disagreement once its threads have
+        would change nothing they consult again. For numba it would actively break the worker, since it compares
+        the variable against the latched count on every compilation and rejects a disagreement once its threads have
         started, which is exactly the state a late pin creates.
 
     Args:
@@ -462,9 +462,9 @@ def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[Pending
 
     Notes:
         Runs once, before the first admission. Without it a queued job whose tracker still records an earlier
-        success reports as succeeded from the moment the batch starts, which makes a run's progress
-        indistinguishable from its history and lets a status reader call a batch complete before it has dispatched
-        anything. Resetting is safe because a caller queues a job precisely to have it run again.
+        success reports as succeeded from the moment the batch starts. That makes a run's progress indistinguishable
+        from its history, and lets a status reader call a batch complete before it has dispatched anything.
+        Resetting is safe because a caller queues a job precisely to have it run again.
 
         Jobs are grouped by tracker so each file is rewritten once, however many of its jobs the batch holds.
 

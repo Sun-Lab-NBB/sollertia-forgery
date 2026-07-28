@@ -78,12 +78,15 @@ def prepare_batch_tool(
 
     Args:
         pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
-            ``two_photon``.
-        session_paths: The session root directories to prepare jobs for.
+            ``two_photon``, ``forging``.
+        session_paths: The processing unit directories to prepare jobs for, which are session roots for every
+            session pipeline and dataset roots for ``forging``.
         options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this
             call registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting
             re-baselining of the stored value over verification against it, which defaults to verification. The
-            other pipelines take no parameters.
+            ``forging`` pipeline reads ``session_names``, ``force_recreate``, and ``recreate_animals``, which its
+            definition job applies to the dataset hierarchy and every other forging job ignores. The other pipelines
+            take no parameters.
         include_job_descriptors: Determines whether each unit carries its full ``jobs`` list. Dispatch reads the
             descriptors from the identifier rather than from this response, so a batch spanning many sessions can
             omit them and report counts alone.
@@ -138,7 +141,7 @@ def inspect_job_resources_tool(
 
     Args:
         pipeline: The pipeline to inspect, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
-            ``two_photon``.
+            ``two_photon``, ``forging``.
         session_paths: The session root directories to inspect.
         options: The pipeline-specific parameters the inspected jobs would run with, forwarded to preparation. See
             ``prepare_batch_tool`` for the keys each pipeline reads.
@@ -447,7 +450,7 @@ def reset_processing_jobs_tool(pipeline: str, tracker_path: str, job_ids: list[s
 
     Args:
         pipeline: The batch pipeline the tracker belongs to, one of ``checksum``, ``runtime``, ``microcontroller``,
-            ``video``, ``two_photon``.
+            ``video``, ``two_photon``, ``forging``.
         tracker_path: The absolute path to the pipeline's processing tracker file.
         job_ids: The job identifiers to reset. Omit to reset every job in the tracker.
 
@@ -497,7 +500,7 @@ def describe_jobs_tool(
 
     Args:
         pipeline: The pipeline whose tracker to read, one of ``checksum``, ``runtime``, ``microcontroller``,
-            ``video``, ``two_photon``.
+            ``video``, ``two_photon``, ``forging``.
         session_paths: The session root directories to describe.
         job_ids: Restricts the reported jobs to these tracker job identifiers.
         job_names: Restricts the reported jobs to these job type names.
@@ -507,9 +510,9 @@ def describe_jobs_tool(
     Returns:
         A response dict with ``pipeline``, ``total_units``, ``total_jobs`` matched across sessions, an aggregate
         ``summary`` of their statuses, and a ``units`` list. Each unit carries its ``session_path``,
-        ``session_name``, ``tracker_path``, whether the tracker ``tracker_exists``, and a ``jobs`` list holding each
+        ``session_name``, ``tracker_path``, and whether the tracker ``tracker_exists``. Its ``jobs`` list holds each
         job's identity, the executor that ran it, its start and completion timestamps, its elapsed seconds, and any
-        recorded error, or an ``error`` when the session could not be read.
+        recorded error. A unit that could not be read carries an ``error`` instead.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
@@ -587,11 +590,12 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dic
 
     The ``checksum`` pipeline owns no directory, because it writes its stored value into the acquired data itself.
     Cleaning it removes its tracker and leaves that stored value in place, so the session keeps the baseline a later
-    verification compares against.
+    verification compares against. The ``forging`` pipeline owns its whole dataset hierarchy, so cleaning it removes
+    every assembled feather in that dataset alongside the tracker.
 
     Args:
         pipeline: The batch pipeline to clean, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
-            ``two_photon``.
+            ``two_photon``, ``forging``.
         session_paths: The session root directories to clean.
 
     Returns:
