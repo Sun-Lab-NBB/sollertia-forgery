@@ -130,6 +130,7 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
 
 
 def runtime_job_prerequisites(
+    session: SessionData,  # noqa: ARG001
     universe: list[tuple[str, str]],
 ) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
     """Returns the intra-pipeline job ordering for the runtime pipeline.
@@ -139,6 +140,7 @@ def runtime_job_prerequisites(
         prerequisite tuple.
 
     Args:
+        session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
         universe: The job universe as returned by ``discover_runtime_jobs``.
 
     Returns:

@@ -232,6 +232,7 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
 
 
 def two_photon_job_prerequisites(
+    session: SessionData,  # noqa: ARG001
     universe: list[tuple[str, str]],
 ) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
     """Returns the intra-pipeline job ordering for the two-photon pipeline.
@@ -242,6 +243,7 @@ def two_photon_job_prerequisites(
         combination job requires every processing job, and the binarization job has no upstream dependency.
 
     Args:
+        session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
         universe: The job universe as returned by ``discover_two_photon_jobs``.
 
     Returns:

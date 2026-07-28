@@ -20,6 +20,7 @@ from .dispatch import (
     resolve_dispatch,
     build_pending_job,
     prepare_pipeline_jobs,
+    resolve_concurrency_limits,
 )
 from .pipelines import ProcessingPipelines
 from .footprints import resolve_host_memory_mb
@@ -38,6 +39,7 @@ __all__ = [
     "group_jobs_by_tracker",
     "job_execution_manager",
     "prepare_pipeline_jobs",
+    "resolve_concurrency_limits",
     "resolve_core_allocations",
     "resolve_dispatch",
     "resolve_host_memory_mb",

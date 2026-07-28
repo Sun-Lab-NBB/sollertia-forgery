@@ -164,6 +164,7 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
 
 
 def checksum_job_prerequisites(
+    session: SessionData,  # noqa: ARG001
     universe: list[tuple[str, str]],
 ) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
     """Returns the intra-pipeline job ordering for the checksum pipeline.
@@ -174,6 +175,7 @@ def checksum_job_prerequisites(
         layer can validate ordering uniformly across pipelines.
 
     Args:
+        session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
         universe: The job universe as returned by ``discover_checksum_jobs``.
 
     Returns:

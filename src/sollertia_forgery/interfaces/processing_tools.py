@@ -27,6 +27,7 @@ from ..orchestration import (
     prepare_pipeline_jobs,
     resolve_host_memory_mb,
     resolve_core_allocations,
+    resolve_concurrency_limits,
 )
 
 if TYPE_CHECKING:
@@ -99,10 +100,11 @@ def prepare_batch_tool(
     descriptors: list[dict[str, Any]] = []
     for session_path in session_paths:
         try:
-            prepared = prepare_pipeline_jobs(dispatch=dispatch, session_path=Path(session_path), options=options)
+            prepared = prepare_pipeline_jobs(dispatch=dispatch, unit_path=Path(session_path), options=options)
         except Exception as exception:
             units.append({"session_path": session_path, "error": str(exception), "job_count": 0, "jobs": []})
             continue
+        prepared["session_name"] = prepared.pop("unit_name")
         prepared["session_path"] = session_path
         descriptors.extend(prepared["jobs"])
         prepared["job_count"] = len(prepared["jobs"])
@@ -186,7 +188,7 @@ def execute_jobs_tool(
     Passing descriptors directly stays available for a caller that assembled or filtered its own job list.
 
     Args:
-        jobs: The job descriptors to dispatch, each carrying ``tracker_path``, ``job_id``, ``session_path``,
+        jobs: The job descriptors to dispatch, each carrying ``tracker_path``, ``job_id``, ``unit_path``,
             ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``, ``prerequisite_ids``, and
             ``options``. Supply this or ``batch_ids``, or both to dispatch their union.
         batch_ids: The identifiers ``prepare_batch_tool`` returned, whose registered descriptors are dispatched.
@@ -249,11 +251,14 @@ def execute_jobs_tool(
     )
 
     # Narrows every job to the resolved budget, since a descriptor prepared against a larger host would otherwise
-    # tell its pipeline to fan out wider than this host can supply.
+    # tell its pipeline to fan out wider than this host can supply. The concurrency limits enter here too, so the
+    # reported maximum for a storage-bound job type is the one admission will actually hold it to.
+    concurrency_limits = resolve_concurrency_limits(job_names={job.job_name for job in pending})
     allocations = resolve_core_allocations(
         job_cores={job.job_name: job.core_weight for job in pending},
         job_names={job.job_name for job in pending},
         core_budget=core_budget,
+        job_limits=concurrency_limits,
     )
     for pending_job in pending:
         pending_job.core_weight = allocations[pending_job.job_name].cores_per_job
@@ -269,6 +274,7 @@ def execute_jobs_tool(
         pending_jobs=deque(pending),
         core_budget=core_budget,
         memory_budget_mb=resolved_memory,
+        concurrency_limits=concurrency_limits,
         pool_size=pool_size,
     )
     _EXECUTION_STATE = state
@@ -284,7 +290,11 @@ def execute_jobs_tool(
         pool_size=pool_size,
         pipelines=sorted({job.pipeline for job in pending}),
         job_allocations={
-            job_name: {"cores_per_job": allocation.cores_per_job, "maximum_parallel": allocation.maximum_parallel}
+            job_name: {
+                "cores_per_job": allocation.cores_per_job,
+                "maximum_parallel": allocation.maximum_parallel,
+                "concurrency_limit": allocation.concurrency_limit,
+            }
             for job_name, allocation in allocations.items()
         },
     )
@@ -510,12 +520,12 @@ def describe_jobs_tool(
     total_jobs = 0
     for session_path in session_paths:
         try:
-            session, _, _ = dispatch.discover(Path(session_path))
+            unit, _, _ = dispatch.discover(Path(session_path))
         except Exception as exception:
             units.append({"session_path": session_path, "error": str(exception)})
             continue
 
-        tracker_path = dispatch.tracker_path(session)
+        tracker_path = dispatch.tracker_path(unit)
         snapshot = ProcessingTracker(file_path=tracker_path).snapshot() if tracker_path.is_file() else {}
 
         jobs: list[dict[str, Any]] = []
@@ -545,7 +555,7 @@ def describe_jobs_tool(
         units.append(
             {
                 "session_path": session_path,
-                "session_name": session.session_name,
+                "session_name": dispatch.unit_name(unit),
                 "tracker_path": str(tracker_path),
                 "tracker_exists": tracker_path.is_file(),
                 "jobs": jobs,
@@ -599,13 +609,13 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dic
     total_removed = 0
     for session_path in session_paths:
         try:
-            session, _, _ = dispatch.discover(Path(session_path))
+            unit, _, _ = dispatch.discover(Path(session_path))
         except Exception as exception:
             units.append({"session_path": session_path, "error": str(exception)})
             continue
 
-        targets = [dispatch.tracker_path(session)]
-        owned = dispatch.output_path(session)
+        targets = [dispatch.tracker_path(unit)]
+        owned = dispatch.output_path(unit)
         if owned is not None:
             targets.append(owned)
 
@@ -627,7 +637,7 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dic
         units.append(
             {
                 "session_path": session_path,
-                "session_name": session.session_name,
+                "session_name": dispatch.unit_name(unit),
                 "removed_paths": removed_paths,
                 "removed_bytes": removed_bytes,
             }

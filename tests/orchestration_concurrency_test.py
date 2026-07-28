@@ -280,7 +280,7 @@ def test_checksum_is_a_registered_batch_pipeline() -> None:
 
     # The pipeline resolves one job per session with no upstream stage, so every job maps to an empty ordering.
     universe = [(CHECKSUM_JOB_NAME, "a_session")]
-    assert dispatch.prerequisites(universe) == {(CHECKSUM_JOB_NAME, "a_session"): ()}
+    assert dispatch.prerequisites(None, universe) == {(CHECKSUM_JOB_NAME, "a_session"): ()}
 
 
 def test_job_options_round_trip_from_descriptor_to_worker() -> None:
@@ -288,7 +288,7 @@ def test_job_options_round_trip_from_descriptor_to_worker() -> None:
     descriptor = {
         "tracker_path": str(TRACKER),
         "job_id": "a_job",
-        "session_path": "/nonexistent/session",
+        "unit_path": "/nonexistent/session",
         "job_name": CHECKSUM_JOB_NAME,
         "pipeline": ProcessingPipelines.CHECKSUM.value,
         "cores": 8,
@@ -326,3 +326,32 @@ def test_worker_initializer_leaves_the_numba_thread_variable_alone() -> None:
     # The other threading layers stay pinned, since they read their variables when the job itself starts.
     assert "OMP_NUM_THREADS" in _PINNED_THREAD_VARIABLES
     assert "POLARS_MAX_THREADS" in _PINNED_THREAD_VARIABLES
+
+
+@pytest.mark.parametrize("pipeline", sorted(member.value for member in BATCH_PIPELINES))
+def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str) -> None:
+    """Verifies that each registered pipeline supplies every callable the unit-generic dispatch contract requires.
+
+    The batch layer reads a unit only through these callables, so an entry omitting one fails at preparation rather
+    than at registration.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    assert dispatch is not None
+
+    for field in ("discover", "worker", "prerequisites", "tracker_path", "output_path", "unit_name", "estimate_memory"):
+        assert callable(getattr(dispatch, field)), f"{pipeline} declares no {field}"
+
+    # The materialization hook is optional, so it is either absent or callable, never some other value.
+    assert dispatch.materialize is None or callable(dispatch.materialize)
+
+
+def test_only_the_two_photon_pipeline_materializes_before_dispatch() -> None:
+    """Verifies that the preparation hook is declared by the one pipeline whose jobs read a file written up front.
+
+    cindra reads its thread count from a configuration file, so that file must exist before any of a session's jobs
+    dispatch. No other registered pipeline has such a precondition.
+    """
+    materializing = {
+        member.value for member in BATCH_PIPELINES if resolve_dispatch(pipeline=member.value).materialize is not None
+    }
+    assert materializing == {ProcessingPipelines.TWO_PHOTON.value}

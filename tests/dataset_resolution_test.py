@@ -18,11 +18,14 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.forging import (
     DEFINE_JOB_NAME,
+    VERIFY_JOB_NAME,
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
     resolve_dataset,
     run_forging_pipeline,
+    build_forging_universe,
+    forging_job_prerequisites,
 )
 import sollertia_forgery.forging.dataset as dataset_module
 import sollertia_forgery.forging.pipeline as pipeline_module
@@ -345,7 +348,7 @@ def _make_tracker(tmp_path: Path, universe: list[tuple[str, str]]) -> Processing
 
 def test_resolve_runnable_jobs_reports_the_whole_universe_for_an_unwritten_tracker(tmp_path: Path) -> None:
     """Verifies that a tracker that has never been written reports every job as outstanding."""
-    universe = [(DEFINE_JOB_NAME, ""), (FORGING_JOB_NAME, "session_1")]
+    universe = [(VERIFY_JOB_NAME, ""), (FORGING_JOB_NAME, "session_1")]
     tracker = ProcessingTracker(file_path=tmp_path.joinpath("forging_tracker.yaml"))
 
     assert _resolve_runnable_jobs(tracker=tracker, universe=universe) == universe
@@ -377,7 +380,7 @@ def test_resolve_runnable_jobs_includes_failed_jobs(tmp_path: Path) -> None:
 def test_reset_animal_jobs_targets_only_the_named_animals(tmp_path: Path) -> None:
     """Verifies that a rebuilt animal's stages are reset while every other animal keeps its recorded state."""
     universe = [
-        (DEFINE_JOB_NAME, ""),
+        (VERIFY_JOB_NAME, ""),
         (MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_1"),
         (FORGING_JOB_NAME, "session_1"),
@@ -463,28 +466,6 @@ def test_run_forging_pipeline_applies_definition_arguments_in_local_mode(
     assert recorded["recreate_animals"] == ("animal_a",)
 
 
-def test_run_forging_pipeline_applies_definition_arguments_to_the_definition_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that a remote definition job applies the session list and the rebuild arguments."""
-    recorded = _record_resolution(monkeypatch)
-    define_id = ProcessingTracker.generate_job_id(job_name=DEFINE_JOB_NAME, specifier="")
-
-    with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(
-            name="test_dataset",
-            session_names=("session_1", "session_2"),
-            project_root=tmp_path,
-            job_id=define_id,
-            force_recreate=True,
-            recreate_animals=("animal_a",),
-        )
-
-    assert recorded["session_names"] == ("session_1", "session_2")
-    assert recorded["force_recreate"] is True
-    assert recorded["recreate_animals"] == ("animal_a",)
-
-
 def test_run_forging_pipeline_suppresses_definition_arguments_for_other_remote_jobs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -543,7 +524,7 @@ def _install_dataset_animals(tmp_path: Path, animals: dict[str, list[str]], conf
     )
 
 
-def test_load_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) -> None:
+def testload_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) -> None:
     """Verifies that reading the plan admits an animal exactly when its configuration is on disk."""
     dataset = _install_dataset_animals(
         tmp_path,
@@ -551,7 +532,7 @@ def test_load_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) 
         configured={"animal_a"},
     )
 
-    plan = pipeline_module._load_multiday_plan(dataset=dataset)
+    plan = pipeline_module.load_multiday_plan(dataset=dataset)
 
     assert set(plan) == {"animal_a"}
     configuration_path, session_names = plan["animal_a"]
@@ -559,11 +540,11 @@ def test_load_multiday_plan_reports_only_the_configured_animals(tmp_path: Path) 
     assert configuration_path == dataset.animals[0].animal_path.joinpath("multi_recording_configuration.yaml")
 
 
-def test_load_multiday_plan_reports_nothing_without_a_configuration(tmp_path: Path) -> None:
+def testload_multiday_plan_reports_nothing_without_a_configuration(tmp_path: Path) -> None:
     """Verifies that a dataset whose animals carry no configuration resolves to an empty plan."""
     dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
 
-    assert pipeline_module._load_multiday_plan(dataset=dataset) == {}
+    assert pipeline_module.load_multiday_plan(dataset=dataset) == {}
 
 
 def _record_plan_selection(monkeypatch: pytest.MonkeyPatch, dataset: Any) -> list[str]:
@@ -588,8 +569,8 @@ def _record_plan_selection(monkeypatch: pytest.MonkeyPatch, dataset: Any) -> lis
 
     monkeypatch.setattr(pipeline_module, "resolve_dataset", lambda **_arguments: dataset)
     monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", lambda _system: None)
-    monkeypatch.setattr(pipeline_module, "_materialize_multiday_plan", _halt("materialize"))
-    monkeypatch.setattr(pipeline_module, "_load_multiday_plan", _halt("load"))
+    monkeypatch.setattr(pipeline_module, "materialize_multiday_plan", _halt("materialize"))
+    monkeypatch.setattr(pipeline_module, "load_multiday_plan", _halt("load"))
     return calls
 
 
@@ -602,20 +583,6 @@ def test_run_forging_pipeline_materializes_the_plan_in_local_mode(
 
     with pytest.raises(RuntimeError, match="halted"):
         run_forging_pipeline(name="test_dataset", session_names=("session_1",), project_root=tmp_path)
-
-    assert calls == ["materialize"]
-
-
-def test_run_forging_pipeline_materializes_the_plan_for_the_definition_job(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Verifies that a remote definition job writes the per-animal configurations."""
-    dataset = _install_dataset_animals(tmp_path, animals={"animal_a": ["session_1"]}, configured=set())
-    calls = _record_plan_selection(monkeypatch, dataset)
-    define_id = ProcessingTracker.generate_job_id(job_name=DEFINE_JOB_NAME, specifier="")
-
-    with pytest.raises(RuntimeError, match="halted"):
-        run_forging_pipeline(name="test_dataset", session_names=("session_1",), project_root=tmp_path, job_id=define_id)
 
     assert calls == ["materialize"]
 
@@ -651,8 +618,8 @@ def test_remote_forging_jobs_leave_the_materialized_configuration_untouched(
         message = "the reading path must not materialize"
         raise AssertionError(message)
 
-    monkeypatch.setattr(pipeline_module, "_materialize_multiday_plan", _fail)
-    monkeypatch.setattr(pipeline_module, "_build_forging_universe", lambda **_arguments: [])
+    monkeypatch.setattr(pipeline_module, "materialize_multiday_plan", _fail)
+    monkeypatch.setattr(pipeline_module, "build_forging_universe", lambda **_arguments: [])
 
     assembly_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier="session_1")
     with pytest.raises(ValueError, match="does not match any forging job"):
@@ -661,3 +628,112 @@ def test_remote_forging_jobs_leave_the_materialized_configuration_untouched(
         )
 
     assert configuration_path.read_text() == original
+
+
+# Tests for the forging job universe and its ordering
+
+
+_MULTIDAY_PLAN: dict[str, tuple[Path, list[str]]] = {
+    "animal_a": (Path("animal_a/multi_recording_configuration.yaml"), ["session_1", "session_2"]),
+    "animal_b": (Path("animal_b/multi_recording_configuration.yaml"), ["session_3"]),
+}
+"""A two-animal multi-day plan standing in for what a materialized dataset leaves on disk."""
+
+
+def test_build_forging_universe_covers_every_stage() -> None:
+    """Verifies that the universe holds each animal's discovery, every extraction and assembly, and verification."""
+    dataset = SimpleNamespace(
+        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
+    )
+
+    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+
+    assert universe == [
+        (DEFINE_JOB_NAME, ""),
+        (MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),
+        (MULTIDAY_EXTRACTION_JOB_NAME, "session_1"),
+        (MULTIDAY_EXTRACTION_JOB_NAME, "session_2"),
+        (MULTIDAY_DISCOVERY_JOB_NAME, "animal_b"),
+        (MULTIDAY_EXTRACTION_JOB_NAME, "session_3"),
+        (FORGING_JOB_NAME, "session_1"),
+        (FORGING_JOB_NAME, "session_2"),
+        (FORGING_JOB_NAME, "session_3"),
+        (VERIFY_JOB_NAME, ""),
+    ]
+
+
+def test_build_forging_universe_omits_multiday_jobs_without_a_plan() -> None:
+    """Verifies that a dataset needing no multi-day processing carries only assembly and verification jobs."""
+    dataset = SimpleNamespace(sessions=(SimpleNamespace(session="session_1"),))
+
+    assert build_forging_universe(dataset=dataset, multiday_plan={}) == [
+        (DEFINE_JOB_NAME, ""),
+        (FORGING_JOB_NAME, "session_1"),
+        (VERIFY_JOB_NAME, ""),
+    ]
+
+
+def test_forging_job_prerequisites_chains_each_session_through_its_own_animal() -> None:
+    """Verifies that an extraction waits on its own animal's discovery and an assembly waits on its extraction."""
+    dataset = SimpleNamespace(
+        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
+    )
+    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+
+    ordering = forging_job_prerequisites(multiday_plan=_MULTIDAY_PLAN, universe=universe)
+
+    assert ordering[DEFINE_JOB_NAME, ""] == ()
+    assert ordering[MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"] == ((DEFINE_JOB_NAME, ""),)
+    assert ordering[MULTIDAY_EXTRACTION_JOB_NAME, "session_2"] == ((MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),)
+    assert ordering[MULTIDAY_EXTRACTION_JOB_NAME, "session_3"] == ((MULTIDAY_DISCOVERY_JOB_NAME, "animal_b"),)
+    assert ordering[FORGING_JOB_NAME, "session_3"] == ((MULTIDAY_EXTRACTION_JOB_NAME, "session_3"),)
+
+
+def test_forging_job_prerequisites_gates_verification_on_every_assembly() -> None:
+    """Verifies that the verification job waits on every assembly job the universe holds."""
+    dataset = SimpleNamespace(sessions=(SimpleNamespace(session="session_1"), SimpleNamespace(session="session_2")))
+    universe = build_forging_universe(dataset=dataset, multiday_plan={})
+
+    ordering = forging_job_prerequisites(multiday_plan={}, universe=universe)
+
+    assert ordering[VERIFY_JOB_NAME, ""] == (
+        (FORGING_JOB_NAME, "session_1"),
+        (FORGING_JOB_NAME, "session_2"),
+    )
+    # A dataset needing no multi-day processing carries the definition requirement on its assembly jobs instead.
+    assert ordering[FORGING_JOB_NAME, "session_1"] == ((DEFINE_JOB_NAME, ""),)
+
+
+def test_forging_job_prerequisites_covers_the_whole_universe() -> None:
+    """Verifies that every job in the universe receives an ordering entry."""
+    dataset = SimpleNamespace(
+        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
+    )
+    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+
+    assert set(forging_job_prerequisites(multiday_plan=_MULTIDAY_PLAN, universe=universe)) == set(universe)
+
+
+@pytest.mark.parametrize("plan", [_MULTIDAY_PLAN, {}], ids=["multiday", "training"])
+def test_every_forging_job_reaches_the_definition_job(plan: dict[str, tuple[Path, list[str]]]) -> None:
+    """Verifies that every job depends on the definition job along some path."""
+    dataset = SimpleNamespace(
+        sessions=tuple(SimpleNamespace(session=session) for session in ("session_1", "session_2", "session_3"))
+    )
+    universe = build_forging_universe(dataset=dataset, multiday_plan=plan)
+    ordering = forging_job_prerequisites(multiday_plan=plan, universe=universe)
+    define_job = (DEFINE_JOB_NAME, "")
+
+    def _reaches_definition(job: tuple[str, str], seen: frozenset[tuple[str, str]]) -> bool:
+        """Reports whether a job's upstream chain terminates at the definition job."""
+        upstream = ordering[job]
+        assert upstream or job == define_job, f"{job} has no upstream and is not the definition job"
+        return all(
+            parent == define_job or (parent not in seen and _reaches_definition(parent, seen | {parent}))
+            for parent in upstream
+        )
+
+    for job in universe:
+        if job == define_job:
+            continue
+        assert _reaches_definition(job, frozenset({job})), f"{job} does not depend on the definition job"

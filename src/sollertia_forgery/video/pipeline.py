@@ -338,6 +338,7 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
 
 
 def video_job_prerequisites(
+    session: SessionData,  # noqa: ARG001
     universe: list[tuple[str, str]],
 ) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
     """Returns the intra-pipeline job ordering for the video pipeline.
@@ -350,6 +351,7 @@ def video_job_prerequisites(
         it to all registered cameras.
 
     Args:
+        session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
         universe: The job set to build ordering over, as returned by ``discover_video_jobs`` (either the universe or
             its runnable subset).
 

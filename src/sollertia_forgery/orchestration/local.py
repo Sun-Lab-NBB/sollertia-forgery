@@ -66,13 +66,18 @@ from the host's core count entirely outside the batch's allocation."""
 
 @dataclass(frozen=True, slots=True)
 class JobAllocation:
-    """Describes the cores one job type receives and how many of its jobs the core budget alone would allow."""
+    """Describes the cores one job type receives and how many of its jobs may run at once."""
 
     cores_per_job: int
     """The cores each job of this type occupies while it runs."""
     maximum_parallel: int
-    """The jobs of this type the core budget alone would allow. Reported for the caller's planning, since admission
-    weighs each running job against both budgets directly."""
+    """The jobs of this type that may run at once, which is what the core budget alone would allow narrowed by any
+    concurrency limit the type declares. Reported for the caller's planning, since admission weighs each running job
+    against both budgets and the limit directly."""
+    concurrency_limit: int | None = None
+    """The concurrent-job ceiling this type declares beyond the two budgets, or None when the budgets alone bound it.
+    Reported alongside the resolved concurrency so a caller reading a maximum below the core budget's own can tell
+    which term produced it."""
 
 
 @dataclass(slots=True)
@@ -184,6 +189,9 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """The cores the batch may commit across all concurrently running jobs."""
     memory_budget_mb: int = 1024
     """The memory the batch may commit across all concurrently running jobs."""
+    concurrency_limits: dict[str, int] = field(default_factory=dict)
+    """The jobs of each type that may run at once, keyed by tracker job name, for the types that declare a ceiling
+    beyond the two budgets. A job type absent from this mapping is bounded by the budgets alone."""
     pool_size: int = 1
     """The number of worker processes the pool spawns."""
     thread_ceiling: int = _WORKER_THREAD_CEILING
@@ -203,14 +211,18 @@ class JobExecutionState[PendingJobT: PendingJob]:
 
 
 def resolve_core_allocations(
-    job_cores: dict[str, int], job_names: set[str], core_budget: int
+    job_cores: dict[str, int],
+    job_names: set[str],
+    core_budget: int,
+    job_limits: dict[str, int] | None = None,
 ) -> dict[str, JobAllocation]:
     """Resolves how many cores each queued job type receives and how many of its jobs run at once.
 
     Notes:
         A type's core count is its declared allocation, narrowed to the budget so a small host never promises a job
-        more cores than it has. The concurrency that follows is simply the budget divided by that count, which the
-        engine treats as a guide, since admission weighs every running job against the same budget.
+        more cores than it has. The concurrency that follows is the budget divided by that count, narrowed again by
+        any ceiling the type declares for itself. The core term the engine treats as a guide, since admission weighs
+        every running job against the same budget, while the declared ceiling admission enforces exactly.
 
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
@@ -222,6 +234,8 @@ def resolve_core_allocations(
         job_cores: The cores one job of each type occupies, keyed by tracker job name.
         job_names: The job type names present in the batch.
         core_budget: The cores the batch may commit across all concurrently running jobs.
+        job_limits: The concurrent-job ceilings the job types declare beyond the budgets, keyed by tracker job name.
+            Only the types that declare one appear, and passing nothing bounds every type by the budgets alone.
 
     Returns:
         A dictionary mapping each job name to its resolved allocation.
@@ -234,10 +248,17 @@ def resolve_core_allocations(
         )
         console.error(message=message, error=ValueError)
 
+    limits = job_limits if job_limits is not None else {}
     allocations: dict[str, JobAllocation] = {}
     for job_name in job_names:
         cores = max(1, min(job_cores[job_name], core_budget))
-        allocations[job_name] = JobAllocation(cores_per_job=cores, maximum_parallel=max(1, core_budget // cores))
+        limit = limits.get(job_name)
+        parallel = max(1, core_budget // cores)
+        allocations[job_name] = JobAllocation(
+            cores_per_job=cores,
+            maximum_parallel=parallel if limit is None else min(parallel, limit),
+            concurrency_limit=limit,
+        )
     return allocations
 
 
@@ -406,7 +427,8 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
 def _admit_pending_jobs[PendingJobT: PendingJob](
     state: JobExecutionState[PendingJobT], pool: ProcessPoolExecutor
 ) -> None:
-    """Admits every queued job whose prerequisites are met and whose cores and memory the budgets still allow.
+    """Admits every queued job whose prerequisites are met, whose type is below its concurrency limit, and whose
+    cores and memory the budgets still allow.
 
     Notes:
         A job is weighed against both budgets, and the one that runs out first is whichever the batch's mix makes
@@ -414,11 +436,17 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
         releases its share automatically. This running total is the batch's main resource guard, so a heavy job and
         a crowd of light ones share the host while committed cores and memory stay within both budgets.
 
+        A job type that declares a concurrency limit is held to it by a third admission term, counted from the
+        running set the same way. The budgets bound what the host can supply, which leaves a job type whose pace is
+        set by storage throughput free to open far more streams than the array serves. The limit bounds that
+        directly, so those types stay at the concurrency they gain from rather than the concurrency the cores allow.
+
         The scan considers the heaviest job first and continues past anything that does not fit, so large jobs are
         admitted as soon as the budgets allow. Small jobs backfill whatever capacity the large ones leave spare. A
         job is admitted alone when nothing is running, so a job larger than the whole budget still makes progress.
         That floor holds the prerequisite check, since dispatching a job before its input exists would fail rather
-        than progress.
+        than progress. It also holds the concurrency limit, which never binds an idle pool because every limit is at
+        least one.
 
     Args:
         state: The active job execution state. Its pending queue is rebuilt from the jobs that were not admitted.
@@ -426,6 +454,10 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
     """
     used_cores = sum(active.job.core_weight for active in state.active_jobs)
     used_memory = sum(active.job.memory_mb for active in state.active_jobs)
+
+    running_counts: dict[str, int] = {}
+    for active in state.active_jobs:
+        running_counts[active.job.job_name] = running_counts.get(active.job.job_name, 0) + 1
 
     admitted_any = False
     deferred: deque[PendingJobT] = deque()
@@ -442,6 +474,12 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
             deferred.append(job)
             continue
 
+        # Bounds how many streams this job type opens against the storage array, which neither budget expresses.
+        limit = state.concurrency_limits.get(job.job_name)
+        if limit is not None and running_counts.get(job.job_name, 0) >= limit:
+            deferred.append(job)
+            continue
+
         forced = not state.active_jobs and not admitted_any
         fits = (
             used_cores + job.core_weight <= state.core_budget and used_memory + job.memory_mb <= state.memory_budget_mb
@@ -454,6 +492,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
         state.active_jobs.append(ActiveJob(job=job, future=future))
         used_cores += job.core_weight
         used_memory += job.memory_mb
+        running_counts[job.job_name] = running_counts.get(job.job_name, 0) + 1
         admitted_any = True
 
     state.pending_jobs = deferred
