@@ -1,4 +1,6 @@
-"""Provides the forging-specific dataset resolution policy layered above the shared dataset hierarchy."""
+"""Provides the forging-specific dataset resolution policy layered above the shared dataset hierarchy, and the
+discovery that enumerates a project's forged datasets.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +25,11 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sollertia_shared_assets import SessionTypes
+
+
+DATASET_MARKER_FILENAME: str = "dataset.yaml"
+"""The marker filename identifying a top-level project directory as a forged dataset. This is the single source of
+that name, so discovery and every consumer that tests for a dataset agree on it."""
 
 
 def resolve_dataset(
@@ -435,3 +442,23 @@ def _copy_animal_surgery_files(
             continue
 
         shutil.copy2(src=source_surgery_path, dst=dataset_animal.surgery_path)
+
+
+def discover_project_datasets(project_root: Path) -> list[DatasetData]:
+    """Loads every forged dataset stored under a project's root directory.
+
+    Notes:
+        A forged dataset is a top-level directory under the project root carrying a dataset marker, so discovery reads
+        one directory listing and one marker per candidate rather than walking the hierarchy.
+
+    Args:
+        project_root: The path to the project's root directory holding the animal and dataset directories.
+
+    Returns:
+        The loaded datasets, ordered by directory name.
+    """
+    return [
+        DatasetData.load(dataset_path=directory)
+        for directory in natsorted(project_root.iterdir(), key=lambda path: path.name)
+        if directory.is_dir() and directory.joinpath(DATASET_MARKER_FILENAME).is_file()
+    ]

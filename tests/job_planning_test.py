@@ -202,7 +202,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
     )
 
     monkeypatch.setattr(planning_module, "iterate_sessions", lambda root_path: [session])  # noqa: ARG005
-    monkeypatch.setattr(planning_module, "_iterate_datasets", lambda project_directory: [dataset])  # noqa: ARG005
+    monkeypatch.setattr(planning_module, "discover_project_datasets", lambda project_root: [dataset])  # noqa: ARG005
 
     written = generate_project_plan(project_directory=project)
     frame = pl.read_ipc(source=written, memory_map=True)
@@ -225,7 +225,7 @@ def test_an_unplanned_unit_contributes_no_rows(tmp_path: Path, monkeypatch: pyte
     session = make_session(project.joinpath("305", "2026-01-02-03-04-05-000006"))
 
     monkeypatch.setattr(planning_module, "iterate_sessions", lambda root_path: [session])  # noqa: ARG005
-    monkeypatch.setattr(planning_module, "_iterate_datasets", lambda project_directory: [])  # noqa: ARG005
+    monkeypatch.setattr(planning_module, "discover_project_datasets", lambda project_root: [])  # noqa: ARG005
 
     frame = pl.read_ipc(source=generate_project_plan(project_directory=project), memory_map=True)
 

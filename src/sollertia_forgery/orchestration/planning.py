@@ -15,6 +15,7 @@ from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import DatasetData, iterate_sessions
 from ataraxis_data_structures import YamlConfig
 
+from ..forging import discover_project_datasets
 from .dispatch import resolve_dispatch, resolve_job_cores
 from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines
 
@@ -232,7 +233,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
             for entry in plan.entries
         )
 
-    for dataset in _iterate_datasets(project_directory=project_directory):
+    for dataset in discover_project_datasets(project_root=project_directory):
         plan = _load_plan(plan_path=dataset_plan_path(dataset=dataset))
         if plan is None:
             unplanned_units += 1
@@ -404,26 +405,6 @@ def _save_plan(plan: JobPlan, plan_path: Path) -> None:
     lock = FileLock(str(plan_path.with_suffix(plan_path.suffix + ".lock")))
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         plan.to_yaml(file_path=plan_path)
-
-
-def _iterate_datasets(project_directory: Path) -> list[DatasetData]:
-    """Loads every forged dataset under a project root.
-
-    Notes:
-        A forged dataset is a top-level directory carrying a ``dataset.yaml`` marker, which is how the project
-        manifest discovers them too.
-
-    Args:
-        project_directory: The path to the project's root directory.
-
-    Returns:
-        The loaded datasets, ordered by directory name.
-    """
-    return [
-        DatasetData.load(dataset_path=directory)
-        for directory in natsorted(project_directory.iterdir(), key=lambda path: path.name)
-        if directory.is_dir() and directory.joinpath("dataset.yaml").is_file()
-    ]
 
 
 def _projection_row(

@@ -16,13 +16,40 @@ from ..forging import (
     forging_tracker_path,
     define_forging_dataset,
     generate_dataset_state,
+    discover_project_datasets,
+)
+from .responses import (
+    ok_response,
+    page_fields,
+    count_values,
+    project_item,
+    resolve_page,
+    error_response,
+    resolve_detail_limit,
 )
 from .mcp_instance import mcp
 from ..orchestration import resolve_job_cores
 
-_DEFAULT_ROW_LIMIT: int = 200
-"""The rows a state query returns when the caller names no limit. A dataset carries one row per forging job across
-every animal and session it holds."""
+_DATASET_SEMI_FIELDS: tuple[str, ...] = (
+    "name",
+    "dataset_path",
+    "session_type",
+    "acquisition_system",
+    "session_count",
+    "animal_count",
+)
+"""The fields a dataset listing carries, which is the dataset's identity and how much it holds. Its job counts are
+absent because reading them opens one stored table per dataset, so detail asks for them."""
+
+_STATE_AXES: tuple[str, ...] = ("scope", "animal", "job_name", "status")
+"""The snapshot columns a caller may filter by, and the axes its breakdown counts."""
+
+_STATE_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "scope", "job_name", "specifier", "status", "job_id")
+"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the key a caller resets a job
+by."""
+
+_STATE_DETAIL_FIELDS: tuple[str, ...] = ("executor_id", "error_message", "started_at", "completed_at")
+"""The job fields detail adds, which are the provenance and timing a caller reads when examining one job closely."""
 
 
 @mcp.tool()
@@ -72,9 +99,9 @@ def define_forging_dataset_tool(
             recreate_animals=tuple(recreate_animals or ()),
         )
     except Exception as exception:
-        return _error_response(message=str(exception))
+        return error_response(message=str(exception))
 
-    return _ok_response(
+    return ok_response(
         dataset_name=dataset.name,
         dataset_path=str(dataset.dataset_data_path.parent),
         tracker_path=str(forging_tracker_path(dataset=dataset)),
@@ -122,41 +149,59 @@ def generate_dataset_state_tool(dataset_paths: list[str]) -> dict[str, Any]:
             }
         )
 
-    return _ok_response(total_units=len(units), total_jobs=total_jobs, units=units)
+    return ok_response(total_units=len(units), total_jobs=total_jobs, units=units)
 
 
 @mcp.tool()
 def read_dataset_state_tool(
     dataset_path: str,
     scope: str | None = None,
-    status_filter: str | None = None,
-    limit: int = _DEFAULT_ROW_LIMIT,
+    animal: str | None = None,
+    session: str | None = None,
+    job_names: list[str] | None = None,
+    status: str | None = None,
+    limit: int | None = None,
+    start_row: int = 0,
+    *,
+    include_items: bool = False,
+    detailed: bool = False,
 ) -> dict[str, Any]:
-    """Reads a dataset's forging job state out of its stored snapshot.
+    """Reads a dataset's forging job state out of its stored snapshot, in three widening stages.
+
+    A bare call reports the totals and a ``breakdown`` naming every scope, animal, job type, and status the dataset
+    holds, which is how you find what needs attention without listing anything. Naming a filter adds a page of jobs
+    carrying their subject and status. Opting into detail adds the executor, the timestamps, and any recorded error.
 
     Reads the stored table rather than the tracker, so a snapshot pulled from a remote host answers without any access
-    to the data it describes. Filters narrow the rows listed, while the summary always spans every row the snapshot
-    holds, so narrowing what is listed never distorts what is reported.
+    to the data it describes. The totals and the breakdown span every job regardless of the filters.
 
     Args:
         dataset_path: The absolute path to the dataset's root directory.
-        scope: Restricts the listed rows to jobs of one scope, either ``animal`` or ``session``.
-        status_filter: Restricts the listed rows to one tracker status, such as ``FAILED`` or ``SUCCEEDED``.
-        limit: The maximum number of rows to list. Values below 1 list every matching row.
+        scope: Restricts the listing to jobs of one scope, either ``animal`` or ``session``.
+        animal: Restricts the listing to one animal's jobs.
+        session: Restricts the listing to one session's jobs.
+        job_names: Restricts the listing to these forging job type names.
+        status: Restricts the listing to one tracker status, such as ``FAILED``.
+        limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
+            every match.
+        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        include_items: Determines whether to list jobs when no filter is named.
+        detailed: Determines whether the listed jobs carry the executor, timestamps, and error text.
 
     Returns:
-        A response dict with ``dataset_path``, ``state_path``, a ``summary`` counting every job by status, the ``rows``
-        listed, ``matched_rows`` before the cap, a ``truncated`` flag, and the ``jobs`` list. Returns an error when no
-        snapshot exists or a filter names a value the snapshot does not hold.
+        A response dict with ``dataset_path``, ``state_path``, a ``summary`` counting every job by status, and a
+        ``breakdown`` per axis. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and
+        ``next_start_row`` whenever a filter is named or the listing is requested. Returns an error when no snapshot
+        exists or a filter names a value the snapshot does not hold.
     """
     try:
         dataset = DatasetData.load(dataset_path=Path(dataset_path))
     except Exception as exception:
-        return _error_response(message=f"Unable to load the dataset at '{dataset_path}'. {exception}")
+        return error_response(message=f"Unable to load the dataset at '{dataset_path}'. {exception}")
 
     state_path = dataset_state_path(dataset=dataset)
     if not state_path.is_file():
-        return _error_response(
+        return error_response(
             message=(
                 f"No dataset state snapshot exists at '{state_path}'. Run generate_dataset_state_tool before reading "
                 f"it."
@@ -164,26 +209,151 @@ def read_dataset_state_tool(
         )
 
     frame = pl.read_ipc(source=state_path, memory_map=True)
-    matched = frame
-
-    for column, value in (("scope", scope), ("status", status_filter)):
-        if value is None:
-            continue
-        available = sorted(set(frame[column].to_list()))
-        if value not in available:
-            return _error_response(message=f"Unknown {column} '{value}'. Available: {available}.")
-        matched = matched.filter(pl.col(column) == value)
-
-    capped = matched if limit < 1 else matched.head(limit)
-    return _ok_response(
+    response = ok_response(
         dataset_path=dataset_path,
         state_path=str(state_path),
         summary=_status_counts(frame=frame),
-        rows=capped.height,
-        matched_rows=matched.height,
-        truncated=capped.height < matched.height,
-        jobs=capped.to_dicts(),
+        breakdown={axis: count_values(values=frame[axis].to_list()) for axis in _STATE_AXES if axis in frame.columns},
     )
+
+    singles: dict[str, str | None] = {"scope": scope, "animal": animal, "session": session, "status": status}
+    if not any(value is not None for value in (*singles.values(), job_names)) and not include_items:
+        return response
+
+    matched = frame
+    for column, value in singles.items():
+        if value is None:
+            continue
+        available = sorted({str(entry) for entry in frame[column].to_list() if entry is not None})
+        if value not in available:
+            return error_response(message=f"No job has '{column}' of '{value}'. Available: {available}.")
+        matched = matched.filter(pl.col(column) == value)
+    if job_names is not None:
+        available = sorted({str(entry) for entry in frame["job_name"].to_list() if entry is not None})
+        unknown = sorted({name for name in job_names if name not in available})
+        if unknown:
+            return error_response(message=f"No job has 'job_name' in {unknown}. Available: {available}.")
+        matched = matched.filter(pl.col("job_name").is_in(job_names))
+
+    fields = (*_STATE_SEMI_FIELDS, *_STATE_DETAIL_FIELDS) if detailed else _STATE_SEMI_FIELDS
+    window = resolve_page(
+        total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
+    )
+    page = matched.slice(window.start, window.length)
+    response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
+    response.update(page_fields(window=window, total=matched.height, listed=page.height))
+    return response
+
+
+@mcp.tool()
+def list_project_datasets_tool(
+    project_path: str,
+    session: str | None = None,
+    animal: str | None = None,
+    limit: int | None = None,
+    start_row: int = 0,
+    *,
+    detailed: bool = False,
+) -> dict[str, Any]:
+    """Lists the forged datasets stored under a project, and which of them hold a given session or animal.
+
+    This is the tool that answers what datasets a project holds and whether a session has been forged into any of
+    them, which no other tool reports. The manifest is session-rowed and says nothing about datasets, because a
+    dataset's own artifacts own that fact.
+
+    A project holds a handful of datasets rather than thousands, so the listing is the summary and appears in every
+    response. Naming a session or an animal narrows it to the datasets holding them. Opting into detail reads each
+    listed dataset's state snapshot and adds its job counts by status, which is the expensive half since it opens one
+    stored table per dataset.
+
+    Args:
+        project_path: The absolute path to the project's root data directory.
+        session: The session name to restrict the listing to the datasets holding it.
+        animal: The animal identifier to restrict the listing to the datasets holding it.
+        limit: The datasets to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
+            every match.
+        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        detailed: Determines whether each listed dataset reports its animals and its job counts by status, read from
+            its state snapshot.
+
+    Returns:
+        A response dict with ``project_path``, ``total_datasets``, ``total_memberships`` summed across datasets, a
+        ``breakdown`` per session type and acquisition system, and a ``datasets`` list alongside ``rows``,
+        ``matched_rows``, ``start_row``, and ``next_start_row``. Each entry carries the dataset's ``name``,
+        ``dataset_path``, ``session_type``, ``acquisition_system``, ``session_count``, and ``animal_count``. Returns an
+        error when the project directory cannot be read.
+    """
+    try:
+        datasets = discover_project_datasets(project_root=Path(project_path))
+    except Exception as exception:
+        return error_response(message=f"Unable to discover the datasets under '{project_path}'. {exception}")
+
+    # Keeps each dataset alongside its rendered fields rather than inside them, so the response never carries the
+    # loaded object and filtering reads the dataset directly.
+    entries: list[tuple[DatasetData, dict[str, Any]]] = [
+        (
+            dataset,
+            {
+                "name": dataset.name,
+                "dataset_path": str(dataset.dataset_data_path.parent),
+                "session_type": str(dataset.session_type),
+                "acquisition_system": str(dataset.acquisition_system),
+                "session_count": len(dataset.sessions),
+                "animal_count": len(dataset.animals),
+            },
+        )
+        for dataset in datasets
+    ]
+
+    response = ok_response(
+        project_path=project_path,
+        total_datasets=len(entries),
+        total_memberships=sum(len(dataset.sessions) for dataset, _ in entries),
+        breakdown={
+            "session_type": count_values(values=[fields["session_type"] for _, fields in entries]),
+            "acquisition_system": count_values(values=[fields["acquisition_system"] for _, fields in entries]),
+        },
+    )
+
+    matched = entries
+    if session is not None:
+        matched = [pair for pair in matched if any(entry.session == session for entry in pair[0].sessions)]
+    if animal is not None:
+        matched = [pair for pair in matched if any(entry.animal == animal for entry in pair[0].sessions)]
+
+    window = resolve_page(
+        total=len(matched), limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
+    )
+    listed: list[dict[str, Any]] = []
+    for dataset, fields in matched[window.start : window.stop]:
+        rendered = project_item(item=fields, fields=_DATASET_SEMI_FIELDS)
+        if detailed:
+            rendered.update(_dataset_state_summary(dataset=dataset))
+            rendered["animals"] = sorted({entry.animal for entry in dataset.sessions})
+        listed.append(rendered)
+
+    response["datasets"] = listed
+    response.update(page_fields(window=window, total=len(matched), listed=len(listed)))
+    return response
+
+
+def _dataset_state_summary(dataset: DatasetData) -> dict[str, Any]:
+    """Reads one dataset's forging job counts from its stored state snapshot.
+
+    Notes:
+        Reports the snapshot's absence rather than falling back to the dataset's tracker, because every job-level fact
+        is read from the artifact that owns it. A dataset whose snapshot was never generated is told to generate one.
+
+    Args:
+        dataset: The dataset whose state snapshot to read.
+
+    Returns:
+        A dictionary carrying whether the snapshot exists and, when it does, its job counts by status.
+    """
+    state_path = dataset_state_path(dataset=dataset)
+    if not state_path.is_file():
+        return {"state_exists": False}
+    return {"state_exists": True, "jobs": _status_counts(frame=pl.read_ipc(source=state_path, memory_map=True))}
 
 
 def _status_counts(frame: pl.DataFrame) -> dict[str, int]:
@@ -197,13 +367,3 @@ def _status_counts(frame: pl.DataFrame) -> dict[str, int]:
     """
     counts = {str(status): int(count) for status, count in frame["status"].value_counts().iter_rows()}
     return {"total": frame.height, **dict(sorted(counts.items()))}
-
-
-def _ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Constructs a successful response dict with a ``success`` flag set to True."""
-    return {"success": True, **payload}
-
-
-def _error_response(message: str) -> dict[str, Any]:
-    """Constructs a failure response dict with a ``success`` flag set to False and the provided error message."""
-    return {"success": False, "error": message}

@@ -95,17 +95,16 @@ def test_reading_a_projection_reports_the_figures_a_submission_is_sized_against(
     assert response["jobs_without_a_modeled_estimate"] == 1
 
 
-def test_the_breakdown_groups_by_unit_kind_and_pipeline(tmp_path: Path) -> None:
-    """Each pipeline reports its own job count, summed memory, and widest allocation."""
+def test_a_bare_call_reports_the_axes_a_caller_can_filter_on(tmp_path: Path) -> None:
+    """The first stage names every value of every filterable axis and how much each would match, and lists nothing."""
     install_projection(project_root=tmp_path.joinpath("Proj"))
 
-    breakdown = read_project_plan_tool(project_path=str(tmp_path.joinpath("Proj")))["breakdown"]
+    response = read_project_plan_tool(project_path=str(tmp_path.joinpath("Proj")))
 
-    entries = {(entry["unit_kind"], entry["pipeline"]): entry for entry in breakdown}
-    assert entries[(SESSION_UNIT, "video")]["jobs"] == 2
-    assert entries[(SESSION_UNIT, "video")]["summed_memory_mb"] == 4400
-    assert entries[(SESSION_UNIT, "video")]["widest_job_cores"] == 16
-    assert entries[(DATASET_UNIT, "forging")]["jobs"] == 1
+    assert "jobs" not in response
+    assert response["breakdown"]["pipeline"] == {"checksum": 1, "forging": 1, "video": 2}
+    assert response["breakdown"]["unit_kind"] == {DATASET_UNIT: 1, SESSION_UNIT: 3}
+    assert response["breakdown"]["animal"] == {"305": 2, "321": 1, "none": 1}
 
 
 def test_a_filter_narrows_the_listing_without_narrowing_the_totals(tmp_path: Path) -> None:
@@ -117,17 +116,40 @@ def test_a_filter_narrows_the_listing_without_narrowing_the_totals(tmp_path: Pat
     assert response["matched_rows"] == 1
     assert response["total_jobs"] == len(PLANNED_JOBS)
     assert [job["pipeline"] for job in response["jobs"]] == ["forging"]
+    # A filter implies the listing, so no separate opt-in is needed.
+    assert response["start_row"] == 0
 
 
-def test_a_limit_caps_the_listing_and_reports_the_truncation(tmp_path: Path) -> None:
-    """A capped read says so, so a caller never mistakes a page for the whole projection."""
+def test_a_page_reports_where_the_next_one_begins(tmp_path: Path) -> None:
+    """A caller walks a long result by following next_start_row until it is null."""
     install_projection(project_root=tmp_path.joinpath("Proj"))
 
-    response = read_project_plan_tool(project_path=str(tmp_path.joinpath("Proj")), limit=2)
+    first = read_project_plan_tool(project_path=str(tmp_path.joinpath("Proj")), include_items=True, limit=2)
 
-    assert response["rows"] == 2
-    assert response["matched_rows"] == len(PLANNED_JOBS)
-    assert response["truncated"] is True
+    assert first["rows"] == 2
+    assert first["matched_rows"] == len(PLANNED_JOBS)
+    assert first["start_row"] == 0
+    assert first["next_start_row"] == 2
+
+    last = read_project_plan_tool(
+        project_path=str(tmp_path.joinpath("Proj")), include_items=True, limit=2, start_row=first["next_start_row"]
+    )
+
+    assert last["rows"] == 2
+    assert last["next_start_row"] is None
+
+
+def test_opting_into_detail_adds_the_expensive_fields(tmp_path: Path) -> None:
+    """Semi-detail carries the job's subject and figures, and detail adds whether the figure was modeled."""
+    install_projection(project_root=tmp_path.joinpath("Proj"))
+    arguments = {"project_path": str(tmp_path.joinpath("Proj")), "include_items": True}
+
+    semi = read_project_plan_tool(**arguments)["jobs"][0]
+    full = read_project_plan_tool(**arguments, detailed=True)["jobs"][0]
+
+    assert "memory_modeled" not in semi
+    assert "cores" in semi
+    assert "memory_modeled" in full
 
 
 def test_an_unknown_pipeline_filter_names_what_is_available(tmp_path: Path) -> None:

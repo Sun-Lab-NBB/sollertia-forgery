@@ -10,6 +10,15 @@ from pathlib import Path
 
 import polars as pl
 
+from .responses import (
+    ok_response,
+    page_fields,
+    count_values,
+    project_item,
+    resolve_page,
+    error_response,
+    resolve_detail_limit,
+)
 from .mcp_instance import mcp
 from ..orchestration import (
     DATASET_UNIT,
@@ -20,12 +29,24 @@ from ..orchestration import (
     generate_project_plan,
 )
 
-_DEFAULT_ROW_LIMIT: int = 200
-"""The rows a plan query returns when the caller names no limit. A fully planned project carries one row per job of
-every session, so an unbounded projection runs to thousands of rows."""
+_PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name", "memory_modeled")
+"""The projection columns a caller may filter by, and the axes its breakdown counts."""
 
-_UNIT_KINDS: tuple[str, ...] = (SESSION_UNIT, DATASET_UNIT)
-"""The unit kinds the projection holds, which is what a caller may filter it by."""
+_PLAN_SEMI_FIELDS: tuple[str, ...] = (
+    "unit_kind",
+    "animal",
+    "session",
+    "dataset",
+    "pipeline",
+    "job_name",
+    "specifier",
+    "cores",
+    "memory_mb",
+)
+"""The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
+
+_PLAN_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled",)
+"""The job field detail adds, stating whether the memory figure follows from the job's own input."""
 
 
 @mcp.tool()
@@ -86,7 +107,7 @@ def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
 
     Returns:
         A response dict with ``project_path``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
-        ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-pipeline ``breakdown``, and the
+        ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-pipeline ``pipeline_totals``, and the
         ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
     """
     directory = Path(project_path)
@@ -94,16 +115,16 @@ def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
     try:
         plan_path = generate_project_plan(project_directory=directory)
     except Exception as exception:
-        return _error_response(message=f"Unable to project the plans under '{project_path}'. {exception}")
+        return error_response(message=f"Unable to project the plans under '{project_path}'. {exception}")
     elapsed = perf_counter() - start
 
     frame = pl.read_ipc(source=plan_path, memory_map=True)
-    return _ok_response(
+    return ok_response(
         project_path=str(directory),
         plan_path=str(plan_path),
         elapsed_seconds=round(elapsed, 3),
         **_plan_totals(frame=frame),
-        breakdown=_plan_breakdown(frame=frame),
+        pipeline_totals=_plan_breakdown(frame=frame),
     )
 
 
@@ -111,30 +132,49 @@ def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
 def read_project_plan_tool(
     project_path: str,
     unit_kind: str | None = None,
+    animal: str | None = None,
+    dataset: str | None = None,
     pipelines: list[str] | None = None,
-    limit: int = _DEFAULT_ROW_LIMIT,
+    job_names: list[str] | None = None,
+    limit: int | None = None,
+    start_row: int = 0,
+    *,
+    include_items: bool = False,
+    detailed: bool = False,
 ) -> dict[str, Any]:
-    """Reads the planned cores and memory of a project's jobs out of its stored projection.
+    """Reads the planned cores and memory of a project's jobs out of its stored projection, in three widening stages.
 
-    Reads the stored table rather than any unit's data, so the cost is independent of how much the project holds.
-    Filters narrow the rows returned, while the totals and the breakdown always span every row the projection holds,
-    so narrowing what is listed never distorts what is reported.
+    A bare call reports the figures a submission is sized against alongside a ``breakdown`` naming every unit kind,
+    animal, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs carrying their
+    subject and their figures. Opting into detail adds whether each figure was modeled from the job's own input.
+
+    The totals and the breakdown span every planned job regardless of the filters, so narrowing what is listed never
+    distorts what is reported. Reads the stored table rather than any unit's data, so the cost is independent of how
+    much the project holds.
 
     Args:
         project_path: The absolute path to the project's root data directory.
-        unit_kind: Restricts the listed rows to one unit kind, either ``session`` or ``dataset``.
-        pipelines: Restricts the listed rows to these pipelines.
-        limit: The maximum number of rows to list. Values below 1 list every matching row.
+        unit_kind: Restricts the listing to one unit kind, either ``session`` or ``dataset``.
+        animal: Restricts the listing to one animal's sessions.
+        dataset: Restricts the listing to one dataset's forging jobs.
+        pipelines: Restricts the listing to these pipelines.
+        job_names: Restricts the listing to these job type names.
+        limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
+            every match, which is how a caller reading under a tight filter takes the whole result at once.
+        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        include_items: Determines whether to list jobs when no filter is named.
+        detailed: Determines whether the listed jobs report whether their memory figure was modeled.
 
     Returns:
-        A response dict with ``project_path``, ``plan_path``, the whole-projection totals and per-pipeline
-        ``breakdown``, the ``rows`` listed, ``matched_rows`` before the cap, a ``truncated`` flag, and the ``jobs``
-        list. Returns an error when no projection exists or a filter names an unknown value.
+        A response dict with ``project_path``, ``plan_path``, the whole-projection totals, and a ``breakdown`` per
+        axis. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a
+        filter is named or the listing is requested. Returns an error when no projection exists or a filter names a
+        value the projection does not hold.
     """
     directory = Path(project_path)
     plan_path = project_plan_path(project_directory=directory)
     if not plan_path.is_file():
-        return _error_response(
+        return error_response(
             message=(
                 f"No plan projection exists at '{plan_path}'. Plan the project's units, then run "
                 f"generate_project_plan_tool before reading it."
@@ -142,31 +182,62 @@ def read_project_plan_tool(
         )
 
     frame = pl.read_ipc(source=plan_path, memory_map=True)
-    matched = frame
-
-    if unit_kind is not None:
-        if unit_kind not in _UNIT_KINDS:
-            return _error_response(message=f"Unknown unit kind '{unit_kind}'. Available: {', '.join(_UNIT_KINDS)}.")
-        matched = matched.filter(pl.col("unit_kind") == unit_kind)
-
-    if pipelines is not None:
-        available = sorted(set(frame["pipeline"].to_list()))
-        unknown = sorted({pipeline for pipeline in pipelines if pipeline not in available})
-        if unknown:
-            return _error_response(message=f"Unknown pipeline(s) {unknown}. Available: {available}.")
-        matched = matched.filter(pl.col("pipeline").is_in(pipelines))
-
-    capped = matched if limit < 1 else matched.head(limit)
-    return _ok_response(
+    response = ok_response(
         project_path=str(directory),
         plan_path=str(plan_path),
         **_plan_totals(frame=frame),
-        breakdown=_plan_breakdown(frame=frame),
-        rows=capped.height,
-        matched_rows=matched.height,
-        truncated=capped.height < matched.height,
-        jobs=capped.to_dicts(),
+        breakdown={axis: count_values(values=frame[axis].to_list()) for axis in _PLAN_AXES if axis in frame.columns},
     )
+
+    singles: dict[str, str | None] = {"unit_kind": unit_kind, "animal": animal, "dataset": dataset}
+    multiples: dict[str, list[str] | None] = {"pipeline": pipelines, "job_name": job_names}
+    if not any(value is not None for value in (*singles.values(), *multiples.values())) and not include_items:
+        return response
+
+    matched = frame
+    for column, value in singles.items():
+        if value is None:
+            continue
+        rejection = _reject_unknown(frame=frame, column=column, values=[value])
+        if rejection is not None:
+            return rejection
+        matched = matched.filter(pl.col(column) == value)
+    for column, values in multiples.items():
+        if values is None:
+            continue
+        rejection = _reject_unknown(frame=frame, column=column, values=values)
+        if rejection is not None:
+            return rejection
+        matched = matched.filter(pl.col(column).is_in(values))
+
+    fields = (*_PLAN_SEMI_FIELDS, *_PLAN_DETAIL_FIELDS) if detailed else _PLAN_SEMI_FIELDS
+    window = resolve_page(
+        total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
+    )
+    page = matched.slice(window.start, window.length)
+    response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
+    response.update(page_fields(window=window, total=matched.height, listed=page.height))
+    return response
+
+
+def _reject_unknown(frame: pl.DataFrame, column: str, values: list[str]) -> dict[str, Any] | None:
+    """Builds the error response for a filter naming a value the projection does not hold.
+
+    Args:
+        frame: The whole projection.
+        column: The column being filtered.
+        values: The values the caller named.
+
+    Returns:
+        The error response, or None when every named value is present.
+    """
+    if column not in frame.columns:
+        return error_response(message=f"Unknown column '{column}'. Available: {sorted(frame.columns)}.")
+    available = sorted({str(entry) for entry in frame[column].to_list() if entry is not None})
+    unknown = sorted({value for value in values if value not in available})
+    if unknown:
+        return error_response(message=f"No planned job has '{column}' in {unknown}. Available: {available}.")
+    return None
 
 
 def _plan_units(unit_paths: list[str], unit_kind: str, *, regenerate_plan: bool) -> dict[str, Any]:
@@ -202,7 +273,7 @@ def _plan_units(unit_paths: list[str], unit_kind: str, *, regenerate_plan: bool)
             }
         )
 
-    return _ok_response(
+    return ok_response(
         total_units=len(units),
         total_jobs=total_jobs,
         elapsed_seconds=round(perf_counter() - start, 3),
@@ -259,13 +330,3 @@ def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
         .sort("unit_kind", "pipeline")
     )
     return grouped.to_dicts()
-
-
-def _ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Constructs a successful response dict with a ``success`` flag set to True."""
-    return {"success": True, **payload}
-
-
-def _error_response(message: str) -> dict[str, Any]:
-    """Constructs a failure response dict with a ``success`` flag set to False and the provided error message."""
-    return {"success": False, "error": message}
