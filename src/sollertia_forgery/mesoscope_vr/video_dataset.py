@@ -1,9 +1,5 @@
 """Provides the Mesoscope-VR video sub-dataset assembler and camera-clock resolver donated to the system-agnostic
 forging pipeline.
-
-The assembler reads the fixed camera set's per-frame timestamp, motion-energy, and pupil-tracking
-feathers and aligns their values onto the assembly reference clock. For training sessions that carry no fluorescence
-clock, ``resolve_slowest_camera_clock`` derives the reference clock from the slowest camera.
 """
 
 from __future__ import annotations

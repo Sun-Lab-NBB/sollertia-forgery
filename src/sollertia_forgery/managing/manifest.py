@@ -1,8 +1,5 @@
 """Provides assets for generating, visualizing, and querying the session-rowed project manifest .feather file that
 captures the snapshot of a project's state.
-
-Generation walks the project once and writes two artifacts under one lock. This module builds the manifest itself and
-hands the per-job rows it collects to the job artifact's own writer, so the two can never disagree about a session.
 """
 
 from __future__ import annotations

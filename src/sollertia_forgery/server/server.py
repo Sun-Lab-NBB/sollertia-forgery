@@ -4,21 +4,28 @@ from __future__ import annotations
 
 from enum import StrEnum
 import stat
-from typing import TYPE_CHECKING
+import shlex
+from typing import TYPE_CHECKING, Self
 from pathlib import Path
 import tempfile
 from dataclasses import dataclass
 
 import paramiko
-from ataraxis_time import PrecisionTimer, TimerPrecisions, TimestampFormats, get_timestamp
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 from ataraxis_base_utilities import LogLevel, console
 
 if TYPE_CHECKING:
+    from types import TracebackType
+    from collections.abc import Sequence
+
     from paramiko.client import SSHClient
     from paramiko.sftp_client import SFTPClient
 
     from .job import Job
     from .server_configuration import ServerConfiguration
+
+_BLOCKED_QUEUE_REASON: str = "DependencyNeverSatisfied"
+"""The reason SLURM's queue reports for a pending job whose dependency can no longer be satisfied."""
 
 
 @dataclass(frozen=True)
@@ -34,31 +41,6 @@ class CommandResult:
     stdout: str
     stderr: str
     return_code: int
-
-
-def get_remote_job_work_directory(server: Server, job_name: str, pipeline_name: str, *, base_path: Path) -> Path:
-    """Resolves and creates the remote compute server log directory for the specified job.
-
-    Args:
-        server: The Server instance that interfaces with the remote compute server used to execute the job.
-        job_name: The name of the job to be executed.
-        pipeline_name: The name of the pipeline to which this job belongs.
-        base_path: The data directory under which to nest the job's log directory. Each pipeline passes the
-            processed session, dataset, or project path so that job logs are always stored under the data
-            they operate on, scoped to a 'logs' subdirectory of that directory.
-
-    Returns:
-        The path to the job's log directory on the remote compute server.
-    """
-    # Resolves the log directory name using a timestamp (accurate to minutes) and the job's name. Job logs are
-    # nested under a 'logs' subdirectory of the data directory the job operates on.
-    timestamp = "-".join(get_timestamp(output_format=TimestampFormats.STRING).split("-")[:5])
-    working_directory = base_path.joinpath("logs", f"{pipeline_name}", f"{job_name}", f"{timestamp}")
-
-    # Creates the log directory on the remote server.
-    server.create(remote_path=working_directory, is_dir=True, parents=True)
-
-    return working_directory
 
 
 class JobStatus(StrEnum):
@@ -80,8 +62,55 @@ class JobStatus(StrEnum):
     """The job terminated due to node failure."""
     OUT_OF_MEMORY = "OUT_OF_MEMORY"
     """The job was terminated for exceeding memory limits."""
+    BLOCKED = "BLOCKED"
+    """The job is queued behind a dependency that can no longer be satisfied, so it will never run. Resolved from the
+    queue's reason field rather than from accounting, which still reports such a job as pending."""
     UNKNOWN = "UNKNOWN"
     """The job status could not be determined."""
+
+
+TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
+    {
+        JobStatus.COMPLETED,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+        JobStatus.TIMEOUT,
+        JobStatus.NODE_FAIL,
+        JobStatus.OUT_OF_MEMORY,
+        JobStatus.BLOCKED,
+    }
+)
+"""The statuses a job never leaves, which is what a caller polls a submission against.
+
+Notes:
+    ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one
+    it can no longer resolve.
+"""
+
+
+def _parse_job_status(state: str) -> JobStatus:
+    """Resolves one accounting state string into a JobStatus member.
+
+    Notes:
+        SLURM decorates some states with a trailing marker or an attribution clause, reporting a cancelled job as
+        'CANCELLED by 1234' and a truncated state as 'CANCELLED+'. Both name the same state, so the decoration is
+        stripped before the state is matched.
+
+    Args:
+        state: The state string accounting reported for the allocation.
+
+    Returns:
+        The matching status, or ``UNKNOWN`` when the state names something this enumeration does not cover.
+    """
+    try:
+        return JobStatus(state)
+    except ValueError:
+        undecorated = state.split(" ", maxsplit=1)[0]
+        cleaned = "".join(character for character in undecorated if character.isalpha() or character == "_")
+        try:
+            return JobStatus(cleaned)
+        except ValueError:
+            return JobStatus.UNKNOWN
 
 
 class Server:
@@ -161,6 +190,19 @@ class Server:
         """If the instance is connected to the server, terminates the connection before the instance is destroyed."""
         self.close()
 
+    def __enter__(self) -> Self:
+        """Returns the connected instance so it can be used as a context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Closes the connection when the context manager exits, however the block ended."""
+        self.close()
+
     def submit_job(self, job: Job, *, verbose: bool = True) -> Job:
         """Submits the input job to the managed remote compute server via the SLURM job manager.
 
@@ -201,16 +243,28 @@ class Server:
             # Uploads the command script to the server using the persistent SFTP client
             self._sftp.put(localpath=str(local_script_path), remotepath=job.remote_script_path)
 
-        # Makes the server-side script executable
-        self._client.exec_command(f"chmod +x {job.remote_script_path}")
+        # Makes the server-side script executable. The exit status is awaited, because a submission issued on a second
+        # channel would otherwise race the permission change on the first.
+        script_path = shlex.quote(job.remote_script_path)
+        chmod_result = self.execute_command(command=f"chmod +x {script_path}")
+        if chmod_result.return_code != 0:
+            message = (
+                f"Failed to make the '{job.job_name}' job script executable on the remote compute server. "
+                f"{chmod_result.stderr.strip()}"
+            )
+            console.error(message, RuntimeError)
 
         # Submits the job to SLURM with sbatch and verifies submission state
-        job_output = self._client.exec_command(f"sbatch {job.remote_script_path}")[1].read().strip().decode()
+        submission = self.execute_command(command=f"sbatch {script_path}")
+        job_output = submission.stdout.strip()
 
         # If batch_job is not in the output received from SLURM in response to issuing the submission command, raises an
         # error.
         if "Submitted batch job" not in job_output:
-            message = f"Failed to submit the '{job.job_name}' job to the remote compute server."
+            message = (
+                f"Failed to submit the '{job.job_name}' job to the remote compute server. "
+                f"{submission.stderr.strip() or job_output}"
+            )
             console.error(message, RuntimeError)
             raise RuntimeError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
 
@@ -232,7 +286,17 @@ class Server:
             slurm_job_id: The SLURM-assigned job ID to abort.
         """
         if self.get_job_status(slurm_job_id=slurm_job_id) in (JobStatus.PENDING, JobStatus.RUNNING):
-            self._client.exec_command(f"scancel {slurm_job_id}")
+            self.execute_command(command=f"scancel {slurm_job_id}")
+
+    def abort_jobs(self, slurm_job_ids: Sequence[str]) -> None:
+        """Aborts every named allocation that is still queued or running on the server.
+
+        Args:
+            slurm_job_ids: The SLURM-assigned job IDs to abort.
+        """
+        if not slurm_job_ids:
+            return
+        self.execute_command(command=f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}")
 
     def get_job_status(self, slurm_job_id: int) -> JobStatus:
         """Queries the managed server's SLURM manager for the runtime status of the job with the specified
@@ -248,33 +312,72 @@ class Server:
         Returns:
             The current status of the job as a JobStatus enumeration value.
         """
-        # Uses the 'sacct' command with a specific format to get the job's state. The '--parsable2' flag provides clean
-        # output. Queries both the main job and any job steps (.batch, .extern), taking the primary job status.
-        result = (
-            self._client.exec_command(f"sacct -j {slurm_job_id} --format=State --noheader --parsable2")[1]
-            .read()
-            .decode()
-            .strip()
+        return self.get_job_statuses(slurm_job_ids=(str(slurm_job_id),))[str(slurm_job_id)]
+
+    def get_job_statuses(self, slurm_job_ids: Sequence[str]) -> dict[str, JobStatus]:
+        """Queries the runtime status of every named allocation in one accounting call.
+
+        Notes:
+            Accounting reports each allocation alongside its steps, and only the allocation rows are read.
+
+            A pending allocation whose dependency can no longer be satisfied is reported as blocked. Accounting still
+            calls that job pending, so the queue's reason field is the only source of that distinction.
+
+        Args:
+            slurm_job_ids: The SLURM-assigned job IDs to query.
+
+        Returns:
+            A dictionary mapping every requested job ID to its status. An allocation accounting does not know reports
+            as ``UNKNOWN``.
+        """
+        requested = [str(job_id) for job_id in slurm_job_ids]
+        if not requested:
+            return {}
+
+        statuses: dict[str, JobStatus] = dict.fromkeys(requested, JobStatus.UNKNOWN)
+        result = self.execute_command(
+            command=f"sacct -j {','.join(requested)} --format=JobID,State --noheader --parsable2"
         )
+        for line in result.stdout.splitlines():
+            fields = line.split("|")
+            expected_fields = 2
+            if len(fields) < expected_fields:
+                continue
+            job_id = fields[0].strip()
+            # Step rows carry a suffixed identifier ('12345.batch'), and describe part of the allocation rather than
+            # the allocation itself.
+            if "." in job_id or job_id not in statuses:
+                continue
+            statuses[job_id] = _parse_job_status(state=fields[1].strip())
 
-        # The output may contain multiple lines (for job steps). The first line contains the main job status.
-        if result:
-            statuses = result.split("\n")
-            if statuses:
-                status_str = statuses[0].strip()
-                # Attempts to match the status string to a JobStatus enum value
-                try:
-                    return JobStatus(status_str)
-                except ValueError:
-                    # SLURM may return statuses with suffixes (e.g., "CANCELLED+"). Strips non-alpha characters
-                    # and retries.
-                    cleaned = "".join(c for c in status_str if c.isalpha() or c == "_")
-                    try:
-                        return JobStatus(cleaned)
-                    except ValueError:
-                        return JobStatus.UNKNOWN
+        pending = [job_id for job_id, status in statuses.items() if status is JobStatus.PENDING]
+        if pending:
+            for job_id in self.get_blocked_job_ids():
+                if job_id in statuses:
+                    statuses[job_id] = JobStatus.BLOCKED
 
-        return JobStatus.UNKNOWN
+        return statuses
+
+    def get_blocked_job_ids(self) -> set[str]:
+        """Returns the identifiers of this user's queued allocations whose dependencies can no longer be satisfied.
+
+        Notes:
+            Queries the user's whole queue, since naming an allocation the queue no longer holds makes the command
+            report an error for it.
+
+        Returns:
+            The SLURM-assigned job IDs the queue reports as permanently blocked.
+        """
+        result = self.execute_command(command=f'squeue -h -u {shlex.quote(self.user)} -o "%i|%r"')
+        blocked: set[str] = set()
+        for line in result.stdout.splitlines():
+            fields = line.split("|")
+            expected_fields = 2
+            if len(fields) < expected_fields:
+                continue
+            if fields[1].strip() == _BLOCKED_QUEUE_REASON:
+                blocked.add(fields[0].strip())
+        return blocked
 
     def pull(self, local_path: Path, remote_path: Path) -> None:
         """Downloads a file or directory from the remote server to the local machine.
@@ -410,6 +513,11 @@ class Server:
 
         This is an internal helper method used by create() and other methods that need to create directories.
 
+        Notes:
+            Creating a nested path is delegated to the shell, which resolves the whole chain in one round trip. Walking
+            the chain over the file-transfer protocol instead costs one query per level, which a batch creating a
+            directory per job pays many times over.
+
         Args:
             remote_path: The absolute path to the directory to create on the remote server.
             parents: If True, creates parent directories if they are missing.
@@ -417,24 +525,13 @@ class Server:
         remote_path_str = str(remote_path)
 
         if parents:
-            # Creates parent directories if needed by splitting the path into parts and creating each level
-            path_parts = Path(remote_path_str).parts
-            current_path = ""
-
-            for part in path_parts:
-                # Skips empty path parts
-                if not part:
-                    continue
-
-                # Builds the full path by concatenating the current path and the part
-                current_path = str(Path(current_path) / part) if current_path else part
-
-                try:
-                    # Checks if the directory exists by trying to 'stat' it
-                    self._sftp.stat(current_path)
-                except FileNotFoundError:
-                    # If the directory does not exist, creates it
-                    self._sftp.mkdir(current_path)
+            result = self.execute_command(command=f"mkdir -p {shlex.quote(remote_path_str)}")
+            if result.return_code != 0:
+                message = (
+                    f"Unable to create the directory {remote_path_str} on the remote compute server. "
+                    f"{result.stderr.strip()}"
+                )
+                console.error(message, RuntimeError)
         else:
             # Only creates the final directory
             try:

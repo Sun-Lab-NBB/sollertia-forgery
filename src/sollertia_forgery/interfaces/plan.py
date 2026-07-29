@@ -1,9 +1,5 @@
 """Provides the ``slf plan`` CLI group that records what a unit's jobs will cost and projects those records into one
 table per project.
-
-Planning reads a unit's raw acquisition data, so it is invoked deliberately rather than as a step inside manifest
-generation or dataset definition. The commands run on whichever host holds the data, which is what lets a remote
-submission be sized from figures measured against the data it will process.
 """
 
 from __future__ import annotations

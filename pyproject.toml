@@ -44,7 +44,7 @@ dependencies = [
     # Sollertia Libraries
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6.0.2,<7",
-    "ataraxis-data-structures>=6.1.2,<7",
+    "ataraxis-data-structures>=6.2.0rc1,<7",
     "sollertia-shared-assets>=9.1.0rc4,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)

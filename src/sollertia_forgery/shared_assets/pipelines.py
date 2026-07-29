@@ -1,6 +1,5 @@
-"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records
-its jobs on. The manifest reporting layer and the orchestration dispatch table both consume these, and the manifest's
-package may not import orchestration, so the shared definitions live below both.
+"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records its
+jobs on.
 """
 
 from __future__ import annotations

@@ -3,16 +3,19 @@ discovery, and server configuration.
 """
 
 from .job import Job
-from .server import Server, JobStatus, CommandResult, get_remote_job_work_directory
+from .server import TERMINAL_JOB_STATUSES, Server, JobStatus, CommandResult
 from .discovery import discover_project_data, discover_project_sessions
 from .server_configuration import (
     ServerConfiguration,
+    remote_state_path,
+    remote_state_directory,
     get_server_configuration,
     get_server_configuration_path,
     create_server_configuration_file,
 )
 
 __all__ = [
+    "TERMINAL_JOB_STATUSES",
     "CommandResult",
     "Job",
     "JobStatus",
@@ -21,7 +24,8 @@ __all__ = [
     "create_server_configuration_file",
     "discover_project_data",
     "discover_project_sessions",
-    "get_remote_job_work_directory",
     "get_server_configuration",
     "get_server_configuration_path",
+    "remote_state_directory",
+    "remote_state_path",
 ]

@@ -1,8 +1,4 @@
-"""Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-The worker combines a mesoscope experiment session's fluorescence, behavior, runtime, and video sub-datasets on the
-fluorescence reference clock into the session's unified ``data.feather``.
-"""
+"""Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline."""
 
 from __future__ import annotations
 

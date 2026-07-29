@@ -1,6 +1,5 @@
 """Provides the dataset state artifact that serializes every forging job the dataset's tracker records into one
-shippable table. A dataset's forging jobs sit at differing scopes, so they are reported per job rather than per
-session, which is what the project manifest reports.
+shippable table.
 """
 
 from __future__ import annotations
@@ -25,8 +24,9 @@ if TYPE_CHECKING:
 
     from sollertia_shared_assets import DatasetData
 
-_DATASET_STATE_FILENAME: str = "dataset_state.feather"
-"""The filename of the dataset state artifact, written at the dataset's root beside its forging tracker."""
+DATASET_STATE_FILENAME: str = "dataset_state.feather"
+"""The filename of the dataset state artifact, written at the dataset's root beside its forging tracker. The remote
+backend resolves the same artifact on a server path, where no dataset can be loaded to resolve it from."""
 
 _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for the state file's lock before giving up, matching the project manifest's writer."""
@@ -85,7 +85,7 @@ def dataset_state_path(dataset: DatasetData) -> Path:
     Returns:
         The path to the dataset's state .feather file.
     """
-    return dataset.dataset_data_path.parent.joinpath(_DATASET_STATE_FILENAME)
+    return dataset.dataset_data_path.parent.joinpath(DATASET_STATE_FILENAME)
 
 
 def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = False) -> Path:

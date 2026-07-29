@@ -211,6 +211,10 @@ class PipelineDispatch[UnitT]:
     """Resolves the unit's name, which every tool response reports the unit by."""
     estimate_memory: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]
     """Estimates the memory each runnable job occupies at its allocated core count, from the data it will process."""
+    command: Callable[[GenericPendingJob], tuple[str, ...]]
+    """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
+    backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
+    allocation."""
     materialize: Callable[[UnitT], None] | None = None
     """Writes whatever a pipeline's jobs must find on disk before any of them dispatches, run once in the parent.
     Resolves to None for a pipeline with no such precondition."""
@@ -242,6 +246,33 @@ def run_batch_job(job: GenericPendingJob) -> None:
         )
         console.error(message=message, error=ValueError)
     dispatch.worker(job)
+
+
+def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command line that runs one prepared job on a host holding the data it processes.
+
+    Notes:
+        Rendered from the same dispatch table the in-process worker routes on, so a job runs the same stage at the same
+        width whichever way it is executed. Progress reporting is suppressed, since a scheduled allocation writes its
+        output to a log file rather than to a terminal.
+
+    Args:
+        job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
+
+    Returns:
+        The command as an argument vector, which a caller quotes for the shell it submits to.
+
+    Raises:
+        ValueError: If the job names a pipeline the dispatch table does not support.
+    """
+    dispatch = resolve_dispatch(pipeline=job.pipeline)
+    if dispatch is None:
+        message = (
+            f"Unable to render the command for job '{job.job_id}'. The job names pipeline '{job.pipeline}', which is "
+            f"not a supported batch pipeline."
+        )
+        console.error(message=message, error=ValueError)
+    return dispatch.command(job)
 
 
 def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch | None:
@@ -428,6 +459,7 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         job_id=job["job_id"],
         unit_path=Path(job["unit_path"]),
         job_name=job.get("job_name", ""),
+        name=job.get("unit_name", ""),
         specifier=job.get("specifier", ""),
         pipeline=job.get("pipeline", ""),
         core_weight=int(job["cores"]),
@@ -499,6 +531,109 @@ def _run_two_photon_job(job: GenericPendingJob) -> None:
         job: The pending job carrying the session root in ``unit_path`` and the target job in ``job_id``.
     """
     run_two_photon_processing_pipeline(session_path=job.unit_path, job_id=job.job_id, workers=job.core_weight)
+
+
+def _checksum_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs the raw-data integrity pipeline for one session.
+
+    Args:
+        job: The pending job carrying the session root, its planned cores, and its mode.
+
+    Returns:
+        The command as an argument vector.
+    """
+    command = ["slf", "checksum", "-sp", str(job.unit_path), "-w", str(job.core_weight), "-np"]
+    if bool(job.options.get("regenerate_checksum", False)):
+        command.append("-rc")
+    return tuple(command)
+
+
+def _runtime_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs the runtime pipeline for one session.
+
+    Args:
+        job: The pending job carrying the session root and its planned cores.
+
+    Returns:
+        The command as an argument vector.
+    """
+    return *_session_command_preamble(job=job), "runtime"
+
+
+def _microcontroller_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs one microcontroller extraction or parse job for one session.
+
+    Args:
+        job: The pending job carrying the session root, the target job, and its planned cores.
+
+    Returns:
+        The command as an argument vector.
+    """
+    return *_session_command_preamble(job=job), "-id", job.job_id, "microcontroller"
+
+
+def _video_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs one camera timestamp, rename, tracking, or motion-energy job for one session.
+
+    Args:
+        job: The pending job carrying the session root, the target job, and its planned cores.
+
+    Returns:
+        The command as an argument vector.
+    """
+    return *_session_command_preamble(job=job), "-id", job.job_id, "video"
+
+
+def _two_photon_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs one two-photon binarization, per-plane, or combination job for one session.
+
+    Args:
+        job: The pending job carrying the session root, the target job, and its planned cores.
+
+    Returns:
+        The command as an argument vector.
+    """
+    return *_session_command_preamble(job=job), "-id", job.job_id, "two-photon"
+
+
+def _forging_command(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the command that runs one forging multi-day or assembly job for one dataset.
+
+    Notes:
+        Names no session and requests no rebuild, so the command runs the tracked job alone against the hierarchy the
+        dataset definition step already built.
+
+    Args:
+        job: The pending job carrying the dataset root, the target job, and its planned cores.
+
+    Returns:
+        The command as an argument vector.
+    """
+    return (
+        "slf",
+        "forge",
+        "-dn",
+        job.unit_path.name,
+        "-pp",
+        str(job.unit_path.parent),
+        "-id",
+        job.job_id,
+        "-w",
+        str(job.core_weight),
+        "-np",
+    )
+
+
+def _session_command_preamble(job: GenericPendingJob) -> tuple[str, ...]:
+    """Renders the options every ``slf process`` subcommand shares, which the group parses ahead of the subcommand.
+
+    Args:
+        job: The pending job carrying the session root and its planned cores.
+
+    Returns:
+        The shared leading arguments of the command.
+    """
+    return "slf", "process", "-sp", str(job.unit_path), "-w", str(job.core_weight), "-np"
 
 
 def _session_memory(pipeline: ProcessingPipelines) -> Callable[[SessionData, list[tuple[str, str, int]]], Any]:
@@ -587,6 +722,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda _session: None,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.CHECKSUM),
+            command=_checksum_command,
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.RUNTIME,
@@ -597,6 +733,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda session: session.processed_data.runtime_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.RUNTIME),
+            command=_runtime_command,
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.MICROCONTROLLER,
@@ -607,6 +744,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda session: session.processed_data.microcontroller_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.MICROCONTROLLER),
+            command=_microcontroller_command,
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.VIDEO,
@@ -617,6 +755,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda session: session.processed_data.video_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.VIDEO),
+            command=_video_command,
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.TWO_PHOTON,
@@ -627,6 +766,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda session: session.processed_data.cindra_data_path,
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),
+            command=_two_photon_command,
             materialize=_materialize_two_photon_configuration,
         ),
         ProcessingPipelines.FORGING: PipelineDispatch[DatasetData](
@@ -639,6 +779,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             output_path=lambda dataset: dataset.dataset_data_path.parent,
             unit_name=lambda dataset: dataset.name,
             estimate_memory=estimate_dataset_job_memory,
+            command=_forging_command,
         ),
     }
 

@@ -1,10 +1,5 @@
-"""Provides the system-agnostic, end-to-end dataset forging pipeline that runs the cross-recording cell-tracking
-stages and assembles the data.feather file for each session.
-
-Notes:
-    The cross-recording stages apply only to animals whose acquisition system resolves a multi-recording
-    configuration, which is the case for sessions carrying two-photon imaging data. A dataset of sessions without it
-    resolves assembly jobs alone.
+"""Provides the system-agnostic, end-to-end dataset forging pipeline that runs the cross-recording cell-tracking stages
+and assembles the data.feather file for each session.
 """
 
 from __future__ import annotations

@@ -120,7 +120,8 @@ def run_two_photon_processing_pipeline(
     tracker = ProcessingTracker(file_path=session.processed_data.two_photon_tracker_path)
 
     if job_id is not None:
-        # Aligning against the full universe keeps the sibling jobs this single-job invocation does not run.
+        # Registers the requested job alone while detecting foreign entries against the full universe, which keeps the
+        # sibling jobs this single-job invocation does not run.
         id_to_job = {
             ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
             for job_name, specifier in universe
@@ -132,9 +133,9 @@ def run_two_photon_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
 
-        tracker.align_jobs(jobs=universe, universe=universe)
-
         job_name, specifier = id_to_job[job_id]
+        tracker.align_jobs(jobs=[(job_name, specifier)], universe=universe)
+
         execute_single_recording_job(
             configuration_path=materialized_configuration_path,
             job_name=SingleRecordingJobNames(job_name),

@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 from pathlib import Path
+from dataclasses import replace
 
 import polars as pl
 import pytest
@@ -27,6 +28,8 @@ from sollertia_forgery.orchestration import (
     session_plan_path,
     generate_project_plan,
 )
+from ataraxis_data_structures import ProcessingTracker
+
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.dispatch import PipelineDispatch
 
@@ -76,10 +79,15 @@ def make_dispatch(
         discover=discover,
         worker=lambda _job: None,
         prerequisites=lambda _unit, _universe: {},
-        tracker_path=lambda _unit: Path("/nonexistent/tracker.yaml"),
+        # Planning registers each pipeline's runnable jobs on its tracker, so the stand-in resolves a real writable
+        # path beside the unit rather than a placeholder.
+        tracker_path=lambda resolved: (
+            getattr(resolved, "processed_data_path", None) or resolved.dataset_data_path.parent
+        ).joinpath(f"{pipeline.value}_tracker.yaml"),
         output_path=lambda _unit: None,
         unit_name=lambda resolved: getattr(resolved, "session_name", None) or resolved.name,
         estimate_memory=estimate,
+        command=lambda job: ("slf", pipeline.value, job.job_id),
     )
 
 
@@ -237,3 +245,70 @@ def test_the_dataset_cache_lands_at_the_dataset_root(tmp_path: Path) -> None:
     """A dataset's plan sits at its root beside its marker, so the dataset stays self-contained."""
     dataset = make_dataset(tmp_path.joinpath("ds_a"))
     assert dataset_plan_path(dataset=dataset).parent == tmp_path.joinpath("ds_a")
+
+
+def test_planning_registers_the_runnable_jobs_on_the_pipeline_tracker(tmp_path: Path) -> None:
+    """The job artifact a remote batch is resolved from is built from trackers, so planning is what creates them."""
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=CHECKSUM_JOBS)
+
+    planning_module._resolve_unit_plan(  # noqa: SLF001
+        dispatches=[dispatch],
+        unit_path=tmp_path.joinpath("2024_11_04"),
+        unit_kind=SESSION_UNIT,
+        regenerate_plan=False,
+        display_progress=False,
+    )
+
+    tracker_path = dispatch.tracker_path(session)
+    assert tracker_path.is_file()
+    recorded = ProcessingTracker(file_path=tracker_path).snapshot()
+    assert [state.job_name for state in recorded.values()] == [CHECKSUM_JOB_NAME]
+
+
+def test_a_job_the_unit_cannot_run_never_reaches_the_tracker(tmp_path: Path) -> None:
+    """A job absent from the tracker is the statement that the unit cannot run it, which is what a scheduler reads."""
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, ""), (CHECKSUM_JOB_NAME, "unreachable")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    # Narrows the runnable subset to the first job, as a resolver does for a job whose input is absent.
+    dispatch = replace(dispatch, discover=lambda _path: (session, universe, [universe[0]]))
+
+    plan = planning_module._resolve_unit_plan(  # noqa: SLF001
+        dispatches=[dispatch],
+        unit_path=tmp_path.joinpath("2024_11_04"),
+        unit_kind=SESSION_UNIT,
+        regenerate_plan=False,
+        display_progress=False,
+    )
+
+    recorded = ProcessingTracker(file_path=dispatch.tracker_path(session)).snapshot()
+    assert [state.specifier for state in recorded.values()] == [""]
+    # The plan still sizes every job the pipeline could produce, since a plan describes cost rather than eligibility.
+    assert len(plan.entries) == len(universe)
+
+
+def test_the_plan_records_the_ordering_a_scheduler_builds_its_graph_from(tmp_path: Path) -> None:
+    """Prerequisites live in the plan so a scheduler resolves a job's upstream stages without loading the unit."""
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, "upstream"), (CHECKSUM_JOB_NAME, "downstream")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    dispatch = replace(
+        dispatch,
+        discover=lambda _path: (session, universe, universe),
+        prerequisites=lambda _unit, _jobs: {universe[0]: (), universe[1]: (universe[0],)},
+    )
+
+    plan = planning_module._resolve_unit_plan(  # noqa: SLF001
+        dispatches=[dispatch],
+        unit_path=tmp_path.joinpath("2024_11_04"),
+        unit_kind=SESSION_UNIT,
+        regenerate_plan=False,
+        display_progress=False,
+    )
+
+    entries = plan.entry_map()
+    upstream = entries[(ProcessingPipelines.CHECKSUM.value, CHECKSUM_JOB_NAME, "upstream")]
+    downstream = entries[(ProcessingPipelines.CHECKSUM.value, CHECKSUM_JOB_NAME, "downstream")]
+    assert upstream.prerequisite_ids == []
+    assert downstream.prerequisite_ids == [upstream.job_id]

@@ -155,8 +155,8 @@ def run_video_processing_pipeline(
     tracker = ProcessingTracker(file_path=video_data_directory.joinpath(ProcessingTrackers.VIDEO))
 
     if job_id is not None:
-        # Remote mode: aligns the tracker against the full universe so that the partial (single-job) invocation does
-        # not wipe sibling jobs, then executes only the requested job.
+        # Remote mode: registers the requested job alone while detecting foreign entries against the full universe, so
+        # the invocation neither wipes its sibling jobs nor registers a job this session cannot run.
         id_to_job = {
             ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
             for job_name, specifier in universe
@@ -168,9 +168,9 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
 
-        tracker.align_jobs(jobs=universe, universe=universe)
-
         job_name, specifier = id_to_job[job_id]
+        tracker.align_jobs(jobs=[(job_name, specifier)], universe=universe)
+
         if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
             message = (
                 f"Unable to execute the requested timestamp parsing job with ID '{job_id}'. No raw log archive was "

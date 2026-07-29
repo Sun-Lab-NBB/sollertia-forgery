@@ -1,5 +1,6 @@
-"""Provides the local orchestration layer: the shared batch job-execution engine, its resource estimators, the
-pipeline dispatch table, and the job plan caches that record each job's resource figures once.
+"""Provides the orchestration layer: the shared batch job-execution engine, its resource estimators, the pipeline
+dispatch table, the job plan caches that record each job's resource figures once, and the scheduler backend that runs
+the same prepared jobs on a remote compute server.
 """
 
 from .local import (
@@ -14,6 +15,31 @@ from .local import (
     resolve_core_allocations,
     resolve_dispatch_priorities,
 )
+from .ledger import (
+    SubmissionBatch,
+    RemoteSubmission,
+    SubmissionLedger,
+    ledger_path,
+    read_ledger,
+    record_batch,
+    forget_batches,
+    resolve_batches,
+    current_timestamp,
+    retire_settled_batches,
+)
+from .remote import (
+    BATCH_DIRECTORY_NAME,
+    REMOTE_JOB_WALLTIME_MINUTES,
+    submit_batch,
+    connect_to_server,
+    query_submissions,
+    render_submission,
+    cancel_submissions,
+    sync_project_state,
+    environment_command,
+    prepare_remote_batch,
+    remote_batch_directory,
+)
 from .dispatch import (
     BATCH_PIPELINES,
     PipelineDispatch,
@@ -21,6 +47,7 @@ from .dispatch import (
     resolve_dispatch,
     build_pending_job,
     resolve_job_cores,
+    resolve_job_command,
     prepare_pipeline_jobs,
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
@@ -41,9 +68,11 @@ from .planning import (
 from .footprints import resolve_host_memory_mb
 
 __all__ = [
+    "BATCH_DIRECTORY_NAME",
     "BATCH_PIPELINES",
     "DATASET_UNIT",
     "PROJECT_PLAN_SCHEMA",
+    "REMOTE_JOB_WALLTIME_MINUTES",
     "RESERVED_CORES",
     "SESSION_UNIT",
     "ActiveJob",
@@ -54,13 +83,29 @@ __all__ = [
     "JobPlanEntry",
     "PendingJob",
     "PipelineDispatch",
+    "RemoteSubmission",
+    "SubmissionBatch",
+    "SubmissionLedger",
     "build_pending_job",
+    "cancel_submissions",
+    "connect_to_server",
+    "current_timestamp",
     "dataset_plan_path",
+    "environment_command",
+    "forget_batches",
     "generate_project_plan",
     "group_jobs_by_tracker",
     "job_execution_manager",
+    "ledger_path",
     "prepare_pipeline_jobs",
+    "prepare_remote_batch",
     "project_plan_path",
+    "query_submissions",
+    "read_ledger",
+    "record_batch",
+    "remote_batch_directory",
+    "render_submission",
+    "resolve_batches",
     "resolve_concurrency_limits",
     "resolve_concurrency_reservations",
     "resolve_core_allocations",
@@ -68,8 +113,12 @@ __all__ = [
     "resolve_dispatch",
     "resolve_dispatch_priorities",
     "resolve_host_memory_mb",
+    "resolve_job_command",
     "resolve_job_cores",
     "resolve_session_plan",
+    "retire_settled_batches",
     "run_batch_job",
     "session_plan_path",
+    "submit_batch",
+    "sync_project_state",
 ]

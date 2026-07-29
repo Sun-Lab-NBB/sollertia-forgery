@@ -1,6 +1,5 @@
-"""Provides the per-unit job plan caches that record each job's resource figures, and the project-level projection
-that ships them. Replanning keeps the figures a cache already holds, so the cores and memory a job is submitted with
-stay the ones it was planned with. Re-estimating them is a deliberate act, requested by regenerating the plan.
+"""Provides the per-unit job plan caches that record each job's resource figures, and the project-level projection that
+ships them.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import DatasetData, iterate_sessions
-from ataraxis_data_structures import YamlConfig
+from ataraxis_data_structures import YamlConfig, ProcessingTracker
 
 from ..forging import discover_project_datasets
 from .dispatch import resolve_dispatch, resolve_job_cores
@@ -44,17 +43,23 @@ PROJECT_PLAN_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType]
     "session": pl.String,
     "dataset": pl.String,
     "pipeline": pl.String,
+    "job_id": pl.String,
     "job_name": pl.String,
     "specifier": pl.String,
     "cores": pl.UInt16,
     "memory_mb": pl.UInt32,
     "memory_modeled": pl.Boolean,
+    "prerequisite_ids": pl.List(pl.String),
 }
 """The column layout of the project plan projection, one row per planned job.
 
 Notes:
     The subject columns mirror the dataset state artifact, so a reader joins a job's figures against its recorded
     state on the same keys. A session row carries no dataset and a dataset row carries neither animal nor session.
+
+    ``job_id`` is what the project job artifact keys its own rows by, so the two tables join on it directly. Carrying
+    the ordering here as well is what lets a scheduler build a job's dependency graph from this table alone, without
+    resolving the unit the jobs belong to.
 """
 
 
@@ -74,11 +79,18 @@ class JobPlanEntry:
     """The memory this job occupies, estimated from the data it will process."""
     memory_modeled: bool = False
     """Determines whether the memory figure follows from this job's own input rather than from a flat allowance."""
+    prerequisite_ids: list[str] = field(default_factory=list)
+    """The identifiers of the jobs that must succeed before this job may run, from its pipeline's own ordering."""
 
     @property
     def key(self) -> tuple[str, str, str]:
         """Returns the triple that identifies this entry within its unit's plan."""
         return self.pipeline, self.job_name, self.specifier
+
+    @property
+    def job_id(self) -> str:
+        """Returns the identifier the processing tracker records this job under."""
+        return ProcessingTracker.generate_job_id(job_name=self.job_name, specifier=self.specifier)
 
 
 @dataclass
@@ -277,6 +289,11 @@ def _resolve_unit_plan(
         reason its resolver gave, so a pipeline absent because its input is malformed is distinguishable from one
         absent because the unit never carried that data.
 
+        Each pipeline's processing tracker is aligned with the jobs the unit can actually run, so a unit that has
+        never been processed still carries a job registry once it is planned. That registry is what the project job
+        artifact is built from, which is how a scheduler on another host learns which jobs exist. A job the unit
+        cannot run never reaches the tracker, so its absence there is the statement that it is not possible.
+
     Args:
         dispatches: The dispatch entries of the pipelines that operate on this kind of unit.
         unit_path: The path to the unit to plan.
@@ -293,20 +310,20 @@ def _resolve_unit_plan(
     """
     # Resolves every pipeline's job set first, so the recorded plan seeds the entry set before any pipeline's
     # outstanding jobs are worked out against it.
-    resolved: list[tuple[PipelineDispatch[Any], Any, list[tuple[str, str]]]] = []
+    resolved: list[tuple[PipelineDispatch[Any], Any, list[tuple[str, str]], list[tuple[str, str]]]] = []
     located: tuple[Path, str] | None = None
     skipped: dict[str, str] = {}
     for dispatch in dispatches:
         discovered = _discover_unit(dispatch=dispatch, unit_path=unit_path, skipped=skipped)
         if discovered is None:
             continue
-        unit, universe = discovered
+        unit, universe, runnable = discovered
         if located is None:
             unit_plan_path = (
                 session_plan_path(session=unit) if unit_kind == SESSION_UNIT else dataset_plan_path(dataset=unit)
             )
             located = (unit_plan_path, dispatch.unit_name(unit))
-        resolved.append((dispatch, unit, universe))
+        resolved.append((dispatch, unit, universe, runnable))
 
     if located is None:
         message = (
@@ -326,7 +343,16 @@ def _resolve_unit_plan(
         {} if recorded is None or regenerate_plan else dict(recorded.entry_map())
     )
 
-    for dispatch, unit, universe in resolved:
+    for dispatch, unit, universe, runnable in resolved:
+        # Registers the jobs this unit can run, so the job artifact built from this tracker enumerates them.
+        tracker_path = dispatch.tracker_path(unit)
+        tracker_path.parent.mkdir(parents=True, exist_ok=True)
+        ProcessingTracker(file_path=tracker_path).align_jobs(jobs=runnable, universe=universe)
+
+        # Ordering resolves over the runnable subset, so a stage waits only on the upstream jobs this unit can
+        # produce. Resolving it over the whole universe would make a stage wait on a job whose input never existed.
+        ordering = dispatch.prerequisites(unit, runnable)
+
         cores = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
         outstanding = [
             (job_name, specifier)
@@ -348,6 +374,10 @@ def _resolve_unit_plan(
                 cores=cores[job_name],
                 memory_mb=memory_mb,
                 memory_modeled=memory_modeled,
+                prerequisite_ids=[
+                    ProcessingTracker.generate_job_id(job_name=upstream_name, specifier=upstream_specifier)
+                    for upstream_name, upstream_specifier in ordering.get((job_name, specifier), ())
+                ],
             )
             entries[entry.key] = entry
 
@@ -358,8 +388,8 @@ def _resolve_unit_plan(
 
 def _discover_unit(
     dispatch: PipelineDispatch[Any], unit_path: Path, skipped: dict[str, str]
-) -> tuple[Any, list[tuple[str, str]]] | None:
-    """Resolves one pipeline's job universe for a unit, recording the reason when the pipeline resolves nothing.
+) -> tuple[Any, list[tuple[str, str]], list[tuple[str, str]]] | None:
+    """Resolves one pipeline's job sets for a unit, recording the reason when the pipeline resolves nothing.
 
     Args:
         dispatch: The pipeline's dispatch entry.
@@ -367,14 +397,15 @@ def _discover_unit(
         skipped: The mapping this call records its pipeline's reason into when resolution does not succeed.
 
     Returns:
-        The loaded unit and its job universe, or None when this pipeline resolves no job for the unit.
+        The loaded unit, its job universe, and the subset it can run, or None when this pipeline resolves no job for
+        the unit.
     """
     try:
-        unit, universe, _ = dispatch.discover(unit_path)
+        unit, universe, runnable = dispatch.discover(unit_path)
     except Exception as exception:
         skipped[dispatch.pipeline.value] = str(exception)
         return None
-    return unit, universe
+    return unit, universe, runnable
 
 
 def _load_plan(plan_path: Path) -> JobPlan | None:
@@ -427,9 +458,11 @@ def _projection_row(
         "session": session,
         "dataset": dataset,
         "pipeline": entry.pipeline,
+        "job_id": entry.job_id,
         "job_name": entry.job_name,
         "specifier": entry.specifier,
         "cores": entry.cores,
         "memory_mb": entry.memory_mb,
         "memory_modeled": entry.memory_modeled,
+        "prerequisite_ids": list(entry.prerequisite_ids),
     }

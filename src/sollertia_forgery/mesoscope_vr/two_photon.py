@@ -1,6 +1,5 @@
 """Provides the Mesoscope-VR two-photon pipeline assets donated to the system-agnostic two-photon and forging worker
-packages. The assets locate the raw ``mesoscope_data`` input the cindra pipeline consumes and resolve the
-genotype-tuned cindra single- and multi-recording configurations for a session.
+packages.
 """
 
 from __future__ import annotations

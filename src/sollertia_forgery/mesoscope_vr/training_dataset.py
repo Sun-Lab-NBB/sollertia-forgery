@@ -1,8 +1,4 @@
-"""Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-The worker combines a run or lick training session's behavior and video sub-datasets on the slowest camera's clock into
-the session's unified ``data.feather``, since a training session carries no mesoscope fluorescence clock.
-"""
+"""Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline."""
 
 from __future__ import annotations
 

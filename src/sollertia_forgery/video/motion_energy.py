@@ -1,8 +1,4 @@
-"""Provides the system-agnostic per-camera motion-energy analysis run by the video-processing pipeline.
-
-The analysis reduces each camera recording to a per-frame scalar indexing how much the animal moved, and as a pure
-function of pixels it applies to every camera the manifest names rather than being donated per acquisition system.
-"""
+"""Provides the system-agnostic per-camera motion-energy analysis run by the video-processing pipeline."""
 
 from __future__ import annotations
 

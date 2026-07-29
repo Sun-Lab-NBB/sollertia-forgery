@@ -1,8 +1,4 @@
-"""Provides the generic ``slf process`` CLI group that runs a system-agnostic processing pipeline on a single
-session. Each command invokes one system-agnostic worker package's local processing pipeline directly. Each
-pipeline infers the acquisition system from the target session internally, resolving its donated parsers and
-workers from the registries, so each command needs only the target session.
-"""
+"""Provides the generic ``slf process`` CLI group that runs a system-agnostic processing pipeline on one session."""
 
 from __future__ import annotations
 

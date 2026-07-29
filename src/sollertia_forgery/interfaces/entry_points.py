@@ -1,11 +1,4 @@
-"""Provides the single ``slf`` console-script root command group for the sollertia-forgery library.
-
-Notes:
-    One root command exposes the system-agnostic management commands (manifest, checksum, server), the agentic Model
-    Context Protocol server, and the generic processing and forging commands. Subcommand groups are imported and
-    registered lazily at module load so that resolving ``slf --help`` stays inexpensive, and the heavy
-    acquisition-library bindings are pulled in only inside the individual command callbacks.
-"""
+"""Provides the single ``slf`` console-script root command group for the sollertia-forgery library."""
 
 import click
 

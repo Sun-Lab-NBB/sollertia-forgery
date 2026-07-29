@@ -1,7 +1,4 @@
-"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline. The parser interprets
-the decoded runtime payloads into the session's system and runtime state feathers, plus the experiment-only guidance
-state, VR cue, trigger-zone, and per-trial behavior feathers.
-"""
+"""Provides the Mesoscope-VR runtime log parser donated to the system-agnostic runtime pipeline."""
 
 from __future__ import annotations
 

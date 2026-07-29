@@ -1,12 +1,5 @@
 """Collects every acquisition-system-keyed dispatch registry in one place and runs the import-time checks that guard
 them.
-
-The assets each acquisition system donates are the microcontroller module parsers and the event codes they read, the
-runtime DataLogger source id and log parser, and the raw two-photon imaging directory locator. Each system also
-donates its video-tracking function, its per-session forging data-assembly worker and column descriptions, and its
-cindra configuration resolvers. This module binds those assets into the dispatch registries and exposes the
-``resolve_*`` helpers that consumers use to look them up. The registries are keyed by acquisition system (from
-sollertia-shared-assets) and, for microcontroller parsers, additionally by hardware ``(module_type, module_id)``.
 """
 
 from __future__ import annotations

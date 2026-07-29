@@ -1,9 +1,4 @@
-"""Provides the admission gate that holds a session out of a forged dataset until its processing has completed.
-
-Assembly reads processed outputs directly, so a session admitted before its pipelines finished fails deep inside an
-assembler with whatever error the missing file raises. This gate moves that failure to dataset definition, where the
-session that caused it is still the subject of the call.
-"""
+"""Provides the admission gate that holds a session out of a forged dataset until its processing has completed."""
 
 from __future__ import annotations
 

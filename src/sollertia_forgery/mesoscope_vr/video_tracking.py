@@ -1,7 +1,4 @@
-"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline. The
-function post-processes externally-produced DeepLabCut pose predictions for the face camera into per-frame pupil and
-eye metrics.
-"""
+"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline."""
 
 from __future__ import annotations
 

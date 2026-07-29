@@ -22,6 +22,9 @@ _CONFIGURATION_DIR: str = "configuration"
 """Subdirectory under the working directory that stores the server configuration YAML alongside other Sollertia
 configuration assets."""
 
+_REMOTE_STATE_DIR: str = "remote_state"
+"""Subdirectory under the working directory that mirrors the state artifacts pulled from the remote compute server."""
+
 
 @dataclass
 class ServerConfiguration(YamlConfig):
@@ -124,3 +127,34 @@ def get_server_configuration_path() -> Path:
     loading the configuration contents.
     """
     return get_working_directory().joinpath(_CONFIGURATION_DIR, _SERVER_CONFIG_FILENAME)
+
+
+def remote_state_path() -> Path:
+    """Returns the local directory holding everything this host records about remote runs.
+
+    Notes:
+        One directory holds both halves of what a remote run leaves behind, which is the state artifacts pulled from
+        the server and this host's own record of what it submitted. Keeping them together means a run's whole local
+        footprint is one directory to find, inspect, or remove.
+
+    Returns:
+        The path to the remote state directory under the Sollertia platform working directory.
+    """
+    return get_working_directory().joinpath(_REMOTE_STATE_DIR)
+
+
+def remote_state_directory(project: str) -> Path:
+    """Returns the local directory mirroring one remote project's state artifacts.
+
+    Notes:
+        The mirror reproduces the project directory by name, so an artifact pulled into it keeps the filename its
+        writer derived from the project. Every read tool resolves an artifact from the project directory it is given,
+        so a mirrored project is read exactly as a local one is.
+
+    Args:
+        project: The name of the project whose remote state is mirrored.
+
+    Returns:
+        The path to the project's mirror directory under the Sollertia platform working directory.
+    """
+    return remote_state_path().joinpath(project)
