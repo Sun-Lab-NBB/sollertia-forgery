@@ -1,4 +1,5 @@
 """Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline.
+
 The worker combines a run or lick training session's behavior and video sub-datasets on the slowest camera's clock into
 the session's unified ``data.feather``, since a training session carries no mesoscope fluorescence clock.
 """
@@ -12,6 +13,7 @@ from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 
 from .video_dataset import assemble_video_dataset, resolve_slowest_camera_clock
+from .runtime_dataset import clip_to_session_bounds
 from .behavior_dataset import assemble_behavior_dataset
 
 if TYPE_CHECKING:
@@ -31,6 +33,10 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
         Training sessions carry no mesoscope imaging, so the assembler requires neither the experiment configuration nor
         any cindra output, and it takes no dataset name because a training session has no cindra multi-recording output
         to resolve.
+
+        The assembled feather is clipped to the session bounds, so it begins when the system first leaves the idle
+        state and ends at the final runtime-state entry. That drops the setup span the cameras record before the
+        session and the teardown span they record after it. Experiment sessions are clipped on the same bounds.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
@@ -89,4 +95,5 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     if video_data.width > 0:
         sub_datasets.append(video_data)
     result = pl.concat(items=sub_datasets, how="horizontal")
+    result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)

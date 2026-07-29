@@ -15,10 +15,11 @@ from typing import TYPE_CHECKING, Protocol
 from dataclasses import dataclass
 
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import AcquisitionSystems
+from sollertia_shared_assets import SessionTypes, AcquisitionSystems
 
 from .mesoscope_vr import (
     RUNTIME_SOURCE_ID,
+    MESOSCOPE_ADMISSION_PIPELINES,
     MESOSCOPE_COLUMN_DESCRIPTIONS,
     parse_lick,
     parse_brake,
@@ -46,6 +47,8 @@ if TYPE_CHECKING:
     import polars as pl
     from sollertia_shared_assets import SessionData
 
+    from .shared_assets import ProcessingPipelines
+
 __all__ = [
     "ForgingAssembler",
     "MicrocontrollerParser",
@@ -53,6 +56,7 @@ __all__ = [
     "TwoPhotonDataLocator",
     "VideoTracker",
     "resolve_eligible_microcontroller_modules",
+    "resolve_forging_admission_pipelines",
     "resolve_forging_assembly_worker",
     "resolve_forging_column_descriptions",
     "resolve_microcontroller_event_codes",
@@ -165,6 +169,14 @@ column-description mapping. Dataset definition, the cindra multi-day stage, in-p
 the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic ``forging``
 package."""
 
+_FORGING_ADMISSION_REGISTRY: dict[AcquisitionSystems, dict[SessionTypes, frozenset[ProcessingPipelines]]] = {
+    AcquisitionSystems.MESOSCOPE_VR: MESOSCOPE_ADMISSION_PIPELINES,
+}
+"""Maps each acquisition system to the pipelines each of its session types must have completed before a session may
+join a forged dataset. Every pipeline resolves its own job universe from the acquisition manifests, so a completed
+tracker already accounts for every source a session recorded, which is why a system declares pipelines rather than
+source counts. A session type a system does not list joins no dataset."""
+
 _CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAsset] = {
     AcquisitionSystems.MESOSCOPE_VR: _CindraConfigurationAsset(
         resolve_single_recording=resolve_single_recording_configuration,
@@ -214,6 +226,25 @@ def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> Forging
         ValueError: If the acquisition system is unknown.
     """
     return _FORGING_ASSEMBLY_REGISTRY[_resolve_system(system=system)].assembler
+
+
+def resolve_forging_admission_pipelines(
+    system: str | AcquisitionSystems,
+) -> dict[SessionTypes, frozenset[ProcessingPipelines]]:
+    """Resolves the per-session-type pipeline requirements a session must satisfy to join the system's datasets.
+
+    Args:
+        system: The acquisition system that recorded the session, for example the value carried by
+            ``SessionData.acquisition_system``.
+
+    Returns:
+        The mapping from session type to the pipelines that must report every job as succeeded. A session type absent
+        from the mapping joins no dataset for this system.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _FORGING_ADMISSION_REGISTRY[_resolve_system(system=system)]
 
 
 def resolve_forging_column_descriptions(system: str | AcquisitionSystems) -> dict[str, str]:
@@ -419,9 +450,9 @@ def _assert_registry_coverage() -> None:
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry, the
     runtime-parser registry, the two-photon-data registry, the video-tracking registry, the microcontroller
-    event-code registry, and the cindra configuration registry, and registers at least one microcontroller module
-    parser. Additionally, confirms that every parseable microcontroller module declares the event codes its parser
-    reads.
+    event-code registry, the cindra configuration registry, and the forging-admission registry, and registers at least
+    one microcontroller module parser. Additionally, confirms that every parseable microcontroller module declares the
+    event codes its parser reads.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable microcontroller
@@ -438,6 +469,7 @@ def _assert_registry_coverage() -> None:
         ("_VIDEO_TRACKING_REGISTRY", frozenset(_VIDEO_TRACKING_REGISTRY)),
         ("_MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(_MICROCONTROLLER_EVENT_CODE_REGISTRY)),
         ("_CINDRA_CONFIGURATION_REGISTRY", frozenset(_CINDRA_CONFIGURATION_REGISTRY)),
+        ("_FORGING_ADMISSION_REGISTRY", frozenset(_FORGING_ADMISSION_REGISTRY)),
         ("_MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
         missing_systems = systems - registered_systems

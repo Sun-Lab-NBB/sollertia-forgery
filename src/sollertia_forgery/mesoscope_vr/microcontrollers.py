@@ -272,11 +272,9 @@ def _parse_encoder_data(
     cw_timestamps: NDArray[np.uint64]
     cw_values: NDArray[np.float64]
 
-    # Extracts CCW (event 51) and CW (event 52) rotation data with displacement values.
     ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
     cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
 
-    # Synthesizes an artificial zero-code entry if one direction is completely missing.
     if len(ccw_timestamps) == 0:
         ccw_timestamps = np.array([cw_timestamps[0] + 1], dtype=np.uint64)
         ccw_values = np.array([0.0], dtype=np.float64)
@@ -288,7 +286,6 @@ def _parse_encoder_data(
         timestamps_a=ccw_timestamps, values_a=ccw_values, timestamps_b=cw_timestamps, values_b=-cw_values
     )
 
-    # Integrates to cumulative distance and normalizes negative-zero entries.
     positions = np.cumsum(displacements * cm_per_pulse)
     positions = np.round(positions, decimals=8)
     positions[np.isclose(positions, -0.0) & np.signbit(positions)] = 0.0
@@ -316,7 +313,6 @@ def _parse_ttl_data(
     on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
     off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
-    # Aborts early if either ON or OFF signals are missing, as rising edges cannot be detected.
     if len(on_timestamps) == 0 or len(off_timestamps) == 0:
         return
 
@@ -327,7 +323,6 @@ def _parse_ttl_data(
         values_b=np.zeros(len(off_timestamps), dtype=np.uint8),
     )
 
-    # Appends a terminal OFF state if the last recorded value is not 0.
     if triggers[-1] != 0:
         timestamps = np.append(timestamps, timestamps[-1] + 1)
         triggers = np.append(triggers, 0)
@@ -388,7 +383,6 @@ def _parse_valve_data(
     open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
     closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
-    # Handles the edge case where the valve was never opened (no water dispensed).
     if len(open_timestamps) == 0:
         result_dataframe = pl.DataFrame(
             {
@@ -407,7 +401,6 @@ def _parse_valve_data(
         values_b=np.zeros(len(closed_timestamps), dtype=np.float64),
     )
 
-    # Detects valve open/close cycles using edge detection.
     edges = np.diff(volume, prepend=volume[0])
     rising_edges = np.where(edges == 1)[0]
     falling_edges = np.where(edges == -1)[0]
@@ -415,15 +408,12 @@ def _parse_valve_data(
     reward_timestamps = timestamps[falling_edges]
     pulse_durations: NDArray[np.float64] = (timestamps[falling_edges] - timestamps[rising_edges]).astype(np.float64)
 
-    # Converts pulse durations to dispensed water volume using calibrated power law.
     volumes = np.cumsum(scale_coefficient * np.power(pulse_durations, nonlinearity_exponent))
     volumes = np.round(volumes, decimals=8)
 
-    # Re-adds the initial zero volume at the first timestamp.
     reward_timestamps = np.insert(reward_timestamps, 0, timestamps[0])
     volumes = np.insert(volumes, 0, 0.0)
 
-    # Extracts tone buzzer signals (event 54 = ON, event 55 = OFF).
     tone_on_timestamps = get_event_timestamps(partition=event_partition, event_code=54)
     tone_off_timestamps = get_event_timestamps(partition=event_partition, event_code=55)
 
@@ -438,7 +428,6 @@ def _parse_valve_data(
         tone_timestamps = np.append(tone_timestamps, tone_timestamps[-1] + 1)
         tone_states = np.append(tone_states, 0)
 
-    # Interpolates valve and tone data onto a shared timestamp grid.
     shared_stamps = np.unique(np.concatenate([tone_timestamps, reward_timestamps]))
 
     interpolated_reward = interpolate_data(
@@ -479,7 +468,6 @@ def _parse_gas_puff_data(
     open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
     closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
-    # Handles the edge case where no gas puffs were delivered.
     if len(open_timestamps) == 0:
         result_dataframe = pl.DataFrame(
             {
@@ -498,7 +486,6 @@ def _parse_gas_puff_data(
         values_b=np.zeros(len(closed_timestamps), dtype=np.uint8),
     )
 
-    # Computes cumulative puff count from falling edges (1 -> 0 transitions).
     edges = np.diff(states, prepend=states[0])
     falling_edges = edges == -1
     cumulative_puffs: NDArray[np.uint32] = np.cumsum(falling_edges.astype(np.uint32))
@@ -534,15 +521,12 @@ def _parse_lick_data(
 
     lick_threshold = np.uint16(hardware_state.lick_threshold)
 
-    # Extracts voltage change events (event 51 only, preserving uint16 resolution).
     timestamps, voltages = get_event_data(partition=event_partition, event_code=51, values_dtype=np.uint16)
 
-    # Sorts by timestamp for additional safety.
     sort_indices = np.argsort(timestamps, kind="stable")
     timestamps = timestamps[sort_indices]
     voltages = voltages[sort_indices]
 
-    # Applies threshold-based binary lick classification.
     licks = (voltages >= lick_threshold).astype(np.uint8)
 
     result_dataframe = pl.DataFrame({"time_us": timestamps, "voltage_12_bit_adc": voltages, "lick_state": licks})
@@ -574,7 +558,6 @@ def _parse_torque_data(
     ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
     cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
 
-    # Synthesizes missing direction data to handle edge cases.
     if len(ccw_timestamps) == 0:
         ccw_timestamps = np.array([cw_timestamps[0] + 1], dtype=np.uint64)
         ccw_values = np.array([0.0], dtype=np.float64)
@@ -591,7 +574,6 @@ def _parse_torque_data(
 
     torques = np.round(torques, decimals=8)
 
-    # Appends a terminal zero torque if the last value is not 0.
     if torques[-1] != 0:
         timestamps = np.append(timestamps, timestamps[-1] + 1)
         torques = np.append(torques, 0)
@@ -624,7 +606,6 @@ def _parse_screen_data(
     on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
     off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
 
-    # Handles the case where screens never changed state.
     if len(on_timestamps) == 0:
         result_dataframe = pl.DataFrame(
             {
@@ -642,15 +623,12 @@ def _parse_screen_data(
         values_b=np.zeros(len(off_timestamps), dtype=np.uint8),
     )
 
-    # Detects rising edges to identify toggle events.
     edges = np.diff(triggers, prepend=0)
     rising_edges = np.where(edges == 1)[0]
     screen_timestamps = timestamps[rising_edges]
 
-    # Prepends the initial state using the first recorded timestamp.
     screen_timestamps = np.concatenate(([timestamps[0]], screen_timestamps))
 
-    # Builds the screen state array starting from the initial state and flipping at each toggle.
     state_count = len(screen_timestamps)
     screen_states: NDArray[np.uint8] = np.empty(state_count, dtype=np.uint8)
     screen_states[0] = initially_on

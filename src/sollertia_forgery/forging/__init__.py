@@ -1,9 +1,4 @@
-"""Provides the system-agnostic dataset forging pipeline: dataset resolution and per-session assembly dispatch.
-
-The dataset hierarchy classes (``DatasetData``, ``DatasetFiles``, ``DatasetAnimal``, ``DatasetSession``) are owned by
-sollertia-shared-assets and re-exported here for convenience. This package owns the forging resolution policy and the
-assembly pipeline.
-"""
+"""Provides the system-agnostic dataset forging pipeline: dataset resolution and per-session assembly dispatch."""
 
 from sollertia_shared_assets import (
     DatasetData,
@@ -12,24 +7,62 @@ from sollertia_shared_assets import (
     DatasetSession,
 )
 
-from .dataset import resolve_dataset
+from .state import (
+    ANIMAL_SCOPE,
+    SESSION_SCOPE,
+    DATASET_JOB_SCOPES,
+    DATASET_STATE_SCHEMA,
+    dataset_state_path,
+    generate_dataset_state,
+)
+from .dataset import (
+    DATASET_MARKER_FILENAME,
+    resolve_dataset,
+    discover_project_datasets,
+)
 from .pipeline import (
-    DEFINE_JOB_NAME,
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
+    FORGING_JOB_CONCURRENCY_LIMITS,
+    load_multiday_plan,
+    forging_tracker_path,
     run_forging_pipeline,
+    discover_forging_jobs,
+    resolve_multiday_plan,
+    build_forging_universe,
+    define_forging_dataset,
+    forging_job_prerequisites,
+    materialize_multiday_plan,
 )
+from .admission import verify_session_admissibility
 
 __all__ = [
-    "DEFINE_JOB_NAME",
+    "ANIMAL_SCOPE",
+    "DATASET_JOB_SCOPES",
+    "DATASET_MARKER_FILENAME",
+    "DATASET_STATE_SCHEMA",
+    "FORGING_JOB_CONCURRENCY_LIMITS",
     "FORGING_JOB_NAME",
     "MULTIDAY_DISCOVERY_JOB_NAME",
     "MULTIDAY_EXTRACTION_JOB_NAME",
+    "SESSION_SCOPE",
     "DatasetAnimal",
     "DatasetData",
     "DatasetFiles",
     "DatasetSession",
+    "build_forging_universe",
+    "dataset_state_path",
+    "define_forging_dataset",
+    "discover_forging_jobs",
+    "discover_project_datasets",
+    "forging_job_prerequisites",
+    "forging_tracker_path",
+    "generate_dataset_state",
+    "load_multiday_plan",
+    "materialize_multiday_plan",
     "resolve_dataset",
+    "resolve_multiday_plan",
     "run_forging_pipeline",
+    "verify_session_admissibility",
 ]

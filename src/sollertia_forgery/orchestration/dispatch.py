@@ -1,5 +1,5 @@
-"""Provides the pipeline dispatch table that binds each session-processing pipeline to its job resolver, its
-picklable batch worker, its job ordering, and its processing tracker, alongside the cores each job type occupies.
+"""Provides the pipeline dispatch table that binds each processing pipeline to its job resolver, its picklable batch
+worker, its job ordering, and its processing tracker, alongside the cores each job type occupies.
 """
 
 from __future__ import annotations
@@ -9,11 +9,11 @@ from pathlib import Path
 from functools import cache
 from dataclasses import dataclass
 
-from cindra import SingleRecordingJobNames
 from ataraxis_base_utilities import console, resolve_worker_count
+from sollertia_shared_assets import DatasetData, SessionData
 from ataraxis_data_structures import ProcessingTracker
 
-from .local import RESERVED_CORES, GenericPendingJob
+from .local import RESERVED_CORES, GenericPendingJob, apply_decode_thread_ceiling
 from ..video import (
     ENERGY_JOB_NAME,
     RENAME_JOB_NAME,
@@ -22,6 +22,16 @@ from ..video import (
     discover_video_jobs,
     video_job_prerequisites,
     run_video_processing_pipeline,
+)
+from ..forging import (
+    FORGING_JOB_NAME,
+    MULTIDAY_DISCOVERY_JOB_NAME,
+    MULTIDAY_EXTRACTION_JOB_NAME,
+    FORGING_JOB_CONCURRENCY_LIMITS,
+    forging_tracker_path,
+    run_forging_pipeline,
+    discover_forging_jobs,
+    forging_job_prerequisites,
 )
 from ..runtime import (
     RUNTIME_JOB_NAME,
@@ -35,14 +45,15 @@ from ..managing import (
     checksum_job_prerequisites,
     run_checksum_processing_pipeline,
 )
-from .pipelines import ProcessingPipelines
-from .footprints import estimate_session_job_memory
+from .footprints import estimate_dataset_job_memory, estimate_session_job_memory
 from ..two_photon import (
+    SingleRecordingJobNames,
     discover_two_photon_jobs,
     two_photon_job_prerequisites,
     materialize_cindra_configuration,
     run_two_photon_processing_pipeline,
 )
+from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from ..microcontrollers import (
     PARSE_JOB_NAME,
     EXTRACTION_JOB_NAME,
@@ -54,8 +65,6 @@ from ..microcontrollers import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sollertia_shared_assets import SessionData
-
 
 BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
     {
@@ -64,6 +73,7 @@ BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
         ProcessingPipelines.MICROCONTROLLER,
         ProcessingPipelines.VIDEO,
         ProcessingPipelines.TWO_PHOTON,
+        ProcessingPipelines.FORGING,
     }
 )
 """The pipelines the generic batch tools support. An import-time check holds this to the dispatch table."""
@@ -92,42 +102,118 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # cindra does not consume the worker count for this stage, and it converts a recording into a binary of similar
-    # size, so its pace is set by write throughput rather than by cores.
-    str(SingleRecordingJobNames.BINARIZE): 2,
+    # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
+    # and leaves the decode width to the reader, so the cores this job holds become the threads that decode it.
+    str(SingleRecordingJobNames.BINARIZE): 4,
     # The only two-photon stage that consumes the worker count, applied as numba threads. cindra documents no benefit
     # past roughly twenty threads per plane and recommends parallelizing across planes instead.
     str(SingleRecordingJobNames.PROCESS): 16,
     # A single-threaded concatenation over every plane's extracted traces.
     str(SingleRecordingJobNames.COMBINE): 1,
+    # Registers an animal's recordings against each other across a thread pool it sizes from this allocation, and
+    # keeps every thread busy for the whole pass.
+    MULTIDAY_DISCOVERY_JOB_NAME: 30,
+    # Gathers each tracked region's pixels through a numba kernel that parallelizes over regions. Every batch the
+    # kernel consumes is read serially before it runs, so the stage plateaus well below the width it is given.
+    MULTIDAY_EXTRACTION_JOB_NAME: 16,
+    # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
+    # threads, so the stage gains nothing from a wider allocation.
+    FORGING_JOB_NAME: 1,
 }
 """The cores one job of each type occupies, keyed by the tracker job name. Each value follows from how that stage
 parallelizes, and every value is safe to retune. Preparing a session that resolves a job type absent from this map
 fails for that session, since dispatching it would run it at a width nobody chose."""
 
 
+_JOB_CONCURRENCY_LIMITS: dict[str, int] = {
+    # Decoder throughput across the host peaks near forty-eight concurrent decoders and falls away past it, and this
+    # stage opens one decoder per core it holds. Three jobs at its core allocation sit on that peak, so this ceiling
+    # keeps the stage at its best aggregate rate while leaving the cores it would otherwise idle to other work.
+    ENERGY_JOB_NAME: 3,
+    # Sits at the root of the two-photon chain, so each job that finishes releases that recording's plane jobs. Four
+    # run at their full decode rate, which is what returns those plane jobs to the queue soonest.
+    str(SingleRecordingJobNames.BINARIZE): 4,
+    # The forging pipeline declares its own ceilings, since it owns their job names.
+    **FORGING_JOB_CONCURRENCY_LIMITS,
+}
+"""The jobs of each type that may run at once regardless of the cores the budget could still supply, keyed by the
+tracker job name.
+
+Notes:
+    This is an admission term separate from the two budgets, and it is a hard ceiling. The budgets bound what the
+    host can supply, while this bounds a job type whose own throughput stops climbing before its cores run out. A
+    type at the root of a dependency chain takes a ceiling on the same terms, since finishing one root releases the
+    stages waiting on it while spreading the same capacity over more roots delays all of them equally.
+
+    Spare cores and spare memory never lift a ceiling recorded here, since a type held by one waits on something the
+    spare capacity does not supply. Job types that convert spare capacity into progress belong in
+    ``_JOB_CONCURRENCY_RESERVATIONS`` instead.
+
+    A job type absent from this map is limited by the budgets alone. Every value is safe to retune, and a value below
+    one is raised to one so a limit can never stall a batch.
+"""
+
+
+_JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
+    # Holds back part of the core budget so the stages that wait on no other job keep a share of the host while this
+    # one runs. Its cores are the batch's scarcest resource once the two-photon chain opens, and it converts spare
+    # capacity into progress, so the hold is released whenever nothing else can use what it gives up.
+    str(SingleRecordingJobNames.PROCESS): 5,
+}
+"""The jobs of each type that run at once while other work can still use the capacity the type gives up, keyed by
+the tracker job name.
+
+Notes:
+    This is a soft counterpart to ``_JOB_CONCURRENCY_LIMITS``. A reservation exists to leave room for other jobs
+    rather than because the type stops gaining from concurrency, so it binds only while other jobs can take that
+    room. Admission offers the reserved capacity to every other runnable job first, then releases the reservation
+    over whatever capacity remains.
+
+    That release is what keeps a reservation from idling the host. A wide compute stage held to a reservation while
+    cores sit unused and its own queue is deep would waste the very capacity the reservation was meant to protect,
+    which is the failure this two-pass admission avoids.
+
+    A job type may appear in both tables, where the ceiling stands in every pass and the reservation applies only to
+    the first. A job type absent from this map competes for capacity at its full core-derived width.
+"""
+
+
 @dataclass(frozen=True, slots=True)
-class PipelineDispatch:
-    """Binds a session-processing pipeline to the assets the generic batch tools drive it with.
+class PipelineDispatch[UnitT]:
+    """Binds a processing pipeline to the assets the generic batch tools drive it with.
 
     Notes:
         ``discover`` is the pipeline's job resolver, ``worker`` is the picklable callable the process pool
         dispatches per job, ``prerequisites`` is the pipeline's own intra-pipeline job ordering, and ``tracker_path``
-        resolves the pipeline's processing tracker from a loaded session. Cores belong to the job type rather than
-        to the pipeline, since one pipeline mixes job types that parallelize very differently, so they come from
-        ``_JOB_CORE_ALLOCATIONS``.
+        resolves the pipeline's processing tracker from a loaded unit. Cores belong to the job type, since one
+        pipeline mixes job types that parallelize very differently.
+
+        ``UnitT`` is whatever the pipeline's resolver loads, which is the processing unit its jobs operate on. A
+        session pipeline resolves a session and a dataset pipeline resolves a dataset.
     """
 
     pipeline: ProcessingPipelines
     """The pipeline this entry dispatches."""
-    discover: Callable[[Path], tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]]
-    """The job resolver returning the loaded session, the job universe, and the runnable subset."""
+    discover: Callable[[Path], tuple[UnitT, list[tuple[str, str]], list[tuple[str, str]]]]
+    """The job resolver returning the loaded unit, the job universe, and the runnable subset."""
     worker: Callable[..., None]
     """The picklable module-level worker the process pool invokes with a single planned job."""
-    prerequisites: Callable[[list[tuple[str, str]]], dict[tuple[str, str], tuple[tuple[str, str], ...]]]
-    """Resolves each job's upstream jobs, producing the ordering the batch engine dispatches jobs in."""
-    tracker_path: Callable[[SessionData], Path]
-    """Resolves the pipeline's processing tracker path from a loaded session."""
+    prerequisites: Callable[[UnitT, list[tuple[str, str]]], dict[tuple[str, str], tuple[tuple[str, str], ...]]]
+    """Resolves each job's upstream jobs, producing the ordering the batch engine dispatches jobs in. Takes the loaded
+    unit, since a pipeline whose jobs carry specifiers at differing scopes recovers their relation from it."""
+    tracker_path: Callable[[UnitT], Path]
+    """Resolves the pipeline's processing tracker path from a loaded unit."""
+    output_path: Callable[[UnitT], Path | None]
+    """Resolves the directory this pipeline owns outright, which is what a cleanup may remove to return the unit
+    to its unprocessed state. Resolves to None for a pipeline that writes into a directory it shares with the
+    acquired data, since removing that directory would take the inputs with it."""
+    unit_name: Callable[[UnitT], str]
+    """Resolves the unit's name, which every tool response reports the unit by."""
+    estimate_memory: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]
+    """Estimates the memory each runnable job occupies at its allocated core count, from the data it will process."""
+    materialize: Callable[[UnitT], None] | None = None
+    """Writes whatever a pipeline's jobs must find on disk before any of them dispatches, run once in the parent.
+    Resolves to None for a pipeline with no such precondition."""
 
 
 def run_batch_job(job: GenericPendingJob) -> None:
@@ -138,12 +224,16 @@ def run_batch_job(job: GenericPendingJob) -> None:
         from every pipeline at once. Each pipeline's own worker is looked up rather than bound into the job, so the
         descriptor stays a plain data record that pickles cheaply.
 
+        The decode pool is scoped to the job's own cores before its worker runs, since one pool worker serves job
+        types whose decode widths differ.
+
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
 
     Raises:
         ValueError: If the job names a pipeline the dispatch table does not support.
     """
+    apply_decode_thread_ceiling(cores=job.core_weight)
     dispatch = resolve_dispatch(pipeline=job.pipeline)
     if dispatch is None:
         message = (
@@ -170,72 +260,131 @@ def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch | 
     return _pipeline_dispatch().get(member)
 
 
-def prepare_pipeline_jobs(
-    dispatch: PipelineDispatch, session_path: Path, options: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Discovers a session's runnable jobs, aligns the pipeline tracker, and returns the job descriptors.
+def resolve_job_cores(job_name: str) -> int:
+    """Resolves the cores one job of the named type occupies, narrowed to what this host can supply.
 
     Notes:
-        Discovery loads the session and resolves the job universe and its runnable subset through the pipeline's
+        A stage that reads its own thread count from a configuration file needs this before its jobs dispatch, so
+        the file names the width the batch budgeted rather than the host's whole core count.
+
+    Args:
+        job_name: The tracker job name whose allocation to resolve.
+
+    Returns:
+        The cores one job of that type occupies, or the host's available cores when the type declares no allocation.
+
+    Raises:
+        ValueError: If the job type declares no core allocation.
+    """
+    if job_name not in _JOB_CORE_ALLOCATIONS:
+        message = (
+            f"Unable to resolve the cores for job type '{job_name}'. Every job type a pipeline resolves must "
+            f"declare the cores one of its jobs occupies in _JOB_CORE_ALLOCATIONS."
+        )
+        console.error(message=message, error=ValueError)
+    return min(
+        _JOB_CORE_ALLOCATIONS[job_name], resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES)
+    )
+
+
+def resolve_concurrency_limits(job_names: set[str]) -> dict[str, int]:
+    """Resolves the concurrent-job ceiling each queued job type carries beyond the batch's two budgets.
+
+    Notes:
+        Only the job types that declare a limit appear in the result, so a caller reads an absent name as bounded by
+        the core and memory budgets alone. Declared limits are raised to one, since a ceiling of zero would leave a
+        queued job with no admission path at all.
+
+    Args:
+        job_names: The job type names present in the batch.
+
+    Returns:
+        A dictionary mapping each limited job name to the jobs of that type that may run at once.
+    """
+    return {
+        job_name: max(1, _JOB_CONCURRENCY_LIMITS[job_name])
+        for job_name in job_names
+        if job_name in _JOB_CONCURRENCY_LIMITS
+    }
+
+
+def resolve_concurrency_reservations(job_names: set[str]) -> dict[str, int]:
+    """Resolves the concurrency each queued job type is held to while other work can use the capacity it gives up.
+
+    Notes:
+        Only the job types that declare a reservation appear in the result, so a caller reads an absent name as
+        competing at its full core-derived width. Declared reservations are raised to one, since a reservation of
+        zero would keep a type out of the first admission pass entirely.
+
+    Args:
+        job_names: The job type names present in the batch.
+
+    Returns:
+        A dictionary mapping each reserved job name to the jobs of that type admitted before the reservation lifts.
+    """
+    return {
+        job_name: max(1, _JOB_CONCURRENCY_RESERVATIONS[job_name])
+        for job_name in job_names
+        if job_name in _JOB_CONCURRENCY_RESERVATIONS
+    }
+
+
+def prepare_pipeline_jobs[UnitT](
+    dispatch: PipelineDispatch[UnitT], unit_path: Path, options: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Discovers a unit's runnable jobs, aligns the pipeline tracker, and returns the job descriptors.
+
+    Notes:
+        Discovery loads the unit and resolves the job universe and its runnable subset through the pipeline's
         job resolver. The tracker is aligned against the runnable subset within the universe, so a partial run
         neither wipes sibling jobs nor discards the recorded state of any job the pipeline can still produce. The
         returned descriptors carry everything the execute tool needs to dispatch each job.
 
         Any options the caller supplies are stamped onto every descriptor unchanged and reach the pipeline's worker
-        at dispatch. They do not reach discovery, so the jobs a session resolves stay a property of the data on disk
+        at dispatch. They do not reach discovery, so the jobs a unit resolves stay a property of the data on disk
         rather than of the parameters a run was launched with. That keeps one tracker slot per job however the job
-        is parameterized, which is what lets a multimode pipeline record one integrity state per session.
+        is parameterized, which is what lets a multimode pipeline record one integrity state per unit.
 
     Args:
         dispatch: The pipeline's dispatch entry.
-        session_path: The path to the session root to discover jobs for.
+        unit_path: The path to the processing unit to discover jobs for, which is a session root for a session
+            pipeline and a dataset root for a dataset pipeline.
         options: The pipeline-specific parameters to run these jobs with, such as the mode a multi-mode pipeline
             runs in. Pipelines that take no parameters ignore this mapping.
 
     Returns:
-        A dictionary with the session name, the tracker path, and a list of job descriptors, each carrying
-        ``job_id``, ``job_name``, ``specifier``, ``session_path``, ``tracker_path``, ``pipeline``, its allocated
+        A dictionary with the unit name, the tracker path, and a list of job descriptors, each carrying
+        ``job_id``, ``job_name``, ``specifier``, ``unit_path``, ``tracker_path``, ``pipeline``, its allocated
         ``cores``, its estimated ``memory_mb``, a ``memory_modeled`` flag, ``prerequisite_ids``, and ``options``.
     """
-    session, universe, runnable = dispatch.discover(session_path)
-    tracker_path = dispatch.tracker_path(session)
+    unit, universe, runnable = dispatch.discover(unit_path)
+    unit_name = dispatch.unit_name(unit)
+    tracker_path = dispatch.tracker_path(unit)
     tracker_path.parent.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=tracker_path)
     tracker.align_jobs(jobs=runnable, universe=universe)
 
-    # Resolves the pipeline's own job ordering over the full universe, so a job's upstream stages are named even when
-    # this batch does not queue them. The engine then treats an unqueued prerequisite as satisfied only if the
-    # tracker already records it as succeeded.
-    ordering = dispatch.prerequisites(universe)
+    # Ordering resolves over the full universe, so a job's upstream stages are named even when this batch does not
+    # queue them. The engine then treats an unqueued prerequisite as satisfied only if the tracker already records
+    # it as succeeded.
+    ordering = dispatch.prerequisites(unit, universe)
 
-    # cindra reads its worker count from the session's configuration rather than from a call argument, and only its
-    # per-plane processing stage consumes it, so that stage's allocation is written once here, before any job of the
-    # session dispatches. The host's own core count bounds it, since a session prepared on a larger machine would
-    # otherwise name more threads than this one can run.
-    if dispatch.pipeline is ProcessingPipelines.TWO_PHOTON:
-        materialize_cindra_configuration(
-            session=session,
-            workers=min(
-                _JOB_CORE_ALLOCATIONS[str(SingleRecordingJobNames.PROCESS)],
-                resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES),
-            ),
-        )
+    # Written once here, in the parent, before any job of the unit dispatches.
+    if dispatch.materialize is not None:
+        dispatch.materialize(unit)
 
-    # Sizes each job from the data it will process, at the cores its type is allocated, so the same figures drive
-    # local admission and any remote submission that reads the descriptor.
+    # One set of figures drives both local admission and any remote submission that reads the descriptor.
     unregistered = sorted({job_name for job_name, _ in runnable if job_name not in _JOB_CORE_ALLOCATIONS})
     if unregistered:
         message = (
-            f"Unable to prepare {dispatch.pipeline.value} jobs for session '{session.session_name}'. No core "
-            f"allocation is registered for job type(s) {unregistered}. Every job type a pipeline resolves must "
-            f"declare the cores one of its jobs occupies in _JOB_CORE_ALLOCATIONS."
+            f"Unable to prepare {dispatch.pipeline.value} jobs for unit '{unit_name}'. No core allocation is "
+            f"registered for job type(s) {unregistered}. Every job type a pipeline resolves must declare the cores "
+            f"one of its jobs occupies in _JOB_CORE_ALLOCATIONS."
         )
         console.error(message=message, error=ValueError)
     cores = {job_name: _JOB_CORE_ALLOCATIONS[job_name] for job_name, _ in runnable}
-    memory = estimate_session_job_memory(
-        pipeline=dispatch.pipeline,
-        session=session,
-        jobs=[(job_name, specifier, cores[job_name]) for job_name, specifier in runnable],
+    memory = dispatch.estimate_memory(
+        unit, [(job_name, specifier, cores[job_name]) for job_name, specifier in runnable]
     )
 
     jobs = [
@@ -243,7 +392,7 @@ def prepare_pipeline_jobs(
             "job_id": ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier),
             "job_name": job_name,
             "specifier": specifier,
-            "session_path": str(session_path),
+            "unit_path": str(unit_path),
             "tracker_path": str(tracker_path),
             "pipeline": dispatch.pipeline.value,
             "cores": cores[job_name],
@@ -257,14 +406,14 @@ def prepare_pipeline_jobs(
         }
         for job_name, specifier in runnable
     ]
-    return {"session_name": session.session_name, "tracker_path": str(tracker_path), "jobs": jobs}
+    return {"unit_name": unit_name, "tracker_path": str(tracker_path), "jobs": jobs}
 
 
 def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
     """Builds a GenericPendingJob from a job descriptor emitted by ``prepare_pipeline_jobs``.
 
     Args:
-        job: A job descriptor carrying ``tracker_path``, ``job_id``, ``session_path``, ``cores``, and
+        job: A job descriptor carrying ``tracker_path``, ``job_id``, ``unit_path``, ``cores``, and
             ``memory_mb``, and optionally ``job_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``, and
             ``options``.
 
@@ -277,7 +426,7 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
     return GenericPendingJob(
         tracker_path=Path(job["tracker_path"]),
         job_id=job["job_id"],
-        unit_path=Path(job["session_path"]),
+        unit_path=Path(job["unit_path"]),
         job_name=job.get("job_name", ""),
         specifier=job.get("specifier", ""),
         pipeline=job.get("pipeline", ""),
@@ -311,8 +460,7 @@ def _run_runtime_job(job: GenericPendingJob) -> None:
     """Runs the runtime pipeline for one session as a batch job.
 
     Notes:
-        The runtime pipeline is single-job, so it takes no job identifier. Every job the batch layer dispatches for
-        it runs the whole runtime pipeline for its session.
+        The runtime pipeline is single-job, so it takes no job identifier.
 
     Args:
         job: The pending job carrying the session root in ``unit_path`` and its planned cores in ``core_weight``.
@@ -353,53 +501,144 @@ def _run_two_photon_job(job: GenericPendingJob) -> None:
     run_two_photon_processing_pipeline(session_path=job.unit_path, job_id=job.job_id, workers=job.core_weight)
 
 
-@cache
-def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch]:
-    """Builds the dispatch entry for every session-processing pipeline the generic batch tools support.
+def _session_memory(pipeline: ProcessingPipelines) -> Callable[[SessionData, list[tuple[str, str, int]]], Any]:
+    """Binds the session memory estimator to one pipeline.
+
+    Args:
+        pipeline: The pipeline whose jobs the bound estimator sizes.
+
+    Returns:
+        The estimator that pipeline's dispatch entry declares.
+    """
+    return lambda session, jobs: estimate_session_job_memory(pipeline=pipeline, session=session, jobs=jobs)
+
+
+def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], Path]:
+    """Binds the shared session tracker-path resolver to one pipeline.
+
+    Args:
+        pipeline: The pipeline whose tracker the bound resolver locates.
+
+    Returns:
+        The tracker resolver that pipeline's dispatch entry declares.
+    """
+    return lambda session: resolve_session_tracker_path(session=session, pipeline=pipeline)
+
+
+def _materialize_two_photon_configuration(session: SessionData) -> None:
+    """Writes a session's two-photon configuration with the thread count its processing jobs will run under.
 
     Notes:
-        Built on first use rather than at import, so the workers it binds are ordinary private definitions rather
-        than names the module has to define ahead of its own constants. The result is cached, so every caller shares
-        one table.
+        The two-photon pipeline reads this count from the configuration rather than from a call argument, and only
+        its per-plane processing stage consumes it. The host's core count bounds the value, since a session prepared
+        on a larger machine would otherwise name more threads than this one can run.
+
+    Args:
+        session: The loaded session whose configuration is written.
+    """
+    materialize_cindra_configuration(
+        session=session,
+        workers=min(
+            _JOB_CORE_ALLOCATIONS[str(SingleRecordingJobNames.PROCESS)],
+            resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES),
+        ),
+    )
+
+
+def _run_forging_job(job: GenericPendingJob) -> None:
+    """Runs a single forging multi-day or assembly job for one dataset.
+
+    Notes:
+        The dataset is named by the unit directory the job carries, which sits under the project root the pipeline
+        resolves its sessions from. The hierarchy the job runs against is built beforehand, so the job takes no
+        parameters of its own.
+
+    Args:
+        job: The pending job carrying the dataset root in ``unit_path``, the target job in ``job_id``, and its
+            planned cores in ``core_weight``.
+    """
+    run_forging_pipeline(
+        name=job.unit_path.name,
+        project_root=job.unit_path.parent,
+        job_id=job.job_id,
+        workers=job.core_weight,
+    )
+
+
+@cache
+def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
+    """Builds the dispatch entry for every processing pipeline the generic batch tools support.
+
+    Notes:
+        Built on first use and cached, so every caller shares one table.
 
     Returns:
         The dispatch entry for each supported pipeline, keyed by pipeline.
     """
     return {
-        ProcessingPipelines.CHECKSUM: PipelineDispatch(
+        ProcessingPipelines.CHECKSUM: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.CHECKSUM,
             discover=discover_checksum_jobs,
             worker=_run_checksum_job,
             prerequisites=checksum_job_prerequisites,
-            tracker_path=lambda session: session.raw_data.checksum_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.CHECKSUM),
+            # Writes its stored checksum into raw_data, which holds the acquired data itself, so it owns no
+            # directory a cleanup may remove.
+            output_path=lambda _session: None,
+            unit_name=lambda session: session.session_name,
+            estimate_memory=_session_memory(ProcessingPipelines.CHECKSUM),
         ),
-        ProcessingPipelines.RUNTIME: PipelineDispatch(
+        ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.RUNTIME,
             discover=discover_runtime_jobs,
             worker=_run_runtime_job,
             prerequisites=runtime_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.runtime_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.RUNTIME),
+            output_path=lambda session: session.processed_data.runtime_data_path,
+            unit_name=lambda session: session.session_name,
+            estimate_memory=_session_memory(ProcessingPipelines.RUNTIME),
         ),
-        ProcessingPipelines.MICROCONTROLLER: PipelineDispatch(
+        ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.MICROCONTROLLER,
             discover=discover_microcontroller_jobs,
             worker=_run_microcontroller_job,
             prerequisites=microcontroller_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.microcontroller_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.MICROCONTROLLER),
+            output_path=lambda session: session.processed_data.microcontroller_data_path,
+            unit_name=lambda session: session.session_name,
+            estimate_memory=_session_memory(ProcessingPipelines.MICROCONTROLLER),
         ),
-        ProcessingPipelines.VIDEO: PipelineDispatch(
+        ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.VIDEO,
             discover=discover_video_jobs,
             worker=_run_video_job,
             prerequisites=video_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.video_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.VIDEO),
+            output_path=lambda session: session.processed_data.video_data_path,
+            unit_name=lambda session: session.session_name,
+            estimate_memory=_session_memory(ProcessingPipelines.VIDEO),
         ),
-        ProcessingPipelines.TWO_PHOTON: PipelineDispatch(
+        ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
             pipeline=ProcessingPipelines.TWO_PHOTON,
             discover=discover_two_photon_jobs,
             worker=_run_two_photon_job,
             prerequisites=two_photon_job_prerequisites,
-            tracker_path=lambda session: session.processed_data.two_photon_tracker_path,
+            tracker_path=_session_tracker(ProcessingPipelines.TWO_PHOTON),
+            output_path=lambda session: session.processed_data.cindra_data_path,
+            unit_name=lambda session: session.session_name,
+            estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),
+            materialize=_materialize_two_photon_configuration,
+        ),
+        ProcessingPipelines.FORGING: PipelineDispatch[DatasetData](
+            pipeline=ProcessingPipelines.FORGING,
+            discover=discover_forging_jobs,
+            worker=_run_forging_job,
+            prerequisites=forging_job_prerequisites,
+            tracker_path=forging_tracker_path,
+            # Owns the dataset hierarchy outright, which holds the assembled feathers and the tracker beside them.
+            output_path=lambda dataset: dataset.dataset_data_path.parent,
+            unit_name=lambda dataset: dataset.name,
+            estimate_memory=estimate_dataset_job_memory,
         ),
     }
 

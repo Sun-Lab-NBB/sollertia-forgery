@@ -39,11 +39,18 @@ _PINNED_THREAD_VARIABLES: tuple[str, ...] = (
     "OPENBLAS_NUM_THREADS",
     "MKL_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
-    "NUMBA_NUM_THREADS",
     "POLARS_MAX_THREADS",
     "OPENCV_FFMPEG_THREADS",
 )
-"""The threading-layer environment variables a pool worker pins when it starts."""
+"""The threading-layer environment variables a pool worker pins when it starts.
+
+Notes:
+    ``NUMBA_NUM_THREADS`` is deliberately absent. numba reads that variable once, when it is imported, and treats the
+    value it read as the ceiling for the rest of the process. It then re-reads the variable on every compilation and
+    raises if the two disagree once its thread pool has started. A worker imports numba before this pin could run, so
+    writing the variable here would guarantee that disagreement and fail every job that compiles a numba function.
+    The worker sets Numba's thread count through its runtime API instead, which is the supported way to change it.
+"""
 
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
@@ -53,19 +60,28 @@ cannot stall the manager for good."""
 
 
 _TIFF_DECODE_THREAD_CEILING: int = 4
-"""The thread ceiling applied to the hidden image-decode pool some readers open. That pool otherwise sizes itself
-from the host's core count entirely outside the batch's allocation."""
+"""The widest image-decode pool one job may open, whatever cores it holds. The reader sizes that pool for itself,
+outside the batch's allocation, which is what this bounds."""
 
 
 @dataclass(frozen=True, slots=True)
 class JobAllocation:
-    """Describes the cores one job type receives and how many of its jobs the core budget alone would allow."""
+    """Describes the cores one job type receives and how many of its jobs may run at once."""
 
     cores_per_job: int
     """The cores each job of this type occupies while it runs."""
     maximum_parallel: int
-    """The jobs of this type the core budget alone would allow. Reported for the caller's planning, since admission
-    weighs each running job against both budgets directly."""
+    """The jobs of this type that may run at once, which is what the core budget alone would allow narrowed by any
+    concurrency limit the type declares. Reported for the caller's planning, since admission weighs each running job
+    against both budgets and the limit directly."""
+    concurrency_limit: int | None = None
+    """The concurrent-job ceiling this type declares beyond the two budgets, or None when the budgets alone bound it.
+    Reported alongside the resolved concurrency so a caller reading a maximum below the core budget's own can tell
+    which term produced it. This ceiling holds however much capacity is idle."""
+    concurrency_reservation: int | None = None
+    """The concurrency this type is held to while other work can use the capacity it gives up, or None when it
+    competes at its full width. A reserved type runs at this count while other jobs are runnable and widens toward
+    ``maximum_parallel`` once nothing else claims the room, so both numbers describe it."""
 
 
 @dataclass(slots=True)
@@ -160,8 +176,8 @@ class JobExecutionState[PendingJobT: PendingJob]:
     memory.
 
     Notes:
-        The generic type parameter ``PendingJobT`` is a ``PendingJob`` subclass. Subclasses carry the fields a worker
-        callable needs at dispatch time, such as the path of the unit the job processes.
+        Subclasses of ``PendingJob`` carry the fields a worker callable needs at dispatch time, such as the path of
+        the unit the job processes.
     """
 
     worker: Callable[[PendingJobT], None]
@@ -177,6 +193,19 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """The cores the batch may commit across all concurrently running jobs."""
     memory_budget_mb: int = 1024
     """The memory the batch may commit across all concurrently running jobs."""
+    concurrency_limits: dict[str, int] = field(default_factory=dict)
+    """The jobs of each type that may run at once, keyed by tracker job name, for the types that declare a ceiling
+    beyond the two budgets. This ceiling holds however much capacity is idle, since a type recorded here waits on a
+    resource that spare cores and spare memory do not supply. A job type absent from this mapping is bounded by the
+    budgets alone."""
+    concurrency_reservations: dict[str, int] = field(default_factory=dict)
+    """The jobs of each type that run at once while other work can still use the capacity the type gives up, keyed
+    by tracker job name. Admission offers that capacity to every other runnable job first and then releases the
+    reservation over whatever remains, so a reserved type widens rather than idling the host."""
+    dispatch_priorities: dict[tuple[str, str], int] = field(default_factory=dict)
+    """The cores each job's transitive dependents commit, keyed by dispatch key, which is the weight admission
+    considers candidates in. Resolved once from the job set when the manager starts, since the batch's dependency
+    graph does not change while it runs."""
     pool_size: int = 1
     """The number of worker processes the pool spawns."""
     thread_ceiling: int = _WORKER_THREAD_CEILING
@@ -196,14 +225,19 @@ class JobExecutionState[PendingJobT: PendingJob]:
 
 
 def resolve_core_allocations(
-    job_cores: dict[str, int], job_names: set[str], core_budget: int
+    job_cores: dict[str, int],
+    job_names: set[str],
+    core_budget: int,
+    job_limits: dict[str, int] | None = None,
+    job_reservations: dict[str, int] | None = None,
 ) -> dict[str, JobAllocation]:
     """Resolves how many cores each queued job type receives and how many of its jobs run at once.
 
     Notes:
         A type's core count is its declared allocation, narrowed to the budget so a small host never promises a job
-        more cores than it has. The concurrency that follows is simply the budget divided by that count, which the
-        engine treats as a guide, since admission weighs every running job against the same budget.
+        more cores than it has. The concurrency that follows is the budget divided by that count, narrowed again by
+        any ceiling the type declares for itself. The core term the engine treats as a guide, since admission weighs
+        every running job against the same budget, while the declared ceiling admission enforces exactly.
 
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
@@ -215,6 +249,11 @@ def resolve_core_allocations(
         job_cores: The cores one job of each type occupies, keyed by tracker job name.
         job_names: The job type names present in the batch.
         core_budget: The cores the batch may commit across all concurrently running jobs.
+        job_limits: The concurrent-job ceilings the job types declare beyond the budgets, keyed by tracker job name.
+            Only the types that declare one appear, and passing nothing bounds every type by the budgets alone.
+        job_reservations: The concurrency the job types are held to while other work can use the capacity they give
+            up, keyed by tracker job name. Only the types that declare one appear, and passing nothing lets every
+            type compete at its full width.
 
     Returns:
         A dictionary mapping each job name to its resolved allocation.
@@ -227,11 +266,72 @@ def resolve_core_allocations(
         )
         console.error(message=message, error=ValueError)
 
+    limits = job_limits if job_limits is not None else {}
+    reservations = job_reservations if job_reservations is not None else {}
     allocations: dict[str, JobAllocation] = {}
     for job_name in job_names:
         cores = max(1, min(job_cores[job_name], core_budget))
-        allocations[job_name] = JobAllocation(cores_per_job=cores, maximum_parallel=max(1, core_budget // cores))
+        limit = limits.get(job_name)
+        parallel = max(1, core_budget // cores)
+        allocations[job_name] = JobAllocation(
+            cores_per_job=cores,
+            maximum_parallel=parallel if limit is None else min(parallel, limit),
+            concurrency_limit=limit,
+            concurrency_reservation=reservations.get(job_name),
+        )
     return allocations
+
+
+def resolve_dispatch_priorities[PendingJobT: PendingJob](
+    jobs: dict[tuple[str, str], PendingJobT],
+) -> dict[tuple[str, str], int]:
+    """Resolves how much queued work waits on each job, which is the weight admission orders candidates by.
+
+    Notes:
+        A job's priority is the cores committed by every job that cannot run until it succeeds, summed over its
+        transitive dependents. Weighing the dependents by their cores rather than counting them separates a job
+        holding back three wide stages from one holding back a single narrow stage. A job nothing waits on weighs
+        zero, whatever its own size.
+
+        Ordering by this weight is what keeps a batch working on its critical path. Admitting by size alone lets a
+        crowd of leaf jobs hold the budget while the root of a long chain waits, which idles the host once those
+        leaves finish and the chain has yet to start. The dependents are collected as a set, so a stage reachable
+        along several paths at once is counted a single time.
+
+        A prerequisite naming a job outside this batch is skipped, since a job the batch does not hold cannot be
+        ordered against the ones it does. Cyclic prerequisites resolve to a finite weight rather than recursing
+        without end, which leaves a malformed pipeline ordering poorly instead of stalling the batch.
+
+    Args:
+        jobs: Every job the batch holds, keyed by dispatch key.
+
+    Returns:
+        A dictionary mapping each job's dispatch key to the cores its transitive dependents commit.
+    """
+    dependents: dict[tuple[str, str], list[tuple[str, str]]] = {key: [] for key in jobs}
+    for key, job in jobs.items():
+        for prerequisite in job.prerequisite_keys:
+            if prerequisite in dependents:
+                dependents[prerequisite].append(key)
+
+    resolved: dict[tuple[str, str], frozenset[tuple[str, str]]] = {}
+
+    def _collect(key: tuple[str, str], visiting: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+        cached = resolved.get(key)
+        if cached is not None:
+            return cached
+        if key in visiting:
+            return frozenset()
+        visiting.add(key)
+        reachable: set[tuple[str, str]] = set()
+        for dependent in dependents[key]:
+            reachable.add(dependent)
+            reachable |= _collect(dependent, visiting)
+        visiting.discard(key)
+        resolved[key] = frozenset(reachable)
+        return resolved[key]
+
+    return {key: sum(jobs[dependent].core_weight for dependent in _collect(key, set())) for key in jobs}
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
@@ -255,9 +355,17 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
     with ProcessPoolExecutor(
         max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
     ) as pool:
-        # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
-        # stages still sees the earlier stages a previous run already completed.
         with state.lock:
+            # Weighs every job by the work waiting on it, so admission can favor the batch's critical path. The
+            # dependency graph is fixed for the session, so this is resolved once rather than on every pass.
+            state.dispatch_priorities = resolve_dispatch_priorities(jobs=state.all_jobs)
+
+            # Clears the recorded outcome of every job this batch holds, so the trackers report this run alone.
+            _reset_queued_jobs(state=state)
+
+            # Seeds the recorded outcomes before the first admission, so a batch that queues only a pipeline's later
+            # stages still sees the earlier stages a previous run already completed. The reset above leaves those
+            # earlier stages untouched, since a batch never queues them.
             _refresh_job_outcomes(state=state)
 
         while True:
@@ -321,6 +429,19 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     return tracker_jobs
 
 
+def apply_decode_thread_ceiling(cores: int) -> None:
+    """Scopes the image-decode pool to the cores one job holds.
+
+    Notes:
+        The reader consults this count when a read is issued rather than when it is imported, so a worker re-scopes
+        it before each job it runs. That is what lets one pool serve job types whose decode widths differ.
+
+    Args:
+        cores: The cores the job about to run holds.
+    """
+    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(_TIFF_DECODE_THREAD_CEILING, cores)))
+
+
 def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> None:
     """Pins a pool worker's library thread pools when the worker process starts.
 
@@ -331,16 +452,42 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         called alongside the variables. A job that needs more threads raises its own count once it starts, which
         numba permits up to the count latched at import.
 
+        numba and OpenCV are pinned through their runtime setters alone, leaving the environment they read at import
+        untouched. Both already hold the count they read when the worker imported them, so rewriting those variables
+        would change nothing they consult again. For numba it would actively break the worker, since it compares
+        the variable against the latched count on every compilation and rejects a disagreement once its threads have
+        started, which is exactly the state a late pin creates.
+
     Args:
         thread_ceiling: The number of threads each library thread pool is pinned to.
     """
     ceiling = max(1, thread_ceiling)
     for variable in _PINNED_THREAD_VARIABLES:
         os.environ[variable] = str(ceiling)
-    os.environ["TIFFFILE_NUM_THREADS"] = str(min(_TIFF_DECODE_THREAD_CEILING, ceiling))
+    apply_decode_thread_ceiling(cores=ceiling)
 
     numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)
+
+
+def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
+    """Returns every job this batch holds to the scheduled state on its tracker.
+
+    Notes:
+        Runs once, before the first admission. Without it a queued job whose tracker still records an earlier
+        success reports as succeeded from the moment the batch starts. That makes a run's progress indistinguishable
+        from its history, and lets a status reader call a batch complete before it has dispatched anything.
+        Resetting is safe because a caller queues a job precisely to have it run again.
+
+        Jobs are grouped by tracker so each file is rewritten once, however many of its jobs the batch holds.
+
+    Args:
+        state: The active job execution state whose jobs are reset. Its trackers are rewritten in place.
+    """
+    for tracker_path, jobs in group_jobs_by_tracker(state=state).items():
+        if not tracker_path.is_file():
+            continue
+        ProcessingTracker(file_path=tracker_path).reset_jobs(job_ids=[job.job_id for job in jobs])
 
 
 def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
@@ -369,7 +516,8 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
 def _admit_pending_jobs[PendingJobT: PendingJob](
     state: JobExecutionState[PendingJobT], pool: ProcessPoolExecutor
 ) -> None:
-    """Admits every queued job whose prerequisites are met and whose cores and memory the budgets still allow.
+    """Admits every queued job whose prerequisites are met, whose type is below its concurrency limit, and whose
+    cores and memory the budgets still allow.
 
     Notes:
         A job is weighed against both budgets, and the one that runs out first is whichever the batch's mix makes
@@ -377,11 +525,29 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
         releases its share automatically. This running total is the batch's main resource guard, so a heavy job and
         a crowd of light ones share the host while committed cores and memory stay within both budgets.
 
-        The scan considers the heaviest job first and continues past anything that does not fit, so large jobs are
-        admitted as soon as the budgets allow. Small jobs backfill whatever capacity the large ones leave spare. A
-        job is admitted alone when nothing is running, so a job larger than the whole budget still makes progress.
-        That floor holds the prerequisite check, since dispatching a job before its input exists would fail rather
-        than progress.
+        A job type that declares a concurrency limit is held to it by a third admission term, counted from the
+        running set the same way. The budgets bound what the host can supply, which leaves a job type whose pace is
+        set by storage throughput free to open far more streams than the array serves. The limit bounds that
+        directly, so those types stay at the concurrency they gain from rather than the concurrency the cores allow.
+        Idle capacity never lifts that ceiling, since a type held by it waits on a resource the idle capacity does
+        not supply.
+
+        A job type that declares a reservation is held to it only while other jobs can use the capacity it gives up.
+        Admission runs a second pass over what the first deferred, with the reservations released, so a reserved
+        type widens into capacity nothing else claimed. That keeps a reservation from idling the host once its own
+        queue is the only queue left.
+
+        The scan considers the job with the most work waiting on it first, and settles ties by size so the heavier of
+        two equally blocking jobs is placed while the budgets are still open. Ordering this way keeps the batch on
+        its critical path, since a job at the root of a long chain is admitted ahead of a leaf that unblocks nothing.
+        Size alone would invert that for a cheap root, which leaves the host idle later when the leaves are spent and
+        the chain has yet to start.
+
+        The scan continues past anything that does not fit, so smaller jobs backfill whatever capacity the larger
+        ones leave spare. A job is admitted alone when nothing is running, so a job larger than the whole budget
+        still makes progress. That floor holds the prerequisite check, since dispatching a job before its input
+        exists would fail rather than progress. It also holds the concurrency limit, which never binds an idle pool
+        because every limit is at least one.
 
     Args:
         state: The active job execution state. Its pending queue is rebuilt from the jobs that were not admitted.
@@ -390,33 +556,68 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
     used_cores = sum(active.job.core_weight for active in state.active_jobs)
     used_memory = sum(active.job.memory_mb for active in state.active_jobs)
 
+    running_counts: dict[str, int] = {}
+    for active in state.active_jobs:
+        running_counts[active.job.job_name] = running_counts.get(active.job.job_name, 0) + 1
+
     admitted_any = False
-    deferred: deque[PendingJobT] = deque()
-    candidates = sorted(state.pending_jobs, key=lambda pending: pending.memory_mb, reverse=True)
-    state.pending_jobs = deque(candidates)
-
-    while state.pending_jobs:
-        job = state.pending_jobs.popleft()
-
-        if any(prerequisite in state.failed_job_keys for prerequisite in job.prerequisite_keys):
-            state.blocked_jobs.append(job)
-            continue
-        if not all(prerequisite in state.succeeded_job_keys for prerequisite in job.prerequisite_keys):
-            deferred.append(job)
-            continue
-
-        forced = not state.active_jobs and not admitted_any
-        fits = (
-            used_cores + job.core_weight <= state.core_budget and used_memory + job.memory_mb <= state.memory_budget_mb
+    remaining: deque[PendingJobT] = deque(
+        sorted(
+            state.pending_jobs,
+            key=lambda pending: (state.dispatch_priorities.get(pending.dispatch_key, 0), pending.memory_mb),
+            reverse=True,
         )
-        if not (fits or forced):
-            deferred.append(job)
-            continue
+    )
 
-        future = pool.submit(state.worker, job)
-        state.active_jobs.append(ActiveJob(job=job, future=future))
-        used_cores += job.core_weight
-        used_memory += job.memory_mb
-        admitted_any = True
+    # The first pass holds every reservation, which offers the capacity a reserved type gives up to every other
+    # runnable job. The second pass releases the reservations over whatever capacity that left, so a reserved type
+    # widens instead of idling the host once nothing else can use the room. A batch holding no reserved type at all
+    # settles in the first pass, since the second would only rescan jobs no term newly admits.
+    passes = (True, False) if state.concurrency_reservations else (True,)
+    for honor_reservations in passes:
+        deferred: deque[PendingJobT] = deque()
+        while remaining:
+            job = remaining.popleft()
 
-    state.pending_jobs = deferred
+            if any(prerequisite in state.failed_job_keys for prerequisite in job.prerequisite_keys):
+                state.blocked_jobs.append(job)
+                continue
+            if not all(prerequisite in state.succeeded_job_keys for prerequisite in job.prerequisite_keys):
+                deferred.append(job)
+                continue
+
+            running = running_counts.get(job.job_name, 0)
+
+            # Bounds how many streams this job type opens against the storage array, which neither budget expresses.
+            # A type held here waits on a resource the spare capacity does not supply, so this ceiling stands in
+            # both passes and idle cores never lift it.
+            limit = state.concurrency_limits.get(job.job_name)
+            if limit is not None and running >= limit:
+                deferred.append(job)
+                continue
+
+            # Holds a type to the room it leaves others only while others can take that room.
+            reservation = state.concurrency_reservations.get(job.job_name)
+            if honor_reservations and reservation is not None and running >= reservation:
+                deferred.append(job)
+                continue
+
+            forced = not state.active_jobs and not admitted_any
+            fits = (
+                used_cores + job.core_weight <= state.core_budget
+                and used_memory + job.memory_mb <= state.memory_budget_mb
+            )
+            if not (fits or forced):
+                deferred.append(job)
+                continue
+
+            future = pool.submit(state.worker, job)
+            state.active_jobs.append(ActiveJob(job=job, future=future))
+            used_cores += job.core_weight
+            used_memory += job.memory_mb
+            running_counts[job.job_name] = running + 1
+            admitted_any = True
+
+        remaining = deferred
+
+    state.pending_jobs = remaining

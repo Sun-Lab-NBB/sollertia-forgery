@@ -1,6 +1,6 @@
 """Provides the Mesoscope-VR system-specific assets donated to the system-agnostic worker packages."""
 
-from .forging import assemble_mesoscope_session
+from .forging import MESOSCOPE_ADMISSION_PIPELINES, assemble_mesoscope_session
 from .runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .metadata import MESOSCOPE_COLUMN_DESCRIPTIONS, DatasetColumn
 from .two_photon import (
@@ -23,6 +23,7 @@ from .microcontrollers import (
 )
 
 __all__ = [
+    "MESOSCOPE_ADMISSION_PIPELINES",
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
     "RUNTIME_SOURCE_ID",
     "DatasetColumn",

@@ -28,6 +28,11 @@ _TRIAL_UNDEFINED: int = 65535
 """The sentinel value used to mask the trial column when the system is not in the run state, equal to the maximum
 value of UInt16 so it sits outside the expected trial ID range for any realistic session."""
 
+_SYSTEM_STATE_IDLE: int = 0
+"""The system state code the acquisition system reports while it is not conducting a session. Every session type
+leaves this state once, at its canonical start, so the first entry carrying a different code marks the moment the
+session's data begins."""
+
 
 def assemble_runtime_dataset(
     microcontroller_data_path: Path,
@@ -64,7 +69,6 @@ def assemble_runtime_dataset(
     runtime_state_mapping[0] = "idle"
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
-    # Loads all experiment data sources.
     encoder_data_frame = pl.read_ipc(
         source=microcontroller_data_path.joinpath(BehaviorDataFiles.ENCODER), memory_map=True
     )
@@ -82,7 +86,6 @@ def assemble_runtime_dataset(
     trial_distance = trial_data_frame["traveled_distance_cm"].to_numpy()
     trial_numbers: NDArray[np.uint32] = np.arange(1, len(trial_data_frame) + 1, dtype=np.uint32)
 
-    # Interpolates the traveled distance first as it's used as a reference for other interpolations.
     reference_distance: NDArray[np.float64] = interpolate_data(  # type: ignore[assignment]
         source_coordinates=encoder_data_frame["time_us"].to_numpy(),
         source_values=encoder_data_frame["traveled_distance_cm"].to_numpy(),
@@ -95,7 +98,6 @@ def assemble_runtime_dataset(
     reinforcing_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.REINFORCING_GUIDANCE)
     aversive_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.AVERSIVE_GUIDANCE)
 
-    # Aligns all data sources to the reference time (or distance) and builds an aligned data dictionary.
     aligned_data: dict[str, NDArray[np.number]] = {
         "trial": interpolate_data(
             source_coordinates=trial_distance,
@@ -128,7 +130,6 @@ def assemble_runtime_dataset(
         ),
     }
 
-    # Adds reinforcing guidance state if the file was produced by the processing pipeline.
     if reinforcing_guidance_file.exists():
         reinforcing_data_frame = pl.read_ipc(source=reinforcing_guidance_file, memory_map=True)
         aligned_data["reinforcing_guided"] = interpolate_data(
@@ -138,7 +139,6 @@ def assemble_runtime_dataset(
             is_discrete=True,
         )
 
-    # Adds aversive guidance state if the file was produced by the processing pipeline.
     if aversive_guidance_file.exists():
         aversive_data_frame = pl.read_ipc(source=aversive_guidance_file, memory_map=True)
         aligned_data["aversive_guided"] = interpolate_data(
@@ -148,8 +148,6 @@ def assemble_runtime_dataset(
             is_discrete=True,
         )
 
-    # Creates the aligned dataframe, replaces categorical data with Polars Enum types and optimizes how the data is
-    # stored in memory by casting some columns to preferred types.
     return pl.DataFrame(aligned_data).with_columns(
         pl.col("trial_type").replace_strict(trial_type_mapping).cast(trial_enum_dtype),
         pl.col("runtime_state").replace_strict(runtime_state_mapping).cast(runtime_state_enum_dtype),
@@ -169,14 +167,11 @@ def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
     Returns:
         The experiment dataset with cue, trial, and trial_type values masked for non-run system states.
     """
-    # Extracts the Enum dtypes to ensure type consistency.
     trial_type_dtype = experiment_data.schema["trial_type"]
     system_state_dtype = experiment_data.schema["system_state"]
 
-    # Defines the non-run system states that should trigger masking, cast to the Enum type.
     non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
 
-    # Creates a boolean mask for rows where the system state is not "run".
     is_non_run = pl.col("system_state").is_in(non_run_states)
 
     return experiment_data.with_columns(
@@ -187,6 +182,52 @@ def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.col("trial_type"))
         .alias("trial_type"),
     )
+
+
+def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path) -> pl.DataFrame:
+    """Discards the assembled samples acquired before the session started and after its runtime ended.
+
+    Notes:
+        The acquisition assets start and stop in sequence around the session itself. The state streams begin at
+        system initialization, and the cameras and the mesoscope begin acquiring during the setup that follows.
+        Teardown then stops the cameras about a second after the runtime, while the mesoscope continues for several
+        more seconds and the microcontrollers log for several more minutes.
+
+        The head therefore holds the setup period, which for an experiment session covers the whole mesoscope
+        alignment. The session itself begins when the acquisition system first leaves the idle state, which is the
+        first ``system_state`` entry whose code differs from ``_SYSTEM_STATE_IDLE``. Later idle spans are left in
+        place, since the system also returns to idle when a running session pauses.
+
+        The tail holds the teardown period. On the fluorescence clock its samples carry the last camera value held
+        constant, so clipping there also removes fabricated data. On a camera clock every trailing sample is
+        acquired, so clipping ends the session at the runtime rather than at the camera teardown.
+
+        Clipping the fully assembled dataset trims every column at once, which keeps the sub-dataset assemblers free
+        of setup-specific and teardown-specific handling. A session that never leaves idle keeps its head, and a
+        session with no runtime-state entry keeps its tail, so a partially acquired session still forges.
+
+    Args:
+        assembled_data: The fully assembled DataFrame, ordered by its session's reference clock.
+        runtime_data_path: The path to the session's processed runtime-data directory.
+
+    Returns:
+        The DataFrame containing only the samples acquired between the session start and the end of the runtime.
+    """
+    system_state_data = pl.read_ipc(source=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE), memory_map=True)
+    runtime_state_data = pl.read_ipc(
+        source=runtime_data_path.joinpath(BehaviorDataFiles.RUNTIME_STATE), memory_map=True
+    )
+
+    clipped = assembled_data
+
+    session_start_times = system_state_data.filter(pl.col("system_state") != _SYSTEM_STATE_IDLE)["time_us"]
+    if session_start_times.len() > 0:
+        clipped = clipped.filter(pl.col("time_us") >= session_start_times[0])
+
+    if runtime_state_data.height > 0:
+        clipped = clipped.filter(pl.col("time_us") <= runtime_state_data["time_us"][-1])
+
+    return clipped
 
 
 @njit(cache=True)
@@ -215,7 +256,6 @@ def _check_trigger_zones(
     if not trigger_zone_count:
         return in_zone
 
-    # Tracks the current zone being checked.
     zone_index = 0
 
     # Determines whether each distance-point falls into a trigger zone. This relies on the distance and trigger zone
@@ -227,19 +267,14 @@ def _check_trigger_zones(
         while zone_index > 0 and trigger_zone_ends[zone_index - 1] >= evaluated_distance:
             zone_index -= 1
 
-        # Checks zone boundaries starting from the current position (evaluated_distance) onward.
         while zone_index < trigger_zone_count:
-            # If the checked distance is less than the start of the next trigger zone, the distance is not within a
-            # trigger zone.
             if evaluated_distance < trigger_zone_starts[zone_index]:
                 break
 
-            # If the distance falls within the trigger zone, marks the corresponding mask point as 1 (in trigger zone).
             if evaluated_distance <= trigger_zone_ends[zone_index]:
                 in_zone[sample_index] = 1
                 break
 
-            # If the distance is past the evaluated trigger zone, moves to the next zone.
             zone_index += 1
 
     return in_zone

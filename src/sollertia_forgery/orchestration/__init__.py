@@ -1,5 +1,5 @@
 """Provides the local orchestration layer: the shared batch job-execution engine, its resource estimators, the
-pipeline dispatch table, and the pipeline-identity enumeration.
+pipeline dispatch table, and the job plan caches that record each job's resource figures once.
 """
 
 from .local import (
@@ -12,6 +12,7 @@ from .local import (
     group_jobs_by_tracker,
     job_execution_manager,
     resolve_core_allocations,
+    resolve_dispatch_priorities,
 )
 from .dispatch import (
     BATCH_PIPELINES,
@@ -19,27 +20,56 @@ from .dispatch import (
     run_batch_job,
     resolve_dispatch,
     build_pending_job,
+    resolve_job_cores,
     prepare_pipeline_jobs,
+    resolve_concurrency_limits,
+    resolve_concurrency_reservations,
 )
-from .pipelines import ProcessingPipelines
+from .planning import (
+    DATASET_UNIT,
+    SESSION_UNIT,
+    PROJECT_PLAN_SCHEMA,
+    JobPlan,
+    JobPlanEntry,
+    dataset_plan_path,
+    project_plan_path,
+    session_plan_path,
+    resolve_dataset_plan,
+    resolve_session_plan,
+    generate_project_plan,
+)
 from .footprints import resolve_host_memory_mb
 
 __all__ = [
     "BATCH_PIPELINES",
+    "DATASET_UNIT",
+    "PROJECT_PLAN_SCHEMA",
     "RESERVED_CORES",
+    "SESSION_UNIT",
     "ActiveJob",
     "GenericPendingJob",
     "JobAllocation",
     "JobExecutionState",
+    "JobPlan",
+    "JobPlanEntry",
     "PendingJob",
     "PipelineDispatch",
-    "ProcessingPipelines",
     "build_pending_job",
+    "dataset_plan_path",
+    "generate_project_plan",
     "group_jobs_by_tracker",
     "job_execution_manager",
     "prepare_pipeline_jobs",
+    "project_plan_path",
+    "resolve_concurrency_limits",
+    "resolve_concurrency_reservations",
     "resolve_core_allocations",
+    "resolve_dataset_plan",
     "resolve_dispatch",
+    "resolve_dispatch_priorities",
     "resolve_host_memory_mb",
+    "resolve_job_cores",
+    "resolve_session_plan",
     "run_batch_job",
+    "session_plan_path",
 ]

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionData, SessionTypes
 
+from ..shared_assets import ProcessingPipelines
 from .training_dataset import assemble_training_dataset
 from .experiment_dataset import assemble_experiment_dataset
 
@@ -17,6 +18,47 @@ if TYPE_CHECKING:
 _TRAINING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING})
 """The session types routed to the training-session assembler. Mesoscope experiment sessions are routed to the
 experiment-session assembler, and every other type is rejected."""
+
+
+MESOSCOPE_ADMISSION_PIPELINES: dict[SessionTypes, frozenset[ProcessingPipelines]] = {
+    SessionTypes.MESOSCOPE_EXPERIMENT: frozenset(
+        {
+            ProcessingPipelines.CHECKSUM,
+            ProcessingPipelines.RUNTIME,
+            ProcessingPipelines.MICROCONTROLLER,
+            ProcessingPipelines.VIDEO,
+            ProcessingPipelines.TWO_PHOTON,
+        }
+    ),
+    SessionTypes.RUN_TRAINING: frozenset(
+        {
+            ProcessingPipelines.CHECKSUM,
+            ProcessingPipelines.RUNTIME,
+            ProcessingPipelines.MICROCONTROLLER,
+            ProcessingPipelines.VIDEO,
+        }
+    ),
+    SessionTypes.LICK_TRAINING: frozenset(
+        {
+            ProcessingPipelines.CHECKSUM,
+            ProcessingPipelines.RUNTIME,
+            ProcessingPipelines.MICROCONTROLLER,
+            ProcessingPipelines.VIDEO,
+        }
+    ),
+}
+"""Maps each Mesoscope-VR session type to the pipelines that must have completed before the session may join a forged
+dataset.
+
+Notes:
+    Every pipeline resolves its own job universe from the acquisition manifests, so a completed tracker already means
+    every source the session recorded was processed. Admission therefore checks which pipelines completed rather than
+    counting sources.
+
+    A training session records no imaging, so the two-photon pipeline is absent from its requirement and the
+    corresponding assembler reads two processed directories rather than three. A session type absent from this mapping
+    joins no dataset, which is the case for window checking.
+"""
 
 
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:

@@ -153,9 +153,8 @@ def merge_event_streams[ScalarT: np.generic](
     """Merges two chronologically-sorted event streams into a single timestamp-sorted stream.
 
     Notes:
-        Consolidates the allocate-empty-arrays / fill-halves / argsort pattern used by most parsing functions to
-        align message streams (event codes). Uses NumPy's stable sort (``kind="stable"``), which NumPy maps to a
-        linear-time radix sort for the uint64 timestamp keys.
+        Uses NumPy's stable sort (``kind="stable"``), which NumPy maps to a linear-time radix sort for the uint64
+        timestamp keys.
 
     Args:
         timestamps_a: The uint64 timestamp array for the first event stream.

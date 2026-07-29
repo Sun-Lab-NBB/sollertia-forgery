@@ -1,5 +1,5 @@
 """Provides the system-agnostic management CLI commands exposed by the ``slf`` root group: project manifest
-generation and inspection, and session raw-data integrity checksum verification.
+generation and inspection, dataset forging-state snapshotting, and session raw-data integrity checksum verification.
 """
 
 from pathlib import Path
@@ -7,7 +7,9 @@ from dataclasses import dataclass
 
 import click
 from ataraxis_base_utilities import console
+from sollertia_shared_assets import DatasetData
 
+from ..forging import generate_dataset_state
 from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
@@ -139,7 +141,6 @@ def print_project_manifest_data(
 
     manifest = ProjectManifest(manifest_file=manifest_path)
 
-    # Ensures that the specified animal exists in the manifest data.
     if animal is not None and animal not in manifest.animals:
         message = (
             f"Unable to display the data for the target animal '{animal}', as it did not participate in the "
@@ -147,11 +148,9 @@ def print_project_manifest_data(
         )
         console.error(message=message, error=ValueError)
 
-    # If requested, prints the experimenter note view of the manifest data.
     if notes:
         manifest.print_notes(animal=animal)
 
-    # If requested, prints the data processing view of the manifest data.
     if summary:
         manifest.print_summary(animal=animal)
 
@@ -209,3 +208,23 @@ def checksum_command(session_path: Path, workers: int, *, regenerate_checksum: b
         workers=workers,
         display_progress=not no_progress,
     )
+
+
+@click.command("dataset-state", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-dp",
+    "--dataset-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    multiple=True,
+    help="The absolute path to a dataset root directory to snapshot. Can be specified multiple times.",
+)
+def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
+    """Snapshots each named dataset's forging job state into a shippable table at the dataset root.
+
+    The snapshot is what carries a dataset's forging progress to another host, since the project manifest reports one
+    row per session while a dataset's jobs sit at differing scopes.
+    """
+    for path in dataset_path:
+        dataset = DatasetData.load(dataset_path=path)
+        click.echo(str(generate_dataset_state(dataset=dataset, display_progress=True)))

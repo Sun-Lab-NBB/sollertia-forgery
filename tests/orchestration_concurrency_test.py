@@ -12,17 +12,27 @@ from concurrent.futures import Future
 
 import pytest
 
+from sollertia_forgery.forging import (
+    FORGING_JOB_NAME,
+    MULTIDAY_DISCOVERY_JOB_NAME,
+    MULTIDAY_EXTRACTION_JOB_NAME,
+)
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
     JobExecutionState,
-    ProcessingPipelines,
     resolve_dispatch,
     build_pending_job,
     resolve_host_memory_mb,
     resolve_core_allocations,
+    resolve_concurrency_limits,
 )
-from sollertia_forgery.orchestration.local import PendingJob, _admit_pending_jobs
+from sollertia_forgery.shared_assets import ProcessingPipelines
+from sollertia_forgery.orchestration.local import (
+    _PINNED_THREAD_VARIABLES,
+    PendingJob,
+    _admit_pending_jobs,
+)
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
 from sollertia_forgery.orchestration.footprints import (
     _CHECKSUM_READER_MEMORY_MB,
@@ -276,7 +286,7 @@ def test_checksum_is_a_registered_batch_pipeline() -> None:
 
     # The pipeline resolves one job per session with no upstream stage, so every job maps to an empty ordering.
     universe = [(CHECKSUM_JOB_NAME, "a_session")]
-    assert dispatch.prerequisites(universe) == {(CHECKSUM_JOB_NAME, "a_session"): ()}
+    assert dispatch.prerequisites(None, universe) == {(CHECKSUM_JOB_NAME, "a_session"): ()}
 
 
 def test_job_options_round_trip_from_descriptor_to_worker() -> None:
@@ -284,7 +294,7 @@ def test_job_options_round_trip_from_descriptor_to_worker() -> None:
     descriptor = {
         "tracker_path": str(TRACKER),
         "job_id": "a_job",
-        "session_path": "/nonexistent/session",
+        "unit_path": "/nonexistent/session",
         "job_name": CHECKSUM_JOB_NAME,
         "pipeline": ProcessingPipelines.CHECKSUM.value,
         "cores": 8,
@@ -308,3 +318,75 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     doubled = _estimate_checksum_memory(cores=2)
     assert doubled - single == pytest.approx(_CHECKSUM_READER_MEMORY_MB * _MEMORY_ESTIMATE_TOLERANCE, rel=0.01)
     assert _estimate_checksum_memory(cores=8) > single
+
+
+def test_worker_initializer_leaves_the_numba_thread_variable_alone() -> None:
+    """Verifies that the worker initializer controls numba through its runtime setter rather than its environment.
+
+    numba reads NUMBA_NUM_THREADS once at import and compares the variable against that latched count on every
+    compilation, rejecting a disagreement once its thread pool has started. A worker imports numba before the
+    initializer runs, so pinning the variable there would fail every job that compiles a numba function.
+    """
+    assert "NUMBA_NUM_THREADS" not in _PINNED_THREAD_VARIABLES
+
+    # The other threading layers stay pinned, since they read their variables when the job itself starts.
+    assert "OMP_NUM_THREADS" in _PINNED_THREAD_VARIABLES
+    assert "POLARS_MAX_THREADS" in _PINNED_THREAD_VARIABLES
+
+
+@pytest.mark.parametrize("pipeline", sorted(member.value for member in BATCH_PIPELINES))
+def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str) -> None:
+    """Verifies that each registered pipeline supplies every callable the unit-generic dispatch contract requires.
+
+    The batch layer reads a unit only through these callables, so an entry omitting one fails at preparation rather
+    than at registration.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    assert dispatch is not None
+
+    for field in ("discover", "worker", "prerequisites", "tracker_path", "output_path", "unit_name", "estimate_memory"):
+        assert callable(getattr(dispatch, field)), f"{pipeline} declares no {field}"
+
+    # The materialization hook is optional, so it is either absent or callable, never some other value.
+    assert dispatch.materialize is None or callable(dispatch.materialize)
+
+
+def test_only_the_two_photon_pipeline_materializes_before_dispatch() -> None:
+    """Verifies that the preparation hook is declared by the one pipeline whose jobs read a file written up front.
+
+    cindra reads its thread count from a configuration file, so that file must exist before any of a session's jobs
+    dispatch. No other registered pipeline has such a precondition.
+    """
+    materializing = {
+        member.value for member in BATCH_PIPELINES if resolve_dispatch(pipeline=member.value).materialize is not None
+    }
+    assert materializing == {ProcessingPipelines.TWO_PHOTON.value}
+
+
+def test_forging_is_a_registered_batch_pipeline() -> None:
+    """Verifies that the dataset-scoped pipeline is dispatchable and declares a core allocation for every stage."""
+    assert ProcessingPipelines.FORGING in BATCH_PIPELINES
+
+    dispatch = resolve_dispatch(pipeline="forging")
+    assert dispatch is not None
+    assert dispatch.pipeline is ProcessingPipelines.FORGING
+
+    # The hierarchy is built by a dedicated tool before any job is prepared, so the pipeline declares no hook.
+    assert dispatch.materialize is None
+
+    for job_name in (MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME):
+        assert job_name in _JOB_CORE_ALLOCATIONS, f"{job_name} declares no core allocation"
+
+
+def test_only_assembly_carries_a_forging_concurrency_limit() -> None:
+    """Verifies that the storage-bound forging stage is capped while the compute-bound stages are budget-bound.
+
+    cindra treats its own cross-recording discovery and extraction as compute-bound and runs them at a wide core
+    allocation, so a ceiling on top of the core budget would hold them below the concurrency they gain from.
+    """
+    limits = resolve_concurrency_limits(
+        job_names={MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME}
+    )
+    assert set(limits) == {FORGING_JOB_NAME}
+    assert _JOB_CORE_ALLOCATIONS[MULTIDAY_DISCOVERY_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
+    assert _JOB_CORE_ALLOCATIONS[MULTIDAY_EXTRACTION_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
