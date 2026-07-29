@@ -1,7 +1,7 @@
 """Tests the per-session pipeline identity assets: the tracker-path resolver, the pipeline tuple derived from it, and
 the manifest schema invariants that both drive.
 
-The manifest feather's ``tracker_paths`` field names and its per-pipeline status columns are derived from these, so a
+The manifest's per-pipeline status columns and the project job artifact's rows are both derived from these, so a
 change to either surfaces here rather than in a generated artifact.
 """
 
@@ -26,7 +26,7 @@ EXPECTED_SESSION_PIPELINES: tuple[ProcessingPipelines, ...] = (
     ProcessingPipelines.TWO_PHOTON,
 )
 """The pipelines a session carries a tracker for, in the order the manifest presents them. Pinned explicitly, because
-the manifest's stored struct field order follows it."""
+the order of the manifest's status columns follows it."""
 
 NON_SESSION_PIPELINES: tuple[ProcessingPipelines, ...] = (
     ProcessingPipelines.MANIFEST,

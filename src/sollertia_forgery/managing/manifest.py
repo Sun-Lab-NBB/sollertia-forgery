@@ -165,9 +165,6 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "microcontroller": [],
                 # The rolled-up status label of the video (timestamp, tracking, motion energy) pipeline.
                 "video": [],
-                # Maps each pipeline to its tracker's location relative to the project root, so a consumer can
-                # reset or inspect a tracker without re-deriving the session hierarchy.
-                "tracker_paths": [],
             }
 
             # Loops over each session of every animal in the project and extracts session ID information and
@@ -205,7 +202,6 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "runtime": pl.UInt8,
                 "microcontroller": pl.UInt8,
                 "video": pl.UInt8,
-                "tracker_paths": pl.Struct({pipeline.value: pl.String for pipeline in SESSION_PIPELINES}),
             }
             manifest_frame = pl.DataFrame(data=manifest, schema=schema, strict=False)
 
@@ -381,7 +377,7 @@ class ProjectManifest:
         Returns:
             A Polars DataFrame containing all manifest columns for the specified session: 'animal', 'date',
             'session', 'session_path', 'type', 'system', 'notes', 'complete', the per-pipeline done columns
-            ('integrity', 'two_photon', 'runtime', 'microcontroller', 'video'), and 'tracker_paths'.
+            ('integrity', 'two_photon', 'runtime', 'microcontroller', 'video').
         """
         return self._data.filter(pl.col("session").eq(session))
 
@@ -556,7 +552,7 @@ def _build_session_row(
 
     Args:
         session_data: The loaded session to snapshot.
-        project_directory: The project's root directory, used to relativize the emitted paths.
+        project_directory: The project's root directory, named in the error raised for an unsupported session type.
 
     Returns:
         A tuple of the manifest row, as a mapping of column name to value, and the session's job rows, each carrying
@@ -606,38 +602,15 @@ def _build_session_row(
     }
 
     session_jobs: list[dict[str, Any]] = []
-    tracker_locations: dict[str, str] = {}
     for pipeline in SESSION_PIPELINES:
         tracker_path = resolve_session_tracker_path(session=session_data, pipeline=pipeline)
         status, pipeline_jobs = _read_pipeline_state(pipeline=pipeline, tracker_path=tracker_path)
         row[PIPELINE_STATUS_COLUMNS[pipeline]] = int(status == _COMPLETED_STATUS)
         session_jobs.extend(pipeline_jobs)
-        tracker_locations[pipeline.value] = _relative_path(path=tracker_path, project_directory=project_directory)
-
-    row["tracker_paths"] = tracker_locations
 
     # Each job row carries the session that recorded it, since the rows of every session are written to one artifact.
     subject = {"animal": str(session_data.animal_id), "session": session_data.session_name}
     return row, [{**subject, **entry} for entry in session_jobs]
-
-
-def _relative_path(path: Path, project_directory: Path) -> str:
-    """Expresses a path under the project hierarchy relative to the project root, using forward slashes.
-
-    Relative locations let a manifest generated against one data root be consumed against another.
-
-    Args:
-        path: The absolute path to express relative to the project root.
-        project_directory: The project's root directory.
-
-    Returns:
-        The path relative to the project root as a forward-slash string, or the unchanged absolute path as a string
-        when it does not lie under the project root.
-    """
-    try:
-        return path.relative_to(project_directory).as_posix()
-    except ValueError:
-        return str(path)
 
 
 def _read_pipeline_state(pipeline: ProcessingPipelines, tracker_path: Path) -> tuple[str, list[dict[str, Any]]]:
