@@ -60,8 +60,8 @@ cannot stall the manager for good."""
 
 
 _TIFF_DECODE_THREAD_CEILING: int = 4
-"""The thread ceiling applied to the hidden image-decode pool some readers open. That pool otherwise sizes itself
-from the host's core count entirely outside the batch's allocation."""
+"""The widest image-decode pool one job may open, whatever cores it holds. The reader sizes that pool for itself,
+outside the batch's allocation, which is what this bounds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,6 +429,19 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     return tracker_jobs
 
 
+def apply_decode_thread_ceiling(cores: int) -> None:
+    """Scopes the image-decode pool to the cores one job holds.
+
+    Notes:
+        The reader consults this count when a read is issued rather than when it is imported, so a worker re-scopes
+        it before each job it runs. That is what lets one pool serve job types whose decode widths differ.
+
+    Args:
+        cores: The cores the job about to run holds.
+    """
+    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(_TIFF_DECODE_THREAD_CEILING, cores)))
+
+
 def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> None:
     """Pins a pool worker's library thread pools when the worker process starts.
 
@@ -451,7 +464,7 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
     ceiling = max(1, thread_ceiling)
     for variable in _PINNED_THREAD_VARIABLES:
         os.environ[variable] = str(ceiling)
-    os.environ["TIFFFILE_NUM_THREADS"] = str(min(_TIFF_DECODE_THREAD_CEILING, ceiling))
+    apply_decode_thread_ceiling(cores=ceiling)
 
     numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)

@@ -13,7 +13,7 @@ from ataraxis_base_utilities import console, resolve_worker_count
 from sollertia_shared_assets import DatasetData, SessionData
 from ataraxis_data_structures import ProcessingTracker
 
-from .local import RESERVED_CORES, GenericPendingJob
+from .local import RESERVED_CORES, GenericPendingJob, apply_decode_thread_ceiling
 from ..video import (
     ENERGY_JOB_NAME,
     RENAME_JOB_NAME,
@@ -102,9 +102,9 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # cindra does not consume the worker count for this stage, and it converts a recording into a binary of similar
-    # size, so its pace is set by write throughput rather than by cores.
-    str(SingleRecordingJobNames.BINARIZE): 2,
+    # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
+    # and leaves the decode width to the reader, so the cores this job holds become the threads that decode it.
+    str(SingleRecordingJobNames.BINARIZE): 4,
     # The only two-photon stage that consumes the worker count, applied as numba threads. cindra documents no benefit
     # past roughly twenty threads per plane and recommends parallelizing across planes instead.
     str(SingleRecordingJobNames.PROCESS): 16,
@@ -126,39 +126,27 @@ fails for that session, since dispatching it would run it at a width nobody chos
 
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
-    # Streams every byte under raw_data through the hash. One job at its full core allocation already reaches the
-    # storage array's sequential ceiling, so further concurrency multiplies seek pressure at unchanged throughput.
-    CHECKSUM_JOB_NAME: 4,
-    # Every worker in the job's own pool re-opens the archive, so one job already holds as many concurrent readers as
-    # it has cores. The stage is bound by how fast the archive is delivered rather than by how fast it is decoded.
-    EXTRACTION_JOB_NAME: 8,
-    # Splits its archive across a worker pool on the same re-opening terms as controller extraction.
-    TIMESTAMP_JOB_NAME: 8,
     # Decoder throughput across the host peaks near forty-eight concurrent decoders and falls away past it, and this
     # stage opens one decoder per core it holds. Three jobs at its core allocation sit on that peak, so this ceiling
     # keeps the stage at its best aggregate rate while leaving the cores it would otherwise idle to other work.
     ENERGY_JOB_NAME: 3,
-    # Reads a recording's full image set and writes a binary of comparable size, so it holds a read and a write stream
-    # open for its whole duration. Its two-core allocation would otherwise let the budget admit dozens at once.
+    # Sits at the root of the two-photon chain, so each job that finishes releases that recording's plane jobs. Four
+    # run at their full decode rate, which is what returns those plane jobs to the queue soonest.
     str(SingleRecordingJobNames.BINARIZE): 4,
-    # Reads every plane's extracted output and writes the merged result, on a single core that the budget would
-    # otherwise admit in unlimited numbers.
-    str(SingleRecordingJobNames.COMBINE): 4,
-    # The forging pipeline declares its own storage-bound types, since it owns their job names.
+    # The forging pipeline declares its own ceilings, since it owns their job names.
     **FORGING_JOB_CONCURRENCY_LIMITS,
 }
 """The jobs of each type that may run at once regardless of the cores the budget could still supply, keyed by the
 tracker job name.
 
 Notes:
-    This is an admission term separate from the two budgets, and it is a hard ceiling. The core and memory budgets
-    bound what the host can supply, while this bounds how many streams a job type opens against the storage array. A
-    job type whose pace is set by storage throughput gains nothing past a handful of concurrent jobs and costs the
-    whole batch the seek contention, which is what this table prevents.
+    This is an admission term separate from the two budgets, and it is a hard ceiling. The budgets bound what the
+    host can supply, while this bounds a job type whose own throughput stops climbing before its cores run out. A
+    type at the root of a dependency chain takes a ceiling on the same terms, since finishing one root releases the
+    stages waiting on it while spreading the same capacity over more roots delays all of them equally.
 
-    Spare cores and spare memory never lift a ceiling recorded here. A storage-bound type widened into idle capacity
-    would run no faster, because the resource it waits on is already saturated, so the batch would trade contention
-    for nothing. Job types that do convert spare capacity into progress belong in
+    Spare cores and spare memory never lift a ceiling recorded here, since a type held by one waits on something the
+    spare capacity does not supply. Job types that convert spare capacity into progress belong in
     ``_JOB_CONCURRENCY_RESERVATIONS`` instead.
 
     A job type absent from this map is limited by the budgets alone. Every value is safe to retune, and a value below
@@ -236,12 +224,16 @@ def run_batch_job(job: GenericPendingJob) -> None:
         from every pipeline at once. Each pipeline's own worker is looked up rather than bound into the job, so the
         descriptor stays a plain data record that pickles cheaply.
 
+        The decode pool is scoped to the job's own cores before its worker runs, since one pool worker serves job
+        types whose decode widths differ.
+
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
 
     Raises:
         ValueError: If the job names a pipeline the dispatch table does not support.
     """
+    apply_decode_thread_ceiling(cores=job.core_weight)
     dispatch = resolve_dispatch(pipeline=job.pipeline)
     if dispatch is None:
         message = (

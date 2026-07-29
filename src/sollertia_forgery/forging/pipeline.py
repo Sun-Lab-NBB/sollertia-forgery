@@ -52,18 +52,17 @@ FORGING_JOB_NAME: str = "session_data_assembly"
 
 FORGING_JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # Reads every fluorescence array and sub-dataset feather its session holds, then writes the merged result, and
-    # computes almost nothing between the two. Four matches the ceiling cindra applies to its own storage-bound
-    # stages, which open the same shape of read and write streams against the same array.
+    # computes almost nothing between the two. Each job holds one core, so this ceiling is what bounds the pool.
     FORGING_JOB_NAME: 4,
 }
 """The jobs of each forging type that may run at once regardless of the cores a budget could still supply, keyed by
 the tracker job name.
 
 Notes:
-    Only assembly is bound by storage throughput. The cross-recording jobs exist for two-photon sessions alone, and
-    cindra classifies its discovery and extraction stages as compute-bound, running them at roughly thirty cores
-    each. Both therefore take a wide core allocation and let the core budget set their concurrency rather than a
-    ceiling declared here.
+    Only assembly declares a ceiling. It holds one core per job, so this is what sets the width of the pool it
+    opens. The cross-recording jobs exist for two-photon sessions alone, and cindra classifies its discovery and
+    extraction stages as compute-bound, running them at roughly thirty cores each. Both therefore take a wide core
+    allocation and let the core budget set their concurrency.
 
     This mapping is the single source for both the local assembly pool and the shared batch layer, which merges it
     into its own concurrency table.
@@ -249,8 +248,8 @@ def run_forging_pipeline(
         session: ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=session)
         for session in dataset_session_names
     }
-    # Narrowed to the assembly type's concurrency ceiling, since the stage is bound by how fast the array serves its
-    # fluorescence arrays and feathers rather than by cores. A wider pool multiplies seek pressure at flat throughput.
+    # Narrowed to the assembly type's concurrency ceiling, since each job holds one core and the stage's pace is set
+    # by the merge it performs rather than by the cores a budget would supply.
     resolved_workers = min(
         resolve_worker_count(requested_workers=workers), FORGING_JOB_CONCURRENCY_LIMITS[FORGING_JOB_NAME]
     )
