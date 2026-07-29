@@ -107,6 +107,9 @@ dev = [
     # Development Automation (>=8.1.1 required alongside cindra>=1.2.0rc2, which needs importlib-metadata>=9)
     "ataraxis-automation>=8.1.1,<9",
 
+    # Architecture (enforces the dependency-direction contracts declared under [tool.importlinter])
+    "import-linter>=2,<3",
+
     # Types
     "types-psutil",
     "types-filelock>=3,<4",
@@ -242,45 +245,21 @@ exclude_lines = [
     "pass",
 ]
 
-# Import-linter contracts that enforce the registry-hub architecture. The dependency hierarchy runs
-# system-packages -> registries -> worker packages (microcontrollers, runtime, two_photon, forging) -> orchestration
-# -> interfaces. The acquisition-system subpackages (mesoscope_vr and its future siblings) are reachable only through
-# the registries hub, and the pure infrastructure layers (shared_assets, server, managing) never import a system
-# package or the hub directly. The worker packages and the composition layers above them (orchestration, interfaces)
-# resolve system-specific assets through the registries hub, so they reach mesoscope_vr only indirectly through that
-# sanctioned path and sit outside the infrastructure contracts.
+# Import-linter contracts that enforce the library's dependency direction. Every layer may import the layers below it
+# and none above it, so an acquisition-system package is reached only through the registries hub and the shared
+# substrate depends on nothing. Modules sharing a layer are independent of one another, which is what keeps a system
+# package out of the cross-system infrastructure and each worker package out of its siblings.
 [tool.importlinter]
 root_package = "sollertia_forgery"
 
 [[tool.importlinter.contracts]]
-name = "Acquisition-system packages are reached only through the registry hub"
-type = "forbidden"
-source_modules = [
-    "sollertia_forgery.shared_assets",
-    "sollertia_forgery.server",
-    "sollertia_forgery.managing",
+name = "Dependencies flow from the shared substrate up to the interface layer"
+type = "layers"
+layers = [
     "sollertia_forgery.interfaces",
-]
-forbidden_modules = ["sollertia_forgery.mesoscope_vr"]
-
-[[tool.importlinter.contracts]]
-name = "System packages never import the registry hub or the interface layer"
-type = "forbidden"
-source_modules = ["sollertia_forgery.mesoscope_vr"]
-forbidden_modules = [
+    "sollertia_forgery.orchestration",
+    "sollertia_forgery.forging | sollertia_forgery.video | sollertia_forgery.runtime | sollertia_forgery.two_photon | sollertia_forgery.microcontrollers",
     "sollertia_forgery.registries",
-    "sollertia_forgery.interfaces",
-]
-
-[[tool.importlinter.contracts]]
-name = "Infrastructure cross-system layers never import the registry hub or the interface layer"
-type = "forbidden"
-source_modules = [
+    "sollertia_forgery.mesoscope_vr | sollertia_forgery.managing | sollertia_forgery.server",
     "sollertia_forgery.shared_assets",
-    "sollertia_forgery.server",
-    "sollertia_forgery.managing",
-]
-forbidden_modules = [
-    "sollertia_forgery.registries",
-    "sollertia_forgery.interfaces",
 ]

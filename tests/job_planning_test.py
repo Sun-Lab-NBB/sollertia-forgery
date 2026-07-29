@@ -89,7 +89,7 @@ def plan_session(unit: SimpleNamespace, dispatches: list[PipelineDispatch[Any]],
         dispatches=dispatches,
         unit_path=unit.processed_data_path.parent,
         unit_kind=SESSION_UNIT,
-        force=kwargs.get("force", False),
+        regenerate_plan=kwargs.get("regenerate_plan", False),
         display_progress=kwargs.get("display_progress", False),
     )
 
@@ -135,7 +135,7 @@ def test_forcing_re_estimates_recorded_figures(tmp_path: Path) -> None:
     replanned = plan_session(
         unit=session,
         dispatches=[make_dispatch(ProcessingPipelines.CHECKSUM, session, CHECKSUM_JOBS, 99999)],
-        force=True,
+        regenerate_plan=True,
     )
 
     assert replanned.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].memory_mb == 99999
@@ -197,7 +197,7 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
         dispatches=[make_dispatch(ProcessingPipelines.FORGING, dataset, RUNTIME_JOBS, 6400)],
         unit_path=project.joinpath("ds_a"),
         unit_kind=DATASET_UNIT,
-        force=False,
+        regenerate_plan=False,
         display_progress=False,
     )
 

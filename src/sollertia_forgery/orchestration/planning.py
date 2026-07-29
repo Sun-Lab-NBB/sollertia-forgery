@@ -1,6 +1,6 @@
 """Provides the per-unit job plan caches that record each job's resource figures, and the project-level projection
 that ships them. Replanning keeps the figures a cache already holds, so the cores and memory a job is submitted with
-stay the ones it was planned with. Re-estimating them is a deliberate act, requested through a forced replan.
+stay the ones it was planned with. Re-estimating them is a deliberate act, requested by regenerating the plan.
 """
 
 from __future__ import annotations
@@ -86,8 +86,8 @@ class JobPlan(YamlConfig):
 
     Notes:
         Replanning estimates only the jobs the plan does not already hold, so widening a unit's job universe appends
-        the new jobs alone. A caller that wants recorded figures re-estimated requests a forced replan, which is the
-        one path through this module that changes them.
+        the new jobs alone. A caller that wants recorded figures re-estimated regenerates the plan, which is the one
+        path through this module that changes them.
 
         Nothing guards the file itself, so a run reading a plan assumes it is the plan its submissions were sized
         against.
@@ -141,7 +141,9 @@ def project_plan_path(project_directory: Path) -> Path:
     return project_directory.joinpath(f"{project_directory.stem}_plan.feather")
 
 
-def resolve_session_plan(session_path: Path, *, force: bool = False, display_progress: bool = False) -> JobPlan:
+def resolve_session_plan(
+    session_path: Path, *, regenerate_plan: bool = False, display_progress: bool = False
+) -> JobPlan:
     """Plans every processing job of one session, estimating only the jobs the cache does not already hold.
 
     Notes:
@@ -151,8 +153,8 @@ def resolve_session_plan(session_path: Path, *, force: bool = False, display_pro
 
     Args:
         session_path: The path to the session root directory to plan.
-        force: Determines whether to re-estimate the jobs the cache already holds. Leave False to keep every recorded
-            figure, since a submission may already have been sized against it.
+        regenerate_plan: Determines whether to re-estimate the jobs the cache already holds. Leave False to keep
+            every recorded figure, since a submission may already have been sized against it.
         display_progress: Determines whether to report the pipelines that resolved no jobs for this session and why.
 
     Returns:
@@ -167,12 +169,14 @@ def resolve_session_plan(session_path: Path, *, force: bool = False, display_pro
         dispatches=dispatches,
         unit_path=session_path,
         unit_kind=SESSION_UNIT,
-        force=force,
+        regenerate_plan=regenerate_plan,
         display_progress=display_progress,
     )
 
 
-def resolve_dataset_plan(dataset_path: Path, *, force: bool = False, display_progress: bool = False) -> JobPlan:
+def resolve_dataset_plan(
+    dataset_path: Path, *, regenerate_plan: bool = False, display_progress: bool = False
+) -> JobPlan:
     """Plans every forging job of one dataset, estimating only the jobs the cache does not already hold.
 
     Notes:
@@ -181,7 +185,7 @@ def resolve_dataset_plan(dataset_path: Path, *, force: bool = False, display_pro
 
     Args:
         dataset_path: The path to the dataset's root directory to plan.
-        force: Determines whether to re-estimate the jobs the cache already holds.
+        regenerate_plan: Determines whether to re-estimate the jobs the cache already holds.
         display_progress: Determines whether to report the reason when the forging pipeline resolves no jobs.
 
     Returns:
@@ -193,7 +197,7 @@ def resolve_dataset_plan(dataset_path: Path, *, force: bool = False, display_pro
         dispatches=dispatches,
         unit_path=dataset_path,
         unit_kind=DATASET_UNIT,
-        force=force,
+        regenerate_plan=regenerate_plan,
         display_progress=display_progress,
     )
 
@@ -257,7 +261,12 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
 
 
 def _resolve_unit_plan(
-    dispatches: list[PipelineDispatch[Any]], unit_path: Path, unit_kind: str, *, force: bool, display_progress: bool
+    dispatches: list[PipelineDispatch[Any]],
+    unit_path: Path,
+    unit_kind: str,
+    *,
+    regenerate_plan: bool,
+    display_progress: bool,
 ) -> JobPlan:
     """Plans one unit across the pipelines that operate on it, preserving every figure already recorded.
 
@@ -271,7 +280,7 @@ def _resolve_unit_plan(
         dispatches: The dispatch entries of the pipelines that operate on this kind of unit.
         unit_path: The path to the unit to plan.
         unit_kind: Whether the unit is a session or a dataset.
-        force: Determines whether to re-estimate the jobs the cache already holds.
+        regenerate_plan: Determines whether to re-estimate the jobs the cache already holds.
         display_progress: Determines whether to report the pipelines that resolved no jobs and why.
 
     Returns:
@@ -312,7 +321,9 @@ def _resolve_unit_plan(
 
     plan_path, unit_name = located
     recorded = _load_plan(plan_path=plan_path)
-    entries: dict[tuple[str, str, str], JobPlanEntry] = {} if recorded is None or force else dict(recorded.entry_map())
+    entries: dict[tuple[str, str, str], JobPlanEntry] = (
+        {} if recorded is None or regenerate_plan else dict(recorded.entry_map())
+    )
 
     for dispatch, unit, universe in resolved:
         cores = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
