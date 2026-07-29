@@ -212,6 +212,13 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
     help="Determines whether to run the binarization stage.",
 )
 @click.option(
+    "-r",
+    "--register",
+    is_flag=True,
+    default=False,
+    help="Determines whether to run the per-plane registration stage.",
+)
+@click.option(
     "-p",
     "--process",
     is_flag=True,
@@ -231,7 +238,7 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
     type=int,
     default=-1,
     show_default=True,
-    help="The imaging plane to process when running the processing stage. Set to -1 to process all planes.",
+    help="The imaging plane to run the per-plane stages for. Set to -1 to cover all planes.",
 )
 @_pass_shared_parameters
 def two_photon_command(
@@ -239,19 +246,21 @@ def two_photon_command(
     target_plane: int,
     *,
     binarize: bool,
+    register: bool,
     process: bool,
     combine: bool,
 ) -> None:
     """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
 
     The acquisition system resolves the cindra processing configuration. When none of ``--binarize``,
-    ``--process``, or ``--combine`` is requested, all three stages run in sequence (local mode). Supplying
-    ``--job-id`` instead runs only the matching job.
+    ``--register``, ``--process``, or ``--combine`` is requested, all four stages run in sequence (local mode).
+    Supplying ``--job-id`` instead runs only the matching job.
     """
     run_two_photon_processing_pipeline(
         session_path=shared.require_session_path(),
         job_id=shared.job_id,
         binarize=binarize,
+        register=register,
         process=process,
         combine=combine,
         target_plane=target_plane,

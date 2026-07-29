@@ -73,7 +73,6 @@ def define_forging_dataset(
     session_names: tuple[str, ...],
     project_root: Path,
     *,
-    workers: int = -1,
     display_progress: bool = False,
     force_recreate: bool = False,
     recreate_animals: tuple[str, ...] = (),
@@ -91,7 +90,6 @@ def define_forging_dataset(
             subject to the resolution policy.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
-        workers: The numba worker budget recorded in each materialized configuration.
         display_progress: The progress-bar flag recorded in each materialized configuration.
         force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
             provided session list.
@@ -115,9 +113,7 @@ def define_forging_dataset(
         force_recreate=force_recreate,
         recreate_animals=recreate_animals,
     )
-    materialize_multiday_plan(
-        dataset=dataset, project_root=project_root, workers=workers, display_progress=display_progress
-    )
+    materialize_multiday_plan(dataset=dataset, project_root=project_root, display_progress=display_progress)
 
     if recreate_animals:
         tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
@@ -216,6 +212,7 @@ def run_forging_pipeline(
             tracker=tracker,
             worker=worker,
             described_columns=described_columns,
+            workers=workers,
         )
         console.echo(message="Forging job completed successfully.", level=LogLevel.SUCCESS)
         return
@@ -226,14 +223,22 @@ def run_forging_pipeline(
         if (MULTIDAY_DISCOVERY_JOB_NAME, animal) in runnable_jobs:
             discovery_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal)
             _run_discovery_job(
-                configuration_path=configuration_path, animal=animal, tracker=tracker, job_id=discovery_id
+                configuration_path=configuration_path,
+                animal=animal,
+                tracker=tracker,
+                job_id=discovery_id,
+                workers=workers,
             )
         for session in sessions:
             if (MULTIDAY_EXTRACTION_JOB_NAME, session) not in runnable_jobs:
                 continue
             extraction_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_EXTRACTION_JOB_NAME, specifier=session)
             _run_extraction_job(
-                configuration_path=configuration_path, session=session, tracker=tracker, job_id=extraction_id
+                configuration_path=configuration_path,
+                session=session,
+                tracker=tracker,
+                job_id=extraction_id,
+                workers=workers,
             )
 
     dataset_session_names = [
@@ -363,7 +368,7 @@ def resolve_multiday_plan(dataset: DatasetData, project_root: Path) -> dict[str,
 
 
 def materialize_multiday_plan(
-    dataset: DatasetData, project_root: Path, *, workers: int, display_progress: bool
+    dataset: DatasetData, project_root: Path, *, display_progress: bool
 ) -> dict[str, tuple[Path, list[str]]]:
     """Resolves the per-animal cross-recording plan and materializes each tracked animal's configuration.
 
@@ -378,7 +383,6 @@ def materialize_multiday_plan(
     Args:
         dataset: The resolved dataset whose animals are planned.
         project_root: The path to the project's root directory that stores the animal and session data directories.
-        workers: The numba worker budget recorded in each materialized configuration.
         display_progress: The progress-bar flag recorded in each materialized configuration.
 
     Returns:
@@ -415,7 +419,6 @@ def materialize_multiday_plan(
         configuration.recording_io.dataset_name = multi_recording_dataset_directory(
             animal_id=animal, dataset_name=dataset.name
         )
-        configuration.runtime.parallel_workers = workers
         configuration.runtime.display_progress_bars = display_progress
 
         configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
@@ -576,19 +579,21 @@ def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals
         )
 
 
-def _run_discovery_job(configuration_path: Path, animal: str, tracker: ProcessingTracker, job_id: str) -> None:
+def _run_discovery_job(
+    configuration_path: Path, animal: str, tracker: ProcessingTracker, job_id: str, workers: int
+) -> None:
     """Runs the cross-recording cell-discovery stage for one animal as a tracked forging job.
 
     Notes:
-        cindra records this job's state directly on the forging tracker under job_id. The job runs single-threaded
-        ahead of its animal's extraction jobs, so it is the one that persists the shared multi-recording bootstrap
-        those jobs read.
+        cindra records this job's state directly on the forging tracker under job_id. The job runs ahead of its
+        animal's extraction jobs, so it is the one that persists the shared multi-recording bootstrap those jobs read.
 
     Args:
         configuration_path: The path to the animal's materialized multi-recording configuration.
         animal: The animal identifier, used for logging.
         tracker: The forging processing tracker this job is recorded on.
         job_id: The unique hexadecimal identifier for this discovery job.
+        workers: The workers this stage runs under.
     """
     console.echo(message=f"Running multi-day discovery for animal '{animal}' (ID: {job_id})...", level=LogLevel.INFO)
     execute_multi_recording_job(
@@ -598,10 +603,13 @@ def _run_discovery_job(configuration_path: Path, animal: str, tracker: Processin
         job_id=job_id,
         tracker=tracker,
         persist_bootstrap=True,
+        workers=workers,
     )
 
 
-def _run_extraction_job(configuration_path: Path, session: str, tracker: ProcessingTracker, job_id: str) -> None:
+def _run_extraction_job(
+    configuration_path: Path, session: str, tracker: ProcessingTracker, job_id: str, workers: int
+) -> None:
     """Runs the aligned-fluorescence extraction stage for one recording as a tracked forging job.
 
     Notes:
@@ -614,6 +622,7 @@ def _run_extraction_job(configuration_path: Path, session: str, tracker: Process
         session: The session name, which is also the cindra recording identifier for the extraction.
         tracker: The forging processing tracker this job is recorded on.
         job_id: The unique hexadecimal identifier for this extraction job.
+        workers: The workers this stage runs under.
     """
     console.echo(message=f"Running multi-day extraction for session '{session}' (ID: {job_id})...", level=LogLevel.INFO)
     execute_multi_recording_job(
@@ -622,6 +631,7 @@ def _run_extraction_job(configuration_path: Path, session: str, tracker: Process
         specifier=session,
         job_id=job_id,
         tracker=tracker,
+        workers=workers,
     )
 
 
@@ -636,6 +646,7 @@ def _execute_remote_forging_job(
     tracker: ProcessingTracker,
     worker: ForgingAssembler,
     described_columns: frozenset[str],
+    workers: int,
 ) -> None:
     """Executes the single forging job matching the provided identifier (remote mode).
 
@@ -650,6 +661,7 @@ def _execute_remote_forging_job(
         tracker: The forging processing tracker.
         worker: The registered per-session assembly worker.
         described_columns: The column names the dataset describes, which every assembled session is held to.
+        workers: The workers a multi-day stage runs under. The assembly stage takes its own fan-out instead.
 
     Raises:
         ValueError: If the job_id does not match any job available for this dataset.
@@ -668,11 +680,19 @@ def _execute_remote_forging_job(
     job_name, specifier = id_to_job[job_id]
     if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
         _run_discovery_job(
-            configuration_path=multiday_plan[specifier][0], animal=specifier, tracker=tracker, job_id=job_id
+            configuration_path=multiday_plan[specifier][0],
+            animal=specifier,
+            tracker=tracker,
+            job_id=job_id,
+            workers=workers,
         )
     elif job_name == MULTIDAY_EXTRACTION_JOB_NAME:
         _run_extraction_job(
-            configuration_path=session_to_configuration[specifier], session=specifier, tracker=tracker, job_id=job_id
+            configuration_path=session_to_configuration[specifier],
+            session=specifier,
+            tracker=tracker,
+            job_id=job_id,
+            workers=workers,
         )
     else:
         _execute_job(

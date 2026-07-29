@@ -94,6 +94,10 @@ _BINARIZATION_BATCH_COPIES: int = 2
 """The number of copies of a raw frame batch binarization holds. Indexing each plane out of the batch allocates a
 second full batch alongside the one that was read."""
 
+_REGISTRATION_BATCH_COPIES: int = 3
+"""The number of copies of a registration batch the stage holds. The batch read from the binary, its shifted result,
+and the phase-correlation workspace the alignment builds from the pair are live at once."""
+
 _CHECKSUM_READER_MEMORY_MB: int = 56
 """The resident memory one checksum worker holds, covering its fixed read chunk and the small module its target
 function lives in. It replaces the general per-child allowance for this stage, because a checksum worker re-imports
@@ -462,16 +466,37 @@ def _estimate_binarization_memory(geometry: _RawImagingGeometry, configuration: 
     return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes))
 
 
+def _estimate_plane_registration_memory(extent: tuple[int, int], configuration: SingleRecordingConfiguration) -> int:
+    """Estimates the memory one two-photon plane-registration job holds, from that plane's shape.
+
+    Notes:
+        Registration streams the plane in batches rather than holding it whole, so its own batch bounds the job and
+        the recording's length does not enter the figure.
+
+    Args:
+        extent: The plane's height and width in pixels.
+        configuration: The recording's resolved processing configuration.
+
+    Returns:
+        The reportable memory in megabytes.
+    """
+    height, width = extent
+    batch_bytes = (
+        configuration.registration.batch_size * height * width * _SINGLE_PRECISION_BYTES * _REGISTRATION_BATCH_COPIES
+    )
+    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes))
+
+
 def _estimate_plane_processing_memory(
     extent: tuple[int, int], geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration
 ) -> int:
     """Estimates the memory one two-photon plane-processing job holds, from that plane's shape and sample count.
 
     Notes:
-        Detection rather than registration sets the peak. The movie is binned down to at most the configured binned
-        sample count, and the temporal standard deviation then holds the binned frames, their difference, and the
-        squared difference at once. Registration is bounded by its own batch and stays below this peak. Registration
-        later narrows a plane to the region that stayed in frame, so the raw extent used here is the wider bound.
+        Detection sets the peak. The movie is binned down to at most the configured binned sample count, and the
+        temporal standard deviation then holds the binned frames, their difference, and the squared difference at
+        once. Registration narrows a plane to the region that stayed in frame before this stage reads it, so the raw
+        extent used here is the wider bound.
 
     Args:
         extent: The plane's height and width in pixels.
@@ -516,10 +541,16 @@ def _estimate_two_photon_memory(
     if job_name == str(SingleRecordingJobNames.COMBINE):
         return _COMBINATION_MEMORY_MB
 
-    estimates = [
-        _estimate_plane_processing_memory(extent=extent, geometry=geometry, configuration=configuration)
-        for extent in geometry.plane_extents
-    ]
+    if job_name == str(SingleRecordingJobNames.REGISTER):
+        estimates = [
+            _estimate_plane_registration_memory(extent=extent, configuration=configuration)
+            for extent in geometry.plane_extents
+        ]
+    else:
+        estimates = [
+            _estimate_plane_processing_memory(extent=extent, geometry=geometry, configuration=configuration)
+            for extent in geometry.plane_extents
+        ]
     plane_index = _resolve_plane_index(specifier=specifier)
     if plane_index is not None and 0 <= plane_index < len(estimates):
         return estimates[plane_index]

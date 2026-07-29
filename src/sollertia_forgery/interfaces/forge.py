@@ -99,7 +99,6 @@ def forge_command(
             name=dataset_name,
             session_names=session,
             project_root=project_path,
-            workers=workers,
             display_progress=not no_progress,
             force_recreate=force_recreate,
             recreate_animals=recreate_animal,

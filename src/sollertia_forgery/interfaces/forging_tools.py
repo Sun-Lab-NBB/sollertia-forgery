@@ -11,7 +11,6 @@ import polars as pl
 from sollertia_shared_assets import DatasetData
 
 from ..forging import (
-    MULTIDAY_EXTRACTION_JOB_NAME,
     dataset_state_path,
     forging_tracker_path,
     define_forging_dataset,
@@ -28,7 +27,6 @@ from .responses import (
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
-from ..orchestration import resolve_job_cores
 
 _DATASET_SEMI_FIELDS: tuple[str, ...] = (
     "name",
@@ -94,7 +92,6 @@ def define_forging_dataset_tool(
             name=dataset_name,
             session_names=tuple(session_names),
             project_root=Path(project_path),
-            workers=resolve_job_cores(job_name=MULTIDAY_EXTRACTION_JOB_NAME),
             force_recreate=force_recreate,
             recreate_animals=tuple(recreate_animals or ()),
         )

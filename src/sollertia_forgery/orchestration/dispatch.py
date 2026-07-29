@@ -50,7 +50,6 @@ from ..two_photon import (
     SingleRecordingJobNames,
     discover_two_photon_jobs,
     two_photon_job_prerequisites,
-    materialize_cindra_configuration,
     run_two_photon_processing_pipeline,
 )
 from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
@@ -105,9 +104,12 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
     # and leaves the decode width to the reader, so the cores this job holds become the threads that decode it.
     str(SingleRecordingJobNames.BINARIZE): 4,
-    # The only two-photon stage that consumes the worker count, applied as numba threads. cindra documents no benefit
-    # past roughly twenty threads per plane and recommends parallelizing across planes instead.
-    str(SingleRecordingJobNames.PROCESS): 16,
+    # Removes motion from one plane and computes its registration-quality components. Its pass over the plane holds
+    # every thread busy, and its gain flattens once the batch it aligns stops covering the added cores.
+    str(SingleRecordingJobNames.REGISTER): 8,
+    # Discovers regions and extracts their fluorescence for one plane. Detection is bound by movie binning and a
+    # serial loop, so the stage plateaus while cores remain and running more planes at once pays better.
+    str(SingleRecordingJobNames.PROCESS): 10,
     # A single-threaded concatenation over every plane's extracted traces.
     str(SingleRecordingJobNames.COMBINE): 1,
     # Registers an animal's recordings against each other across a thread pool it sizes from this allocation, and
@@ -155,6 +157,10 @@ Notes:
 
 
 _JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
+    # Gates the plane that waits on it, so holding a share back keeps the stages that wait on no other job running
+    # while a recording's planes are still being registered. It converts spare capacity into progress, so the hold is
+    # released whenever nothing else can use what it gives up.
+    str(SingleRecordingJobNames.REGISTER): 4,
     # Holds back part of the core budget so the stages that wait on no other job keep a share of the host while this
     # one runs. Its cores are the batch's scarcest resource once the two-photon chain opens, and it converts spare
     # capacity into progress, so the hold is released whenever nothing else can use what it gives up.
@@ -215,9 +221,6 @@ class PipelineDispatch[UnitT]:
     """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
     backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
     allocation."""
-    materialize: Callable[[UnitT], None] | None = None
-    """Writes whatever a pipeline's jobs must find on disk before any of them dispatches, run once in the parent.
-    Resolves to None for a pipeline with no such precondition."""
 
 
 def run_batch_job(job: GenericPendingJob) -> None:
@@ -400,10 +403,6 @@ def prepare_pipeline_jobs[UnitT](
     # it as succeeded.
     ordering = dispatch.prerequisites(unit, universe)
 
-    # Written once here, in the parent, before any job of the unit dispatches.
-    if dispatch.materialize is not None:
-        dispatch.materialize(unit)
-
     # One set of figures drives both local admission and any remote submission that reads the descriptor.
     unregistered = sorted({job_name for job_name, _ in runnable if job_name not in _JOB_CORE_ALLOCATIONS})
     if unregistered:
@@ -521,11 +520,11 @@ def _run_video_job(job: GenericPendingJob) -> None:
 
 
 def _run_two_photon_job(job: GenericPendingJob) -> None:
-    """Runs a single two-photon binarization, per-plane processing, or combination job for one session.
+    """Runs a single two-photon binarization, per-plane registration, per-plane processing, or combination job.
 
     Notes:
-        cindra reads its thread count from the session's configuration, which the preparation step wrote, so the
-        job's own core weight bounds what the batch admits rather than what cindra runs.
+        The job's core weight reaches cindra as a call argument, so the stage runs at the width the batch admitted it
+        at rather than at a default cindra would resolve on its own.
 
     Args:
         job: The pending job carrying the session root in ``unit_path`` and the target job in ``job_id``.
@@ -660,26 +659,6 @@ def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], P
     return lambda session: resolve_session_tracker_path(session=session, pipeline=pipeline)
 
 
-def _materialize_two_photon_configuration(session: SessionData) -> None:
-    """Writes a session's two-photon configuration with the thread count its processing jobs will run under.
-
-    Notes:
-        The two-photon pipeline reads this count from the configuration rather than from a call argument, and only
-        its per-plane processing stage consumes it. The host's core count bounds the value, since a session prepared
-        on a larger machine would otherwise name more threads than this one can run.
-
-    Args:
-        session: The loaded session whose configuration is written.
-    """
-    materialize_cindra_configuration(
-        session=session,
-        workers=min(
-            _JOB_CORE_ALLOCATIONS[str(SingleRecordingJobNames.PROCESS)],
-            resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES),
-        ),
-    )
-
-
 def _run_forging_job(job: GenericPendingJob) -> None:
     """Runs a single forging multi-day or assembly job for one dataset.
 
@@ -767,7 +746,6 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             unit_name=lambda session: session.session_name,
             estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),
             command=_two_photon_command,
-            materialize=_materialize_two_photon_configuration,
         ),
         ProcessingPipelines.FORGING: PipelineDispatch[DatasetData](
             pipeline=ProcessingPipelines.FORGING,

@@ -50,7 +50,7 @@ dependencies = [
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
     "ataraxis-video-system>=4,<5",
     "ataraxis-communication-interface>=6,<7",
-    "cindra>=1.2.0rc2,<2",
+    "cindra>=2.0.0rc1,<3",
 
     # Machine Vision (GenICam runtime for ataraxis-video-system, sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
@@ -104,7 +104,7 @@ dev = [
     "uv>=0,<1",
     "tox-uv>=1,<2",
 
-    # Development Automation (>=8.1.1 required alongside cindra>=1.2.0rc2, which needs importlib-metadata>=9)
+    # Development Automation (>=8.1.1 required alongside cindra>=2.0.0rc1, which needs importlib-metadata>=9)
     "ataraxis-automation>=8.1.1,<9",
 
     # Architecture (enforces the dependency-direction contracts declared under [tool.importlinter])
