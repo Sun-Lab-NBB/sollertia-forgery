@@ -1,0 +1,6 @@
+from typing import Literal
+
+__all__ = ["run_mcp_server", "run_server"]
+
+def run_mcp_server() -> None: ...
+def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None: ...
