@@ -23,10 +23,15 @@ from .mcp_instance import mcp
 from ..orchestration import (
     DATASET_UNIT,
     SESSION_UNIT,
+    PROJECT_PLAN_SCHEMA,
     project_plan_path,
-    resolve_dataset_plan,
-    resolve_session_plan,
-    generate_project_plan,
+    resolve_project_root,
+)
+from .host_resolution import (
+    HOST_LABELS,
+    resolve_execution_host,
+    resolve_readable_project,
+    unsupported_host_message,
 )
 
 _PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name", "memory_modeled")
@@ -50,7 +55,9 @@ _PLAN_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled",)
 
 
 @mcp.tool()
-def plan_session_jobs_tool(session_paths: list[str], *, regenerate_plan: bool = False) -> dict[str, Any]:
+def plan_session_jobs_tool(
+    session_paths: list[str], host: str = "local", *, regenerate_plan: bool = False
+) -> dict[str, Any]:
     """Records what every processing job of one or more sessions will cost, caching the figures beside each session.
 
     Estimation reads each session's raw acquisition data, opening video containers and image headers, so this is the
@@ -61,6 +68,7 @@ def plan_session_jobs_tool(session_paths: list[str], *, regenerate_plan: bool = 
 
     Args:
         session_paths: The session root directories to plan.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds. Leave False unless a
             deliberate retune should be adopted, since a submission may already have been sized against the recorded
             figures.
@@ -70,18 +78,21 @@ def plan_session_jobs_tool(session_paths: list[str], *, regenerate_plan: bool = 
         list carrying each session's ``session_path``, ``unit_name``, ``plan_path``, ``job_count``, and
         ``summed_memory_mb``, or an ``error``.
     """
-    return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, regenerate_plan=regenerate_plan)
+    return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
 
 
 @mcp.tool()
-def plan_dataset_jobs_tool(dataset_paths: list[str], *, regenerate_plan: bool = False) -> dict[str, Any]:
+def plan_dataset_jobs_tool(
+    dataset_paths: list[str], host: str = "local", *, regenerate_plan: bool = False
+) -> dict[str, Any]:
     """Records what every forging job of one or more datasets will cost, caching the figures at each dataset root.
 
     A dataset's figures follow from the single-day outputs its jobs consume, and admission already requires a session
     to carry those outputs, so a dataset is plannable as soon as its hierarchy is defined.
 
     Args:
-        dataset_paths: The dataset root directories to plan.
+        dataset_paths: The dataset root directories to plan, which are paths ON THE SERVER for ``remote``.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds.
 
     Returns:
@@ -89,11 +100,11 @@ def plan_dataset_jobs_tool(dataset_paths: list[str], *, regenerate_plan: bool = 
         list carrying each dataset's ``dataset_path``, ``unit_name``, ``plan_path``, ``job_count``, and
         ``summed_memory_mb``, or an ``error``.
     """
-    return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, regenerate_plan=regenerate_plan)
+    return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
 
 
 @mcp.tool()
-def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
+def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[str, Any]:
     """Projects every plan cache under a project into one table at the project root.
 
     Reads the caches alone and estimates nothing, so this is the cheap half of planning and the half that ships. Pull
@@ -103,24 +114,34 @@ def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
     as unplanned rather than free.
 
     Args:
-        project_path: The absolute path to the project's root data directory.
+        project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
+            ``remote``.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Returns:
         A response dict with ``project_path``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
         ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-pipeline ``pipeline_totals``, and the
         ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+
     directory = Path(project_path)
+    plan_path = project_plan_path(project_directory=directory)
     start = perf_counter()
     try:
-        plan_path = generate_project_plan(project_directory=directory)
+        with resolve_execution_host(host=host) as execution_host:
+            # Naming no unit leaves the projection alone to run, since this reprojects what the units already planned.
+            execution_host.plan(project_root=directory, unit_paths=[], unit_kind=SESSION_UNIT, replan=False)
+            rows = execution_host.read_rows(path=plan_path)
     except Exception as exception:
         return error_response(message=f"Unable to project the plans under '{project_path}'. {exception}")
     elapsed = perf_counter() - start
 
-    frame = pl.read_ipc(source=plan_path, memory_map=True)
+    frame = pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False)
     return ok_response(
         project_path=str(directory),
+        host=host,
         plan_path=str(plan_path),
         elapsed_seconds=round(elapsed, 3),
         **_plan_totals(frame=frame),
@@ -131,6 +152,7 @@ def generate_project_plan_tool(project_path: str) -> dict[str, Any]:
 @mcp.tool()
 def read_project_plan_tool(
     project_path: str,
+    host: str = "local",
     unit_kind: str | None = None,
     animal: str | None = None,
     dataset: str | None = None,
@@ -154,6 +176,9 @@ def read_project_plan_tool(
 
     Args:
         project_path: The absolute path to the project's root data directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
         unit_kind: Restricts the listing to one unit kind, either ``session`` or ``dataset``.
         animal: Restricts the listing to one animal's sessions.
         dataset: Restricts the listing to one dataset's forging jobs.
@@ -171,7 +196,13 @@ def read_project_plan_tool(
         filter is named or the listing is requested. Returns an error when no projection exists or a filter names a
         value the projection does not hold.
     """
-    directory = Path(project_path)
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+    try:
+        directory = resolve_readable_project(project_path=project_path, host=host)
+    except Exception as exception:
+        return error_response(message=f"Unable to read the {host} project. {exception}")
+
     plan_path = project_plan_path(project_directory=directory)
     if not plan_path.is_file():
         return error_response(
@@ -240,44 +271,45 @@ def _reject_unknown(frame: pl.DataFrame, column: str, values: list[str]) -> dict
     return None
 
 
-def _plan_units(unit_paths: list[str], unit_kind: str, *, regenerate_plan: bool) -> dict[str, Any]:
-    """Plans every unit of one kind, reporting each independently.
+def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_plan: bool) -> dict[str, Any]:
+    """Plans every unit of one kind on the named host, reporting each independently.
 
     Args:
         unit_paths: The unit root directories to plan.
-        unit_kind: Whether the units are sessions or datasets, which selects the resolver and names the response key.
+        unit_kind: Whether the units are sessions or datasets.
+        host: Where the data sits, either ``local`` or ``remote``.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds.
 
     Returns:
         The response dict the calling tool returns.
     """
-    resolve = resolve_session_plan if unit_kind == SESSION_UNIT else resolve_dataset_plan
-    path_key = "session_path" if unit_kind == SESSION_UNIT else "dataset_path"
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
 
-    units: list[dict[str, Any]] = []
-    total_jobs = 0
+    units = [Path(path) for path in unit_paths]
+    if not units:
+        return error_response(message="No processing unit was named.")
+
+    try:
+        project_root = resolve_project_root(unit_paths=units, unit_kind=unit_kind)
+    except ValueError as exception:
+        return error_response(message=str(exception))
+
     start = perf_counter()
-    for unit_path in unit_paths:
-        try:
-            plan = resolve(Path(unit_path), regenerate_plan=regenerate_plan)
-        except Exception as exception:
-            units.append({path_key: unit_path, "error": str(exception), "job_count": 0})
-            continue
-        total_jobs += len(plan.entries)
-        units.append(
-            {
-                path_key: unit_path,
-                "unit_name": plan.unit_name,
-                "job_count": len(plan.entries),
-                "summed_memory_mb": sum(entry.memory_mb for entry in plan.entries),
-            }
-        )
+    try:
+        with resolve_execution_host(host=host) as execution_host:
+            planned = execution_host.plan(
+                project_root=project_root, unit_paths=units, unit_kind=unit_kind, replan=regenerate_plan
+            )
+    except Exception as exception:
+        return error_response(message=f"Unable to plan the {host} units. {exception}")
 
     return ok_response(
-        total_units=len(units),
-        total_jobs=total_jobs,
+        host=host,
+        total_units=len(planned),
+        total_jobs=sum(int(entry["job_count"]) for entry in planned),
         elapsed_seconds=round(perf_counter() - start, 3),
-        units=units,
+        units=planned,
     )
 
 

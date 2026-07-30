@@ -8,11 +8,10 @@ from time import time_ns
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
-from contextlib import contextmanager
 from collections import deque
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker, delete_directory
+from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker
 
 from .responses import (
     ok_response,
@@ -39,7 +38,6 @@ from ..orchestration import (
     submit_batch,
     prepare_batch,
     run_batch_job,
-    resolve_dispatch,
     build_pending_job,
     connect_to_server,
     query_submissions,
@@ -57,18 +55,18 @@ from ..orchestration import (
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
 )
+from .host_resolution import (
+    HOST_LABELS,
+    resolve_execution_host,
+    unsupported_host_message,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from ..orchestration import ExecutionHost, GenericPendingJob
 
 _EXECUTION_STATE: JobExecutionState[GenericPendingJob] | None = None
 """The single batch execution state. One pool serves every pipeline, so a batch may hold any mix of jobs and the
 engine packs them against one pair of budgets."""
-
-_HOST_LABELS: frozenset[str] = frozenset({LOCAL_HOST_LABEL, REMOTE_HOST_LABEL})
-"""The hosts a batch may be prepared against and dispatched to."""
 
 _CLOSED_BATCH_MESSAGE: str = (
     "No batch is running in this process. The named batches have closed, so their outcomes are read from the snapshot "
@@ -182,11 +180,11 @@ def prepare_batch_tool(
     """
     if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
-    if host not in _HOST_LABELS:
-        return error_response(message=_unsupported_host_message(host=host))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
 
     try:
-        with _resolve_host(host=host) as execution_host:
+        with resolve_execution_host(host=host) as execution_host:
             document = prepare_batch(
                 host=execution_host,
                 pipeline=pipeline,
@@ -446,8 +444,8 @@ def get_processing_status_tool(
         ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is
         False with an explanatory ``message``.
     """
-    if host not in _HOST_LABELS:
-        return error_response(message=_unsupported_host_message(host=host))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
     if host == REMOTE_HOST_LABEL:
         return remote_batch_status(
             batch_ids=batch_ids,
@@ -531,8 +529,8 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
         ``remote`` it carries the ``canceled_jobs`` count and the ``batch_ids`` the cancellation covered. Returns an
         error when nothing is running or outstanding.
     """
-    if host not in _HOST_LABELS:
-        return error_response(message=_unsupported_host_message(host=host))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
     if host == REMOTE_HOST_LABEL:
         return remote_batch_cancel(batch_ids=batch_ids)
 
@@ -553,172 +551,136 @@ def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = No
 
 
 @mcp.tool()
-def reset_processing_jobs_tool(pipeline: str, unit_path: str, job_ids: list[str] | None = None) -> dict[str, Any]:
-    """Resets tracked jobs to SCHEDULED so a subsequent execute reruns only them, preserving untargeted jobs.
+def reset_processing_jobs_tool(
+    pipeline: str, unit_paths: list[str], job_ids: list[str] | None = None, host: str = "local"
+) -> dict[str, Any]:
+    """Resets tracked jobs to SCHEDULED across one or more units, so a later execute reruns only them.
 
-    Resolves the pipeline's tracker from the unit itself, so a caller names what it wants reset rather than where the
-    tracker sits. That makes a mismatched pipeline and path impossible to express, and it is why no read tool has to
-    carry tracker locations. Works independently of any running batch. Requested job IDs absent from the tracker are
-    ignored, and omitting them resets every job the tracker holds.
+    Resolves each pipeline tracker from its unit, so a caller names what it wants reset rather than where the tracker
+    sits. That makes a mismatched pipeline and path impossible to express, and it is why no read tool has to carry
+    tracker locations.
+
+    One call covers every named unit, because each unit resets only the identifiers it actually tracks. Passing a whole
+    batch's identifiers alongside all of its units therefore costs a single operation, which remotely is one lightweight
+    server-side invocation rather than one per unit. Omitting the identifiers resets every job each unit tracks.
+
+    Works independently of any running batch, and note that ``execute_jobs_tool`` already resets what it dispatches, so
+    this is for the case where a caller wants a unit returned to a clean slate without running anything.
 
     Args:
         pipeline: The pipeline whose jobs to reset, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
-        unit_path: The absolute path to the processing unit, which is a session root for every session pipeline and a
-            dataset root for ``forging``.
-        job_ids: The job identifiers to reset, as reported by any read tool's listing. Omit to reset every job.
+        unit_paths: The processing unit directories whose jobs to reset, which are session roots for every session
+            pipeline and dataset roots for ``forging``. These are paths ON THE SERVER for ``remote``.
+        job_ids: The job identifiers to reset, as reported by any read tool's listing. Omit to reset every job each
+            named unit tracks.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Returns:
-        A response dict with ``pipeline``, ``unit_path``, the resolved ``tracker_path``, and the ``jobs_reset`` list.
-        Returns an error when the pipeline is not supported, when the unit cannot be loaded, when the tracker is
-        missing or empty, or when none of the requested identifiers exist.
+        A response dict with ``pipeline``, ``host``, ``total_units``, and the ``jobs_reset`` count. Returns an error
+        when the pipeline or the host is not supported.
     """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
+    if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
 
-    # Resolves the tracker without running discovery, so resetting never writes anything the way a preparation does.
+    units = [Path(path) for path in unit_paths]
     try:
-        path = dispatch.tracker_path(dispatch.load(Path(unit_path)))
+        with resolve_execution_host(host=host) as execution_host:
+            execution_host.reset_jobs(pipeline=pipeline, unit_paths=units, job_ids=job_ids or ())
     except Exception as exception:
-        return error_response(message=f"Unable to load the unit at '{unit_path}'. {exception}")
+        return error_response(message=f"Unable to reset the {host} '{pipeline}' jobs. {exception}")
 
-    if not path.is_file():
-        return error_response(
-            message=f"The '{dispatch.pipeline.value}' pipeline has no tracker for '{unit_path}', expected at '{path}'."
-        )
-
-    tracker = ProcessingTracker(file_path=path)
-    snapshot = tracker.snapshot()
-    if not snapshot:
-        return error_response(message=f"The tracker at '{path}' has no jobs.")
-
-    target_ids = list(snapshot.keys()) if job_ids is None else [job_id for job_id in job_ids if job_id in snapshot]
-    if not target_ids:
-        return error_response(message="None of the requested job IDs exist in the tracker.")
-
-    tracker.reset_jobs(job_ids=target_ids)
     return ok_response(
-        pipeline=dispatch.pipeline.value, unit_path=unit_path, tracker_path=str(path), jobs_reset=target_ids
+        pipeline=pipeline,
+        host=host,
+        total_units=len(units),
+        jobs_reset=len(job_ids) if job_ids else None,
+        message=(
+            "Reset every job each named unit tracks."
+            if not job_ids
+            else "Reset the named identifiers each unit tracks, skipping the ones it does not."
+        ),
     )
 
 
 @mcp.tool()
-def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dict[str, Any]:
-    """Removes a pipeline's output and processing tracker for one or more sessions, returning them to an unprocessed
-    state.
+def clean_processing_output_tool(pipeline: str, session_paths: list[str], host: str = "local") -> dict[str, Any]:
+    """Removes a pipeline's output and processing tracker for one or more units, on this machine or on the server.
 
-    Deletes the directory the pipeline owns outright alongside its tracker, so a subsequent preparation rediscovers
-    every job from the acquired data rather than resuming a partial run. Sessions are cleaned independently, and one
-    that cannot be cleaned is reported in its own entry without aborting the others.
+    Returns each unit to an unprocessed state, so a later preparation rediscovers every job from the acquired data
+    rather than resuming a partial run. Removal reports the bytes each path held either way, since the host runs the
+    same removal whichever side of the connection it sits on.
 
     The ``checksum`` pipeline owns no directory, because it writes its stored value into the acquired data itself.
-    Cleaning it removes its tracker and leaves that stored value in place, so the session keeps the baseline a later
+    Cleaning it removes its tracker and leaves that stored value in place, so the unit keeps the baseline a later
     verification compares against. The ``forging`` pipeline owns its whole dataset hierarchy, so cleaning it removes
     every assembled feather in that dataset alongside the tracker.
 
     Args:
         pipeline: The batch pipeline to clean, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
-        session_paths: The session root directories to clean.
+        session_paths: The processing unit directories to clean, which are paths ON THE SERVER for ``remote``.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Returns:
-        A response dict with ``pipeline``, ``total_units``, ``removed_bytes`` freed across every session, and a
-        ``units`` list carrying each session's ``removed_paths`` and ``removed_bytes``, or an ``error``. Returns an
-        error when a batch is running, since removing the output of a job in flight would fail that job.
+        A response dict with ``pipeline``, ``host``, ``total_paths`` removed, ``removed_bytes`` freed across every
+        unit, and a ``removed`` list carrying each path and the bytes it held. Returns an error when a batch is
+        running locally, since removing the output of a job in flight would fail that job.
     """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
+    if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
 
     # A running batch holds open the very files this removes, so cleaning waits for the pool to drain.
     state = _EXECUTION_STATE
-    if state is not None and state.manager_thread is not None and state.manager_thread.is_alive():
+    running = state is not None and state.manager_thread is not None and state.manager_thread.is_alive()
+    if host == LOCAL_HOST_LABEL and running:
         return error_response(
             message="A batch is currently running. Wait for it to finish or cancel it before cleaning output."
         )
 
-    units: list[dict[str, Any]] = []
-    total_removed = 0
-    for session_path in session_paths:
-        # Loads the unit rather than resolving its jobs, since a cleanup needs the unit's own locations alone and a
-        # unit whose pipeline has never been prepared still has output to remove.
-        try:
-            unit = dispatch.load(Path(session_path))
-        except Exception as exception:
-            units.append({"session_path": session_path, "error": str(exception)})
-            continue
-
-        targets = [dispatch.tracker_path(unit)]
-        owned = dispatch.output_path(unit)
-        if owned is not None:
-            targets.append(owned)
-
-        removed_paths: list[str] = []
-        removed_bytes = 0
-        for target in targets:
-            if not target.exists():
-                continue
-            removed_bytes += _directory_size(path=target)
-            if target.is_dir():
-                delete_directory(directory_path=target)
-            else:
-                target.unlink()
-                # The tracker's lock file is bookkeeping beside it rather than tracked output of its own.
-                target.with_suffix(target.suffix + ".lock").unlink(missing_ok=True)
-            removed_paths.append(str(target))
-
-        total_removed += removed_bytes
-        units.append(
-            {
-                "session_path": session_path,
-                "session_name": dispatch.unit_name(unit),
-                "removed_paths": removed_paths,
-                "removed_bytes": removed_bytes,
-            }
-        )
+    try:
+        with resolve_execution_host(host=host) as execution_host:
+            removed = execution_host.clean(pipeline=pipeline, unit_paths=[Path(path) for path in session_paths])
+    except Exception as exception:
+        return error_response(message=f"Unable to clean the {host} '{pipeline}' output. {exception}")
 
     return ok_response(
-        pipeline=dispatch.pipeline.value,
-        units=units,
-        total_units=len(units),
-        removed_bytes=total_removed,
+        pipeline=pipeline,
+        host=host,
+        removed=removed,
+        total_paths=len(removed),
+        removed_bytes=sum(int(entry["removed_bytes"]) for entry in removed),
     )
-
-
-@contextmanager
-def _resolve_host(host: str) -> Iterator[ExecutionHost]:
-    """Opens the named execution host, closing a server connection when the caller is done with it.
-
-    Args:
-        host: Either ``local`` for this machine or ``remote`` for the configured compute server.
-
-    Yields:
-        The execution host preparation drives.
-    """
-    if host == REMOTE_HOST_LABEL:
-        with connect_to_server() as server:
-            yield RemoteHost(server=server)
-        return
-    yield LocalHost()
 
 
 def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> None:
     """Clears the recorded state of every job about to be dispatched, on the host that records it.
 
     Notes:
-        Jobs are grouped by the pipeline and unit that record them, so each tracker is rewritten once however many of
-        its jobs the batch holds.
+        Jobs are grouped by pipeline rather than by unit, so one operation carries every unit of a pipeline. Each unit
+        resets only the identifiers it actually tracks, which is what lets the whole group ship as a single call and
+        keeps a batch spanning many units to one round trip per pipeline.
 
     Args:
         host: The host holding the trackers.
         jobs: The jobs whose records to clear.
     """
-    grouped: dict[tuple[str, str], list[str]] = {}
+    grouped: dict[str, tuple[set[str], set[str]]] = {}
     for job in jobs:
-        grouped.setdefault((job.pipeline, str(job.unit_path)), []).append(job.job_id)
-    for (pipeline, unit_path), job_ids in grouped.items():
-        host.reset_jobs(pipeline=pipeline, unit_path=Path(unit_path), job_ids=job_ids)
+        units, identifiers = grouped.setdefault(job.pipeline, (set(), set()))
+        units.add(str(job.unit_path))
+        identifiers.add(job.job_id)
+
+    for pipeline, (units, identifiers) in grouped.items():
+        host.reset_jobs(
+            pipeline=pipeline,
+            unit_paths=[Path(unit) for unit in sorted(units)],
+            job_ids=sorted(identifiers),
+        )
 
 
 def _run_and_close_local_batch(
@@ -921,25 +883,6 @@ def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
         "prerequisite_ids": list(job.prerequisite_ids),
         "options": dict(job.options),
     }
-
-
-def _unsupported_host_message(host: str) -> str:
-    """Builds the error message returned when a caller names a host the tools do not support."""
-    return f"Unsupported host '{host}'. Available: {', '.join(sorted(_HOST_LABELS))}."
-
-
-def _directory_size(path: Path) -> int:
-    """Sums the bytes a path holds, counting a directory's whole tree and a file's own size.
-
-    Args:
-        path: The file or directory to measure.
-
-    Returns:
-        The size in bytes.
-    """
-    if path.is_file():
-        return path.stat().st_size
-    return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
 
 
 def _unsupported_message(pipeline: str) -> str:

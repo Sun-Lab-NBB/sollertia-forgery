@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 from dataclasses import asdict
 
-from ..server import TERMINAL_JOB_STATUSES, JobStatus, remote_state_directory
+from ..server import TERMINAL_JOB_STATUSES, JobStatus
 from .responses import (
     ok_response,
     page_fields,
@@ -15,7 +15,6 @@ from .responses import (
     error_response,
     resolve_detail_limit,
 )
-from .mcp_instance import mcp
 from ..orchestration import (
     RemoteHost,
     SubmissionLedger,
@@ -25,7 +24,6 @@ from ..orchestration import (
     query_submissions,
     render_submission,
     cancel_submissions,
-    sync_project_state,
     close_settled_batches,
 )
 
@@ -68,11 +66,11 @@ _BLOCKED_SEMI_FIELDS: tuple[str, ...] = (
 find already succeeded."""
 
 _FINISHED_BATCH_GUIDANCE: str = (
-    "Read what a finished run produced by calling sync_remote_state_tool for its project, then read_project_jobs_tool "
-    "against the mirrored project."
+    "Read what a finished run produced from the outcome closure recorded on the batch, which "
+    "get_processing_status_tool reports, or from read_project_jobs_tool with host='remote'."
 )
 """The guidance appended wherever a caller reaches for a batch the ledger no longer holds. The ledger names outstanding
-allocations alone, so the answer for a finished batch is always the project's own job artifact."""
+allocations alone, so the answer for a finished batch is its recorded outcome or the project's own job artifact."""
 
 _NOTHING_OUTSTANDING: str = f"No remote batch is outstanding. {_FINISHED_BATCH_GUIDANCE}"
 """The message reported when the ledger holds no batch, which means every submitted batch has finished or none was
@@ -101,9 +99,9 @@ def remote_batch_status(
     filter adds a page of jobs, and opting into detail adds the resources each allocation requested and the log files
     it wrote.
 
-    This tracks a run in flight and nothing more. A batch stops being reported once its allocations all finish, and
-    the call that first observes them finishing is the last one to name its log files. Read what the run produced with
-    ``sync_remote_state_tool`` followed by the project read tools.
+    This tracks a run in flight. A batch stops being reported as outstanding once its allocations all finish, and the
+    call that observes them finishing closes the batch and carries its outcome, which is the durable record of what its
+    jobs reached.
 
     Args:
         batch_ids: Restricts the report to these outstanding batches. Omit to cover all of them.
@@ -250,43 +248,6 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
         canceled_jobs=len(allocations),
         batch_ids=[batch.batch_id for batch in batches],
         message="Cancellation issued for every allocation of the named batches, including the ones already finished.",
-    )
-
-
-@mcp.tool()
-def sync_remote_state_tool(project: str, *, regenerate: bool = True) -> dict[str, Any]:
-    """Regenerates a remote project's state artifacts and mirrors them into the local working directory.
-
-    This is what brings a remote run's definitive record home. The manifest, the project job table, the plan, and each
-    dataset's forging state are rewritten on the server and then pulled, so the mirrored tables describe the state
-    after the runs rather than before them.
-
-    The mirror reproduces the project directory by name, so every read tool reads a mirrored project exactly as it
-    reads a local one by pointing at the returned ``local_path``.
-
-    Args:
-        project: The name of the project under the server's data root whose state to mirror.
-        regenerate: Determines whether to rewrite the artifacts on the server before pulling them. Leave True unless
-            reading a snapshot exactly as the server already holds it.
-
-    Returns:
-        A response dict with ``project``, the ``local_path`` the artifacts were mirrored into, ``total_artifacts``,
-        and the ``artifacts`` list of mirrored paths. Returns an error when the server holds no such project.
-    """
-    local_path = remote_state_directory(project=project)
-    try:
-        with connect_to_server() as server:
-            mirrored = sync_project_state(
-                server=server, project=project, local_directory=local_path, regenerate=regenerate
-            )
-    except Exception as exception:
-        return error_response(message=f"Unable to mirror the state of project '{project}'. {exception}")
-
-    return ok_response(
-        project=project,
-        local_path=str(local_path),
-        total_artifacts=len(mirrored),
-        artifacts=[str(path) for path in mirrored],
     )
 
 

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from dataclasses import asdict
 
 from ataraxis_base_utilities import LogLevel, console
+from sollertia_shared_assets import ProcessingTrackers
 
 from .graph import BatchDocument, build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
@@ -293,10 +294,15 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
     if regenerate:
         _regenerate_remote_state(server=server, project_path=project_path, datasets=datasets)
 
+    # The markers and the manifest tracker travel alongside the tables, because the read tools resolve a dataset from
+    # its marker and read the manifest's progress from its tracker. Mirroring the tables alone would leave those tools
+    # reporting a project with no datasets and a manifest that had never been generated.
     remote_artifacts = [
         project_manifest_path(project_directory=project_path),
+        project_path.joinpath(ProcessingTrackers.MANIFEST),
         project_jobs_path(project_directory=project_path),
         project_plan_path(project_directory=project_path),
+        *[dataset.joinpath(DATASET_MARKER_FILENAME) for dataset in datasets],
         *[dataset.joinpath(DATASET_STATE_FILENAME) for dataset in datasets],
     ]
 

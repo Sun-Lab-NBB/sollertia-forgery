@@ -52,7 +52,11 @@ def plan_cli() -> None:
 def plan_session_command(session_path: tuple[Path, ...], *, regenerate_plan: bool) -> None:
     """Records what every processing job of each named session will cost."""
     for path in session_path:
-        plan = resolve_session_plan(session_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        try:
+            plan = resolve_session_plan(session_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        except Exception as exception:
+            click.echo(f"{path.name}: planned nothing. {exception}")
+            continue
         click.echo(f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
 
 
@@ -79,7 +83,11 @@ def plan_session_command(session_path: tuple[Path, ...], *, regenerate_plan: boo
 def plan_dataset_command(dataset_path: tuple[Path, ...], *, regenerate_plan: bool) -> None:
     """Records what every forging job of each named dataset will cost."""
     for path in dataset_path:
-        plan = resolve_dataset_plan(dataset_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        try:
+            plan = resolve_dataset_plan(dataset_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        except Exception as exception:
+            click.echo(f"{path.name}: planned nothing. {exception}")
+            continue
         click.echo(f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
 
 

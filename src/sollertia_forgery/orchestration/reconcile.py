@@ -9,10 +9,8 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .ledger import read_ledger
 from ..server import TERMINAL_JOB_STATUSES
-from .dispatch import resolve_dispatch
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from collections.abc import Sequence
 
     from .graph import GenericPendingJob
@@ -136,30 +134,3 @@ def _resolve_claimed_allocations(jobs: Sequence[GenericPendingJob]) -> dict[tupl
             claimed[job.dispatch_key] = allocation
 
     return {key: allocation for key, allocation in claimed.items() if key in {job.dispatch_key for job in jobs}}
-
-
-def reset_tracked_jobs(pipeline: str, unit_path: Path, job_ids: Sequence[str]) -> None:
-    """Returns the named tracked jobs of one unit to the scheduled state.
-
-    Notes:
-        Resolves the tracker from the unit rather than taking its path, so a caller names what it wants reset without
-        knowing where the record sits. Identifiers the tracker does not hold are dropped, because a tracker rejects a
-        request naming a job it does not track and would then reset nothing at all.
-
-    Args:
-        pipeline: The pipeline whose jobs to reset.
-        unit_path: The path to the processing unit that records them.
-        job_ids: The identifiers of the jobs to reset.
-    """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
-        return
-
-    tracker_path = dispatch.tracker_path(dispatch.load(unit_path))
-    if not tracker_path.is_file():
-        return
-
-    tracker = ProcessingTracker(file_path=tracker_path)
-    targets = [job_id for job_id in job_ids if job_id in tracker.snapshot()]
-    if targets:
-        tracker.reset_jobs(job_ids=targets)

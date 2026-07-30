@@ -11,6 +11,7 @@ import polars as pl
 from sollertia_shared_assets import DatasetData
 
 from ..forging import (
+    DATASET_STATE_FILENAME,
     dataset_state_path,
     forging_tracker_path,
     define_forging_dataset,
@@ -27,6 +28,17 @@ from .responses import (
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
+from ..orchestration import (
+    DATASET_UNIT,
+    REMOTE_HOST_LABEL,
+    RemoteHost,
+    connect_to_server,
+)
+from .host_resolution import (
+    HOST_LABELS,
+    resolve_readable_project,
+    unsupported_host_message,
+)
 
 _DATASET_SEMI_FIELDS: tuple[str, ...] = (
     "name",
@@ -56,6 +68,7 @@ def define_forging_dataset_tool(
     dataset_name: str,
     session_names: list[str],
     recreate_animals: list[str] | None = None,
+    host: str = "local",
     *,
     force_recreate: bool = False,
 ) -> dict[str, Any]:
@@ -79,6 +92,9 @@ def define_forging_dataset_tool(
         session_names: The session names the dataset must contain.
         recreate_animals: The identifiers of animals already in the dataset to rebuild from the sessions provided
             for them. Omit to leave every existing animal frozen.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
+            A remote definition reports the dataset it built without its shape, since the hierarchy cannot be loaded
+            from this machine.
         force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
             provided session list. Mutually exclusive with ``recreate_animals``.
 
@@ -87,6 +103,34 @@ def define_forging_dataset_tool(
         ``tracker_path`` its jobs record on, the ``session_count`` and ``animal_count`` the dataset now holds, and
         the ``animals`` it covers. Returns an error when the resolution policy rejects the request.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+
+    if host == REMOTE_HOST_LABEL:
+        try:
+            with connect_to_server() as server:
+                RemoteHost(server=server).define_dataset(
+                    project_root=Path(project_path),
+                    dataset_name=dataset_name,
+                    session_names=session_names,
+                    recreate_animals=recreate_animals or (),
+                    force_recreate=force_recreate,
+                )
+        except Exception as exception:
+            return error_response(message=f"Unable to define the remote dataset '{dataset_name}'. {exception}")
+
+        # The hierarchy sits on the server, so nothing here can load it to report its shape. A caller reads what it
+        # holds through the dataset state artifact.
+        return ok_response(
+            dataset_name=dataset_name,
+            host=host,
+            dataset_path=str(Path(project_path).joinpath(dataset_name)),
+            message=(
+                "Defined the dataset on the server. Read what it now holds with generate_dataset_state_tool followed "
+                "by read_dataset_state_tool, since the hierarchy cannot be loaded from this machine."
+            ),
+        )
+
     try:
         dataset = define_forging_dataset(
             name=dataset_name,
@@ -109,7 +153,7 @@ def define_forging_dataset_tool(
 
 
 @mcp.tool()
-def generate_dataset_state_tool(dataset_paths: list[str]) -> dict[str, Any]:
+def generate_dataset_state_tool(dataset_paths: list[str], host: str = "local") -> dict[str, Any]:
     """Snapshots each named dataset's forging job state into a shippable feather file at the dataset root.
 
     Reads the dataset's forging tracker and rewrites the snapshot, so it is cheap enough to run before deciding
@@ -117,13 +161,20 @@ def generate_dataset_state_tool(dataset_paths: list[str]) -> dict[str, Any]:
     not abort the others.
 
     Args:
-        dataset_paths: The dataset root directories to snapshot.
+        dataset_paths: The dataset root directories to snapshot, which are paths ON THE SERVER for ``remote``.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
+            A remote snapshot reads its rows back off the server, since the dataset cannot be loaded from this machine.
 
     Returns:
-        A response dict with ``total_units``, ``total_jobs``, and a ``units`` list carrying each dataset's
-        ``dataset_path``, ``dataset_name``, ``state_path``, ``job_count``, and a ``summary`` counting its jobs by
-        status, or an ``error``.
+        A response dict with ``host``, ``total_units``, ``total_jobs``, and a ``units`` list carrying each dataset's
+        ``dataset_path``, ``dataset_name``, ``job_count``, and a ``summary`` counting its jobs by status, or an
+        ``error``. A local snapshot also carries each ``state_path``.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+    if host == REMOTE_HOST_LABEL:
+        return _generate_remote_dataset_state(dataset_paths=dataset_paths)
+
     units: list[dict[str, Any]] = []
     total_jobs = 0
     for dataset_path in dataset_paths:
@@ -146,12 +197,13 @@ def generate_dataset_state_tool(dataset_paths: list[str]) -> dict[str, Any]:
             }
         )
 
-    return ok_response(total_units=len(units), total_jobs=total_jobs, units=units)
+    return ok_response(host=host, total_units=len(units), total_jobs=total_jobs, units=units)
 
 
 @mcp.tool()
 def read_dataset_state_tool(
     dataset_path: str,
+    host: str = "local",
     scope: str | None = None,
     animal: str | None = None,
     session: str | None = None,
@@ -174,6 +226,9 @@ def read_dataset_state_tool(
 
     Args:
         dataset_path: The absolute path to the dataset's root directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
         scope: Restricts the listing to jobs of one scope, either ``animal`` or ``session``.
         animal: Restricts the listing to one animal's jobs.
         session: Restricts the listing to one session's jobs.
@@ -191,10 +246,14 @@ def read_dataset_state_tool(
         ``next_start_row`` whenever a filter is named or the listing is requested. Returns an error when no snapshot
         exists or a filter names a value the snapshot does not hold.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
     try:
-        dataset = DatasetData.load(dataset_path=Path(dataset_path))
+        # A remote dataset is mirrored through its project, since the mirror reproduces the project directory by name.
+        project = resolve_readable_project(project_path=str(Path(dataset_path).parent), host=host)
+        dataset = DatasetData.load(dataset_path=project.joinpath(Path(dataset_path).name))
     except Exception as exception:
-        return error_response(message=f"Unable to load the dataset at '{dataset_path}'. {exception}")
+        return error_response(message=f"Unable to load the {host} dataset at '{dataset_path}'. {exception}")
 
     state_path = dataset_state_path(dataset=dataset)
     if not state_path.is_file():
@@ -245,6 +304,7 @@ def read_dataset_state_tool(
 @mcp.tool()
 def list_project_datasets_tool(
     project_path: str,
+    host: str = "local",
     session: str | None = None,
     animal: str | None = None,
     limit: int | None = None,
@@ -265,6 +325,9 @@ def list_project_datasets_tool(
 
     Args:
         project_path: The absolute path to the project's root data directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
         session: The session name to restrict the listing to the datasets holding it.
         animal: The animal identifier to restrict the listing to the datasets holding it.
         limit: The datasets to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
@@ -280,8 +343,12 @@ def list_project_datasets_tool(
         ``dataset_path``, ``session_type``, ``acquisition_system``, ``session_count``, and ``animal_count``. Returns an
         error when the project directory cannot be read.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
     try:
-        datasets = discover_project_datasets(project_root=Path(project_path))
+        datasets = discover_project_datasets(
+            project_root=resolve_readable_project(project_path=project_path, host=host)
+        )
     except Exception as exception:
         return error_response(message=f"Unable to discover the datasets under '{project_path}'. {exception}")
 
@@ -364,3 +431,43 @@ def _status_counts(frame: pl.DataFrame) -> dict[str, int]:
     """
     counts = {str(status): int(count) for status, count in frame["status"].value_counts().iter_rows()}
     return {"total": frame.height, **dict(sorted(counts.items()))}
+
+
+def _generate_remote_dataset_state(dataset_paths: list[str]) -> dict[str, Any]:
+    """Rewrites each named dataset's state artifact on the server and reports what it now records.
+
+    Notes:
+        The hierarchy sits on the server, so the rows are read back off it rather than loaded from a dataset this
+        machine cannot open.
+
+    Args:
+        dataset_paths: The dataset root directories on the server.
+
+    Returns:
+        The response dict the calling tool returns.
+    """
+    units = [Path(path) for path in dataset_paths]
+    try:
+        with connect_to_server() as server:
+            host = RemoteHost(server=server)
+            for unit in units:
+                host.generate_state(project_root=unit.parent, unit_paths=[unit], unit_kind=DATASET_UNIT)
+            rows = {str(unit): host.read_rows(path=unit.joinpath(DATASET_STATE_FILENAME)) for unit in units}
+    except Exception as exception:
+        return error_response(message=f"Unable to generate the remote dataset state. {exception}")
+
+    reported = [
+        {
+            "dataset_path": str(unit),
+            "dataset_name": unit.name,
+            "job_count": len(rows[str(unit)]),
+            "summary": count_values(values=[row["status"] for row in rows[str(unit)]]),
+        }
+        for unit in units
+    ]
+    return ok_response(
+        host=REMOTE_HOST_LABEL,
+        total_units=len(reported),
+        total_jobs=sum(entry["job_count"] for entry in reported),
+        units=reported,
+    )

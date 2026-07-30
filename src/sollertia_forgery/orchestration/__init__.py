@@ -103,11 +103,15 @@ from .reconcile import (
     LOCAL_HOST_LABEL,
     REMOTE_HOST_LABEL,
     Reconciliation,
-    reset_tracked_jobs,
     reconcile_local_jobs,
     reconcile_remote_jobs,
 )
 from .footprints import resolve_host_memory_mb
+from .maintenance import (
+    resolve_path_size,
+    reset_tracked_jobs,
+    clean_pipeline_output,
+)
 from .preparation import prepare_batch, resolve_project_root
 
 __all__ = [
@@ -145,6 +149,7 @@ __all__ = [
     "build_job_descriptor",
     "build_pending_job",
     "cancel_submissions",
+    "clean_pipeline_output",
     "close_batch",
     "close_settled_batches",
     "connect_to_server",
@@ -188,6 +193,7 @@ __all__ = [
     "resolve_host_memory_mb",
     "resolve_job_command",
     "resolve_job_cores",
+    "resolve_path_size",
     "resolve_project_root",
     "resolve_session_plan",
     "resolve_submission_order",

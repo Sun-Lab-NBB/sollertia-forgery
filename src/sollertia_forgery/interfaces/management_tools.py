@@ -29,6 +29,17 @@ from .responses import (
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
+from ..orchestration import (
+    SESSION_UNIT,
+    REMOTE_HOST_LABEL,
+    RemoteHost,
+    connect_to_server,
+)
+from .host_resolution import (
+    HOST_LABELS,
+    resolve_readable_project,
+    unsupported_host_message,
+)
 
 _MANIFEST_AXES: tuple[str, ...] = (
     "animal",
@@ -77,7 +88,7 @@ _JOB_DETAIL_FIELDS: tuple[str, ...] = ("executor_id", "error_message", "started_
 
 
 @mcp.tool()
-def generate_project_manifest_tool(project_path: str) -> dict[str, Any]:
+def generate_project_manifest_tool(project_path: str, host: str = "local") -> dict[str, Any]:
     """Regenerates the target project's manifest and job artifacts, returning a summary of the resulting snapshot.
 
     Runs to completion before returning, because generation reads only small metadata files and finishes in about a
@@ -86,15 +97,25 @@ def generate_project_manifest_tool(project_path: str) -> dict[str, Any]:
     is read.
 
     Args:
-        project_path: The absolute path to the project's root data directory.
+        project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
+            ``remote``.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
+            A remote generation reports the row counts it produced, and the artifacts themselves are brought over with
+            ``fetch_remote_artifacts_tool``.
 
     Returns:
-        A response dict carrying every field of the manifest summary, alongside ``project_path``, ``manifest_path``,
-        ``jobs_path``, the ``total_jobs`` the job artifact holds, and the ``elapsed_seconds`` generation took. Returns
-        an error when the project directory holds no sessions or cannot be read.
+        A response dict carrying every field of the manifest summary, alongside ``project_path``, ``host``,
+        ``manifest_path``, ``jobs_path``, the ``total_jobs`` the job artifact holds, and the ``elapsed_seconds``
+        generation took. Returns an error when the project directory holds no sessions or cannot be read.
     """
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+
     directory = Path(project_path)
     start = perf_counter()
+    if host == REMOTE_HOST_LABEL:
+        return _generate_remote_manifest(project_root=directory, start=start)
+
     try:
         generate_project_manifest(project_directory=directory)
     except Exception as exception:
@@ -106,6 +127,7 @@ def generate_project_manifest_tool(project_path: str) -> dict[str, Any]:
     return ok_response(
         project_path=str(directory),
         manifest_path=str(manifest_path),
+        host=host,
         jobs_path=str(jobs_path),
         total_jobs=pl.read_ipc(source=jobs_path, memory_map=True).height if jobs_path.is_file() else 0,
         elapsed_seconds=round(elapsed, 3),
@@ -116,6 +138,7 @@ def generate_project_manifest_tool(project_path: str) -> dict[str, Any]:
 @mcp.tool()
 def read_project_manifest_tool(
     project_path: str,
+    host: str = "local",
     animal: int | None = None,
     session_type: str | None = None,
     system: str | None = None,
@@ -141,6 +164,9 @@ def read_project_manifest_tool(
 
     Args:
         project_path: The absolute path to the project's root data directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
         animal: The animal identifier to restrict the listing to.
         session_type: The session type to restrict the listing to, as reported by the ``type`` breakdown axis.
         system: The acquisition system to restrict the listing to.
@@ -159,7 +185,13 @@ def read_project_manifest_tool(
         filter is named or the listing is requested. Returns an error when no manifest exists or a filter names a value
         the project does not hold.
     """
-    directory = Path(project_path)
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+    try:
+        directory = resolve_readable_project(project_path=project_path, host=host)
+    except Exception as exception:
+        return error_response(message=f"Unable to read the {host} project. {exception}")
+
     manifest_path = project_manifest_path(project_directory=directory)
     if not manifest_path.is_file():
         return error_response(
@@ -208,6 +240,7 @@ def read_project_manifest_tool(
 @mcp.tool()
 def read_project_jobs_tool(
     project_path: str,
+    host: str = "local",
     animal: str | None = None,
     session: str | None = None,
     pipelines: list[str] | None = None,
@@ -230,6 +263,9 @@ def read_project_jobs_tool(
 
     Args:
         project_path: The absolute path to the project's root data directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
         animal: The animal identifier to restrict the listing to.
         session: The session name to restrict the listing to.
         pipelines: The pipelines to restrict the listing to.
@@ -247,7 +283,13 @@ def read_project_jobs_tool(
         or the listing is requested. Returns an error when no job artifact exists or a filter names a value the project
         does not hold.
     """
-    directory = Path(project_path)
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+    try:
+        directory = resolve_readable_project(project_path=project_path, host=host)
+    except Exception as exception:
+        return error_response(message=f"Unable to read the {host} project. {exception}")
+
     jobs_path = project_jobs_path(project_directory=directory)
     if not jobs_path.is_file():
         return error_response(
@@ -297,7 +339,7 @@ def read_project_jobs_tool(
 
 
 @mcp.tool()
-def get_manifest_status_tool(project_path: str) -> dict[str, Any]:
+def get_manifest_status_tool(project_path: str, host: str = "local") -> dict[str, Any]:
     """Reports the state of the target project's last state-artifact generation from its processing tracker.
 
     Reads the tracker alone and rescans nothing, so it answers whether the stored artifacts are trustworthy without
@@ -305,13 +347,22 @@ def get_manifest_status_tool(project_path: str) -> dict[str, Any]:
 
     Args:
         project_path: The absolute path to the project's root data directory.
+        host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
+            compute server. A remote read mirrors the project's artifacts onto this machine and reads the
+            mirror, so it reports what the project currently records without regenerating anything.
 
     Returns:
         A response dict with ``project_path``, ``tracker_path``, ``manifest_path``, ``jobs_path``, whether each
         artifact ``exists``, and the ``status`` of the generation job alongside any ``error_message`` it recorded. A
         project whose artifacts have never been generated reports a ``not_started`` status.
     """
-    directory = Path(project_path)
+    if host not in HOST_LABELS:
+        return error_response(message=unsupported_host_message(host=host))
+    try:
+        directory = resolve_readable_project(project_path=project_path, host=host)
+    except Exception as exception:
+        return error_response(message=f"Unable to read the {host} project. {exception}")
+
     tracker_path = directory.joinpath(ProcessingTrackers.MANIFEST)
     manifest_path = project_manifest_path(project_directory=directory)
     jobs_path = project_jobs_path(project_directory=directory)
@@ -377,3 +428,37 @@ def _reject_unknown(frame: pl.DataFrame, column: str, values: list[str]) -> dict
     if unknown:
         return error_response(message=f"No job has '{column}' in {unknown}. Available: {available}.")
     return None
+
+
+def _generate_remote_manifest(project_root: Path, start: float) -> dict[str, Any]:
+    """Regenerates a remote project's manifest and job artifacts, then reports what they now hold.
+
+    Notes:
+        The rows are counted off the server rather than from a local read, since the artifacts stay there until a
+        caller fetches them.
+
+    Args:
+        project_root: The path to the project's root directory on the server.
+        start: The performance counter reading generation began at.
+
+    Returns:
+        The response dict the calling tool returns.
+    """
+    try:
+        with connect_to_server() as server:
+            host = RemoteHost(server=server)
+            host.generate_state(project_root=project_root, unit_paths=[], unit_kind=SESSION_UNIT)
+            job_rows = host.read_rows(path=project_jobs_path(project_directory=project_root))
+    except Exception as exception:
+        return error_response(
+            message=f"Unable to generate the remote state artifacts for '{project_root}'. {exception}"
+        )
+
+    return ok_response(
+        project_path=str(project_root),
+        host=REMOTE_HOST_LABEL,
+        manifest_path=str(project_manifest_path(project_directory=project_root)),
+        jobs_path=str(project_jobs_path(project_directory=project_root)),
+        total_jobs=len(job_rows),
+        elapsed_seconds=round(perf_counter() - start, 3),
+    )

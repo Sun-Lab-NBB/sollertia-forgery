@@ -8,11 +8,10 @@ from dataclasses import dataclass
 import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData
-from ataraxis_data_structures import ProcessingTracker
 
 from ..forging import generate_dataset_state
 from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
-from ..orchestration import resolve_dispatch
+from ..orchestration import reset_tracked_jobs, clean_pipeline_output
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -246,36 +245,53 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
     "--unit-path",
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
-    help="The absolute path to the processing unit, which is a session root for a session pipeline and a dataset root "
-    "for 'forging'.",
+    multiple=True,
+    help="The absolute path to a processing unit whose jobs to reset, which is a session root for a session pipeline "
+    "and a dataset root for 'forging'. Can be specified multiple times.",
 )
 @click.option(
     "-id",
     "--job-id",
     type=str,
+    default=(),
+    multiple=True,
+    help="The hexadecimal identifier of a tracked job to reset. Can be specified multiple times. Omit to reset every "
+    "job each named unit tracks.",
+)
+def reset_command(pipeline: str, unit_path: tuple[Path, ...], job_id: tuple[str, ...]) -> None:
+    """Returns tracked jobs of the named units to the scheduled state, leaving every untargeted job's record intact.
+
+    This is what a submission calls before dispatching a batch, so a status read never reports the previous attempt's
+    outcome while the new one waits to start. One invocation covers every named unit, and each unit resets only the
+    identifiers it actually tracks, so a batch spanning many units costs a single call.
+    """
+    reset = reset_tracked_jobs(pipeline=pipeline, unit_paths=unit_path, job_ids=job_id)
+    click.echo(f"Reset {len(reset)} job(s) across {len(unit_path)} unit(s).")
+
+
+@click.command("clean", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-p",
+    "--pipeline",
+    type=str,
+    required=True,
+    help="The pipeline whose output to remove, one of 'checksum', 'runtime', 'microcontroller', 'video', "
+    "'two_photon', 'forging'.",
+)
+@click.option(
+    "-up",
+    "--unit-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
     multiple=True,
-    help="The hexadecimal identifier of a tracked job to reset. Can be specified multiple times.",
+    help="The absolute path to a processing unit to clean. Can be specified multiple times.",
 )
-def reset_command(pipeline: str, unit_path: Path, job_id: tuple[str, ...]) -> None:
-    """Returns the named tracked jobs to the scheduled state, leaving every untargeted job's record intact.
+def clean_command(pipeline: str, unit_path: tuple[Path, ...]) -> None:
+    """Removes a pipeline's output and processing tracker for the named units.
 
-    This is what a submission calls before dispatching a job, so a status read never reports the previous attempt's
-    outcome while the new one waits to start. Identifiers the tracker does not hold are ignored.
+    Returns each unit to an unprocessed state, so a later preparation rediscovers every job from the acquired data
+    rather than resuming a partial run. Each removed path is reported with the bytes it held, one per line, so a
+    caller driving this over a command line reads the same figures an in-process call returns.
     """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
-        message = f"Unsupported pipeline '{pipeline}'."
-        raise click.UsageError(message=message)
-
-    tracker_path = dispatch.tracker_path(dispatch.load(unit_path))
-    if not tracker_path.is_file():
-        click.echo(f"No '{pipeline}' tracker exists for '{unit_path}'.")
-        return
-
-    tracker = ProcessingTracker(file_path=tracker_path)
-    targets = [identifier for identifier in job_id if identifier in tracker.snapshot()]
-    if not targets:
-        click.echo("None of the requested job identifiers exist in the tracker.")
-        return
-    click.echo(f"Reset {len(tracker.reset_jobs(job_ids=targets))} job(s) on '{tracker_path}'.")
+    for removed in clean_pipeline_output(pipeline=pipeline, unit_paths=unit_path):
+        click.echo(f"{removed['removed_bytes']} {removed['path']}")
