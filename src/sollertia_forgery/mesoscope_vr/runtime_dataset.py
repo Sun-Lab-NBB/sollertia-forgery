@@ -180,7 +180,9 @@ def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
 
     non_run_states = pl.Series(["idle", "rest"]).cast(system_state_dtype)
 
-    is_non_run = pl.col("system_state").is_in(non_run_states)
+    # Imploding the state collection into a single list value matches each row against the collection as a whole,
+    # rather than pairing the column with it element-wise.
+    is_non_run = pl.col("system_state").is_in(non_run_states.implode())
 
     return experiment_data.with_columns(
         pl.when(is_non_run).then(pl.lit(_CUE_UNDEFINED, dtype=pl.UInt8)).otherwise(pl.col("cue")).alias("cue"),

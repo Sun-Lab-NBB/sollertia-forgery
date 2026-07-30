@@ -230,6 +230,12 @@ ignore_errors = true
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"
 
+# Places the repository root on sys.path, so that the 'tests' package is importable from the subprocesses the parallel
+# pipeline tests spawn. The import mode above resolves test modules without touching sys.path, and a spawned worker
+# inherits the parent's sys.path to import the module defining the callable it unpickles. The src layout keeps this
+# entry from shadowing the installed distribution the tests measure coverage against.
+pythonpath = ["."]
+
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
 [tool.coverage.run]
 

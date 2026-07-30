@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from functools import reduce
 
 import polars as pl
 from ataraxis_base_utilities import console, ensure_directory_exists
@@ -85,11 +86,13 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     )
     video_data = assemble_video_dataset(video_data_path=video_data_path, reference_time=reference_time)
 
-    # Concatenates the behavior and video sub-datasets into the unified feather and writes it uncompressed so downstream
-    # consumers can memory-map it. The video sub-dataset joins only when it produced columns.
+    # Stacks the behavior and video sub-datasets into the unified feather and writes it uncompressed so downstream
+    # consumers can memory-map it. Stacking requires both sub-datasets to carry the reference clock's height, so one
+    # that drifts off that clock raises rather than being padded. The video sub-dataset joins only when it produced
+    # columns.
     sub_datasets = [behavior_data]
     if video_data.width > 0:
         sub_datasets.append(video_data)
-    result = pl.concat(items=sub_datasets, how="horizontal")
+    result = reduce(pl.DataFrame.hstack, sub_datasets)
     result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)
