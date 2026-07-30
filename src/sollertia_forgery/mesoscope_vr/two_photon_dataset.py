@@ -178,6 +178,11 @@ def assemble_cindra_dataset(
     # fewer in-window pulses than the cindra frame count, the duration filter has rejected real frames whose TTL
     # signal briefly fell outside the tolerance window. The ScanImage-based fallback recovers them by matching
     # each logged TTL rising edge to its nearest ScanImage-recorded frame timestamp.
+    #
+    # Clipping the front assumes the surplus sits before the acquisition, which holds while every plane contributes
+    # the same sample count. The reference mesoscope-vr recording guarantees that by acquiring one physical plane on
+    # one channel. cindra's plane combination trims each plane to the shortest one it holds, so a recording that
+    # interleaves several planes or two channels would carry part of its surplus at the tail instead.
     if len(frame_aligned_data) > frame_count:
         frame_aligned_data = frame_aligned_data.tail(frame_count)
     elif len(frame_aligned_data) < frame_count:
@@ -454,6 +459,11 @@ def _align_pulses_to_scanimage(
 
     # The ScanImage archive must contain exactly as many entries as cindra's frame count. If it does not, the
     # input data is internally inconsistent and alignment cannot proceed.
+    #
+    # This one-to-one equality holds while the recording delivers one cindra sample per ScanImage frame, which the
+    # reference mesoscope-vr configuration guarantees by acquiring one physical plane on one channel. cindra sizes
+    # each plane from its own interleave position, so a recording carrying several planes or two channels reports a
+    # per-position count that this comparison would read as an inconsistency.
     if scanimage_microseconds.size != expected_frame_count:
         message = (
             f"Unable to apply the ScanImage-based fallback alignment for the cindra dataset assembly. The cindra "
