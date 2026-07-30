@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from pathlib import Path
 import dataclasses
 
 from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
 import pytest
+from tests.conftest import FIXTURES_DIRECTORY
 from sollertia_shared_assets import SessionTypes, AcquisitionSystems, MesoscopeDirectories
 
 from sollertia_forgery.registries import (
@@ -31,11 +31,12 @@ from sollertia_forgery.mesoscope_vr.two_photon import (
 )
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Callable
 
     from sollertia_shared_assets import SessionData
 
-_FIXTURES_DIRECTORY: Path = Path(__file__).parent / "fixtures" / "cindra"
+_FIXTURES_DIRECTORY: Path = FIXTURES_DIRECTORY / "cindra"
 """The directory holding the reference mesoscope-vr cindra configuration YAMLs the golden regression pins against."""
 
 

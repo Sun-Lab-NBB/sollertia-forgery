@@ -52,6 +52,10 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+FIXTURES_DIRECTORY: Path = Path(__file__).parent / "fixtures"
+"""The directory holding the static reference files the suite pins its golden comparisons against. Resolving it here
+keeps a test's own depth under the suite root out of the path."""
+
 PROJECT_NAME: str = "TestProject"
 """The name of the project every hierarchy fixture builds under the temporary data root."""
 

@@ -40,11 +40,10 @@ from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from tests.conftest import StubSSHTransport
     from sollertia_shared_assets import ProjectData, SessionData
 
     from sollertia_forgery.server import Server
-
-    from .conftest import StubSSHTransport
 
 SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
 """The project directory every remote-host test addresses on the stubbed compute server."""

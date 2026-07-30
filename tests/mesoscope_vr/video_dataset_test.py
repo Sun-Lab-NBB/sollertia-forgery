@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 import pytest
+from tests.mesoscope_vr.video_tracking_test import _build_points, _frame_specification
 
-from tests.video_tracking_test import _build_points, _frame_specification
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import (
     _BODY_CAMERA_NAME,
