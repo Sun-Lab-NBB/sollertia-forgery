@@ -4,20 +4,22 @@ project-level projection of those plans.
 
 from __future__ import annotations
 
-from time import perf_counter
 from typing import Any
 from pathlib import Path
 
 import polars as pl
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 
 from .responses import (
     ok_response,
     page_fields,
-    count_values,
     project_item,
     resolve_page,
     error_response,
+    reject_unknown,
+    frame_breakdown,
     resolve_detail_limit,
+    resolve_elapsed_seconds,
 )
 from .mcp_instance import mcp
 from ..orchestration import (
@@ -35,7 +37,7 @@ from .host_resolution import (
 )
 
 _PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name", "memory_modeled")
-"""The projection columns a caller may filter by, and the axes its breakdown counts."""
+"""The axes a plan breakdown counts. Every one but ``memory_modeled`` is also a column a caller may filter by."""
 
 _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "unit_kind",
@@ -67,16 +69,16 @@ def plan_session_jobs_tool(
     A session that cannot be planned is reported in its own entry and does not abort the others.
 
     Args:
-        session_paths: The session root directories to plan.
+        session_paths: The session root directories to plan, which are paths ON THE SERVER for ``remote``.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds. Leave False unless a
             deliberate retune should be adopted, since a submission may already have been sized against the recorded
             figures.
 
     Returns:
-        A response dict with ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a ``units``
-        list carrying each session's ``session_path``, ``unit_name``, ``plan_path``, ``job_count``, and
-        ``summed_memory_mb``, or an ``error``.
+        A response dict with ``host``, ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a
+        ``units`` list carrying each session's ``unit_path``, ``unit_name``, ``job_count``, and ``summed_memory_mb``,
+        or its ``unit_path`` and the ``error`` that stopped it.
     """
     return _plan_units(unit_paths=session_paths, unit_kind=SESSION_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -96,9 +98,9 @@ def plan_dataset_jobs_tool(
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds.
 
     Returns:
-        A response dict with ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a ``units``
-        list carrying each dataset's ``dataset_path``, ``unit_name``, ``plan_path``, ``job_count``, and
-        ``summed_memory_mb``, or an ``error``.
+        A response dict with ``host``, ``total_units``, ``total_jobs``, the ``elapsed_seconds`` planning took, and a
+        ``units`` list carrying each dataset's ``unit_path``, ``unit_name``, ``job_count``, and ``summed_memory_mb``,
+        or its ``unit_path`` and the ``error`` that stopped it.
     """
     return _plan_units(unit_paths=dataset_paths, unit_kind=DATASET_UNIT, host=host, regenerate_plan=regenerate_plan)
 
@@ -119,16 +121,17 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Returns:
-        A response dict with ``project_path``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
-        ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-pipeline ``pipeline_totals``, and the
-        ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
+        A response dict with ``project_path``, ``host``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
+        ``largest_job_memory_mb``, ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-unit-kind and
+        per-pipeline ``pipeline_totals``, and the ``elapsed_seconds`` the projection took. Returns an error when the
+        project cannot be read.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
 
     directory = Path(project_path)
     plan_path = project_plan_path(project_directory=directory)
-    start = perf_counter()
+    timer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
     try:
         with resolve_execution_host(host=host) as execution_host:
             # Naming no unit leaves the projection alone to run, since this reprojects what the units already planned.
@@ -136,14 +139,13 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
             rows = execution_host.read_rows(path=plan_path)
     except Exception as exception:
         return error_response(message=f"Unable to project the plans under '{project_path}'. {exception}")
-    elapsed = perf_counter() - start
 
     frame = pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False)
     return ok_response(
         project_path=str(directory),
         host=host,
         plan_path=str(plan_path),
-        elapsed_seconds=round(elapsed, 3),
+        elapsed_seconds=resolve_elapsed_seconds(timer=timer),
         **_plan_totals(frame=frame),
         pipeline_totals=_plan_breakdown(frame=frame),
     )
@@ -217,7 +219,7 @@ def read_project_plan_tool(
         project_path=str(directory),
         plan_path=str(plan_path),
         **_plan_totals(frame=frame),
-        breakdown={axis: count_values(values=frame[axis].to_list()) for axis in _PLAN_AXES if axis in frame.columns},
+        breakdown=frame_breakdown(frame=frame, axes=_PLAN_AXES),
     )
 
     singles: dict[str, str | None] = {"unit_kind": unit_kind, "animal": animal, "dataset": dataset}
@@ -229,14 +231,14 @@ def read_project_plan_tool(
     for column, value in singles.items():
         if value is None:
             continue
-        rejection = _reject_unknown(frame=frame, column=column, values=[value])
+        rejection = reject_unknown(frame=frame, column=column, values=[value], subject="planned job")
         if rejection is not None:
             return rejection
         matched = matched.filter(pl.col(column) == value)
     for column, values in multiples.items():
         if values is None:
             continue
-        rejection = _reject_unknown(frame=frame, column=column, values=values)
+        rejection = reject_unknown(frame=frame, column=column, values=values, subject="planned job")
         if rejection is not None:
             return rejection
         matched = matched.filter(pl.col(column).is_in(values))
@@ -251,32 +253,12 @@ def read_project_plan_tool(
     return response
 
 
-def _reject_unknown(frame: pl.DataFrame, column: str, values: list[str]) -> dict[str, Any] | None:
-    """Builds the error response for a filter naming a value the projection does not hold.
-
-    Args:
-        frame: The whole projection.
-        column: The column being filtered.
-        values: The values the caller named.
-
-    Returns:
-        The error response, or None when every named value is present.
-    """
-    if column not in frame.columns:
-        return error_response(message=f"Unknown column '{column}'. Available: {sorted(frame.columns)}.")
-    available = sorted({str(entry) for entry in frame[column].to_list() if entry is not None})
-    unknown = sorted({value for value in values if value not in available})
-    if unknown:
-        return error_response(message=f"No planned job has '{column}' in {unknown}. Available: {available}.")
-    return None
-
-
 def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_plan: bool) -> dict[str, Any]:
     """Plans every unit of one kind on the named host, reporting each independently.
 
     Args:
         unit_paths: The unit root directories to plan.
-        unit_kind: Whether the units are sessions or datasets.
+        unit_kind: The kind of processing unit the paths name, either ``session`` or ``dataset``.
         host: Where the data sits, either ``local`` or ``remote``.
         regenerate_plan: Determines whether to re-estimate the figures a cache already holds.
 
@@ -295,7 +277,7 @@ def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_
     except ValueError as exception:
         return error_response(message=str(exception))
 
-    start = perf_counter()
+    timer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
     try:
         with resolve_execution_host(host=host) as execution_host:
             planned = execution_host.plan(
@@ -308,7 +290,7 @@ def _plan_units(unit_paths: list[str], unit_kind: str, host: str, *, regenerate_
         host=host,
         total_units=len(planned),
         total_jobs=sum(int(entry["job_count"]) for entry in planned),
-        elapsed_seconds=round(perf_counter() - start, 3),
+        elapsed_seconds=resolve_elapsed_seconds(timer=timer),
         units=planned,
     )
 
@@ -341,14 +323,14 @@ def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
 
 
 def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
-    """Groups a plan projection by pipeline, which is the grain at which a caller admits work.
+    """Groups a plan projection by unit kind and pipeline, which is the grain at which a caller admits work.
 
     Args:
         frame: The whole plan projection.
 
     Returns:
-        A list of per-pipeline entries, each carrying the pipeline, its job count, its summed memory, and its widest
-        core allocation, ordered by pipeline.
+        A list of entries, each carrying the unit kind, the pipeline, its job count, its summed memory, and its widest
+        core allocation, ordered by unit kind and then by pipeline.
     """
     if frame.height == 0:
         return []

@@ -49,9 +49,13 @@ other job."""
 _RAW_CAMERA_LOG_PART_COUNT: int = 2
 """The expected number of underscore-delimited components in a ``{source_id}_log`` archive stem."""
 
+_PARSED_CAMERA_PREFIX: str = "camera_"
+"""The prefix the extraction binding puts on each parsed timestamp feather it writes, ahead of the camera's numeric
+source ID."""
+
 _CAMERA_TIMESTAMP_SUFFIX: str = "_timestamps.feather"
 """The suffix appended to each camera's manifest name to form its canonical timestamp feather filename within the
-video data directory (e.g., the ``left_camera`` source produces ``left_camera_timestamps.feather``)."""
+video data directory (for example, the ``left_camera`` source produces ``left_camera_timestamps.feather``)."""
 
 
 def run_video_processing_pipeline(
@@ -68,12 +72,12 @@ def run_video_processing_pipeline(
     """Discovers, validates, and executes the camera video-processing pipeline for the target session.
 
     Notes:
-        The pipeline runs four jobs sharing one processing tracker, grouped under three flags. The ``timestamp`` flag
-        runs one parse job per camera whose ``{source_id}_log.npz`` archive is on disk, each extracting that camera's
-        frame timestamps, then the single rename job that republishes every parsed feather under its canonical manifest
-        name. The ``track`` flag runs the single job that applies the acquisition system's donated tracking function to
-        the session's pose predictions, which no-ops when none are present. The ``energy`` flag runs one job
-        per camera, measuring its recording into a motion-energy feather, and no-ops when the recording is absent.
+        The pipeline runs four kinds of job sharing one processing tracker, grouped under three flags. The ``timestamp``
+        flag runs one parse job per camera whose ``{source_id}_log.npz`` archive is on disk, each extracting that
+        camera's frame timestamps, then the single rename job that republishes every parsed feather under its canonical
+        manifest name. The ``track`` flag runs the single job that applies the acquisition system's donated tracking
+        function to the session's pose predictions, which no-ops when none are present. The ``energy`` flag runs one
+        job per camera, measuring its recording into a motion-energy feather, and no-ops when the recording is absent.
 
         The camera manifest defines the full job universe, one parse and one energy job per registered camera plus the
         single rename and tracking jobs, so tracker alignment does not depend on which archives are on disk.
@@ -106,7 +110,9 @@ def run_video_processing_pipeline(
 
     Raises:
         ValueError: If the camera manifest registers no cameras, if no camera log archives are discovered for the
-            timestamp stage, if target_camera is not a discovered camera, or if job_id does not match an available job.
+            timestamp stage, or if job_id does not match an available job. Also raised when target_camera has no
+            discovered log archive while the timestamp stage runs, or is not registered in the camera manifest while
+            the motion-energy stage runs.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
     """
@@ -157,18 +163,18 @@ def run_video_processing_pipeline(
     if job_id is not None:
         # Remote mode: registers the requested job alone while detecting foreign entries against the full universe, so
         # the invocation neither wipes its sibling jobs nor registers a job this session cannot run.
-        id_to_job = {
+        jobs_by_identifier = {
             ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
             for job_name, specifier in universe
         }
-        if job_id not in id_to_job:
+        if job_id not in jobs_by_identifier:
             message = (
                 f"Unable to execute the requested job with ID '{job_id}'. The identifier does not match any camera "
-                f"processing job available for this session. Valid job IDs: {sorted(id_to_job.keys())}."
+                f"processing job available for this session. Valid job IDs: {sorted(jobs_by_identifier.keys())}."
             )
             console.error(message=message, error=ValueError)
 
-        job_name, specifier = id_to_job[job_id]
+        job_name, specifier = jobs_by_identifier[job_id]
         tracker.align_jobs(jobs=[(job_name, specifier)], universe=universe)
 
         if job_name == TIMESTAMP_JOB_NAME and int(specifier) not in log_paths:
@@ -390,13 +396,14 @@ def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Each manifest source associates a source ID with a colloquial name (e.g., 'left_camera').
     manifest = CameraManifest.from_yaml(file_path=manifest_path)
     return {source.id: source.name for source in manifest.sources}
 
 
 def _find_camera_logs(data_directory: Path) -> list[Path]:
-    """Discovers raw VideoSystem camera log archives inside the canonical raw behavior data directory.
+    """Discovers every raw DataLogger log archive inside the canonical raw behavior data directory.
+
+    The caller narrows the discovered archives to the cameras the acquisition-time manifest registers.
 
     Args:
         data_directory: The path to the session's raw behavior data directory
@@ -424,7 +431,7 @@ def _extract_camera_source_id(log_path: Path) -> int:
     Raises:
         ValueError: If the filename does not follow the expected naming convention.
     """
-    stem = log_path.stem  # e.g., "51_log"
+    stem = log_path.stem
     parts = stem.split("_")
 
     if len(parts) != _RAW_CAMERA_LOG_PART_COUNT or parts[1] != "log" or not parts[0].isdigit():
@@ -469,8 +476,8 @@ def _dispatch_job(
         display_progress: Determines whether the extraction binding displays a progress bar and whether the energy
             job reports per-chunk completion.
         executor: An optional process pool shared across parse and energy jobs so neither spawns its own. The renaming
-            and tracking jobs ignore it. When None, the job creates and tears down its own pool, except that a
-            motion-energy job whose recording plans a single decode chunk runs in-process without one.
+            and tracking jobs ignore it. When None, the job creates and tears down its own pool. A motion-energy job
+            whose recording plans a single decode chunk runs in-process either way and touches no pool.
 
     Raises:
         ValueError: If the job name does not identify a pipeline job.
@@ -480,8 +487,8 @@ def _dispatch_job(
     # The extraction binding announces and runs the timestamp job itself. The jobs this module owns are announced here
     # in the same format, so every job kind reports its start uniformly.
     if job_name != TIMESTAMP_JOB_NAME:
-        source = f" for source '{specifier}'" if specifier else ""
-        console.echo(message=f"Running '{job_name}' job{source} (ID: {job_id})...", level=LogLevel.INFO)
+        source_fragment = f" for source '{specifier}'" if specifier else ""
+        console.echo(message=f"Running '{job_name}' job{source_fragment} (ID: {job_id})...", level=LogLevel.INFO)
 
     if job_name == TIMESTAMP_JOB_NAME:
         # The ataraxis-video-system binding extracts the timestamps, writes the
@@ -498,10 +505,20 @@ def _dispatch_job(
             executor=executor,
         )
         # The binding writes one timestamp per camera frame, so the feather's row count is the extracted frame count.
-        frame_count = pl.read_ipc(video_data_directory.joinpath(f"camera_{specifier}_timestamps.feather")).height
+        frame_count = pl.read_ipc(
+            source=video_data_directory.joinpath(f"{_PARSED_CAMERA_PREFIX}{specifier}{_CAMERA_TIMESTAMP_SUFFIX}"),
+            memory_map=True,
+        ).height
         console.echo(
             message=f"Extracted {frame_count} frame timestamp(s) for source '{specifier}'.",
             level=LogLevel.SUCCESS,
+        )
+    elif job_name == RENAME_JOB_NAME:
+        _link_parsed_timestamps(
+            video_data_directory=video_data_directory,
+            camera_names=camera_names,
+            job_id=job_id,
+            tracker=tracker,
         )
     elif job_name == TRACKING_JOB_NAME:
         _run_pose_tracking(
@@ -521,13 +538,6 @@ def _dispatch_job(
             display_progress=display_progress,
             executor=executor,
         )
-    elif job_name == RENAME_JOB_NAME:
-        _link_parsed_timestamps(
-            video_data_directory=video_data_directory,
-            camera_names=camera_names,
-            job_id=job_id,
-            tracker=tracker,
-        )
     else:
         # Every job name is matched explicitly, so an unrecognized name surfaces here as a failure.
         message = (
@@ -535,85 +545,6 @@ def _dispatch_job(
             f"pipeline job."
         )
         console.error(message=message, error=ValueError)
-
-
-def _run_pose_tracking(
-    session: SessionData,
-    video_data_directory: Path,
-    job_id: str,
-    tracker: ProcessingTracker,
-) -> None:
-    """Runs the acquisition system's donated video-tracking function over the session's pose predictions, as one job.
-
-    The system's donated tracking function locates its externally-produced pose predictions, parses them, and writes
-    its tracking outputs into the processed video-data directory. The predictions are produced upstream and travel with
-    the session's raw data, so this job only reads them. The function no-ops when no prediction file is present, so
-    this job is safe to run on every session.
-
-    Args:
-        session: The loaded session whose acquisition system selects the tracking function.
-        video_data_directory: The processed video-data directory the tracking outputs are written into.
-        job_id: The unique hexadecimal identifier for the tracking job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
-    """
-    with tracked_job(tracker=tracker, job_id=job_id):
-        resolve_video_tracking(session.acquisition_system)(session=session, output_directory=video_data_directory)
-
-
-def _run_motion_energy(
-    session: SessionData,
-    camera_name: str,
-    video_data_directory: Path,
-    job_id: str,
-    tracker: ProcessingTracker,
-    *,
-    workers: int,
-    display_progress: bool,
-    executor: ProcessPoolExecutor | None,
-) -> None:
-    """Measures one camera's recording into a per-frame motion-energy feather, as one tracked job.
-
-    Locates the camera's recording in the session's raw camera-data directory and writes its motion energy into the
-    processed video-data directory. A camera whose recording is absent is skipped, so a rig that ran one of its
-    cameras leaves the shared video tracker clear on the camera it did not run.
-
-    Args:
-        session: The loaded session whose raw camera-data directory supplies the recording.
-        camera_name: The colloquial manifest name of the camera to measure, which names both its recording and its
-            output feather.
-        video_data_directory: The processed video-data directory the motion-energy feather is written into.
-        job_id: The unique hexadecimal identifier for this camera's energy job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
-        workers: The number of worker processes to decode the recording with.
-        display_progress: Determines whether per-chunk completion is reported as the recording is measured.
-        executor: An optional process pool to decode the recording's chunks in. When None, a pool is created and torn
-            down for this recording, unless it plans a single decode chunk, which runs in-process with no pool.
-    """
-    # Resolved inside the tracked job so that a missing recording and a decode failure alike are recorded against a
-    # job that actually started, rather than leaving the tracker unable to explain why the job never ran.
-    with tracked_job(tracker=tracker, job_id=job_id):
-        video_path = resolve_camera_video(
-            camera_data_directory=session.raw_data.camera_data_path,
-            session_name=session.session_name,
-            camera_name=camera_name,
-        )
-        if video_path is None:
-            console.echo(
-                message=(
-                    f"No '{camera_name}' recording was found in the raw camera_data directory of session "
-                    f"'{session.session_name}'. Skipping its motion-energy measurement."
-                ),
-                level=LogLevel.INFO,
-            )
-            return
-
-        compute_camera_motion_energy(
-            video_path=video_path,
-            output_path=video_data_directory.joinpath(f"{camera_name}{MOTION_ENERGY_SUFFIX}"),
-            workers=workers,
-            executor=executor,
-            display_progress=display_progress,
-        )
 
 
 def _link_parsed_timestamps(
@@ -644,7 +575,7 @@ def _link_parsed_timestamps(
         for source_id, camera_name in camera_names.items():
             # The parsing job (ataraxis-video-system extraction binding) writes each camera's feather under this
             # name into the video data directory. The rename job then hardlinks it under its canonical name.
-            parsed_path = video_data_directory.joinpath(f"camera_{source_id}_timestamps.feather")
+            parsed_path = video_data_directory.joinpath(f"{_PARSED_CAMERA_PREFIX}{source_id}{_CAMERA_TIMESTAMP_SUFFIX}")
             if not parsed_path.is_file():
                 continue
             canonical_path = video_data_directory.joinpath(f"{camera_name}{_CAMERA_TIMESTAMP_SUFFIX}")
@@ -656,12 +587,94 @@ def _link_parsed_timestamps(
             # Replaces any stale link so a re-run re-points the canonical name at the freshly parsed feather.
             canonical_path.unlink(missing_ok=True)
             try:
-                canonical_path.hardlink_to(parsed_path)
+                canonical_path.hardlink_to(target=parsed_path)
             except OSError:
-                # Hardlinking can fail in some environments. Fall back to a copy so the canonical name is published.
+                # Hardlinking can fail in some environments. Falls back to a copy so the canonical name is published.
                 shutil.copy2(src=parsed_path, dst=canonical_path)
             published += 1
         console.echo(
             message=f"Renamed {published} parsed camera timestamp feather(s) to their canonical names.",
             level=LogLevel.SUCCESS,
+        )
+
+
+def _run_pose_tracking(
+    session: SessionData,
+    video_data_directory: Path,
+    job_id: str,
+    tracker: ProcessingTracker,
+) -> None:
+    """Runs the acquisition system's donated video-tracking function over the session's pose predictions, as one job.
+
+    The system's donated tracking function locates its externally-produced pose predictions, parses them, and writes
+    its tracking outputs into the processed video-data directory. The predictions are produced upstream and travel with
+    the session's raw data, so this job only reads them. The function no-ops when no prediction file is present, so
+    this job is safe to run on every session.
+
+    Args:
+        session: The loaded session whose acquisition system selects the tracking function.
+        video_data_directory: The processed video-data directory the tracking outputs are written into.
+        job_id: The unique hexadecimal identifier for the tracking job.
+        tracker: The video ProcessingTracker instance for recording job state transitions.
+    """
+    with tracked_job(tracker=tracker, job_id=job_id):
+        resolve_video_tracking(system=session.acquisition_system)(
+            session=session, output_directory=video_data_directory
+        )
+
+
+def _run_motion_energy(
+    session: SessionData,
+    camera_name: str,
+    video_data_directory: Path,
+    job_id: str,
+    tracker: ProcessingTracker,
+    *,
+    workers: int,
+    display_progress: bool,
+    executor: ProcessPoolExecutor | None,
+) -> None:
+    """Measures one camera's recording into a per-frame motion-energy feather, as one tracked job.
+
+    Locates the camera's recording in the session's raw camera-data directory and writes its motion energy into the
+    processed video-data directory. A camera whose recording is absent is skipped, so a rig that ran one of its
+    cameras leaves the shared video tracker clear on the camera it did not run.
+
+    Args:
+        session: The loaded session whose raw camera-data directory supplies the recording.
+        camera_name: The colloquial manifest name of the camera to measure, which names both its recording and its
+            output feather.
+        video_data_directory: The processed video-data directory the motion-energy feather is written into.
+        job_id: The unique hexadecimal identifier for this camera's energy job.
+        tracker: The video ProcessingTracker instance for recording job state transitions.
+        workers: The number of worker processes to decode the recording with.
+        display_progress: Determines whether per-chunk completion is reported as the recording is measured.
+        executor: An optional process pool to decode the recording's chunks in. When None, a pool is created and torn
+            down for this recording. A recording that plans a single decode chunk runs in-process either way and
+            touches no pool.
+    """
+    # Resolved inside the tracked job so that a missing recording and a decode failure alike are recorded against a
+    # job that actually started, rather than leaving the tracker unable to explain why the job never ran.
+    with tracked_job(tracker=tracker, job_id=job_id):
+        video_path = resolve_camera_video(
+            camera_data_directory=session.raw_data.camera_data_path,
+            session_name=session.session_name,
+            camera_name=camera_name,
+        )
+        if video_path is None:
+            console.echo(
+                message=(
+                    f"No '{camera_name}' recording was found in the raw camera_data directory of session "
+                    f"'{session.session_name}'. Skipping its motion-energy measurement."
+                ),
+                level=LogLevel.INFO,
+            )
+            return
+
+        compute_camera_motion_energy(
+            video_path=video_path,
+            output_path=video_data_directory.joinpath(f"{camera_name}{MOTION_ENERGY_SUFFIX}"),
+            workers=workers,
+            executor=executor,
+            display_progress=display_progress,
         )

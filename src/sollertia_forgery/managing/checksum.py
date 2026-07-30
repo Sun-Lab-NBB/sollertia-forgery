@@ -61,12 +61,14 @@ def run_checksum_processing_pipeline(
     Raises:
         FileNotFoundError: If the source path does not contain a valid session data hierarchy, or if verification is
             requested for a session that stores no checksum value.
+        ValueError: If the session's raw_data directory holds no file the checksum covers, which leaves the
+            pipeline's job unregistered on the tracker.
     """
     session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
-    # universe resets foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
+    # universe discards foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
     tracker.align_jobs(jobs=possible, universe=universe)
 
@@ -90,11 +92,10 @@ def run_checksum_processing_pipeline(
                 level=LogLevel.INFO,
             )
 
-        # Resolves the process count and calculates the checksum for the raw_data directory. If the
-        # 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check below
-        # succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated value.
-        # Hashing fans one file per worker across a pool of its own, and each of those workers sizes its library
-        # thread pools while importing, so the caps are placed here rather than inside them.
+        # If the 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check
+        # below succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated
+        # value. Hashing fans one file per worker across a pool of its own, and each of those workers sizes its
+        # library thread pools while importing, so the caps are placed here rather than inside them.
         resolved_workers = resolve_worker_count(requested_workers=workers)
         with pinned_worker_threads():
             calculated_checksum = calculate_directory_checksum(
@@ -105,11 +106,10 @@ def run_checksum_processing_pipeline(
                 excluded_files=_CHECKSUM_EXCLUDED_FILES,
             )
 
-        # Loads the checksum stored inside the ax_checksum.txt file.
         with checksum_path.open() as file:
             stored_checksum = file.read().strip()
 
-        # If the two checksums do not match, this indicates data corruption.
+        # A mismatch marks the session's raw data as corrupted, which the pipeline records as a job failure.
         if stored_checksum != calculated_checksum:
             tracker.fail_job(
                 job_id=job_id,
@@ -131,9 +131,8 @@ def run_checksum_processing_pipeline(
                     level=LogLevel.SUCCESS,
                 )
 
-    except Exception as error:
-        # Marks the job as failed and re-raises any unexpected errors.
-        tracker.fail_job(job_id=job_id, error_message=f"{type(error).__name__}: {error}")
+    except Exception as exception:
+        tracker.fail_job(job_id=job_id, error_message=f"{type(exception).__name__}: {exception}")
         raise
 
 
@@ -144,8 +143,8 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
         The checksum pipeline produces exactly one job, so the universe is always the single
         ``(CHECKSUM_JOB_NAME, session_name)`` pair. Both pipeline modes share that job, because a session carries one
         integrity state whether the run establishes it or confirms it. That job is possible once the session holds
-        raw data the checksum covers, which excludes the checksum file, the tracker, and the tracker lock. This is
-        pure discovery that reads no file contents and mutates nothing.
+        raw data the checksum covers, which excludes the checksum file, the tracker, and the tracker lock. Discovery
+        loads the session marker and walks the raw data directory, leaving the session as it found it.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.

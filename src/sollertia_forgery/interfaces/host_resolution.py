@@ -29,10 +29,7 @@ def unsupported_host_message(host: str) -> str:
     """Builds the error message returned when a caller names a host the tools do not support.
 
     Args:
-        host: The name the caller supplied.
-
-    Returns:
-        The error message.
+        host: The unrecognized host name to report back.
     """
     return f"Unsupported host '{host}'. Available: {', '.join(sorted(HOST_LABELS))}."
 
@@ -58,16 +55,16 @@ def resolve_readable_project(project_path: str, host: str) -> Path:
     """Resolves the directory a read tool opens a project's artifacts from.
 
     Notes:
-        A local project is read where it sits. A remote project is mirrored onto this machine first and read from the
-        mirror, which is what lets one reader serve both hosts without knowing which it was given. The mirror reproduces
-        the project directory by name, so every artifact keeps the filename its writer derived from the project.
-
-        Mirroring rewrites nothing on the server, so a read reports what the project currently records rather than
-        regenerating it. Regeneration is a deliberate act, which ``generate_project_manifest_tool`` and
-        ``generate_dataset_state_tool`` perform and which a batch's closure performs on its own.
+        A remote project is mirrored onto this machine and read from the mirror, which is what lets one reader serve
+        both hosts. The mirror keeps the project directory's name, so every artifact keeps the filename its writer
+        derived from the project. Mirroring leaves the server's artifacts as they stand, so regeneration stays a
+        deliberate act performed by ``generate_project_manifest_tool``, ``generate_dataset_state_tool``, and a
+        batch's closure.
 
     Args:
-        project_path: The path to the project's root directory, on this machine or on the server.
+        project_path: The path to the project's root directory. A local read opens this path as given. A remote read
+            takes the project name from the path's final component and resolves the project under the server's
+            configured data root, so the directories above that component are ignored.
         host: Either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Returns:

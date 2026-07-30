@@ -25,10 +25,9 @@ PROJECT_JOBS_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType]
 """The column layout of the project job artifact, one row per tracked job.
 
 Notes:
-    Carries every ``ataraxis_data_structures.JobState`` field alongside the subject columns naming which session
-    recorded it, so a reader joins it against the manifest on the animal and session pair.
-
-    The layout mirrors the dataset state artifact, so a project's two job-grained artifacts read the same way.
+    Carries every ``ataraxis_data_structures.JobState`` field alongside its registry ``job_id`` and the ``pipeline``
+    that produced it. The subject columns name the session the job belongs to, so a reader joins the artifact against
+    the manifest on the animal and session pair.
 """
 
 

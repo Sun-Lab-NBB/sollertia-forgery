@@ -103,11 +103,13 @@ class _ForgingAssemblyAsset:
 
     assembler: ForgingAssembler
     """The picklable, module-level worker that assembles one session's ``data.feather``. The agnostic forging
-    pipeline invokes it once per session."""
+    pipeline invokes it once per session.
+    """
     column_descriptions: dict[str, str]
     """The mapping from each column name the assembler can emit into ``data.feather`` to its human-readable
     description. The agnostic forging pipeline bakes it into the dataset's ``data_descriptions.feather`` once, at
-    dataset-definition time."""
+    dataset-definition time.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,11 +118,13 @@ class _CindraConfigurationAsset:
 
     resolve_single_recording: Callable[[SessionData], SingleRecordingConfiguration]
     """The resolver that returns the system's single-recording cindra configuration for the session, or raises when
-    it cannot resolve one. The agnostic two-photon pipeline calls it for the session it processes."""
+    it cannot resolve one. The agnostic two-photon pipeline calls it for the session it processes.
+    """
     resolve_multi_recording: Callable[[SessionData], MultiRecordingConfiguration | None]
     """The resolver that returns the system's multi-recording cindra configuration for the session, or None when the
     system performs no cross-recording tracking for it. The agnostic forging pipeline calls it once per animal in the
-    dataset and skips the animals for which it returns None."""
+    dataset and skips the animals for which it returns None.
+    """
 
 
 _MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], MicrocontrollerParser] = {
@@ -135,21 +139,24 @@ _MICROCONTROLLER_PARSER_REGISTRY: dict[tuple[AcquisitionSystems, int, int], Micr
 }
 """Maps each ``(acquisition system, module_type, module_id)`` triplet to the module-level parser an
 acquisition-system package implements for that hardware module. A module is parseable for a system exactly when it
-appears here."""
+appears here.
+"""
 
 _MICROCONTROLLER_EVENT_CODE_REGISTRY: dict[AcquisitionSystems, Callable[[], dict[tuple[int, int], tuple[int, ...]]]] = {
     AcquisitionSystems.MESOSCOPE_VR: get_module_event_codes,
 }
 """Maps each acquisition system to the module-level accessor returning its ``(module_type, module_id) -> event
 codes`` mapping for every module the system parses. The agnostic microcontroller pipeline derives each controller's
-extraction filter from this mapping, so a system's event codes live next to the parsers that read them."""
+extraction filter from this mapping, so a system's event codes live next to the parsers that read them.
+"""
 
 _MICROCONTROLLER_ELIGIBILITY_REGISTRY: dict[AcquisitionSystems, Callable[[SessionData], set[tuple[int, int]]]] = {
     AcquisitionSystems.MESOSCOPE_VR: get_eligible_modules,
 }
 """Maps each acquisition system to the module-level accessor returning the hardware modules a given session
 configured for use. The agnostic microcontroller pipeline narrows each controller's extraction filter to these
-modules, so a system's eligibility rules live next to the parsers that apply them."""
+modules, so a system's eligibility rules live next to the parsers that apply them.
+"""
 
 _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
     AcquisitionSystems.MESOSCOPE_VR: _ForgingAssemblyAsset(
@@ -158,9 +165,10 @@ _FORGING_ASSEMBLY_REGISTRY: dict[AcquisitionSystems, _ForgingAssemblyAsset] = {
     ),
 }
 """Maps each acquisition system to the ``_ForgingAssemblyAsset`` bundling its per-session assembly worker with its
-column-description mapping. Dataset definition, the cindra multi-day stage, in-pipeline job and tracker preparation,
-the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic ``forging``
-package."""
+column-description mapping. Dataset definition, the cindra multi-recording stages, in-pipeline job and tracker
+preparation, the per-dataset column-description binding, and shared-asset re-export are owned by the agnostic
+``forging`` package.
+"""
 
 _FORGING_ADMISSION_REGISTRY: dict[AcquisitionSystems, dict[SessionTypes, frozenset[ProcessingPipelines]]] = {
     AcquisitionSystems.MESOSCOPE_VR: MESOSCOPE_ADMISSION_PIPELINES,
@@ -168,7 +176,8 @@ _FORGING_ADMISSION_REGISTRY: dict[AcquisitionSystems, dict[SessionTypes, frozens
 """Maps each acquisition system to the pipelines each of its session types must have completed before a session may
 join a forged dataset. Every pipeline resolves its own job universe from the acquisition manifests, so a completed
 tracker already accounts for every source a session recorded, which is why a system declares pipelines rather than
-source counts. A session type a system does not list joins no dataset."""
+source counts. A session type a system does not list joins no dataset.
+"""
 
 _CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAsset] = {
     AcquisitionSystems.MESOSCOPE_VR: _CindraConfigurationAsset(
@@ -178,14 +187,16 @@ _CINDRA_CONFIGURATION_REGISTRY: dict[AcquisitionSystems, _CindraConfigurationAss
 }
 """Maps each acquisition system to the ``_CindraConfigurationAsset`` bundling its single- and multi-recording
 configuration resolvers. The agnostic two-photon and forging pipelines obtain a runnable cindra configuration through
-these resolvers, so each system decides for itself how its configuration is derived."""
+these resolvers, so each system decides for itself how its configuration is derived.
+"""
 
 _RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, RuntimeParser]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
 }
 """Maps each acquisition system to its runtime DataLogger source id, which locates the ``{source_id}_log.npz``
 archive, paired with the module-level parser that interprets the decoded runtime payloads into the system's behavior
-feathers."""
+feathers.
+"""
 
 _TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, TwoPhotonDataLocator] = {
     AcquisitionSystems.MESOSCOPE_VR: locate_two_photon_data,
@@ -193,7 +204,8 @@ _TWO_PHOTON_DATA_REGISTRY: dict[AcquisitionSystems, TwoPhotonDataLocator] = {
 """Maps each acquisition system to the module-level locator that resolves the loaded session's raw two-photon
 (calcium-imaging) directory, which the agnostic two-photon worker hands to the cindra single-recording pipeline as
 its input. Every system donates a locator, and a system that produces no two-photon data donates one returning the
-path it would use."""
+path it would use.
+"""
 
 _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, VideoTracker] = {
     AcquisitionSystems.MESOSCOPE_VR: process_mesoscope_video_tracking,
@@ -201,7 +213,8 @@ _VIDEO_TRACKING_REGISTRY: dict[AcquisitionSystems, VideoTracker] = {
 """Maps each acquisition system to the module-level function that performs all of that system's video tracking. The
 function locates its own externally-produced DeepLabCut ``.h5`` predictions, parses the bodyparts it targets, and
 writes its outputs into the session's processed video-data directory. The agnostic video pipeline runs it once per
-session, and a system donates a no-op function when it performs no video tracking."""
+session, and a system donates a no-op function when it performs no video tracking.
+"""
 
 
 def resolve_forging_assembly_worker(system: str | AcquisitionSystems) -> ForgingAssembler:
@@ -318,7 +331,8 @@ def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dic
 
 
 def resolve_eligible_microcontroller_modules(
-    system: str | AcquisitionSystems, session: SessionData
+    system: str | AcquisitionSystems,
+    session: SessionData,
 ) -> set[tuple[int, int]]:
     """Resolves the microcontroller modules the target session configured for use.
 
@@ -416,16 +430,16 @@ def resolve_video_tracking(system: str | AcquisitionSystems) -> VideoTracker:
 
 
 def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
-    """Validates and normalizes an acquisition-system identifier to an AcquisitionSystems member.
+    """Validates and normalizes an acquisition-system identifier to an ``AcquisitionSystems`` member.
 
     Args:
         system: The acquisition-system identifier to validate and normalize.
 
     Returns:
-        The corresponding AcquisitionSystems member.
+        The corresponding ``AcquisitionSystems`` member.
 
     Raises:
-        ValueError: If the identifier is not a valid AcquisitionSystems member.
+        ValueError: If the identifier is not a valid ``AcquisitionSystems`` member.
     """
     if system not in AcquisitionSystems:
         valid_system_values = ", ".join(member.value for member in AcquisitionSystems)
@@ -441,11 +455,10 @@ def _resolve_system(system: str | AcquisitionSystems) -> AcquisitionSystems:
 def _assert_registry_coverage() -> None:
     """Verifies at import time that every acquisition system has registered every donated asset.
 
-    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly registry, the
-    runtime-parser registry, the two-photon-data registry, the video-tracking registry, the microcontroller
-    event-code registry, the cindra configuration registry, and the forging-admission registry, and registers at least
-    one microcontroller module parser. Additionally, confirms that every parseable microcontroller module declares the
-    event codes its parser reads.
+    Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, runtime-parser,
+    two-photon-data, video-tracking, microcontroller event-code, microcontroller eligibility, cindra configuration,
+    and forging-admission registries. Confirms that every member registers at least one microcontroller module parser,
+    and that every parseable microcontroller module declares the event codes its parser reads.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable microcontroller
@@ -461,6 +474,7 @@ def _assert_registry_coverage() -> None:
         ("_TWO_PHOTON_DATA_REGISTRY", frozenset(_TWO_PHOTON_DATA_REGISTRY)),
         ("_VIDEO_TRACKING_REGISTRY", frozenset(_VIDEO_TRACKING_REGISTRY)),
         ("_MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(_MICROCONTROLLER_EVENT_CODE_REGISTRY)),
+        ("_MICROCONTROLLER_ELIGIBILITY_REGISTRY", frozenset(_MICROCONTROLLER_ELIGIBILITY_REGISTRY)),
         ("_CINDRA_CONFIGURATION_REGISTRY", frozenset(_CINDRA_CONFIGURATION_REGISTRY)),
         ("_FORGING_ADMISSION_REGISTRY", frozenset(_FORGING_ADMISSION_REGISTRY)),
         ("_MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),

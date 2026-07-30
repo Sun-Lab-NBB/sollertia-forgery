@@ -10,12 +10,18 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Sequence
 
+_SECONDS_PER_DAY: int = 86400
+"""The divisor extracting the day field of a SLURM wall-time string."""
+
+_SECONDS_PER_HOUR: int = 3600
+"""The divisor extracting the hour field of a SLURM wall-time string."""
+
+_SECONDS_PER_MINUTE: int = 60
+"""The divisor extracting the minute field of a SLURM wall-time string."""
+
 
 class Job:
     """Defines a non-interactive SLURM-managed job to be executed on the remote compute server.
-
-    This class provides the API for constructing and managing the non-interactive jobs running on remote compute
-    servers.
 
     Notes:
         Instances of this class should be submitted to an initialized Server instance's submit_job() method to be
@@ -31,10 +37,11 @@ class Job:
             the job to the 'stdout' pipe.
         error_log: The absolute path to the .txt file on the compute server to use for storing the messages sent by
             the job to the 'stderr' pipe.
-        working_directory: The absolute path to the compute server's directory where to store the temporary job's files.
+        working_directory: The absolute path to the compute server's directory in which the temporary job files are
+            stored.
         conda_environment: The name of the mamba / conda environment to activate on the server before running the job.
         cpu_threads: The number of CPU threads to use for the job.
-        ram: The amount of RAM to allocate for the job, in Gigabytes.
+        ram: The amount of RAM to allocate for the job, in gigabytes.
         time: The maximum period of time to run the job, in minutes.
         dependencies: The SLURM-assigned identifiers of the allocations that must complete successfully before this
             job runs. Leave empty for a job that waits on nothing.
@@ -58,15 +65,15 @@ class Job:
         time: int = 60,
         dependencies: Sequence[str] = (),
     ) -> None:
-        # Resolves the paths to the remote (server-side) .sh script file. This is the path where the job script
-        # will be stored on the server, once it is transferred by the Server class instance.
-        self.remote_script_path = str(working_directory.joinpath(f"{job_name}.sh"))
+        # The Server instance transfers the script to this path, so the path is fixed at construction rather than
+        # at submission.
+        self.remote_script_path: str = str(working_directory.joinpath(f"{job_name}.sh"))
 
-        # Defines additional arguments used by the Server class that executed the job.
+        # Defines the attributes the Server instance fills in when it submits the job.
         self.job_id: str | None = None  # This is set by the Server that submits the job.
-        self.job_name: str = job_name  # Also stores the job name to support more informative terminal prints
+        self.job_name: str = job_name  # Supports more informative terminal prints.
 
-        # Builds the slurm command object filled with configuration information
+        # Builds the SLURM command object filled with the configuration information.
         self._command: _SlurmScript = _SlurmScript(
             cpus_per_task=cpu_threads,
             job_name=job_name,
@@ -78,23 +85,24 @@ class Job:
             cleanup_path=self.remote_script_path,
         )
 
-        # Conda shell initialization commands
-        self._command.add_preamble("eval $(conda shell.bash hook)")
-        self._command.add_preamble("conda init bash")
+        # Initializes the conda shell hooks required before an environment can be activated.
+        self._command.add_preamble(command="eval $(conda shell.bash hook)")
+        self._command.add_preamble(command="conda init bash")
 
-        # Activates the target conda environment for the command.
-        self._command.add_preamble(f"source activate {conda_environment}")  # Need to use old syntax for our server.
+        # Uses the 'source activate' form, which is the activation syntax the reference compute server's conda
+        # installation supports.
+        self._command.add_preamble(command=f"source activate {conda_environment}")
 
     def __repr__(self) -> str:
-        """Returns the string representation of the Job instance."""
+        """Returns a string representation of the Job instance."""
         return f"Job(name={self.job_name}, id={self.job_id})"
 
     def add_command(self, command: str) -> None:
         """Adds the input command string to the end of the job's command sequence.
 
         Notes:
-            The instance generates a preamble section that configures the job's SLURM and Conda environments during
-            class initialization. Do not submit additional SLURM or Conda commands via this method, as this may produce
+            The instance generates the job's SLURM directive header and a Conda activation preamble during class
+            initialization. Do not submit additional SLURM or Conda commands via this method, as this may produce
             unexpected behavior.
 
             Commands added through this method run under shell error checking, so the job exits with the status of the
@@ -102,19 +110,15 @@ class Job:
             behind this one.
 
         Args:
-            command: The command string to append to the job's command sequence, e.g.: 'python main.py --input 1'.
+            command: The command string to append to the job's command sequence, for example
+                'python main.py --input 1'.
         """
-        self._command.add_command(command)
+        self._command.add_command(command=command)
 
     @property
     def command_script(self) -> str:
-        """Translates the managed job into a shell-script-writable string.
-
-        Notes:
-            This method is used by the Server class to translate the job into the format that can be submitted to and
-            executed by the remote compute server. Do not call this method directly.
-
-            Rendering does not modify the job, so a script rendered twice is identical both times.
+        """Returns the managed job rendered as a shell-script-writable string, which the Server instance submits to the
+        remote compute server.
         """
         return self._command.render()
 
@@ -175,17 +179,6 @@ class _SlurmScript:
         self._commands: list[str] = []
         self._cleanup_path: str = cleanup_path
 
-    @staticmethod
-    def _format_time(time_delta: datetime.timedelta) -> str:
-        """Formats a timedelta as a SLURM-compatible time string (``[D-]HH:MM:SS``)."""
-        total_seconds = int(time_delta.total_seconds())
-        days, remainder = divmod(total_seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if days > 0:
-            return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
     def add_preamble(self, command: str) -> None:
         """Appends an environment setup line that runs before error checking is enabled.
 
@@ -208,7 +201,11 @@ class _SlurmScript:
         self._commands.append(command)
 
     def render(self) -> str:
-        """Renders the complete batch script as a string."""
+        """Renders the complete batch script as a string.
+
+        Returns:
+            The full script text, including the directive header, the exit trap, the preamble, and the command body.
+        """
         lines = ["#!/bin/bash"]
         lines.extend(self._directives)
         lines.append("")
@@ -221,3 +218,21 @@ class _SlurmScript:
         lines.append("set -eo pipefail")
         lines.extend(self._commands)
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _format_time(time_delta: datetime.timedelta) -> str:
+        """Formats a timedelta as a SLURM-compatible time string (``[D-]HH:MM:SS``).
+
+        Args:
+            time_delta: The wall-time to format.
+
+        Returns:
+            The formatted time string, which carries a day field only for a wall-time of at least one day.
+        """
+        total_seconds = int(time_delta.total_seconds())
+        days, remainder = divmod(total_seconds, _SECONDS_PER_DAY)
+        hours, remainder = divmod(remainder, _SECONDS_PER_HOUR)
+        minutes, seconds = divmod(remainder, _SECONDS_PER_MINUTE)
+        if days:
+            return f"{days}-{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"

@@ -20,8 +20,8 @@ class PendingJob:
 
     Notes:
         Subclasses extend this dataclass with the additional fields their worker callables need. The base fields carry
-        everything the shared graph and the shared execution manager need, which is the unit and job a record names,
-        the tracker it is recorded on, the cores and memory it occupies, and the jobs it waits for.
+        everything the shared graph and the shared execution manager need. That is the unit and job a record names, the
+        tracker it is recorded on, the cores and memory it occupies, and the jobs it waits for.
     """
 
     tracker_path: Path
@@ -79,14 +79,15 @@ class GenericPendingJob(PendingJob):
     """The specifier that differentiates jobs of the same type within one unit, such as a camera or controller source
     identifier, a controller-module triple, or a plane index."""
     project_root: Path | None = None
-    """The project root directory, carried for workers that resolve their output location above the unit path."""
+    """The project root directory, which stays unset while every worker resolves its output location from
+    ``unit_path``. A pipeline whose worker needs the root above that path reads it from here."""
     options: dict[str, Any] = field(default_factory=dict)
     """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
-    The execution engine never reads this mapping, so a pipeline's worker interprets whichever keys it declares and
-    ignores the rest. A pipeline that takes no parameters leaves it empty."""
+    The mapping is carried through to the pipeline's own worker, which interprets whichever keys it declares. A
+    pipeline that takes no parameters leaves it empty."""
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class BatchDocument:
     """Describes one prepared batch, which is what both the local and the remote backend dispatch.
 
@@ -99,8 +100,8 @@ class BatchDocument:
     pipeline: str = ""
     """The pipeline this batch dispatches."""
     host: str = ""
-    """The host this batch was prepared against, which is the one holding the data its jobs read. Execution reads this
-    rather than taking it again, so a batch can only run where it was prepared."""
+    """The host this batch was prepared against, which is the one holding the data its jobs read. Execution reads the
+    host from here, so a batch runs where it was prepared."""
     options: dict[str, Any] = field(default_factory=dict)
     """The pipeline-specific parameters every job of this batch runs with."""
     units: list[dict[str, Any]] = field(default_factory=list)
@@ -250,10 +251,6 @@ def build_job_descriptor(
 def index_rows_by_unit(rows: list[dict[str, Any]], key: str) -> dict[str, dict[str, dict[str, Any]]]:
     """Indexes table rows by their unit and then by their job identifier.
 
-    Notes:
-        A job identifier is derived from the job name and specifier alone, so the same stage of two different units
-        shares one identifier and the unit is what separates them.
-
     Args:
         rows: The rows to index.
         key: The column naming each row's unit.
@@ -357,6 +354,7 @@ def resolve_dispatch_priorities[PendingJobT: PendingJob](
     resolved: dict[tuple[str, str], frozenset[tuple[str, str]]] = {}
 
     def _collect(key: tuple[str, str], visiting: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
+        """Gathers every job reachable downstream of the given dispatch key, memoizing each resolved set."""
         cached = resolved.get(key)
         if cached is not None:
             return cached
@@ -366,12 +364,12 @@ def resolve_dispatch_priorities[PendingJobT: PendingJob](
         reachable: set[tuple[str, str]] = set()
         for dependent in dependents[key]:
             reachable.add(dependent)
-            reachable |= _collect(dependent, visiting)
+            reachable |= _collect(key=dependent, visiting=visiting)
         visiting.discard(key)
         resolved[key] = frozenset(reachable)
         return resolved[key]
 
-    return {key: sum(jobs[dependent].core_weight for dependent in _collect(key, set())) for key in jobs}
+    return {key: sum(jobs[dependent].core_weight for dependent in _collect(key=key, visiting=set())) for key in jobs}
 
 
 def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT]) -> list[PendingJobT]:
@@ -394,6 +392,7 @@ def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT
     depths: dict[tuple[str, str], int] = {}
 
     def _depth(key: tuple[str, str], visiting: set[tuple[str, str]]) -> int:
+        """Resolves how many in-batch prerequisites the given dispatch key sits behind, memoizing each depth."""
         cached = depths.get(key)
         if cached is not None:
             return cached
@@ -402,7 +401,7 @@ def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT
         visiting.add(key)
         resolved = max(
             (
-                _depth(prerequisite, visiting) + 1
+                _depth(key=prerequisite, visiting=visiting) + 1
                 for prerequisite in by_key[key].prerequisite_keys
                 if prerequisite in by_key
             ),
@@ -412,7 +411,10 @@ def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT
         depths[key] = resolved
         return resolved
 
-    order = sorted(range(len(jobs)), key=lambda position: (_depth(jobs[position].dispatch_key, set()), position))
+    order = sorted(
+        range(len(jobs)),
+        key=lambda position: (_depth(key=jobs[position].dispatch_key, visiting=set()), position),
+    )
     return [jobs[position] for position in order]
 
 
@@ -459,7 +461,14 @@ def _unresolved_unit(unit_path: Path, reason: str) -> dict[str, Any]:
 
 
 def _no_state_reason(pipeline: str) -> str:
-    """Builds the reason reported for a unit whose state table records no job of the prepared pipeline."""
+    """Builds the reason reported for a unit whose state table records no job of the prepared pipeline.
+
+    Args:
+        pipeline: The pipeline that was prepared.
+
+    Returns:
+        The reason to record on the unit's entry.
+    """
     return (
         f"The project's state table records no '{pipeline}' job for this unit, so the unit carries none of the data "
         f"that pipeline consumes."
@@ -467,7 +476,14 @@ def _no_state_reason(pipeline: str) -> str:
 
 
 def _unplanned_reason(job_ids: list[str]) -> str:
-    """Builds the reason reported for a unit whose outstanding jobs carry no planned figures."""
+    """Builds the reason reported for a unit whose outstanding jobs carry no planned figures.
+
+    Args:
+        job_ids: The identifiers of the outstanding jobs that carry no planned figures.
+
+    Returns:
+        The reason to record on the unit's entry.
+    """
     return (
         f"The project's plan table carries no figures for job(s) {job_ids}. Every outstanding job must be planned "
         f"before it can be sized for a host or a scheduler."

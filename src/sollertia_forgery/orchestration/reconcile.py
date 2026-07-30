@@ -41,8 +41,8 @@ class Reconciliation:
     """The identifier of the allocation already running each adopted job, keyed by dispatch key. A dependent of an
     adopted job waits on the allocation recorded here rather than on one this run submits."""
     resettable: list[GenericPendingJob] = field(default_factory=list)
-    """The dispatchable jobs whose recorded state is cleared before they run, which is every one of them the trackers
-    already hold a record of."""
+    """The dispatchable jobs whose recorded state is cleared before they run, which is every one of them. The reset
+    itself drops the identifiers a unit does not track."""
 
 
 def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> Reconciliation:
@@ -62,7 +62,7 @@ def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> Reconciliation:
     Returns:
         The reconciliation, which adopts nothing and dispatches every job.
     """
-    return Reconciliation(dispatchable=list(jobs), adopted={}, resettable=list(jobs))
+    return Reconciliation(dispatchable=list(jobs), resettable=list(jobs))
 
 
 def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> Reconciliation:
@@ -133,4 +133,5 @@ def _resolve_claimed_allocations(jobs: Sequence[GenericPendingJob]) -> dict[tupl
         if scheme == _SLURM_EXECUTOR_SCHEME and allocation:
             claimed[job.dispatch_key] = allocation
 
-    return {key: allocation for key, allocation in claimed.items() if key in {job.dispatch_key for job in jobs}}
+    batch_keys = {job.dispatch_key for job in jobs}
+    return {key: allocation for key, allocation in claimed.items() if key in batch_keys}

@@ -1,16 +1,16 @@
-"""Tests the shared batch engine: core allocation, two-dimensional admission, and dependency ordering.
-
-The engine's behavior is a scheduling policy expressed in arithmetic, so these tests pin it against explicit budgets
-rather than against any host. A retune is expected to update the pinned values deliberately.
-"""
+"""Tests the shared batch engine: core allocation, two-dimensional admission, and the graph a batch is dispatched as."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from collections import deque
+from dataclasses import field, dataclass
 from concurrent.futures import Future
 
+import psutil
 import pytest
+from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.forging import (
     FORGING_JOB_NAME,
@@ -20,12 +20,18 @@ from sollertia_forgery.forging import (
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
+    SUCCEEDED_STATUS,
     JobExecutionState,
     resolve_dispatch,
     build_pending_job,
+    index_rows_by_unit,
+    build_batch_document,
+    partition_blocked_jobs,
     resolve_host_memory_mb,
     resolve_core_allocations,
+    resolve_submission_order,
     resolve_concurrency_limits,
+    resolve_dispatch_priorities,
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.local import (
@@ -41,43 +47,52 @@ from sollertia_forgery.orchestration.footprints import (
     _estimate_checksum_memory,
 )
 
-CORE_BUDGET = 64
-"""The core budget the admission tests weigh their jobs against."""
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
-MEMORY_BUDGET_MB = 65536
-"""The memory budget the admission tests weigh their jobs against."""
+_BYTES_PER_MEGABYTE: int = 1024 * 1024
+"""The divisor that converts the byte figure the host reports into the megabytes the probe answers with."""
 
-TRACKER = Path("/nonexistent/tracker.yaml")
-OTHER_TRACKER = Path("/nonexistent/other_tracker.yaml")
+_CORE_BUDGET: int = 64
+"""The core budget the admission tests weigh their jobs against, pinned so a retune is adopted deliberately."""
 
-UNIT = Path("/nonexistent/session")
+_MEMORY_BUDGET_MB: int = 65536
+"""The memory budget the admission tests weigh their jobs against, pinned so a retune is adopted deliberately."""
+
+_TRACKER: Path = Path("/nonexistent/tracker.yaml")
+"""The tracker path the admission tests attach their jobs to."""
+
+_OTHER_TRACKER: Path = Path("/nonexistent/other_tracker.yaml")
+"""A second tracker path, used where a test must show that two units keep separate tracker state."""
+
+_UNIT: Path = Path("/nonexistent/session")
 """The processing unit the admission tests place their jobs under, which is what scopes a job identifier."""
 
-OTHER_UNIT = Path("/nonexistent/other_session")
+_OTHER_UNIT: Path = Path("/nonexistent/other_session")
 """A second processing unit, used where a test must show that two units' identical identifiers stay separate."""
 
 
+@dataclass
 class RecordingPool:
     """Stands in for a process pool, recording each submitted job instead of running it."""
 
-    def __init__(self) -> None:
-        """Initializes the recorded submission list."""
-        self.submitted: list[PendingJob] = []
+    submitted: list[PendingJob] = field(default_factory=list)
+    """Every job handed to the pool, in submission order."""
 
-    def submit(self, worker: object, job: PendingJob) -> Future[None]:  # noqa: ARG002
+    def submit(self, worker: Callable[[PendingJob], None], job: PendingJob) -> Future[None]:  # noqa: ARG002
         """Records a submitted job and returns a future that never completes."""
         self.submitted.append(job)
         return Future()
 
 
-def make_job(
+def make_pending_job(
     job_id: str,
     job_name: str = "processing",
     cores: int = 1,
     memory_mb: int = 512,
     prerequisites: tuple[str, ...] = (),
-    tracker_path: Path = TRACKER,
-    unit_path: Path = UNIT,
+    tracker_path: Path = _TRACKER,
+    unit_path: Path = _UNIT,
 ) -> PendingJob:
     """Builds a pending job with explicit resource weights and prerequisite identifiers."""
     return PendingJob(
@@ -92,7 +107,7 @@ def make_job(
 
 
 def build_state(
-    jobs: list[PendingJob], core_budget: int = CORE_BUDGET, memory_budget_mb: int = MEMORY_BUDGET_MB
+    jobs: list[PendingJob], core_budget: int = _CORE_BUDGET, memory_budget_mb: int = _MEMORY_BUDGET_MB
 ) -> JobExecutionState[PendingJob]:
     """Builds an execution state holding the supplied jobs against explicit budgets."""
     return JobExecutionState(
@@ -105,14 +120,14 @@ def build_state(
     )
 
 
-def admit(state: JobExecutionState[PendingJob]) -> RecordingPool:
+def run_admission_pass(state: JobExecutionState[PendingJob]) -> RecordingPool:
     """Runs one admission pass against a recording pool and returns it."""
     pool = RecordingPool()
     _admit_pending_jobs(state=state, pool=pool)  # type: ignore[arg-type]
     return pool
 
 
-def complete(state: JobExecutionState[PendingJob], job: PendingJob) -> None:
+def complete_job(state: JobExecutionState[PendingJob], job: PendingJob) -> None:
     """Marks a running job finished and successful, as the manager would after reaping its future."""
     state.active_jobs = [active for active in state.active_jobs if active.job.dispatch_key != job.dispatch_key]
     state.succeeded_job_keys.add(job.dispatch_key)
@@ -134,7 +149,7 @@ def test_core_allocations_come_from_the_table_and_clamp_to_the_budget() -> None:
 def test_unregistered_job_type_stops_the_batch() -> None:
     """Verifies that a job type with no registered core allocation raises instead of running at a default width."""
     with pytest.raises(ValueError, match="an_unregistered_job"):
-        resolve_core_allocations(job_cores={}, job_names={"an_unregistered_job"}, core_budget=CORE_BUDGET)
+        resolve_core_allocations(job_cores={}, job_names={"an_unregistered_job"}, core_budget=_CORE_BUDGET)
 
 
 def test_a_partial_allocation_table_stops_the_batch() -> None:
@@ -143,127 +158,129 @@ def test_a_partial_allocation_table_stops_the_batch() -> None:
         resolve_core_allocations(
             job_cores=_JOB_CORE_ALLOCATIONS,
             job_names={*_JOB_CORE_ALLOCATIONS, "an_unregistered_job"},
-            core_budget=CORE_BUDGET,
+            core_budget=_CORE_BUDGET,
         )
 
 
 def test_admission_stops_on_whichever_budget_binds_first() -> None:
     """Verifies that cores and memory are both enforced and that the scarcer one limits concurrency."""
     core_bound = build_state(
-        jobs=[make_job(job_id=f"c{index}", cores=16, memory_mb=1024) for index in range(8)],
-        core_budget=CORE_BUDGET,
-        memory_budget_mb=MEMORY_BUDGET_MB,
+        jobs=[make_pending_job(job_id=f"c{index}", cores=16, memory_mb=1024) for index in range(8)],
+        core_budget=_CORE_BUDGET,
+        memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(admit(core_bound).submitted) == 4
+    assert len(run_admission_pass(core_bound).submitted) == 4
 
     memory_bound = build_state(
-        jobs=[make_job(job_id=f"m{index}", cores=1, memory_mb=20000) for index in range(8)],
-        core_budget=CORE_BUDGET,
-        memory_budget_mb=MEMORY_BUDGET_MB,
+        jobs=[make_pending_job(job_id=f"m{index}", cores=1, memory_mb=20000) for index in range(8)],
+        core_budget=_CORE_BUDGET,
+        memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(admit(memory_bound).submitted) == 3
+    assert len(run_admission_pass(memory_bound).submitted) == 3
 
 
 def test_admission_never_commits_past_either_budget() -> None:
     """Verifies that the running set stays inside both budgets for a heterogeneous queue."""
     sizes = [50000, 20000, 20000, 6000, 6000, 6000, 6000, 6000]
     state = build_state(
-        jobs=[make_job(job_id=f"j{index}", cores=4, memory_mb=size) for index, size in enumerate(sizes)],
-        core_budget=CORE_BUDGET,
-        memory_budget_mb=MEMORY_BUDGET_MB,
+        jobs=[make_pending_job(job_id=f"j{index}", cores=4, memory_mb=size) for index, size in enumerate(sizes)],
+        core_budget=_CORE_BUDGET,
+        memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    pool = admit(state)
-    assert sum(job.core_weight for job in pool.submitted) <= CORE_BUDGET
-    assert sum(job.memory_mb for job in pool.submitted) <= MEMORY_BUDGET_MB
+    pool = run_admission_pass(state)
+    assert sum(job.core_weight for job in pool.submitted) <= _CORE_BUDGET
+    assert sum(job.memory_mb for job in pool.submitted) <= _MEMORY_BUDGET_MB
 
 
 def test_admission_considers_the_heaviest_job_first() -> None:
     """Verifies that a large job is dispatched before lighter ones rather than waiting for them to drain."""
-    jobs = [make_job(job_id=f"light{index}", memory_mb=1024) for index in range(6)]
-    jobs.append(make_job(job_id="heavy", memory_mb=40000))
-    pool = admit(build_state(jobs=jobs))
+    jobs = [make_pending_job(job_id=f"light{index}", memory_mb=1024) for index in range(6)]
+    jobs.append(make_pending_job(job_id="heavy", memory_mb=40000))
+    pool = run_admission_pass(build_state(jobs=jobs))
     assert pool.submitted[0].job_id == "heavy"
 
 
 def test_light_jobs_backfill_the_capacity_a_heavy_job_leaves_spare() -> None:
     """Verifies that a heavy job runs alongside as many light jobs as the remaining budget allows."""
-    jobs = [make_job(job_id="heavy", cores=8, memory_mb=40000)]
-    jobs += [make_job(job_id=f"light{index}", cores=2, memory_mb=4000) for index in range(10)]
-    pool = admit(build_state(jobs=jobs, core_budget=CORE_BUDGET, memory_budget_mb=MEMORY_BUDGET_MB))
+    jobs = [make_pending_job(job_id="heavy", cores=8, memory_mb=40000)]
+    jobs += [make_pending_job(job_id=f"light{index}", cores=2, memory_mb=4000) for index in range(10)]
+    pool = run_admission_pass(build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB))
     submitted = {job.job_id for job in pool.submitted}
     assert "heavy" in submitted
     assert len(submitted) >= 6, "light jobs did not backfill around the heavy job"
-    assert sum(job.memory_mb for job in pool.submitted) <= MEMORY_BUDGET_MB
+    assert sum(job.memory_mb for job in pool.submitted) <= _MEMORY_BUDGET_MB
 
 
 def test_freed_capacity_is_repacked_on_the_next_pass() -> None:
     """Verifies that finishing a job immediately releases its share to the jobs still queued."""
-    jobs = [make_job(job_id=f"j{index}", cores=1, memory_mb=20000) for index in range(6)]
-    state = build_state(jobs=jobs, core_budget=CORE_BUDGET, memory_budget_mb=MEMORY_BUDGET_MB)
+    jobs = [make_pending_job(job_id=f"j{index}", cores=1, memory_mb=20000) for index in range(6)]
+    state = build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
 
-    first = admit(state)
+    first = run_admission_pass(state)
     assert len(first.submitted) == 3
     assert len(state.pending_jobs) == 3
 
-    complete(state=state, job=first.submitted[0])
-    second = admit(state)
+    complete_job(state=state, job=first.submitted[0])
+    second = run_admission_pass(state)
     assert len(second.submitted) == 1, "capacity freed by a finished job was not refilled"
 
 
 def test_admission_withholds_a_job_until_its_prerequisite_succeeds() -> None:
     """Verifies that a dependent job is not dispatched while its upstream job has not yet succeeded."""
-    upstream = make_job(job_id="up", job_name="binarization")
-    downstream = make_job(job_id="down", prerequisites=("up",))
+    upstream = make_pending_job(job_id="up", job_name="binarization")
+    downstream = make_pending_job(job_id="down", prerequisites=("up",))
     state = build_state(jobs=[upstream, downstream])
 
-    pool = admit(state)
+    pool = run_admission_pass(state)
     assert [job.job_id for job in pool.submitted] == ["up"]
 
-    complete(state=state, job=upstream)
-    assert [job.job_id for job in admit(state).submitted] == ["down"]
+    complete_job(state=state, job=upstream)
+    assert [job.job_id for job in run_admission_pass(state).submitted] == ["down"]
 
 
-def test_one_sessions_completed_stage_does_not_satisfy_another_sessions() -> None:
+def test_a_completed_stage_in_one_session_does_not_satisfy_another_session() -> None:
     """Verifies that identical job identifiers in different sessions are tracked separately.
 
     A job identifier is derived from the job name and specifier alone, so every session's binarization shares one
     identifier. A batch spanning sessions must not treat one session's completed stage as every session's.
     """
-    first_upstream = make_job(job_id="shared", job_name="binarization", tracker_path=TRACKER, unit_path=UNIT)
-    second_downstream = make_job(
-        job_id="down", prerequisites=("shared",), tracker_path=OTHER_TRACKER, unit_path=OTHER_UNIT
+    first_upstream = make_pending_job(job_id="shared", job_name="binarization", tracker_path=_TRACKER, unit_path=_UNIT)
+    second_downstream = make_pending_job(
+        job_id="down", prerequisites=("shared",), tracker_path=_OTHER_TRACKER, unit_path=_OTHER_UNIT
     )
     state = build_state(jobs=[first_upstream, second_downstream])
 
-    pool = admit(state)
+    pool = run_admission_pass(state)
     assert [job.job_id for job in pool.submitted] == ["shared"]
 
-    complete(state=state, job=first_upstream)
-    assert not admit(state).submitted, "another session's dependent was released by an unrelated session's job"
+    complete_job(state=state, job=first_upstream)
+    assert not run_admission_pass(state).submitted, (
+        "another session's dependent was released by an unrelated session's job"
+    )
     assert [job.job_id for job in state.pending_jobs] == ["down"]
 
 
 def test_admission_blocks_a_dependent_whose_prerequisite_failed() -> None:
     """Verifies that a job whose upstream failed is moved aside rather than waiting for an outcome that cannot come."""
-    downstream = make_job(job_id="down", prerequisites=("up",))
+    downstream = make_pending_job(job_id="down", prerequisites=("up",))
     state = build_state(jobs=[downstream])
-    state.failed_job_keys.add((str(UNIT), "up"))
+    state.failed_job_keys.add((str(_UNIT), "up"))
 
-    assert not admit(state).submitted
+    assert not run_admission_pass(state).submitted
     assert [job.job_id for job in state.blocked_jobs] == ["down"]
     assert not state.pending_jobs
 
 
 def test_forward_progress_floor_never_bypasses_the_prerequisite_check() -> None:
     """Verifies that the single-job floor does not dispatch a job whose input does not exist yet."""
-    downstream = make_job(job_id="down", memory_mb=10_000_000, prerequisites=("up",))
-    assert not admit(build_state(jobs=[downstream])).submitted
+    downstream = make_pending_job(job_id="down", memory_mb=10_000_000, prerequisites=("up",))
+    assert not run_admission_pass(build_state(jobs=[downstream])).submitted
 
 
 def test_forward_progress_floor_admits_a_job_larger_than_the_budget() -> None:
     """Verifies that a job no budget can hold still runs alone rather than stalling the batch."""
-    oversized = make_job(job_id="huge", cores=999, memory_mb=10_000_000)
-    assert [job.job_id for job in admit(build_state(jobs=[oversized])).submitted] == ["huge"]
+    oversized = make_pending_job(job_id="huge", cores=999, memory_mb=10_000_000)
+    assert [job.job_id for job in run_admission_pass(build_state(jobs=[oversized])).submitted] == ["huge"]
 
 
 def test_estimates_carry_the_shared_tolerance() -> None:
@@ -274,8 +291,9 @@ def test_estimates_carry_the_shared_tolerance() -> None:
 
 
 def test_host_memory_is_readable_and_positive() -> None:
-    """Verifies that the host memory probe returns a usable figure on any supported host."""
-    assert resolve_host_memory_mb() > 0
+    """Verifies that the host memory probe reports a figure inside the host's physical memory."""
+    reported = resolve_host_memory_mb()
+    assert 0 < reported <= psutil.virtual_memory().total // _BYTES_PER_MEGABYTE
 
 
 def test_every_dispatched_job_type_declares_a_core_allocation() -> None:
@@ -302,7 +320,7 @@ def test_checksum_is_a_registered_batch_pipeline() -> None:
 def test_job_options_round_trip_from_descriptor_to_worker() -> None:
     """Verifies that pipeline-specific parameters survive the descriptor hop into the dispatched job."""
     descriptor = {
-        "tracker_path": str(TRACKER),
+        "tracker_path": str(_TRACKER),
         "job_id": "a_job",
         "unit_path": "/nonexistent/session",
         "job_name": CHECKSUM_JOB_NAME,
@@ -354,8 +372,16 @@ def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str)
     dispatch = resolve_dispatch(pipeline=pipeline)
     assert dispatch is not None
 
-    for field in ("discover", "worker", "prerequisites", "tracker_path", "output_path", "unit_name", "estimate_memory"):
-        assert callable(getattr(dispatch, field)), f"{pipeline} declares no {field}"
+    for field_name in (
+        "discover",
+        "worker",
+        "prerequisites",
+        "tracker_path",
+        "output_path",
+        "unit_name",
+        "estimate_memory",
+    ):
+        assert callable(getattr(dispatch, field_name)), f"{pipeline} declares no {field_name}"
 
 
 def test_forging_is_a_registered_batch_pipeline() -> None:
@@ -382,3 +408,333 @@ def test_only_assembly_carries_a_forging_concurrency_limit() -> None:
     assert set(limits) == {FORGING_JOB_NAME}
     assert _JOB_CORE_ALLOCATIONS[MULTIDAY_DISCOVERY_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
     assert _JOB_CORE_ALLOCATIONS[MULTIDAY_EXTRACTION_JOB_NAME] > _JOB_CORE_ALLOCATIONS[FORGING_JOB_NAME]
+
+
+# Batch document assembly
+
+_PIPELINE: str = ProcessingPipelines.CHECKSUM.value
+"""The pipeline every batch-document test prepares."""
+
+
+def identifier(job_name: str, specifier: str = "") -> str:
+    """Returns the identifier the processing tracker records the named job under."""
+    return ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
+
+
+def plan_row(
+    unit: str,
+    job_name: str,
+    specifier: str = "",
+    *,
+    cores: int = 4,
+    memory_mb: int = 2048,
+    prerequisites: tuple[tuple[str, str], ...] = (),
+    pipeline: str = _PIPELINE,
+    unit_column: str = "session",
+) -> dict[str, Any]:
+    """Renders one row of the project plan projection, carrying a job's figures and its recorded ordering."""
+    return {
+        unit_column: unit,
+        "pipeline": pipeline,
+        "job_id": identifier(job_name=job_name, specifier=specifier),
+        "job_name": job_name,
+        "specifier": specifier,
+        "cores": cores,
+        "memory_mb": memory_mb,
+        "memory_modeled": True,
+        "prerequisite_ids": [identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites],
+    }
+
+
+def state_row(
+    unit: str,
+    job_name: str,
+    specifier: str = "",
+    *,
+    status: str = "SCHEDULED",
+    pipeline: str | None = _PIPELINE,
+    unit_column: str = "session",
+) -> dict[str, Any]:
+    """Renders one row of the project state projection, carrying a tracked job's recorded status."""
+    row: dict[str, Any] = {
+        unit_column: unit,
+        "job_id": identifier(job_name=job_name, specifier=specifier),
+        "job_name": job_name,
+        "specifier": specifier,
+        "status": status,
+    }
+    if pipeline is not None:
+        row["pipeline"] = pipeline
+    return row
+
+
+def descriptor(job_id: str, prerequisites: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Builds the minimal job descriptor the blocking partition reads."""
+    return {
+        "job_id": job_id,
+        "job_name": "processing",
+        "specifier": job_id,
+        "pipeline": _PIPELINE,
+        "unit_path": str(_UNIT),
+        "unit_name": _UNIT.name,
+        "prerequisite_ids": list(prerequisites),
+    }
+
+
+def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None:
+    """Verifies that preparing a unit twice queues the outstanding work, leaving a succeeded job out of the batch."""
+    unit = Path("/nonexistent/project/305/a_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[
+            plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            plan_row(unit=unit.name, job_name="hash", specifier="b", cores=8, memory_mb=4096),
+            # A row of another pipeline never reaches this batch, whichever unit it names.
+            plan_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
+        ],
+        state_rows=[
+            state_row(unit=unit.name, job_name="hash", specifier="a", status=SUCCEEDED_STATUS),
+            state_row(unit=unit.name, job_name="hash", specifier="b"),
+            state_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
+        ],
+        unit_paths=[unit],
+        options={"regenerate_checksum": True},
+        tracker_paths={str(unit): "/nonexistent/project/305/a_session/tracker.yaml"},
+    )
+
+    assert document.pipeline == _PIPELINE
+    assert document.host == "workstation"
+    assert document.options == {"regenerate_checksum": True}
+    assert [job["job_id"] for job in document.jobs] == [identifier(job_name="hash", specifier="b")]
+    assert document.jobs[0] == {
+        "job_id": identifier(job_name="hash", specifier="b"),
+        "job_name": "hash",
+        "specifier": "b",
+        "unit_path": str(unit),
+        "unit_name": unit.name,
+        "pipeline": _PIPELINE,
+        "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
+        "cores": 8,
+        "memory_mb": 4096,
+        "memory_modeled": True,
+        "prerequisite_ids": [],
+        "options": {"regenerate_checksum": True},
+    }
+    assert document.units == [{"unit_path": str(unit), "unit_name": unit.name, "job_count": 1, "blocked_count": 0}]
+    assert document.blocked_jobs == []
+
+
+def test_a_state_row_naming_no_pipeline_is_read_as_the_prepared_ones() -> None:
+    """Verifies that a state table recording no pipeline column belongs wholly to the pipeline being prepared."""
+    unit = Path("/nonexistent/project/305/a_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        state_rows=[state_row(unit=unit.name, job_name="hash", specifier="a", pipeline=None)],
+        unit_paths=[unit],
+        options={},
+    )
+
+    # No tracker location was supplied, which is what a backend recording its outcomes elsewhere passes.
+    assert document.jobs[0]["tracker_path"] == ""
+    assert document.jobs[0]["options"] == {}
+
+
+def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
+    """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it."""
+    unit = Path("/nonexistent/project/305/a_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[
+            plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            plan_row(
+                unit=unit.name,
+                job_name="hash",
+                specifier="b",
+                prerequisites=(("hash", "a"), ("hash", "never_possible")),
+            ),
+        ],
+        state_rows=[
+            state_row(unit=unit.name, job_name="hash", specifier="a"),
+            state_row(unit=unit.name, job_name="hash", specifier="b"),
+        ],
+        unit_paths=[unit],
+        options={},
+    )
+
+    downstream = next(job for job in document.jobs if job["specifier"] == "b")
+    assert downstream["prerequisite_ids"] == [identifier(job_name="hash", specifier="a")]
+
+
+def test_a_unit_the_state_table_records_nothing_for_contributes_no_job() -> None:
+    """Verifies that a unit carrying none of the pipeline's data is reported with the reason it contributes none."""
+    known = Path("/nonexistent/project/305/a_session")
+    unknown = Path("/nonexistent/project/321/another_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[plan_row(unit=known.name, job_name="hash", specifier="a")],
+        state_rows=[state_row(unit=known.name, job_name="hash", specifier="a")],
+        unit_paths=[known, unknown],
+        options={},
+    )
+
+    unresolved = next(entry for entry in document.units if entry["unit_name"] == unknown.name)
+    assert unresolved["job_count"] == 0
+    assert unresolved["error"] == (
+        f"The project's state table records no '{_PIPELINE}' job for this unit, so the unit carries none of the data "
+        f"that pipeline consumes."
+    )
+
+
+def test_a_unit_whose_outstanding_job_carries_no_figures_is_rejected() -> None:
+    """Verifies that an unplanned outstanding job stops its whole unit, since every job is sized before it runs."""
+    unit = Path("/nonexistent/project/305/a_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        state_rows=[
+            state_row(unit=unit.name, job_name="hash", specifier="a"),
+            state_row(unit=unit.name, job_name="hash", specifier="unplanned"),
+            # An unplanned job that already succeeded is tolerated, since this run would never dispatch it.
+            state_row(unit=unit.name, job_name="hash", specifier="retired", status=SUCCEEDED_STATUS),
+        ],
+        unit_paths=[unit],
+        options={},
+    )
+
+    assert document.jobs == []
+    assert document.units[0]["error"] == (
+        f"The project's plan table carries no figures for job(s) "
+        f"{[identifier(job_name='hash', specifier='unplanned')]}. Every outstanding job must be planned before it "
+        f"can be sized for a host or a scheduler."
+    )
+
+
+def test_rows_naming_no_unit_are_left_out_of_the_index() -> None:
+    """Verifies that a row whose unit column is empty belongs to no unit, so it indexes under none of them."""
+    indexed = index_rows_by_unit(
+        rows=[
+            {"session": "a_session", "job_id": "first"},
+            {"session": None, "job_id": "second"},
+            {"dataset": "a_dataset", "job_id": "third"},
+        ],
+        key="session",
+    )
+
+    assert set(indexed) == {"a_session"}
+    assert indexed["a_session"]["first"] == {"session": "a_session", "job_id": "first"}
+
+
+def test_blocking_propagates_along_the_chain_that_waits_on_it() -> None:
+    """Verifies that a stage waiting on a blocked stage is blocked in turn, so the whole chain is set aside."""
+    jobs = [
+        descriptor(job_id="root", prerequisites=("absent",)),
+        descriptor(job_id="middle", prerequisites=("root",)),
+        descriptor(job_id="leaf", prerequisites=("middle",)),
+        descriptor(job_id="independent"),
+    ]
+
+    dispatchable, blocked = partition_blocked_jobs(jobs=jobs, succeeded=set())
+
+    assert [job["job_id"] for job in dispatchable] == ["independent"]
+    assert [entry["job_id"] for entry in blocked] == ["root", "middle", "leaf"]
+    assert blocked[0]["unsatisfied_prerequisite_ids"] == ["absent"]
+    assert blocked[2]["unsatisfied_prerequisite_ids"] == ["middle"]
+    assert blocked[1]["unit_name"] == _UNIT.name
+
+
+def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
+    """Verifies that a prerequisite recorded as succeeded blocks nothing, even where this run never dispatches it."""
+    jobs = [descriptor(job_id="downstream", prerequisites=("upstream",))]
+
+    dispatchable, blocked = partition_blocked_jobs(jobs=jobs, succeeded={"upstream"})
+
+    assert [job["job_id"] for job in dispatchable] == ["downstream"]
+    assert blocked == []
+
+
+# Dispatch ordering
+
+
+def test_priority_weighs_a_job_by_the_cores_its_dependents_commit() -> None:
+    """Verifies that ordering follows the queued work a job holds back, so a root outweighs the leaves it releases."""
+    root = make_pending_job(job_id="root", cores=2)
+    first = make_pending_job(job_id="first", cores=8, prerequisites=("root",))
+    second = make_pending_job(job_id="second", cores=4, prerequisites=("root",))
+    # Reachable along both middle stages at once, so it is counted a single time.
+    leaf = make_pending_job(job_id="leaf", cores=16, prerequisites=("first", "second"))
+    jobs = {job.dispatch_key: job for job in (root, first, second, leaf)}
+
+    priorities = resolve_dispatch_priorities(jobs=jobs)
+
+    assert priorities[root.dispatch_key] == 8 + 4 + 16
+    assert priorities[first.dispatch_key] == 16
+    assert priorities[leaf.dispatch_key] == 0
+
+
+def test_a_prerequisite_outside_the_batch_contributes_no_priority() -> None:
+    """Verifies that a job the batch does not hold cannot be ordered against the ones it does, so it weighs nothing."""
+    inside = make_pending_job(job_id="inside", cores=4, prerequisites=("outside_the_batch",))
+    other_unit = make_pending_job(job_id="root", cores=4, unit_path=_OTHER_UNIT)
+    jobs = {job.dispatch_key: job for job in (inside, other_unit)}
+
+    priorities = resolve_dispatch_priorities(jobs=jobs)
+
+    assert priorities == {inside.dispatch_key: 0, other_unit.dispatch_key: 0}
+
+
+def test_a_cyclic_ordering_resolves_to_a_finite_priority() -> None:
+    """Verifies that a malformed pipeline ordering is weighed poorly rather than recursing without end."""
+    first = make_pending_job(job_id="first", cores=3, prerequisites=("second",))
+    second = make_pending_job(job_id="second", cores=5, prerequisites=("first",))
+    jobs = {job.dispatch_key: job for job in (first, second)}
+
+    priorities = resolve_dispatch_priorities(jobs=jobs)
+
+    # The first key resolved reaches the whole cycle, and the one it memoized on the way stops at the truncation.
+    assert priorities[first.dispatch_key] == 3 + 5
+    assert priorities[second.dispatch_key] == 3
+
+
+def test_submission_orders_every_job_behind_the_jobs_it_waits_on() -> None:
+    """Verifies that a dependency names the upstream allocation's identifier, so upstream is submitted first."""
+    leaf = make_pending_job(job_id="leaf", prerequisites=("first", "second"))
+    first = make_pending_job(job_id="first", prerequisites=("root",))
+    second = make_pending_job(job_id="second", prerequisites=("root",))
+    root = make_pending_job(job_id="root")
+
+    ordered = resolve_submission_order(jobs=[leaf, first, second, root])
+
+    assert [job.job_id for job in ordered] == ["root", "first", "second", "leaf"]
+
+
+def test_submission_ignores_a_prerequisite_outside_the_batch() -> None:
+    """Verifies that a prerequisite the batch does not hold contributes no depth, so its dependent keeps its place."""
+    outside = make_pending_job(job_id="outside", prerequisites=("never_submitted",))
+    other_unit = make_pending_job(job_id="root", unit_path=_OTHER_UNIT)
+    dependent = make_pending_job(job_id="dependent", prerequisites=("root",))
+
+    ordered = resolve_submission_order(jobs=[outside, other_unit, dependent])
+
+    # The dependent names its own unit's root, which this batch holds under another unit, so it sits at depth zero.
+    assert [job.job_id for job in ordered] == ["outside", "root", "dependent"]
+
+
+def test_a_cyclic_ordering_resolves_to_a_finite_submission_depth() -> None:
+    """Verifies that a cycle is ordered poorly rather than stalling the submission it belongs to."""
+    first = make_pending_job(job_id="first", prerequisites=("second",))
+    second = make_pending_job(job_id="second", prerequisites=("first",))
+
+    ordered = resolve_submission_order(jobs=[first, second])
+
+    assert [job.job_id for job in ordered] == ["second", "first"]

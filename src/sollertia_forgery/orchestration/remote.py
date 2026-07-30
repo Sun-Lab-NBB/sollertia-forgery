@@ -11,10 +11,10 @@ from dataclasses import asdict
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import ProcessingTrackers
 
-from .graph import BatchDocument, build_pending_job, resolve_submission_order
+from .graph import build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
 from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
-from ..server import Job, Server, JobStatus, get_server_configuration
+from ..server import Job, Server, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME, DATASET_MARKER_FILENAME
 from .dispatch import resolve_job_command
 from .planning import project_plan_path
@@ -25,11 +25,12 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Sequence
 
-    from .graph import GenericPendingJob
+    from .graph import BatchDocument, GenericPendingJob
+    from ..server import JobStatus
 
 
 REMOTE_JOB_WALLTIME_MINUTES: int = 480
-"""The wall-time every remote allocation requests, in minutes.
+"""The wall-time a remote allocation requests when a caller names none, in minutes.
 
 Notes:
     One figure covers every job type, because this bound exists to stop a run that has stopped making progress rather
@@ -43,7 +44,7 @@ _MEGABYTES_PER_GIGABYTE: int = 1024
 """The divisor converting an estimate in megabytes into the gigabyte figure a SLURM memory request takes."""
 
 _SLURM_NAME_SANITIZER: re.Pattern[str] = re.compile(r"[^A-Za-z0-9._-]+")
-"""Matches the characters a SLURM job name and its script filename should not carry."""
+"""Matches every character excluded from a SLURM job name and its script filename."""
 
 
 def remote_batch_directory(server: Server, batch_id: str) -> Path:
@@ -80,6 +81,7 @@ def prepare_remote_batch(
     Raises:
         ValueError: If the named pipeline is not a supported batch pipeline, or if the named units do not share one
             project.
+        FileNotFoundError: If the server holds no plan table for the units' project.
         RuntimeError: If a server-side command fails.
     """
     return prepare_batch(host=RemoteHost(server=server), pipeline=pipeline, unit_paths=unit_paths, options=options)
@@ -156,80 +158,6 @@ def submit_batch(
     return submissions
 
 
-def _submit_ordered_jobs(
-    server: Server,
-    ordered: Sequence[GenericPendingJob],
-    batch_directory: Path,
-    walltime_minutes: int,
-    submissions: list[RemoteSubmission],
-    allocation_of_job: dict[tuple[str, str], str],
-    *,
-    verbose: bool,
-) -> None:
-    """Submits each ordered job, appending its record as the scheduler accepts it.
-
-    Notes:
-        Accumulates into the caller's list rather than returning one, so the caller still holds every accepted
-        allocation when the scheduler rejects a later job.
-
-    Args:
-        server: The connected server to submit to.
-        ordered: The jobs to submit, in dependency order.
-        batch_directory: The server-side directory the scripts and logs are written into.
-        walltime_minutes: The wall-time every allocation requests.
-        submissions: The list each accepted allocation's record is appended to.
-        allocation_of_job: The mapping from each submitted job's dispatch key to its allocation identifier, which is
-            what a dependent job's dependency directive is resolved from.
-        verbose: Determines whether to report each submission as it is accepted.
-
-    Raises:
-        RuntimeError: If the scheduler rejects a submission.
-    """
-    for index, job in enumerate(ordered):
-        slurm_job_name = _resolve_slurm_job_name(job=job, index=index)
-        output_log = batch_directory.joinpath(f"{slurm_job_name}.out")
-        error_log = batch_directory.joinpath(f"{slurm_job_name}.err")
-        dependencies = [
-            allocation_of_job[prerequisite]
-            for prerequisite in job.prerequisite_keys
-            if prerequisite in allocation_of_job
-        ]
-
-        allocation = Job(
-            job_name=slurm_job_name,
-            output_log=output_log,
-            error_log=error_log,
-            working_directory=batch_directory,
-            conda_environment=server.environment,
-            cpu_threads=job.core_weight,
-            ram=max(1, ceil(job.memory_mb / _MEGABYTES_PER_GIGABYTE)),
-            time=walltime_minutes,
-            dependencies=dependencies,
-        )
-        allocation.add_command(shlex.join(resolve_job_command(job=job)))
-        allocation = server.submit_job(job=allocation, verbose=verbose)
-
-        # submit_job() raises rather than returning an unidentified job, so the identifier is always present here.
-        slurm_job_id = str(allocation.job_id)
-        allocation_of_job[job.dispatch_key] = slurm_job_id
-        submissions.append(
-            RemoteSubmission(
-                job_id=job.job_id,
-                slurm_job_id=slurm_job_id,
-                slurm_job_name=slurm_job_name,
-                pipeline=job.pipeline,
-                job_name=job.job_name,
-                specifier=job.specifier,
-                unit_path=str(job.unit_path),
-                unit_name=job.name,
-                cores=job.core_weight,
-                memory_mb=job.memory_mb,
-                output_log=str(output_log),
-                error_log=str(error_log),
-            )
-        )
-
-
 def query_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -> dict[str, JobStatus]:
     """Queries the scheduler for the state of every submitted allocation.
 
@@ -249,7 +177,8 @@ def query_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -
 
 
 def cancel_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -> list[str]:
-    """Cancels every allocation the given submissions hold, leaving the ones that already finished untouched.
+    """Cancels every allocation the given submissions hold in one call, which the scheduler applies to the queued and
+    running ones alone.
 
     Args:
         server: The connected server the batch runs on.
@@ -267,8 +196,9 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
     """Regenerates a remote project's state artifacts and mirrors them onto this host.
 
     Notes:
-        Regeneration precedes the pull, so the mirrored tables describe the state after the runs rather than before
-        them.
+        Regeneration precedes the pull, so the mirrored state tables describe the state after the runs rather than
+        before them. The plan projection is mirrored as the server last wrote it, since replanning is a preparation
+        step rather than a mirroring one.
 
     Args:
         server: The connected server holding the project.
@@ -339,6 +269,80 @@ def render_submission(submission: RemoteSubmission) -> dict[str, Any]:
     return asdict(submission)
 
 
+def _submit_ordered_jobs(
+    server: Server,
+    ordered: Sequence[GenericPendingJob],
+    batch_directory: Path,
+    walltime_minutes: int,
+    submissions: list[RemoteSubmission],
+    allocation_of_job: dict[tuple[str, str], str],
+    *,
+    verbose: bool,
+) -> None:
+    """Submits each ordered job, appending its record as the scheduler accepts it.
+
+    Notes:
+        Accumulates into the caller's list rather than returning one, so the caller still holds every accepted
+        allocation when the scheduler rejects a later job.
+
+    Args:
+        server: The connected server to submit to.
+        ordered: The jobs to submit, in dependency order.
+        batch_directory: The server-side directory the scripts and logs are written into.
+        walltime_minutes: The wall-time every allocation requests.
+        submissions: The list each accepted allocation's record is appended to.
+        allocation_of_job: The mapping from each submitted job's dispatch key to its allocation identifier, which is
+            what a dependent job's dependency directive is resolved from.
+        verbose: Determines whether to report each submission as it is accepted.
+
+    Raises:
+        RuntimeError: If the scheduler rejects a submission.
+    """
+    for index, job in enumerate(ordered):
+        slurm_job_name = _resolve_slurm_job_name(job=job, index=index)
+        output_log = batch_directory.joinpath(f"{slurm_job_name}.out")
+        error_log = batch_directory.joinpath(f"{slurm_job_name}.err")
+        dependencies = [
+            allocation_of_job[prerequisite]
+            for prerequisite in job.prerequisite_keys
+            if prerequisite in allocation_of_job
+        ]
+
+        allocation = Job(
+            job_name=slurm_job_name,
+            output_log=output_log,
+            error_log=error_log,
+            working_directory=batch_directory,
+            conda_environment=server.environment,
+            cpu_threads=job.core_weight,
+            ram=max(1, ceil(job.memory_mb / _MEGABYTES_PER_GIGABYTE)),
+            time=walltime_minutes,
+            dependencies=dependencies,
+        )
+        allocation.add_command(command=shlex.join(resolve_job_command(job=job)))
+        allocation = server.submit_job(job=allocation, verbose=verbose)
+
+        # submit_job() raises rather than returning an unidentified job, so the identifier is always present here.
+        slurm_job_id = str(allocation.job_id)
+        allocation_of_job[job.dispatch_key] = slurm_job_id
+        submissions.append(
+            RemoteSubmission(
+                job_id=job.job_id,
+                slurm_job_id=slurm_job_id,
+                slurm_job_name=slurm_job_name,
+                pipeline=job.pipeline,
+                job_name=job.job_name,
+                specifier=job.specifier,
+                unit_path=str(job.unit_path),
+                unit_name=job.name,
+                cores=job.core_weight,
+                memory_mb=job.memory_mb,
+                output_log=str(output_log),
+                error_log=str(error_log),
+            )
+        )
+
+
 def _resolve_slurm_job_name(job: GenericPendingJob, index: int) -> str:
     """Builds the name one allocation carries in the scheduler's queue and on its script and log files.
 
@@ -370,12 +374,10 @@ def _discover_remote_datasets(server: Server, project_path: Path) -> list[Path]:
     Returns:
         The paths to the project's dataset directories, ordered by name.
     """
-    datasets: list[Path] = []
-    for entry in server.list_directory(remote_path=project_path):
-        candidate = project_path.joinpath(entry)
-        if server.exists(remote_path=candidate.joinpath(DATASET_MARKER_FILENAME)):
-            datasets.append(candidate)
-    return sorted(datasets)
+    candidates = [project_path.joinpath(entry) for entry in server.list_directory(remote_path=project_path)]
+    return sorted(
+        candidate for candidate in candidates if server.exists(remote_path=candidate.joinpath(DATASET_MARKER_FILENAME))
+    )
 
 
 def _regenerate_remote_state(server: Server, project_path: Path, datasets: Sequence[Path]) -> None:

@@ -10,8 +10,7 @@ from ataraxis_base_utilities import LogLevel, console
 
 from .graph import SUCCEEDED_STATUS, index_rows_by_unit
 from .hosts import state_artifact_paths
-from .ledger import current_timestamp, retire_settled_batches
-from ..server import TERMINAL_JOB_STATUSES
+from .ledger import forget_batches, batch_is_settled, current_timestamp
 from .batches import batch_directory, read_prepared_batch, record_batch_outcome
 from .planning import DATASET_UNIT, SESSION_UNIT
 from .preparation import resolve_project_root
@@ -85,6 +84,10 @@ def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
 
     Returns:
         The recorded outcome, or None when this host holds no batch under that identifier.
+
+    Raises:
+        RuntimeError: If a step fails on the host.
+        Timeout: If the batch file's lock cannot be acquired within the timeout period.
     """
     document = read_prepared_batch(batch_id=batch_id)
     if document is None:
@@ -96,7 +99,7 @@ def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
 
 
 def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -> BatchOutcome:
-    """Reads what a batch's jobs recorded, out of freshly regenerated project artifacts.
+    """Reads what a batch's jobs recorded out of freshly regenerated project artifacts.
 
     Notes:
         A job absent from the state artifact counts as outstanding rather than missing, since a tracker that lost an
@@ -133,12 +136,13 @@ def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) ->
 def close_settled_batches(
     host: ExecutionHost, batches: Sequence[SubmissionBatch], statuses: dict[str, JobStatus]
 ) -> list[BatchOutcome]:
-    """Closes every batch whose allocations have all reached a state they never leave, then retires them.
+    """Closes every batch whose allocations have all reached a state they never leave, then retires the ones that
+    closed.
 
     Notes:
-        Closure runs before retirement, so a batch leaves the submission ledger only once this machine holds a durable
-        snapshot of what its jobs recorded. A batch that fails to close stays in the ledger, which leaves it
-        answerable and lets the next query try again.
+        Retirement is issued per batch identifier, and only for a batch whose own closure completed. A batch that
+        fails to close therefore stays in the submission ledger however its siblings fared, which leaves it answerable
+        and lets the next query try again.
 
         An allocation the query did not cover counts as unfinished, so a partial query never closes a batch it did not
         fully observe.
@@ -149,16 +153,13 @@ def close_settled_batches(
         statuses: The observed state of each allocation, keyed by its scheduler identifier.
 
     Returns:
-        The outcomes of the batches that were closed and retired.
+        The outcomes of the batches that were closed. A settled batch this host holds no prepared record of is retired
+        without producing one.
     """
-    settled = [
-        batch
-        for batch in batches
-        if batch.submissions
-        and all(statuses.get(submission.slurm_job_id) in TERMINAL_JOB_STATUSES for submission in batch.submissions)
-    ]
+    settled = [batch for batch in batches if batch_is_settled(batch=batch, statuses=statuses)]
 
     closed: list[BatchOutcome] = []
+    retired: list[str] = []
     for batch in settled:
         try:
             outcome = close_batch(host=host, batch_id=batch.batch_id)
@@ -173,8 +174,10 @@ def close_settled_batches(
             continue
         if outcome is not None:
             closed.append(outcome)
-        retire_settled_batches(statuses=statuses)
+        retired.append(batch.batch_id)
 
+    if retired:
+        forget_batches(batch_ids=retired)
     return closed
 
 

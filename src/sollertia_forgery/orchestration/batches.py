@@ -16,11 +16,11 @@ from ..server import remote_state_path
 if TYPE_CHECKING:
     from pathlib import Path
 
-_BATCH_DIRECTORY: str = "prepared_batches"
+_BATCH_DIRECTORY_NAME: str = "prepared_batches"
 """The directory holding one file per prepared batch, beside this host's other records of a run."""
 
 _LOCK_TIMEOUT_SECONDS: float = 20.0
-"""The period a writer waits for a batch file's lock before giving up, matching the submission ledger's writer."""
+"""The period a writer waits for a batch file's lock before giving up, matching the project manifest's writer."""
 
 
 @dataclass
@@ -57,7 +57,7 @@ def batch_directory() -> Path:
     Returns:
         The path to the prepared-batch directory under the Sollertia platform working directory.
     """
-    return remote_state_path().joinpath(_BATCH_DIRECTORY)
+    return remote_state_path().joinpath(_BATCH_DIRECTORY_NAME)
 
 
 def batch_path(batch_id: str) -> Path:
@@ -90,7 +90,7 @@ def record_prepared_batch(document: BatchDocument) -> str:
     recorded = PreparedBatch(
         batch_id=batch_id, pipeline=document.pipeline, host=document.host, document=asdict(document)
     )
-    with FileLock(str(path.with_suffix(path.suffix + ".lock"))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+    with FileLock(str(_lock_path(path=path))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         recorded.to_yaml(file_path=path)
     return batch_id
 
@@ -175,7 +175,7 @@ def forget_prepared_batches(batch_ids: list[str]) -> list[str]:
         if not path.is_file():
             continue
         path.unlink()
-        path.with_suffix(path.suffix + ".lock").unlink(missing_ok=True)
+        _lock_path(path=path).unlink(missing_ok=True)
         removed.append(batch_id)
     return removed
 
@@ -200,7 +200,7 @@ def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
     path = batch_path(batch_id=batch_id)
     if not path.is_file():
         return False
-    with FileLock(str(path.with_suffix(path.suffix + ".lock"))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+    with FileLock(str(_lock_path(path=path))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         recorded = PreparedBatch.from_yaml(file_path=path)
         recorded.outcome = dict(outcome)
         recorded.to_yaml(file_path=path)
@@ -221,3 +221,15 @@ def read_batch_outcome(batch_id: str) -> dict[str, Any] | None:
         return None
     outcome = PreparedBatch.from_yaml(file_path=path).outcome
     return outcome or None
+
+
+def _lock_path(path: Path) -> Path:
+    """Resolves the lock file guarding one batch file.
+
+    Args:
+        path: The batch file the lock guards.
+
+    Returns:
+        The path to the lock file.
+    """
+    return path.with_suffix(path.suffix + ".lock")

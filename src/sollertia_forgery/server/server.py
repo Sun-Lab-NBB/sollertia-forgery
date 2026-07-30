@@ -1,4 +1,4 @@
-"""Provides API for submitting jobs to SLURM-managed servers, monitoring job status, and managing remote data."""
+"""Provides the API for submitting jobs to SLURM-managed servers, monitoring job status, and managing remote data."""
 
 from __future__ import annotations
 
@@ -27,20 +27,24 @@ if TYPE_CHECKING:
 _BLOCKED_QUEUE_REASON: str = "DependencyNeverSatisfied"
 """The reason SLURM's queue reports for a pending job whose dependency can no longer be satisfied."""
 
+_MAXIMUM_CONNECTION_RETRIES: int = 30
+"""The number of times a Server instance retries the SSH handshake after the initial attempt fails, before it reports
+the server unreachable."""
 
-@dataclass(frozen=True)
+_EXPECTED_FIELD_COUNT: int = 2
+"""The number of pipe-separated fields a parsable accounting or queue row carries."""
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
-    """Stores the result of executing a command on the remote server.
-
-    Attributes:
-        stdout: The standard output from the command.
-        stderr: The standard error output from the command.
-        return_code: The exit code of the command (0 indicates success).
-    """
+    """Stores the result of executing a command on the remote server."""
 
     stdout: str
+    """The standard output the command produced."""
     stderr: str
+    """The standard error output the command produced."""
     return_code: int
+    """The exit code of the command, where zero indicates success."""
 
 
 class JobStatus(StrEnum):
@@ -88,37 +92,11 @@ Notes:
 """
 
 
-def _parse_job_status(state: str) -> JobStatus:
-    """Resolves one accounting state string into a JobStatus member.
-
-    Notes:
-        SLURM decorates some states with a trailing marker or an attribution clause, reporting a cancelled job as
-        'CANCELLED by 1234' and a truncated state as 'CANCELLED+'. Both name the same state, so the decoration is
-        stripped before the state is matched.
-
-    Args:
-        state: The state string accounting reported for the allocation.
-
-    Returns:
-        The matching status, or ``UNKNOWN`` when the state names something this enumeration does not cover.
-    """
-    try:
-        return JobStatus(state)
-    except ValueError:
-        undecorated = state.split(" ", maxsplit=1)[0]
-        cleaned = "".join(character for character in undecorated if character.isalpha() or character == "_")
-        try:
-            return JobStatus(cleaned)
-        except ValueError:
-            return JobStatus.UNKNOWN
-
-
 class Server:
     """Establishes and maintains a bidirectional interface that allows working with a remote compute server.
 
-    This class provides the central API that allows submitting SLURM-managed jobs to the server and monitoring their
-    execution status. Additionally, it also provides the API for managing the data stored on the remote compute server
-    via the SFTP protocol.
+    Submits SLURM-managed jobs to the server, monitors their execution status, and manages the data stored on the
+    server over the SFTP protocol.
 
     Notes:
         This class assumes that the target server has the SLURM job manager installed and accessible to the user whose
@@ -138,19 +116,18 @@ class Server:
         # Tracker used to prevent __del__ from calling close() for a partially initialized class.
         self._open: bool = False
 
-        # Stores the server configuration
         self._configuration: ServerConfiguration = configuration
 
-        # Initializes a timer class to optionally delay loop cycling below
         timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
-        # Establishes the SSH connection to the specified processing server. At most, attempts to connect to the server
-        # 30 times before terminating with an error
+        # Establishes the SSH connection to the specified processing server.
         attempt = 0
-        _maximum_connection_attempts = 30
         while True:
             console.echo(
-                message=f"Connecting to {self._configuration.host} (attempt {attempt}/30)...", level=LogLevel.INFO
+                message=(
+                    f"Connecting to {self._configuration.host} (attempt {attempt}/{_MAXIMUM_CONNECTION_RETRIES})..."
+                ),
+                level=LogLevel.INFO,
             )
             try:
                 self._client: SSHClient = paramiko.SSHClient()
@@ -173,11 +150,14 @@ class Server:
                     f"Authentication failed when connecting to {self._configuration.host} using "
                     f"{self._configuration.username} user."
                 )
-                console.error(message, PermissionError)
+                console.error(message=message, error=PermissionError)
             except Exception:
-                if attempt == _maximum_connection_attempts:
-                    message = f"Could not connect to {self._configuration.host} after 30 attempts. Aborting runtime."
-                    console.error(message, ConnectionError)
+                if attempt == _MAXIMUM_CONNECTION_RETRIES:
+                    message = (
+                        f"Could not connect to {self._configuration.host} after {_MAXIMUM_CONNECTION_RETRIES} "
+                        f"retries. Aborting runtime."
+                    )
+                    console.error(message=message, error=ConnectionError)
 
                 console.echo(
                     message=f"Could not SSH into {self._configuration.host}, retrying after a 2-second delay...",
@@ -187,8 +167,12 @@ class Server:
                 timer.delay(delay=2, allow_sleep=True, block=False)
 
     def __del__(self) -> None:
-        """If the instance is connected to the server, terminates the connection before the instance is destroyed."""
+        """Terminates an open connection to the server before the instance is destroyed."""
         self.close()
+
+    def __repr__(self) -> str:
+        """Returns a string representation of the Server instance."""
+        return f"Server(host={self.host}, user={self.user}, open={self._open})"
 
     def __enter__(self) -> Self:
         """Returns the connected instance so it can be used as a context manager."""
@@ -210,7 +194,8 @@ class Server:
 
         Args:
             job: The Job instance that defines the job to be executed.
-            verbose: Determines whether to notify the user about non-error states of the submission process.
+            verbose: Determines whether to emit the submission start and success messages. The warning issued for a
+                job that was already submitted is emitted regardless.
 
         Returns:
             The job object whose 'job_id' attribute had been replaced with the SLURM-assigned job ID.
@@ -232,15 +217,13 @@ class Server:
 
         # Generates a temporary shell script on the local machine. Uses tempfile to automatically remove the
         # local script as soon as it is uploaded to the server.
-        with tempfile.TemporaryDirectory() as temp_dir:
-            local_script_path = Path(temp_dir).joinpath(f"{job.job_name}.sh")
-            fixed_script_content = job.command_script
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            local_script_path = Path(temporary_directory).joinpath(f"{job.job_name}.sh")
+            script_content = job.command_script
 
-            # Creates a temporary script file locally and dumps translated command data into the file
-            with local_script_path.open("w") as f:
-                f.write(fixed_script_content)
+            with local_script_path.open("w") as script_file:
+                script_file.write(script_content)
 
-            # Uploads the command script to the server using the persistent SFTP client
             self._sftp.put(localpath=str(local_script_path), remotepath=job.remote_script_path)
 
         # Makes the server-side script executable. The exit status is awaited, because a submission issued on a second
@@ -252,34 +235,28 @@ class Server:
                 f"Failed to make the '{job.job_name}' job script executable on the remote compute server. "
                 f"{chmod_result.stderr.strip()}"
             )
-            console.error(message, RuntimeError)
+            console.error(message=message, error=RuntimeError)
 
-        # Submits the job to SLURM with sbatch and verifies submission state
         submission = self.execute_command(command=f"sbatch {script_path}")
         job_output = submission.stdout.strip()
 
-        # If batch_job is not in the output received from SLURM in response to issuing the submission command, raises an
-        # error.
         if "Submitted batch job" not in job_output:
             message = (
                 f"Failed to submit the '{job.job_name}' job to the remote compute server. "
                 f"{submission.stderr.strip() or job_output}"
             )
-            console.error(message, RuntimeError)
-            raise RuntimeError(message)  # pragma: no cover - console.error() is NoReturn but ruff cannot infer this
+            console.error(message=message, error=RuntimeError)
 
-        # Otherwise, extracts the job id assigned to the job by SLURM from the response and writes it to the processed
-        # Job object
+        # SLURM reports the assigned identifier as the last token of the acknowledgement line.
         job_id = job_output.split()[-1]
         job.job_id = job_id
 
         if verbose:
             console.echo(message=f"{job.job_name} job: Submitted to {self.host}.", level=LogLevel.SUCCESS)
 
-        # Returns the updated job object
         return job
 
-    def abort_job(self, slurm_job_id: int) -> None:
+    def abort_job(self, slurm_job_id: str) -> None:
         """Aborts the job with the specified SLURM-assigned ID if it is currently running or pending on the server.
 
         Args:
@@ -298,13 +275,15 @@ class Server:
             return
         self.execute_command(command=f"scancel {' '.join(shlex.quote(str(job)) for job in slurm_job_ids)}")
 
-    def get_job_status(self, slurm_job_id: int) -> JobStatus:
+    def get_job_status(self, slurm_job_id: str) -> JobStatus:
         """Queries the managed server's SLURM manager for the runtime status of the job with the specified
         SLURM-assigned ID.
 
         Notes:
             This method uses the 'sacct' command to determine the current state of the job, returning the actual status
-            (e.g., PENDING, RUNNING, COMPLETED, FAILED) assigned by the SLURM manager.
+            (e.g., PENDING, RUNNING, COMPLETED, FAILED) assigned by the SLURM manager. A pending allocation is
+            additionally checked against the queue's reason field, so a job whose dependency can no longer be satisfied
+            is reported as BLOCKED.
 
         Args:
             slurm_job_id: The SLURM-assigned job ID for which to query the runtime status.
@@ -312,7 +291,7 @@ class Server:
         Returns:
             The current status of the job as a JobStatus enumeration value.
         """
-        return self.get_job_statuses(slurm_job_ids=(str(slurm_job_id),))[str(slurm_job_id)]
+        return self.get_job_statuses(slurm_job_ids=(slurm_job_id,))[slurm_job_id]
 
     def get_job_statuses(self, slurm_job_ids: Sequence[str]) -> dict[str, JobStatus]:
         """Queries the runtime status of every named allocation in one accounting call.
@@ -340,8 +319,7 @@ class Server:
         )
         for line in result.stdout.splitlines():
             fields = line.split("|")
-            expected_fields = 2
-            if len(fields) < expected_fields:
+            if len(fields) < _EXPECTED_FIELD_COUNT:
                 continue
             job_id = fields[0].strip()
             # Step rows carry a suffixed identifier ('12345.batch'), and describe part of the allocation rather than
@@ -350,8 +328,7 @@ class Server:
                 continue
             statuses[job_id] = _parse_job_status(state=fields[1].strip())
 
-        pending = [job_id for job_id, status in statuses.items() if status is JobStatus.PENDING]
-        if pending:
+        if any(status is JobStatus.PENDING for status in statuses.values()):
             for job_id in self.get_blocked_job_ids():
                 if job_id in statuses:
                     statuses[job_id] = JobStatus.BLOCKED
@@ -369,15 +346,12 @@ class Server:
             The SLURM-assigned job IDs the queue reports as permanently blocked.
         """
         result = self.execute_command(command=f'squeue -h -u {shlex.quote(self.user)} -o "%i|%r"')
-        blocked: set[str] = set()
-        for line in result.stdout.splitlines():
-            fields = line.split("|")
-            expected_fields = 2
-            if len(fields) < expected_fields:
-                continue
-            if fields[1].strip() == _BLOCKED_QUEUE_REASON:
-                blocked.add(fields[0].strip())
-        return blocked
+        rows = (line.split("|") for line in result.stdout.splitlines())
+        return {
+            fields[0].strip()
+            for fields in rows
+            if len(fields) >= _EXPECTED_FIELD_COUNT and fields[1].strip() == _BLOCKED_QUEUE_REASON
+        }
 
     def pull(self, local_path: Path, remote_path: Path) -> None:
         """Downloads a file or directory from the remote server to the local machine.
@@ -392,47 +366,36 @@ class Server:
         Raises:
             FileNotFoundError: If the remote path does not exist on the server.
         """
-        # Checks if the remote path exists and determines if it is a file or directory
         try:
-            remote_stat = self._sftp.stat(str(remote_path))
+            remote_stat = self._sftp.stat(path=str(remote_path))
         except FileNotFoundError:
             message = f"The remote path {remote_path} does not exist on the server."
-            console.error(message, FileNotFoundError)
-            raise FileNotFoundError(message) from None
+            console.error(message=message, error=FileNotFoundError)
 
-        # Determines if the remote path is a directory or file and handles accordingly
         if stat.S_ISDIR(remote_stat.st_mode):
-            self._pull_directory(local_path, remote_path)
+            self._pull_directory(local_path=local_path, remote_path=remote_path)
         else:
-            # Ensures the parent directory exists locally
             local_path.parent.mkdir(parents=True, exist_ok=True)
             self._sftp.get(localpath=str(local_path), remotepath=str(remote_path))
 
     def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
         """Recursively downloads a directory from the remote server.
 
-        This is an internal helper method used by pull() to handle directory transfers.
-
         Args:
             local_path: The local directory path where contents will be saved.
             remote_path: The remote directory path to download.
         """
-        # Creates the local directory if it doesn't exist
         local_path.mkdir(parents=True, exist_ok=True)
 
-        # Gets the list of items in the remote directory
-        remote_items = self._sftp.listdir_attr(str(remote_path))
+        remote_items = self._sftp.listdir_attr(path=str(remote_path))
 
         for item in remote_items:
             remote_item_path = remote_path / item.filename
             local_item_path = local_path / item.filename
 
-            # Checks if the item is a directory
             if stat.S_ISDIR(item.st_mode):
-                # Recursively pulls the subdirectory
-                self._pull_directory(local_item_path, remote_item_path)
+                self._pull_directory(local_path=local_item_path, remote_path=remote_item_path)
             else:
-                # Downloads the individual file
                 self._sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
 
     def push(self, local_path: Path, remote_path: Path) -> None:
@@ -450,68 +413,59 @@ class Server:
         """
         if not local_path.exists():
             message = f"The local path {local_path} does not exist."
-            console.error(message, FileNotFoundError)
-            raise FileNotFoundError(message)
+            console.error(message=message, error=FileNotFoundError)
 
         if local_path.is_dir():
-            self._push_directory(local_path, remote_path)
+            self._push_directory(local_path=local_path, remote_path=remote_path)
         else:
-            # Ensures the parent directory exists on the remote server
-            self._create_directory(remote_path.parent, parents=True)
+            self._create_directory(remote_path=remote_path.parent, parents=True)
             self._sftp.put(localpath=str(local_path), remotepath=str(remote_path))
 
     def _push_directory(self, local_path: Path, remote_path: Path) -> None:
         """Recursively uploads a directory to the remote server.
 
-        This is an internal helper method used by push() to handle directory transfers.
-
         Args:
             local_path: The local directory path to upload.
             remote_path: The remote directory path where contents will be saved.
         """
-        # Creates the remote directory
-        self._create_directory(remote_path, parents=True)
+        self._create_directory(remote_path=remote_path, parents=True)
 
-        # Iterates through all items in the local directory
         for local_item_path in local_path.iterdir():
             remote_item_path = remote_path / local_item_path.name
 
             if local_item_path.is_dir():
-                # Recursively pushes subdirectory
-                self._push_directory(local_item_path, remote_item_path)
+                self._push_directory(local_path=local_item_path, remote_path=remote_item_path)
             else:
-                # Uploads the individual file
                 self._sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
 
     def create(self, remote_path: Path, *, is_dir: bool = True, parents: bool = True) -> None:
         """Creates a file or directory on the remote server.
 
+        Notes:
+            An existing target is left as it is, so a repeated call succeeds.
+
         Args:
             remote_path: The absolute path to the file or directory to create on the remote server.
-            is_dir: If True, creates a directory. If False, creates an empty file.
-            parents: If True and is_dir is True, creates parent directories if they are missing. If False and parents
-                do not exist, raises a FileNotFoundError. This parameter is ignored when creating files (parents are
-                always created for files).
+            is_dir: Determines whether the created target is a directory rather than an empty file.
+            parents: Determines whether missing parent directories are created alongside a requested directory.
+                Parents are always created for a file.
 
-        Notes:
-            This method silently succeeds if the target already exists.
+        Raises:
+            RuntimeError: If the remote directory creation command fails.
+            FileNotFoundError: If ``parents`` is False and the target's parent directory does not exist.
         """
         if is_dir:
-            self._create_directory(remote_path, parents=parents)
+            self._create_directory(remote_path=remote_path, parents=parents)
         else:
-            # For files, always ensure parent directories exist
-            self._create_directory(remote_path.parent, parents=True)
+            self._create_directory(remote_path=remote_path.parent, parents=True)
 
-            # Creates an empty file if it doesn't exist
-            if not self.exists(remote_path):
-                # Opens the file in 'write' mode and immediately closes it to create an empty file
-                with self._sftp.open(str(remote_path), "w"):
+            if not self.exists(remote_path=remote_path):
+                # Opening the path for writing and immediately closing it leaves an empty file behind.
+                with self._sftp.open(str(remote_path), mode="w"):
                     pass
 
     def _create_directory(self, remote_path: Path, *, parents: bool = True) -> None:
         """Creates a directory on the remote server.
-
-        This is an internal helper method used by create() and other methods that need to create directories.
 
         Notes:
             Creating a nested path is delegated to the shell, which resolves the whole chain in one round trip. Walking
@@ -520,7 +474,7 @@ class Server:
 
         Args:
             remote_path: The absolute path to the directory to create on the remote server.
-            parents: If True, creates parent directories if they are missing.
+            parents: Determines whether missing parent directories are created alongside the requested directory.
         """
         remote_path_str = str(remote_path)
 
@@ -531,15 +485,12 @@ class Server:
                     f"Unable to create the directory {remote_path_str} on the remote compute server. "
                     f"{result.stderr.strip()}"
                 )
-                console.error(message, RuntimeError)
+                console.error(message=message, error=RuntimeError)
         else:
-            # Only creates the final directory
             try:
-                # Checks if the directory already exists
-                self._sftp.stat(remote_path_str)
+                self._sftp.stat(path=remote_path_str)
             except FileNotFoundError:
-                # Creates the directory if it does not exist
-                self._sftp.mkdir(remote_path_str)
+                self._sftp.mkdir(path=remote_path_str)
 
     def remove(self, remote_path: Path, *, is_dir: bool, recursive: bool = False) -> None:
         """Removes a file or directory from the remote server.
@@ -547,15 +498,13 @@ class Server:
         Args:
             remote_path: The path to the file or directory on the remote server to be removed.
             is_dir: Determines whether the input path represents a directory or a file.
-            recursive: If True and is_dir is True, recursively deletes all contents of the directory
-                before removing it. If False, only removes empty directories (standard rmdir behavior).
+            recursive: Determines whether the directory's contents are deleted before the directory itself.
+                A non-recursive removal succeeds only for an empty directory.
         """
         if is_dir:
             if recursive:
-                # Recursively deletes all contents first and then removes the top-level (now empty) directory
-                self._recursive_remove(remote_path)
+                self._recursive_remove(remote_path=remote_path)
             else:
-                # Only removes empty directories
                 self._sftp.rmdir(path=str(remote_path))
         else:
             self._sftp.unlink(path=str(remote_path))
@@ -563,32 +512,25 @@ class Server:
     def _recursive_remove(self, remote_path: Path) -> None:
         """Recursively removes a directory and all its contents from the remote server.
 
-        This is an internal helper method used by remove() to handle recursive directory deletion.
-
         Args:
             remote_path: The path to the remote directory to recursively remove.
         """
         try:
-            # Lists all items in the directory
-            items = self._sftp.listdir_attr(str(remote_path))
+            items = self._sftp.listdir_attr(path=str(remote_path))
 
             for item in items:
                 item_path = remote_path / item.filename
 
-                # Checks if the item is a directory
                 if stat.S_ISDIR(item.st_mode):
-                    # Recursively removes subdirectories
-                    self._recursive_remove(item_path)
+                    self._recursive_remove(remote_path=item_path)
                 else:
-                    # Removes files
-                    self._sftp.unlink(str(item_path))
+                    self._sftp.unlink(path=str(item_path))
 
-            # After all contents are removed, removes the empty directory
-            self._sftp.rmdir(str(remote_path))
+            self._sftp.rmdir(path=str(remote_path))
 
-        except Exception as e:
+        except Exception as error:
             console.echo(
-                message=f"Unable to remove the specified directory {remote_path}: {e!s}", level=LogLevel.WARNING
+                message=f"Unable to remove the specified directory {remote_path}: {error!s}", level=LogLevel.WARNING
             )
 
     def exists(self, remote_path: Path) -> bool:
@@ -601,7 +543,7 @@ class Server:
             True if the path exists, False otherwise.
         """
         try:
-            self._sftp.stat(str(remote_path))
+            self._sftp.stat(path=str(remote_path))
         except FileNotFoundError:
             return False
         else:
@@ -617,10 +559,11 @@ class Server:
             True if the path exists and is a directory, False otherwise.
         """
         try:
-            file_stat = self._sftp.stat(str(remote_path))
-            return stat.S_ISDIR(file_stat.st_mode)
+            file_stat = self._sftp.stat(path=str(remote_path))
         except FileNotFoundError:
             return False
+        else:
+            return stat.S_ISDIR(file_stat.st_mode)
 
     def list_directory(self, remote_path: Path) -> list[str]:
         """Lists the contents of a directory on the remote server.
@@ -634,7 +577,7 @@ class Server:
         Raises:
             FileNotFoundError: If the directory does not exist.
         """
-        return self._sftp.listdir(str(remote_path))
+        return self._sftp.listdir(path=str(remote_path))
 
     def execute_command(self, command: str) -> CommandResult:
         """Executes the specified command on the remote server and returns the result.
@@ -679,9 +622,8 @@ class Server:
 
     @property
     def environment(self) -> str:
-        """Returns the name of the shared conda environment, on the server, in which the ``slf`` CLI and all of its
-        processing dependencies are installed. Every remote compute job activates this environment before invoking the
-        ``slf`` CLI.
+        """Returns the name of the shared conda environment, on the server, that every remote compute job activates
+        before invoking the ``slf`` CLI.
         """
         return self._configuration.environment
 
@@ -694,3 +636,28 @@ class Server:
     def dlc_projects_directory(self) -> Path:
         """Returns the absolute path to the DeepLabCut project directory under the server's data root."""
         return self.root.joinpath("deeplabcut_projects")
+
+
+def _parse_job_status(state: str) -> JobStatus:
+    """Resolves one accounting state string into a JobStatus member.
+
+    Notes:
+        SLURM decorates some states with a trailing marker or an attribution clause, reporting a cancelled job as
+        'CANCELLED by 1234' and a truncated state as 'CANCELLED+'. Both name the same state, so the decoration is
+        stripped before the state is matched.
+
+    Args:
+        state: The state string accounting reported for the allocation.
+
+    Returns:
+        The matching status, or ``UNKNOWN`` when the state names something this enumeration does not cover.
+    """
+    try:
+        return JobStatus(state)
+    except ValueError:
+        undecorated = state.split(" ", maxsplit=1)[0]
+        cleaned = "".join(character for character in undecorated if character.isalpha() or character == "_")
+        try:
+            return JobStatus(cleaned)
+        except ValueError:
+            return JobStatus.UNKNOWN

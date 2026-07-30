@@ -2,8 +2,10 @@
 environment.
 """
 
+from .entry_points import slf_cli
 from .mcp_instance import mcp
 
 __all__ = [
     "mcp",
+    "slf_cli",
 ]

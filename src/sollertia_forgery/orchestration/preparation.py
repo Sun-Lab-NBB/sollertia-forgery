@@ -7,7 +7,7 @@ from pathlib import Path
 
 from ataraxis_base_utilities import console
 
-from .graph import BatchDocument, build_batch_document
+from .graph import build_batch_document
 from .hosts import plan_artifact_path, state_artifact_paths
 from .dispatch import resolve_dispatch
 from .planning import DATASET_UNIT, SESSION_UNIT
@@ -16,6 +16,7 @@ from ..shared_assets import ProcessingPipelines
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from .graph import BatchDocument
     from .hosts import ExecutionHost
 
 _UNIT_DEPTHS: dict[str, int] = {SESSION_UNIT: 2, DATASET_UNIT: 1}
@@ -60,6 +61,7 @@ def prepare_batch(
     Raises:
         ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named units
             span more than one project.
+        FileNotFoundError: If the host holds no plan table for the units' project.
         RuntimeError: If a step fails on the host.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
@@ -113,14 +115,14 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
         ValueError: If no unit is named, or if the named units span more than one project.
     """
     if not unit_paths:
-        message = "Unable to prepare a batch. No processing unit was named."
+        message = "Unable to resolve the project of a batch. No processing unit was named."
         console.error(message=message, error=ValueError)
 
     depth = _UNIT_DEPTHS[unit_kind]
     roots = {unit_path.parents[depth - 1] for unit_path in unit_paths}
     if len(roots) > 1:
         message = (
-            f"Unable to prepare a batch spanning the projects {sorted(str(root) for root in roots)}. The plan and "
+            f"Unable to resolve a batch spanning the projects {sorted(str(root) for root in roots)}. The plan and "
             f"state artifacts a batch is resolved from are written per project, so every unit of one batch must "
             f"belong to the same project."
         )

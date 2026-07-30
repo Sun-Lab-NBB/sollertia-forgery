@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING
 from numba import njit
 import numpy as np
 import polars as pl
-from numpy.typing import NDArray  # noqa: TC002 - Required at runtime for Numba type introspection
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import SessionTypes, TaskTemplate, MesoscopeExperimentConfiguration
 
 from .metadata import BehaviorDataFiles
@@ -17,7 +16,9 @@ if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Iterable
 
+    from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData, TrialStructure
+
 
 RUNTIME_SOURCE_ID: str = "1"
 """The source ID used by the Mesoscope-VR runtime DataLogger for its log archive. Every processable session
@@ -48,9 +49,8 @@ _ERROR_CONTEXT_CUE_COUNT: int = 20
 def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, session: SessionData) -> None:
     """Parses the decoded Mesoscope-VR runtime archive into the session's runtime behavior feathers.
 
-    Notes:
-        Routes each decoded payload by its leading code (or by length for VR wall cue sequences) and writes the
-        resulting behavior feathers. The experiment-only feathers are written only for experiment sessions.
+    Routes each decoded payload by its leading code (or by length for VR wall cue sequences) and writes the resulting
+    behavior feathers. The experiment-only feathers are written only for experiment sessions.
 
     Args:
         decoded_messages: The decoded runtime messages as a Polars DataFrame with a ``time_us`` UInt64 column and a
@@ -62,7 +62,8 @@ def parse_runtime(decoded_messages: pl.DataFrame, output_directory: Path, sessio
     Raises:
         FileNotFoundError: If the session is an experiment session but its experiment configuration or VR task
             template YAML file is missing.
-        ValueError: If the recorded VR wall cue sequences are absent or their distance breakpoints are inconsistent.
+        ValueError: If the recorded VR wall cue sequences are absent, if their distance breakpoints are inconsistent,
+            or if the experiment configuration references a trial name absent from the VR task template.
         RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
     experiment_configuration = _resolve_experiment_configuration(session=session)
@@ -89,18 +90,22 @@ def _export_runtime_data(
 ) -> None:
     """Routes decoded runtime messages by payload code and exports the resulting behavior feathers.
 
-    Notes:
-        Writes the system-state and runtime-state feathers for every session. For experiment sessions it also writes
-        the cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events
-        were recorded.
+    Writes the system-state and runtime-state feathers for every session. For experiment sessions it also writes the
+    cue, trigger-zone, and trial feathers, plus the guidance feathers when the corresponding guidance events were
+    recorded.
 
     Args:
         messages: An iterable of ``(timestamp, payload)`` records, where each payload is a uint8 byte array.
-        output_directory: The path to the directory where to save the extracted data as uncompressed .feather files.
+        output_directory: The path to the directory where the extracted data is written as uncompressed .feather files.
         experiment_configuration: The MesoscopeExperimentConfiguration instance for the processed session. Only
             required if the processed session is an experiment session.
         task_template: The VR task template supplying the trial geometry for the processed session. Present exactly
             when experiment_configuration is present, since only experiment sessions decode trial geometry.
+
+    Raises:
+        ValueError: If the recorded VR wall cue sequences are absent, if their distance breakpoints are inconsistent,
+            or if the experiment configuration references a trial name absent from the VR task template.
+        RuntimeError: If a VR wall cue sequence cannot be fully decomposed into trial motifs.
     """
     system_states: list[np.uint8] = []
     system_timestamps: list[np.uint64] = []
@@ -113,11 +118,12 @@ def _export_runtime_data(
     cue_sequences: list[NDArray[np.uint8]] = []
     distance_snapshots: list[np.float64] = []
 
-    # Routes each message by its payload code. The timestamps are already absolute UTC values resolved during decoding.
+    # The timestamps are already absolute UTC values resolved during decoding.
     for timestamp, payload in messages:
-        # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences.
+        # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences, collected only for experiment
+        # sessions.
         if len(payload) > _CUE_SEQUENCE_MIN_LENGTH and experiment_configuration is not None:
-            cue_sequences.append(payload.view(dtype=np.uint8).astype(np.uint8))
+            cue_sequences.append(payload.astype(np.uint8))
 
         elif payload[0] == _SYSTEM_STATE_CODE:
             system_states.append(np.uint8(payload[1]))
@@ -140,7 +146,7 @@ def _export_runtime_data(
             traveled_distance = np.float64(distance_bytes.view(dtype="<f8")[0])
             distance_snapshots.append(traveled_distance)
 
-    output_directory.mkdir(parents=True, exist_ok=True)
+    ensure_directory_exists(path=output_directory)
 
     system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
     system_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.SYSTEM_STATE, compression="uncompressed")
@@ -231,7 +237,8 @@ def _resolve_task_template(
     Notes:
         The task template is the session's ``vr_configuration.yaml`` snapshot. It holds the spatial trial geometry the
         runtime parser needs: the cue catalog, the corridor cue offset, and each trial's cue sequence and trigger
-        zone. The experiment configuration carries only the stimulus parameters, so the two are joined by trial name.
+        zone. The experiment configuration carries the per-trial stimulus parameters and the experiment state machine,
+        so the two configurations are joined by trial name.
 
     Args:
         session: The loaded session whose runtime data is being parsed.
@@ -260,7 +267,7 @@ def _resolve_task_template(
 
 
 def _resolve_trial_geometries(task_template: TaskTemplate, trial_names: list[str]) -> list[TrialStructure]:
-    """Joins each experiment trial to its spatial geometry in the VR task template, ordered by trial name.
+    """Joins each experiment trial to its spatial geometry in the VR task template, keyed by trial name.
 
     Notes:
         The runtime parser indexes trials by their position in the experiment configuration, so the returned
@@ -305,8 +312,8 @@ def _decompose_multiple_cue_sequences_into_trials(
             defines the canonical trial ordering that trial_type_index refers to.
         task_template: The VR task template supplying each trial's cue motif and length, joined by trial name.
         cue_sequences: The Virtual Reality environment cue sequences in the order they were used during runtime.
-        distance_breakpoints: The cumulative distances, in centimeters, at which each sequence ends. Should have
-            the same number of elements as the number of cue sequences minus one.
+        distance_breakpoints: The cumulative distances, in centimeters, at which each sequence ends. It holds one
+            fewer element than the cue_sequences list.
 
     Returns:
         A tuple of two elements. The first element is an array of trial type indices stored in the order encountered
@@ -359,7 +366,7 @@ def _decompose_multiple_cue_sequences_into_trials(
     cumulative_distance = 0.0
 
     for sequence_index, cue_sequence in enumerate(cue_sequences):
-        trial_indices_array, trial_count = _decompose_sequence_numba_flat(
+        trial_indices_array, trial_count = _decompose_cue_sequence_into_trials(
             cue_sequence=cue_sequence,
             motifs_flat=motifs_flat,
             motif_starts=motif_starts,
@@ -408,8 +415,8 @@ def _decompose_multiple_cue_sequences_into_trials(
             all_trial_distances.append(float(new_cumulative_distance))
             cumulative_distance = new_cumulative_distance
 
-    trial_type_sequence: NDArray[np.int32] = np.array(all_trial_indices, dtype=np.int32).astype(np.int32)
-    trial_distance_sequence: NDArray[np.float64] = np.array(all_trial_distances, dtype=np.float64).astype(np.float64)
+    trial_type_sequence: NDArray[np.int32] = np.array(all_trial_indices, dtype=np.int32)
+    trial_distance_sequence: NDArray[np.float64] = np.array(all_trial_distances, dtype=np.float64)
 
     return trial_type_sequence, trial_distance_sequence
 
@@ -424,7 +431,7 @@ def _prepare_motif_data(
         trial_distances: The trial motif distances, in centimeters.
 
     Returns:
-        A tuple with five elements. The first element is the flattened array that stores all motifs. The second
+        A tuple of five elements. The first element is the flattened array that stores all motifs. The second
         element is the array that stores the starting indices of each motif in the flattened array. The third
         element is the array that stores the length of each motif, in cues. The fourth element is the array
         that stores the original indices of motifs before sorting. The fifth element is the array of trial distances
@@ -438,10 +445,10 @@ def _prepare_motif_data(
     total_size: int = sum(len(motif) for motif in trial_motifs)
     motif_count: int = len(trial_motifs)
 
-    motifs_flat: NDArray[np.uint8] = np.zeros(total_size, dtype=np.uint8).astype(np.uint8)
-    motif_starts: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
-    motif_lengths: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
-    motif_indices: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32).astype(np.int32)
+    motifs_flat: NDArray[np.uint8] = np.zeros(total_size, dtype=np.uint8)
+    motif_starts: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
+    motif_lengths: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
+    motif_indices: NDArray[np.int32] = np.zeros(motif_count, dtype=np.int32)
 
     current_position: int = 0
     for index, (original_index, motif, length) in enumerate(motif_data):
@@ -452,13 +459,13 @@ def _prepare_motif_data(
         motif_indices[index] = original_index
         current_position += length
 
-    distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32).astype(np.float32)
+    distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32)
 
     return motifs_flat, motif_starts, motif_lengths, motif_indices, distances_array
 
 
 @njit(cache=True)
-def _decompose_sequence_numba_flat(
+def _decompose_cue_sequence_into_trials(
     cue_sequence: NDArray[np.uint8],
     motifs_flat: NDArray[np.uint8],
     motif_starts: NDArray[np.int32],
@@ -469,8 +476,7 @@ def _decompose_sequence_numba_flat(
     """Decomposes a long sequence of Virtual Reality wall cues into individual trial motifs.
 
     Notes:
-        Uses numba-acceleration to speed up decomposition. Longer motifs are matched preferentially over shorter
-        ones to prevent partial matches.
+        Longer motifs are matched preferentially over shorter ones to prevent partial matches.
 
     Args:
         cue_sequence: The full Virtual Reality environment cue sequence to decompose.
@@ -481,8 +487,9 @@ def _decompose_sequence_numba_flat(
         max_trials: The maximum number of trials that can make up the entire cue sequence.
 
     Returns:
-        A tuple of two elements. The first element is the array of trial-type indices decoded from the cue
-        sequence. The second element is the total number of trials extracted, or -1 if decomposition failed.
+        A tuple of two elements. The first element is the array of trial-type indices decoded from the cue sequence,
+        trimmed to the extracted trial count on success and returned as the full max_trials buffer on failure. The
+        second element is the total number of trials extracted, or -1 if decomposition failed.
     """
     trial_indices: NDArray[np.int32] = np.zeros(max_trials, dtype=np.int32)
     trial_count = 0
@@ -539,9 +546,10 @@ def _process_trial_sequence(
         A tuple of five NumPy arrays. The first array stores the IDs of the Virtual Reality environment cues
         experienced by the animal during runtime. The second array stores the cumulative distance, in centimeters,
         traveled by the animal at the onset of each cue. The third array stores the cumulative distance traveled by
-        the animal when it entered each trial's trigger zone. The fourth array stores the cumulative distance
-        traveled by the animal when it left each trial's trigger zone. The fifth array stores the cumulative
-        distance traveled by the animal at the start of each trial.
+        the animal when it entered a trial's trigger zone, and the fourth the distance at which it left that zone,
+        clamped to the trial's end distance. Trials that ended before their trigger zone began contribute no entry,
+        so these two arrays can be shorter than the trial-type array. The fifth array stores the cumulative distance
+        traveled by the animal at the start of each trial.
     """
     # The experiment configuration defines the canonical trial ordering, and the VR task template supplies each
     # trial's cue sequence, trigger zone, and the cue catalog, joined by trial name.
@@ -610,12 +618,10 @@ def _process_trial_sequence(
 
         previous_trial_end_distance = trial_distances[index]
 
-    distances: NDArray[np.float64] = np.array(distances_list, dtype=np.float64).astype(np.float64)
-    cues: NDArray[np.uint8] = np.array(cues_list, dtype=np.uint8).astype(np.uint8)
-    trigger_zone_starts: NDArray[np.float64] = np.array(trigger_zone_starts_list, dtype=np.float64).astype(np.float64)
-    trigger_zone_ends: NDArray[np.float64] = np.array(trigger_zone_ends_list, dtype=np.float64).astype(np.float64)
-    trial_start_distances: NDArray[np.float64] = np.array(trial_start_distances_list, dtype=np.float64).astype(
-        np.float64
-    )
+    distances: NDArray[np.float64] = np.array(distances_list, dtype=np.float64)
+    cues: NDArray[np.uint8] = np.array(cues_list, dtype=np.uint8)
+    trigger_zone_starts: NDArray[np.float64] = np.array(trigger_zone_starts_list, dtype=np.float64)
+    trigger_zone_ends: NDArray[np.float64] = np.array(trigger_zone_ends_list, dtype=np.float64)
+    trial_start_distances: NDArray[np.float64] = np.array(trial_start_distances_list, dtype=np.float64)
 
     return cues, distances, trigger_zone_starts, trigger_zone_ends, trial_start_distances

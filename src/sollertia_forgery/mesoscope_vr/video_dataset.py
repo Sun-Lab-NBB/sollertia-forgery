@@ -4,7 +4,8 @@ forging pipeline.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
@@ -45,22 +46,41 @@ _PUPIL_FLAG_COLUMNS: frozenset[str] = frozenset({PupilColumn.BLINKING_STATE, Pup
 """The pupil feather columns holding boolean state flags. They are interpolated by nearest-prior sample and stored as
 unsigned 8-bit integers, since a boolean state cannot be linearly interpolated."""
 
-_CAMERA_SOURCES: tuple[tuple[str, str, str, str | None], ...] = (
-    (
-        PUPIL_CAMERA_NAME,
-        VideoDataFiles.FACE_CAMERA_TIMESTAMPS,
-        VideoDataFiles.FACE_CAMERA_ENERGY,
-        VideoDataFiles.FACE_CAMERA_PUPIL,
+type _AlignedArray = NDArray[np.float32] | NDArray[np.uint8]
+"""The per-camera array types the assembled columns take: linearly interpolated geometry and the nearest-prior state
+flags."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CameraSource:
+    """Pairs a Mesoscope-VR camera's colloquial name with the per-camera feathers the assembler reads for it."""
+
+    name: str
+    """The camera's colloquial name, used to prefix its motion-energy and frame-luminance dataset columns."""
+    timestamps_file: str
+    """The camera's timestamp feather filename, holding its source clock."""
+    energy_file: str
+    """The camera's motion-energy feather filename."""
+    pupil_file: str | None
+    """The camera's pupil-tracking feather filename, present only for the camera that carries the eye."""
+
+
+_CAMERA_SOURCES: tuple[_CameraSource, ...] = (
+    _CameraSource(
+        name=PUPIL_CAMERA_NAME,
+        timestamps_file=VideoDataFiles.FACE_CAMERA_TIMESTAMPS,
+        energy_file=VideoDataFiles.FACE_CAMERA_ENERGY,
+        pupil_file=VideoDataFiles.FACE_CAMERA_PUPIL,
     ),
-    (
-        _BODY_CAMERA_NAME,
-        VideoDataFiles.BODY_CAMERA_TIMESTAMPS,
-        VideoDataFiles.BODY_CAMERA_ENERGY,
-        None,
+    _CameraSource(
+        name=_BODY_CAMERA_NAME,
+        timestamps_file=VideoDataFiles.BODY_CAMERA_TIMESTAMPS,
+        energy_file=VideoDataFiles.BODY_CAMERA_ENERGY,
+        pupil_file=None,
     ),
 )
-"""The fixed Mesoscope-VR camera set, each entry pairing a camera's colloquial name with its timestamp, motion-energy,
-and optional pupil feather filenames. The face camera carries the eye, so only it contributes a pupil feather."""
+"""The fixed Mesoscope-VR camera set, each entry naming a camera and the feathers read for it. The face camera carries
+the eye, so only it contributes a pupil feather."""
 
 
 def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uint64]) -> pl.DataFrame:
@@ -86,12 +106,12 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
     Raises:
         ValueError: If a camera's motion-energy or pupil feather has a different row count than its timestamp feather.
     """
-    aligned_data: dict[str, NDArray[Any]] = {}
     if not video_data_path.is_dir():
         return pl.DataFrame()
 
-    for camera_name, timestamps_file, energy_file, pupil_file in _CAMERA_SOURCES:
-        timestamps_path = video_data_path.joinpath(timestamps_file)
+    aligned_data: dict[str, _AlignedArray] = {}
+    for camera in _CAMERA_SOURCES:
+        timestamps_path = video_data_path.joinpath(camera.timestamps_file)
         if not timestamps_path.is_file():
             continue
 
@@ -99,24 +119,24 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
         # recorded frame in the same acquisition order, so its values align to this clock by row position.
         frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[_FRAME_TIME_COLUMN].to_numpy()
 
-        energy_path = video_data_path.joinpath(energy_file)
+        energy_path = video_data_path.joinpath(camera.energy_file)
         if energy_path.is_file():
             energy_frame = _read_frame_aligned(
-                feather_path=energy_path, expected_rows=frame_time.size, axis_name=timestamps_path.name
+                feather_path=energy_path, expected_rows=frame_time.size, timestamps_filename=timestamps_path.name
             )
             for source_column in (_MOTION_ENERGY_COLUMN, _FRAME_LUMINANCE_COLUMN):
-                aligned_data[f"{camera_name}_{source_column}"] = _interpolate_linear(
+                aligned_data[f"{camera.name}_{source_column}"] = _interpolate_linear(
                     frame_time=frame_time,
                     values=energy_frame[source_column].to_numpy(),
                     reference_time=reference_time,
                 )
 
-        if pupil_file is None:
+        if camera.pupil_file is None:
             continue
-        pupil_path = video_data_path.joinpath(pupil_file)
+        pupil_path = video_data_path.joinpath(camera.pupil_file)
         if pupil_path.is_file():
             pupil_frame = _read_frame_aligned(
-                feather_path=pupil_path, expected_rows=frame_time.size, axis_name=timestamps_path.name
+                feather_path=pupil_path, expected_rows=frame_time.size, timestamps_filename=timestamps_path.name
             )
             for column in pupil_frame.columns:
                 if column in _PUPIL_FLAG_COLUMNS:
@@ -126,7 +146,7 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
                         source_values=pupil_frame[column].to_numpy().astype(np.uint8),
                         target_coordinates=reference_time,
                         is_discrete=True,
-                    )
+                    ).astype(np.uint8)
                 else:
                     aligned_data[column] = _interpolate_linear(
                         frame_time=frame_time,
@@ -163,8 +183,8 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
     slowest_camera = ""
 
     if video_data_path.is_dir():
-        for camera_name, timestamps_file, _energy_file, _pupil_file in _CAMERA_SOURCES:
-            timestamps_path = video_data_path.joinpath(timestamps_file)
+        for camera in _CAMERA_SOURCES:
+            timestamps_path = video_data_path.joinpath(camera.timestamps_file)
             if not timestamps_path.is_file():
                 continue
 
@@ -182,7 +202,7 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
             if mean_rate < slowest_rate:
                 slowest_rate = mean_rate
                 slowest_clock = frame_time
-                slowest_camera = camera_name
+                slowest_camera = camera.name
 
     if slowest_clock is None:
         message = (
@@ -191,8 +211,6 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
             f"can serve as the assembly reference clock."
         )
         console.error(message=message, error=FileNotFoundError)
-        # Unreachable: console.error() is NoReturn, but ruff cannot trace NoReturn through method calls (RET503).
-        raise FileNotFoundError(message)  # pragma: no cover
 
     console.echo(message=f"Resolved the '{slowest_camera}' clock ({slowest_rate:.2f} fps) as the reference clock.")
     return slowest_clock
@@ -209,8 +227,8 @@ def _interpolate_linear(
         reference_time: The reference time vector to interpolate the values onto.
 
     Returns:
-        The interpolated values as single-precision floats, matching the source feather precision. A not-a-number
-        source value propagates to the samples that bracket it, so an unmeasured frame stays unmeasured.
+        The interpolated values, carried at the source feather precision. A not-a-number source value propagates to
+        the samples that bracket it, so an unmeasured frame stays unmeasured.
     """
     return interpolate_data(
         source_coordinates=frame_time,
@@ -220,13 +238,13 @@ def _interpolate_linear(
     ).astype(np.float32)
 
 
-def _read_frame_aligned(feather_path: Path, expected_rows: int, axis_name: str) -> pl.DataFrame:
+def _read_frame_aligned(feather_path: Path, expected_rows: int, timestamps_filename: str) -> pl.DataFrame:
     """Reads a per-camera value feather and verifies it carries exactly one row per recorded frame.
 
     Args:
         feather_path: The path to the motion-energy or pupil feather to read.
         expected_rows: The camera timestamp feather's row count, which every per-camera feather must match.
-        axis_name: The timestamp feather filename, used only for the error message.
+        timestamps_filename: The timestamp feather filename, used only for the error message.
 
     Returns:
         The loaded feather.
@@ -239,8 +257,8 @@ def _read_frame_aligned(feather_path: Path, expected_rows: int, axis_name: str) 
     if frame.height != expected_rows:
         message = (
             f"Unable to assemble the video dataset. The feather '{feather_path.name}' has {frame.height} rows, but the "
-            f"camera timestamp feather '{axis_name}' has {expected_rows}. Every per-camera video feather must hold "
-            f"exactly one row per recorded frame."
+            f"camera timestamp feather '{timestamps_filename}' has {expected_rows}. Every per-camera video feather "
+            f"must hold exactly one row per recorded frame."
         )
         console.error(message=message, error=ValueError)
     return frame

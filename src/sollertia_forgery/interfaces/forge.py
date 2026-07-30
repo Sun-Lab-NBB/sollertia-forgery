@@ -1,5 +1,7 @@
 """Provides the generic ``slf forge`` command that assembles a dataset from a project's processed sessions."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import click
@@ -12,7 +14,11 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 
 @click.command("forge", context_settings=_CONTEXT_SETTINGS)
 @click.option(
-    "-dn", "--dataset-name", type=str, required=True, help="The unique name for the dataset to create or use."
+    "-dn",
+    "--dataset-name",
+    type=str,
+    required=True,
+    help="The unique name for the dataset to create or use.",
 )
 @click.option(
     "-pp",
@@ -26,8 +32,10 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--session",
     type=str,
     multiple=True,
-    help="The session name the dataset must contain. A session the dataset does not hold is appended to it. Can be "
-    "specified multiple times.",
+    help=(
+        "The session name the dataset must contain. A session the dataset does not hold is appended to it. Can be "
+        "specified multiple times."
+    ),
 )
 @click.option(
     "-id",
@@ -57,8 +65,10 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     "--recreate-animal",
     type=str,
     multiple=True,
-    help="The identifier of an animal already in the dataset to rebuild from the sessions provided for it, leaving "
-    "every other animal untouched. Can be specified multiple times.",
+    help=(
+        "The identifier of an animal already in the dataset to rebuild from the sessions provided for it, leaving "
+        "every other animal untouched. Can be specified multiple times."
+    ),
 )
 @click.option(
     "-np",

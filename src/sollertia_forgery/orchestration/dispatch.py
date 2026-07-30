@@ -79,7 +79,6 @@ BATCH_PIPELINES: frozenset[ProcessingPipelines] = frozenset(
 )
 """The pipelines the generic batch tools support. An import-time check holds this to the dispatch table."""
 
-
 _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # Hashes one file per worker, streaming each in fixed chunks, so the stage is bound by how fast the storage
     # delivers bytes rather than by how fast a core hashes them.
@@ -104,7 +103,7 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
     # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
-    # and leaves the decode width to the reader, so the cores this job holds become the threads that decode it.
+    # and caps the decode threads it opens at a ceiling of its own, so this allocation is what that pool is sized from.
     str(SingleRecordingJobNames.BINARIZE): 4,
     # Removes motion from one plane and computes its registration-quality components. Its pass over the plane holds
     # every thread busy, and its gain flattens once the batch it aligns stops covering the added cores.
@@ -125,14 +124,13 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     FORGING_JOB_NAME: 1,
 }
 """The cores one job of each type occupies, keyed by the tracker job name. Each value follows from how that stage
-parallelizes, and every value is safe to retune. Preparing a session that resolves a job type absent from this map
-fails for that session, since dispatching it would run it at a width nobody chose."""
-
+parallelizes, and every value is safe to retune. Preparing a processing unit that resolves a job type absent from this
+map fails for that unit, since dispatching it would run it at a width nobody chose."""
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
-    # Decoder throughput across the host peaks near forty-eight concurrent decoders and falls away past it, and this
-    # stage opens one decoder per core it holds. Three jobs at its core allocation sit on that peak, so this ceiling
-    # keeps the stage at its best aggregate rate while leaving the cores it would otherwise idle to other work.
+    # Decoder throughput across the host stops climbing once enough decoders are open, and this stage opens one
+    # decoder per core it holds. Three jobs at its core allocation reach that ceiling, so this limit keeps the stage
+    # at its best aggregate rate while leaving the cores it would otherwise idle to other work.
     ENERGY_JOB_NAME: 3,
     # Sits at the root of the two-photon chain, so each job that finishes releases that recording's plane jobs. Four
     # run at their full decode rate, which is what returns those plane jobs to the queue soonest.
@@ -156,7 +154,6 @@ Notes:
     A job type absent from this map is limited by the budgets alone. Every value is safe to retune, and a value below
     one is raised to one so a limit can never stall a batch.
 """
-
 
 _JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
     # Gates the plane that waits on it, so holding a share back keeps the stages that wait on no other job running
@@ -191,10 +188,8 @@ class PipelineDispatch[UnitT]:
     """Binds a processing pipeline to the assets the generic batch tools use to drive it.
 
     Notes:
-        ``discover`` is the pipeline's job resolver, ``worker`` is the picklable callable the process pool
-        dispatches per job, ``prerequisites`` is the pipeline's own intra-pipeline job ordering, and ``tracker_path``
-        resolves the pipeline's processing tracker from a loaded unit. Cores belong to the job type, since one
-        pipeline mixes job types that parallelize very differently.
+        Cores belong to the job type rather than to the pipeline, since one pipeline mixes job types that parallelize
+        very differently.
 
         ``UnitT`` is whatever the pipeline's resolver loads, which is the processing unit its jobs operate on. A
         session pipeline resolves a session and a dataset pipeline resolves a dataset.
@@ -221,7 +216,8 @@ class PipelineDispatch[UnitT]:
     unit_name: Callable[[UnitT], str]
     """Resolves the unit's name, which every tool response reports the unit by."""
     estimate_memory: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]
-    """Estimates the memory each possible job occupies at its allocated core count, from the data it will process."""
+    """Estimates the memory each job of the pipeline's universe occupies at its allocated core count, from the data it
+    will process."""
     command: Callable[[GenericPendingJob], tuple[str, ...]]
     """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
     backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
@@ -241,8 +237,9 @@ def run_batch_job(job: GenericPendingJob) -> None:
         from every pipeline at once. Each pipeline's own worker is looked up rather than bound into the job, so the
         descriptor stays a plain data record that pickles cheaply.
 
-        The decode pool is scoped to the job's own cores before its worker runs, since one pool worker serves job
-        types whose decode widths differ.
+        The image-decode ceiling is written before the pipeline's own worker runs, which bounds any read that names no
+        decode width of its own. A reader that names one, as cindra does, sizes its threads from the cores the batch
+        handed the job.
 
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
@@ -258,7 +255,7 @@ def run_batch_job(job: GenericPendingJob) -> None:
             f"supported batch pipeline."
         )
         console.error(message=message, error=ValueError)
-    dispatch.worker(job)
+    dispatch.worker(job=job)
 
 
 def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:
@@ -288,11 +285,11 @@ def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:
     return dispatch.command(job)
 
 
-def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch | None:
+def resolve_dispatch(pipeline: str | ProcessingPipelines) -> PipelineDispatch[Any] | None:
     """Resolves the dispatch entry for a batch pipeline, or None when the identifier is not a supported batch pipeline.
 
     Args:
-        pipeline: The pipeline identifier, either a ProcessingPipelines member or its string value.
+        pipeline: The pipeline to resolve the dispatch entry for.
 
     Returns:
         The pipeline's dispatch entry, or None if the identifier is unknown or names a non-batch pipeline.
@@ -342,7 +339,7 @@ def resolve_concurrency_limits(job_names: set[str]) -> dict[str, int]:
         job_names: The job type names present in the batch.
 
     Returns:
-        A dictionary mapping each limited job name to the jobs of that type that may run at once.
+        The jobs of each limited type that may run at once, keyed by job name.
     """
     return {
         job_name: max(1, _JOB_CONCURRENCY_LIMITS[job_name])
@@ -363,7 +360,7 @@ def resolve_concurrency_reservations(job_names: set[str]) -> dict[str, int]:
         job_names: The job type names present in the batch.
 
     Returns:
-        A dictionary mapping each reserved job name to the jobs of that type admitted before the reservation lifts.
+        The jobs of each reserved type admitted before the reservation lifts, keyed by job name.
     """
     return {
         job_name: max(1, _JOB_CONCURRENCY_RESERVATIONS[job_name])
@@ -431,9 +428,30 @@ def _run_two_photon_job(job: GenericPendingJob) -> None:
         at rather than at a default cindra would resolve on its own.
 
     Args:
-        job: The pending job carrying the session root in ``unit_path`` and the target job in ``job_id``.
+        job: The pending job carrying the session root in ``unit_path``, the target job in ``job_id``, and its
+            planned cores in ``core_weight``.
     """
     run_two_photon_processing_pipeline(session_path=job.unit_path, job_id=job.job_id, workers=job.core_weight)
+
+
+def _run_forging_job(job: GenericPendingJob) -> None:
+    """Runs a single forging multi-day or assembly job for one dataset.
+
+    Notes:
+        The dataset is named by the unit directory the job carries, which sits under the project root the pipeline
+        resolves its sessions from. The hierarchy the job runs against is built beforehand, so the job takes no
+        parameters of its own.
+
+    Args:
+        job: The pending job carrying the dataset root in ``unit_path``, the target job in ``job_id``, and its
+            planned cores in ``core_weight``.
+    """
+    run_forging_pipeline(
+        name=job.unit_path.name,
+        project_root=job.unit_path.parent,
+        job_id=job.job_id,
+        workers=job.core_weight,
+    )
 
 
 def _checksum_command(job: GenericPendingJob) -> tuple[str, ...]:
@@ -446,7 +464,7 @@ def _checksum_command(job: GenericPendingJob) -> tuple[str, ...]:
         The command as an argument vector.
     """
     command = ["slf", "checksum", "-sp", str(job.unit_path), "-w", str(job.core_weight), "-np"]
-    if bool(job.options.get("regenerate_checksum", False)):
+    if job.options.get("regenerate_checksum", False):
         command.append("-rc")
     return tuple(command)
 
@@ -563,7 +581,9 @@ def _load_dataset(dataset_path: Path) -> DatasetData:
     return DatasetData.load(dataset_path=dataset_path)
 
 
-def _session_memory(pipeline: ProcessingPipelines) -> Callable[[SessionData, list[tuple[str, str, int]]], Any]:
+def _session_memory(
+    pipeline: ProcessingPipelines,
+) -> Callable[[SessionData, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]:
     """Binds the session memory estimator to one pipeline.
 
     Args:
@@ -587,26 +607,6 @@ def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], P
     return lambda session: resolve_session_tracker_path(session=session, pipeline=pipeline)
 
 
-def _run_forging_job(job: GenericPendingJob) -> None:
-    """Runs a single forging multi-day or assembly job for one dataset.
-
-    Notes:
-        The dataset is named by the unit directory the job carries, which sits under the project root the pipeline
-        resolves its sessions from. The hierarchy the job runs against is built beforehand, so the job takes no
-        parameters of its own.
-
-    Args:
-        job: The pending job carrying the dataset root in ``unit_path``, the target job in ``job_id``, and its
-            planned cores in ``core_weight``.
-    """
-    run_forging_pipeline(
-        name=job.unit_path.name,
-        project_root=job.unit_path.parent,
-        job_id=job.job_id,
-        workers=job.core_weight,
-    )
-
-
 @cache
 def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
     """Builds the dispatch entry for every processing pipeline the generic batch tools support.
@@ -624,12 +624,12 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_checksum_jobs,
             worker=_run_checksum_job,
             prerequisites=checksum_job_prerequisites,
-            tracker_path=_session_tracker(ProcessingPipelines.CHECKSUM),
+            tracker_path=_session_tracker(pipeline=ProcessingPipelines.CHECKSUM),
             # Writes its stored checksum into raw_data, which holds the acquired data itself, so it owns no
             # directory a cleanup may remove.
             output_path=lambda _session: None,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(ProcessingPipelines.CHECKSUM),
+            estimate_memory=_session_memory(pipeline=ProcessingPipelines.CHECKSUM),
             command=_checksum_command,
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
@@ -638,10 +638,10 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_runtime_jobs,
             worker=_run_runtime_job,
             prerequisites=runtime_job_prerequisites,
-            tracker_path=_session_tracker(ProcessingPipelines.RUNTIME),
+            tracker_path=_session_tracker(pipeline=ProcessingPipelines.RUNTIME),
             output_path=lambda session: session.processed_data.runtime_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(ProcessingPipelines.RUNTIME),
+            estimate_memory=_session_memory(pipeline=ProcessingPipelines.RUNTIME),
             command=_runtime_command,
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
@@ -650,10 +650,10 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_microcontroller_jobs,
             worker=_run_microcontroller_job,
             prerequisites=microcontroller_job_prerequisites,
-            tracker_path=_session_tracker(ProcessingPipelines.MICROCONTROLLER),
+            tracker_path=_session_tracker(pipeline=ProcessingPipelines.MICROCONTROLLER),
             output_path=lambda session: session.processed_data.microcontroller_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(ProcessingPipelines.MICROCONTROLLER),
+            estimate_memory=_session_memory(pipeline=ProcessingPipelines.MICROCONTROLLER),
             command=_microcontroller_command,
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
@@ -662,10 +662,10 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_video_jobs,
             worker=_run_video_job,
             prerequisites=video_job_prerequisites,
-            tracker_path=_session_tracker(ProcessingPipelines.VIDEO),
+            tracker_path=_session_tracker(pipeline=ProcessingPipelines.VIDEO),
             output_path=lambda session: session.processed_data.video_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(ProcessingPipelines.VIDEO),
+            estimate_memory=_session_memory(pipeline=ProcessingPipelines.VIDEO),
             command=_video_command,
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
@@ -674,10 +674,10 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             discover=discover_two_photon_jobs,
             worker=_run_two_photon_job,
             prerequisites=two_photon_job_prerequisites,
-            tracker_path=_session_tracker(ProcessingPipelines.TWO_PHOTON),
+            tracker_path=_session_tracker(pipeline=ProcessingPipelines.TWO_PHOTON),
             output_path=lambda session: session.processed_data.cindra_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(ProcessingPipelines.TWO_PHOTON),
+            estimate_memory=_session_memory(pipeline=ProcessingPipelines.TWO_PHOTON),
             command=_two_photon_command,
             # cindra requires one single-threaded step to write the shared configuration and every plane's runtime
             # data before any job reads them. That bootstrap is also where the recording's plane count is recorded.

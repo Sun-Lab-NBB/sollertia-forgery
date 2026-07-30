@@ -6,6 +6,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 import click
+from ataraxis_base_utilities import console
 
 from ..video import run_video_processing_pipeline
 from ..runtime import run_runtime_processing_pipeline
@@ -34,8 +35,9 @@ class _SharedProcessingParameters:
     available job for the session (local mode)."""
 
     workers: int
-    """The parallel worker budget for the pipeline. -1 resolves the available CPU cores automatically, and 1 forces
-    sequential execution."""
+    """The parallel worker budget for the pipeline. A value of -1 resolves the host's available cores for the video,
+    microcontroller, and runtime pipelines, and accepts cindra's measured per-stage default for the two-photon
+    pipeline. A value of 1 forces sequential execution."""
 
     display_progress: bool
     """Determines whether the pipeline displays a progress bar during processing."""
@@ -43,8 +45,11 @@ class _SharedProcessingParameters:
     def require_session_path(self) -> Path:
         """Returns the session root path, raising a Click usage error when ``--session-path`` was not supplied."""
         if self.session_path is None:
-            message = "Missing option '-sp' / '--session-path'."
-            raise click.UsageError(message=message)
+            message = (
+                "Unable to resolve the session root directory for the 'process' command. The '-sp' / "
+                "'--session-path' option must be supplied before the subcommand name, but it was omitted."
+            )
+            console.error(message=message, error=click.UsageError)
         return self.session_path
 
 
@@ -88,9 +93,7 @@ _pass_shared_parameters = click.make_pass_decorator(_SharedProcessingParameters)
     is_flag=True,
     show_default=True,
     default=False,
-    help=(
-        "Determines whether to suppress the progress bar during processing. The progress bar is displayed by default."
-    ),
+    help="Determines whether to suppress the progress bar during processing. The progress bar is displayed by default.",
 )
 @click.pass_context
 def process_cli(
@@ -165,8 +168,8 @@ def video_command(
 ) -> None:
     """Extracts camera frame timestamps, processes pose predictions, and measures per-camera motion energy.
 
-    When none of ``--timestamp``, ``--track``, or ``--energy`` is requested, all three stages run (local mode).
-    Supplying ``--job-id`` instead runs only the matching job.
+    When none of '--timestamp', '--track', or '--energy' is requested, all three stages run (local mode). Supplying
+    '--job-id' instead runs only the matching job.
     """
     run_video_processing_pipeline(
         session_path=shared.require_session_path(),
@@ -252,9 +255,9 @@ def two_photon_command(
 ) -> None:
     """Runs the single-recording two-photon (calcium-imaging) processing pipeline for a session.
 
-    The acquisition system resolves the cindra processing configuration. When none of ``--binarize``,
-    ``--register``, ``--process``, or ``--combine`` is requested, all four stages run in sequence (local mode).
-    Supplying ``--job-id`` instead runs only the matching job.
+    The acquisition system resolves the cindra processing configuration. When none of '--binarize', '--register',
+    '--process', or '--combine' is requested, all four stages run in sequence (local mode). Supplying '--job-id'
+    instead runs only the matching job.
     """
     run_two_photon_processing_pipeline(
         session_path=shared.require_session_path(),

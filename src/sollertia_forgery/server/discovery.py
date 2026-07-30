@@ -14,8 +14,8 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
     """Discovers all sessions stored under the project's directory on the remote compute server's data root.
 
     Notes:
-        This function explicitly skips dataset directories (those containing dataset_data.yaml) to avoid confusing
-        dataset session hierarchies with actual animal/session directories.
+        Dataset directories carry a dataset.yaml marker and are skipped, so a dataset's session hierarchy is never
+        returned as an animal's sessions.
 
     Args:
         project: The name of the project for which to discover sessions.
@@ -26,27 +26,23 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
     """
     project_path = server.root.joinpath(project)
 
-    # Builds a list of DatasetSession instances for all discovered sessions.
     discovered_sessions: list[DatasetSession] = []
-    for animal_dir in console.track(
+    for animal_directory in console.track(
         server.list_directory(remote_path=project_path), description="Evaluating animal directories", unit="directory"
     ):
-        animal_path = project_path.joinpath(animal_dir)
+        animal_path = project_path.joinpath(animal_directory)
 
         # Skips non-directory entries (like manifest files).
         if not server.is_directory(remote_path=animal_path):
             continue
 
-        # Skips dataset directories (those containing dataset_data.yaml) to avoid confusing dataset session
-        # hierarchies with actual animal/session directories.
-        if server.exists(remote_path=animal_path.joinpath("dataset_data.yaml")):
+        if server.exists(remote_path=animal_path.joinpath("dataset.yaml")):
             continue
 
-        # Finds valid sessions (those containing session_data.yaml files).
         discovered_sessions.extend(
-            DatasetSession(session=session_dir, animal=animal_dir)
-            for session_dir in server.list_directory(remote_path=animal_path)
-            if server.exists(remote_path=animal_path.joinpath(session_dir, "raw_data", "session_data.yaml"))
+            DatasetSession(session=session_directory, animal=animal_directory)
+            for session_directory in server.list_directory(remote_path=animal_path)
+            if server.exists(remote_path=animal_path.joinpath(session_directory, "raw_data", "session_data.yaml"))
         )
 
     return tuple(discovered_sessions)
@@ -55,9 +51,8 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
 def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
     """Discovers and reports all sessions stored under the project's directory on the remote compute server.
 
-    This function serves as the entry point for discovering project data available on the remote server. It connects
-    to the server, scans the project's directory under the data root, and prints the discovered sessions to the
-    terminal.
+    Serves as the entry point for discovering project data, connecting to the server and reporting the discovered
+    sessions to the terminal.
 
     Args:
         project: The name of the project whose data to discover.

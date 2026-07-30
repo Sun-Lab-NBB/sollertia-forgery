@@ -23,17 +23,13 @@ _MODULE_FEATHER_PATTERN: str = "controller_*_module_*.feather"
 def find_module_feathers(data_directory: Path) -> list[Path]:
     """Discovers microcontroller module feather files under the data directory.
 
-    Searches ``data_directory`` non-recursively for feather files matching the ``controller_*_module_*.feather``
-    naming convention used by ataraxis-communication-interface. The directory is expected to be the session's
-    canonical ``processed_data/microcontroller_data`` location exposed by
-    ``SessionData.processed_data.microcontroller_data_path``.
-
     Args:
-        data_directory: The path to the session's microcontroller data directory.
+        data_directory: The path to the session's canonical ``processed_data/microcontroller_data`` directory, as
+            exposed by ``SessionData.processed_data.microcontroller_data_path``.
 
     Returns:
-        The discovered module feather paths, sorted, or an empty list when the directory does not exist or holds no
-        matching files.
+        The module feather paths matching the ``controller_*_module_*.feather`` convention, sorted, or an empty list
+        when the directory holds none.
     """
     if not data_directory.is_dir():
         return []
@@ -55,11 +51,11 @@ def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
     Raises:
         ValueError: If the filename does not follow the expected naming convention.
     """
-    stem = feather_path.stem  # e.g., "controller_101_module_3_1"
+    stem = feather_path.stem
     parts = stem.split("_")
 
-    _expected_part_count = 5
-    if len(parts) != _expected_part_count or parts[0] != "controller" or parts[2] != "module":
+    expected_part_count = 5
+    if len(parts) != expected_part_count or parts[0] != "controller" or parts[2] != "module":
         message = (
             f"Unable to parse module feather filename '{feather_path.name}'. The filename does not follow the "
             f"expected 'controller_{{id}}_module_{{type}}_{{id}}.feather' naming convention."
@@ -71,10 +67,6 @@ def parse_module_feather_name(feather_path: Path) -> tuple[int, int, int]:
 
 def partition_events(module_dataframe: pl.DataFrame) -> dict[int, pl.DataFrame]:
     """Partitions a module DataFrame into per-event sub-DataFrames in a single pass.
-
-    Notes:
-        Groups the rows by event code in a single ``partition_by`` traversal of the DataFrame, returning the groups
-        keyed by event code so subsequent per-code lookups are O(1).
 
     Args:
         module_dataframe: The Polars DataFrame read from an ataraxis-communication-interface module feather file with
@@ -94,10 +86,10 @@ def get_event_timestamps(partition: dict[int, pl.DataFrame], event_code: int) ->
     """Returns the timestamp array for a given event code from a partitioned DataFrame.
 
     Notes:
-        Designed for state-only events that do not carry data payloads.
+        Serves state-only events, whose messages carry a timestamp alone.
 
     Args:
-        partition: The event-code-keyed partition dictionary produced by partition_events().
+        partition: The event-code-keyed partition dictionary produced by ``partition_events()``.
         event_code: The event code to look up.
 
     Returns:
@@ -118,11 +110,11 @@ def get_event_data[ScalarT: np.generic](
 
     Notes:
         Relies on the ataraxis-communication-interface protocol guarantee that all messages sharing an event code also
-        share a payload dtype, so binary payloads can be concatenated and decoded with a single np.frombuffer() call.
-        The reconstructed values are then cast to the requested output dtype for uniform downstream handling.
+        share a payload dtype, so binary payloads can be concatenated and decoded with a single ``np.frombuffer()``
+        call. The reconstructed values are then cast to the requested output dtype for uniform downstream handling.
 
     Args:
-        partition: The event-code-keyed partition dictionary produced by partition_events().
+        partition: The event-code-keyed partition dictionary produced by ``partition_events()``.
         event_code: The event code to look up.
         values_dtype: The NumPy scalar type to cast the reconstructed values to.
 
@@ -163,7 +155,7 @@ def merge_event_streams[ScalarT: np.generic](
         values_b: The value array for the second event stream.
 
     Returns:
-        A tuple of (merged timestamps, reordered values) sorted chronologically.
+        The chronologically sorted timestamps and the values reordered to match them.
     """
     timestamps = np.concatenate([timestamps_a, timestamps_b])
     values = np.concatenate([values_a, values_b])

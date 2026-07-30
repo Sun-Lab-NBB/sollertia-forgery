@@ -1,29 +1,21 @@
-"""Tests the reconciliation of jobs the trackers already record as running, and the on-disk prepared-batch registry.
-
-A re-submitted batch must not run one job twice, and it must not reset a record an allocation is still writing. These
-tests pin which source a claim is read from, when an allocation is adopted rather than submitted again, and that a
-batch identifier outlives the process that issued it.
-"""
+"""Contains tests for job reconciliation and for the on-disk prepared-batch registry."""
 
 from __future__ import annotations
 
-from typing import Any
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-import platformdirs
-from sollertia_shared_assets import set_working_directory
 from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
     BatchDocument,
-    read_prepared_batch,
     resolve_batch_host,
-    read_prepared_batches,
-    record_prepared_batch,
+    read_prepared_batch,
     reconcile_local_jobs,
+    read_prepared_batches,
     reconcile_remote_jobs,
+    record_prepared_batch,
     forget_prepared_batches,
 )
 from sollertia_forgery.orchestration.graph import build_pending_job
@@ -33,43 +25,108 @@ from sollertia_forgery.orchestration.ledger import (
     record_batch,
 )
 
-UNIT = "/data/Project/305/2024_11_04"
-"""The processing unit the reconciliation tests place their jobs under."""
+if TYPE_CHECKING:
+    from pathlib import Path
+    from collections.abc import Callable
+
+    from sollertia_forgery.orchestration import GenericPendingJob
+
+pytestmark = pytest.mark.usefixtures("isolated_working_directory")
+
+_UNIT_PATH: str = "/data/Project/305/2024_11_04"
+"""The path to the processing unit the reconciliation tests place their jobs under."""
+
+_TRACKER_JOB: tuple[str, str] = ("motion_energy", "1")
+"""The job name and specifier every tracker these tests write is aligned against."""
 
 
-@pytest.fixture(autouse=True)
-def isolated_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Points the Sollertia platform working directory at a pristine tmp-backed location.
+@pytest.fixture
+def running_job(
+    tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
+) -> Callable[[str | None], GenericPendingJob]:
+    """Returns a builder that writes a tracker recording one job as running and points a pending job at it.
 
-    The ledger and the prepared-batch registry are both written under that directory, so every test in this module
-    records into its own files rather than into whatever this host already holds.
+    Args:
+        tmp_path: The temporary directory the tracker is written under.
+        write_tracker: The builder that writes the tracker.
+
+    Returns:
+        A callable taking the executor identifier the running record names, and returning the pending job.
     """
-    working = tmp_path.joinpath("working")
-    monkeypatch.setattr(platformdirs, "user_data_dir", lambda *_args, **_kwargs: str(tmp_path.joinpath("platform")))
-    set_working_directory(path=working)
-    return working
+
+    def _build(executor_id: str | None) -> GenericPendingJob:
+        tracker_path = tmp_path.joinpath("tracker.yaml")
+        write_tracker(path=tracker_path, jobs=[_TRACKER_JOB], running=[_TRACKER_JOB], executor_id=executor_id)
+        return _make_job(job_id=_tracker_job_id(), tracker_path=tracker_path)
+
+    return _build
 
 
-class StubServer:
-    """Stands in for a connected server, answering a fixed scheduler state per allocation."""
+@pytest.fixture
+def scheduled_job(tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]) -> GenericPendingJob:
+    """Builds a pending job whose tracker holds it in the scheduled state, so the record names no executor.
+
+    Args:
+        tmp_path: The temporary directory the tracker is written under.
+        write_tracker: The builder that writes the tracker.
+
+    Returns:
+        The pending job pointing at the written tracker.
+    """
+    tracker_path = tmp_path.joinpath("tracker.yaml")
+    write_tracker(path=tracker_path, jobs=[_TRACKER_JOB])
+    return _make_job(job_id=_tracker_job_id(), tracker_path=tracker_path)
+
+
+class _StubServer:
+    """Stands in for a connected server, answering a fixed scheduler state per allocation.
+
+    Args:
+        statuses: The scheduler state this server answers for each allocation identifier.
+
+    Attributes:
+        _statuses: Cached scheduler states.
+        queried: The allocation identifiers of the most recent query.
+    """
 
     def __init__(self, statuses: dict[str, JobStatus]) -> None:
         self._statuses: dict[str, JobStatus] = statuses
         self.queried: list[str] = []
 
     def get_job_statuses(self, slurm_job_ids: list[str]) -> dict[str, JobStatus]:
-        """Records the queried allocations and answers the fixed state of each."""
+        """Records the queried allocations and answers the fixed state of each.
+
+        Args:
+            slurm_job_ids: The allocation identifiers the caller asked about.
+
+        Returns:
+            The state of each queried allocation this server holds one for.
+        """
         self.queried = list(slurm_job_ids)
         return {allocation: self._statuses[allocation] for allocation in slurm_job_ids if allocation in self._statuses}
 
 
-def make_job(job_id: str, tracker_path: Path, unit_path: str = UNIT) -> Any:  # noqa: ANN401
-    """Builds a pending job pointing at a real tracker file."""
+def _tracker_job_id() -> str:
+    """Returns the identifier the tracker registers the shared job name and specifier under."""
+    return ProcessingTracker.generate_job_id(job_name=_TRACKER_JOB[0], specifier=_TRACKER_JOB[1])
+
+
+def _make_job(job_id: str, tracker_path: Path, unit_path: str = _UNIT_PATH) -> GenericPendingJob:
+    """Builds a pending job pointing at a real tracker file.
+
+    Args:
+        job_id: The identifier the job is registered under in the tracker.
+        tracker_path: The path to the tracker the job is recorded on.
+        unit_path: The processing unit the job runs against.
+
+    Returns:
+        The pending job.
+    """
     return build_pending_job(
         job={
             "job_id": job_id,
-            "job_name": "motion_energy",
-            "specifier": "1",
+            "job_name": _TRACKER_JOB[0],
+            "specifier": _TRACKER_JOB[1],
             "unit_path": unit_path,
             "unit_name": "2024_11_04",
             "pipeline": "video",
@@ -82,93 +139,83 @@ def make_job(job_id: str, tracker_path: Path, unit_path: str = UNIT) -> Any:  # 
     )
 
 
-def write_tracker(path: Path, job_name: str, specifier: str, executor_id: str | None) -> str:
-    """Writes a tracker holding one job left in the running state, and returns its identifier."""
-    tracker = ProcessingTracker(file_path=path)
-    tracker.align_jobs(jobs=[(job_name, specifier)], universe=[(job_name, specifier)])
-    job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
-    tracker.start_job(job_id=job_id, executor_id=executor_id)
-    return job_id
-
-
-def test_a_local_batch_adopts_nothing_and_reruns_every_job(tmp_path: Path) -> None:
-    """Nothing else on this machine should hold a job, so a running record describes a pool that died."""
-    tracker_path = tmp_path.joinpath("tracker.yaml")
-    job_id = write_tracker(path=tracker_path, job_name="motion_energy", specifier="1", executor_id="pid:4242")
-    job = make_job(job_id=job_id, tracker_path=tracker_path)
+def test_a_local_batch_adopts_nothing_and_reruns_every_job(
+    running_job: Callable[[str | None], GenericPendingJob],
+) -> None:
+    """Verifies that a local batch adopts no job and reruns every job a tracker records as running."""
+    job = running_job("pid:4242")
 
     reconciliation = reconcile_local_jobs(jobs=[job])
 
+    # Nothing else on this machine holds a job, so a running record describes a pool that died.
     assert not reconciliation.adopted
-    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job_id]
-    assert [resettable.job_id for resettable in reconciliation.resettable] == [job_id]
+    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job.job_id]
+    assert [resettable.job_id for resettable in reconciliation.resettable] == [job.job_id]
 
 
-def test_a_live_allocation_named_by_the_tracker_is_adopted(tmp_path: Path) -> None:
-    """An executor identifier travels with the data, so it covers an allocation submitted from another machine."""
-    tracker_path = tmp_path.joinpath("tracker.yaml")
-    job_id = write_tracker(path=tracker_path, job_name="motion_energy", specifier="1", executor_id="slurm:991")
-    job = make_job(job_id=job_id, tracker_path=tracker_path)
-    server = StubServer(statuses={"991": JobStatus.RUNNING})
+def test_a_live_allocation_named_by_the_tracker_is_adopted(
+    running_job: Callable[[str | None], GenericPendingJob],
+) -> None:
+    """Verifies that a job whose tracker names a live scheduler allocation is adopted."""
+    job = running_job("slurm:991")
+    server = _StubServer(statuses={"991": JobStatus.RUNNING})
 
-    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])  # type: ignore[arg-type]
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
 
-    assert reconciliation.adopted == {(UNIT, job_id): "991"}
+    # An executor identifier travels with the data, so it covers an allocation submitted from another machine.
+    assert reconciliation.adopted == {(_UNIT_PATH, job.job_id): "991"}
     assert not reconciliation.dispatchable
     # An adopted job is never reset, since that would wipe a record its allocation is still writing.
     assert not reconciliation.resettable
 
 
-def test_a_finished_allocation_is_submitted_again(tmp_path: Path) -> None:
-    """A record left running by an allocation that has since finished describes work that never completed."""
-    tracker_path = tmp_path.joinpath("tracker.yaml")
-    job_id = write_tracker(path=tracker_path, job_name="motion_energy", specifier="1", executor_id="slurm:991")
-    job = make_job(job_id=job_id, tracker_path=tracker_path)
-    server = StubServer(statuses={"991": JobStatus.FAILED})
+def test_a_finished_allocation_is_submitted_again(running_job: Callable[[str | None], GenericPendingJob]) -> None:
+    """Verifies that a job whose tracker names a finished allocation is submitted again."""
+    job = running_job("slurm:991")
+    server = _StubServer(statuses={"991": JobStatus.FAILED})
 
-    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])  # type: ignore[arg-type]
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
 
+    # A record left running by an allocation that has since finished describes work that never completed.
     assert not reconciliation.adopted
-    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job_id]
+    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job.job_id]
 
 
-def test_an_off_scheduler_executor_is_treated_as_dead(tmp_path: Path) -> None:
-    """A record naming a bare process identifier was never a scheduler allocation, so nothing can be adopted."""
-    tracker_path = tmp_path.joinpath("tracker.yaml")
-    job_id = write_tracker(path=tracker_path, job_name="motion_energy", specifier="1", executor_id="pid:4242")
-    job = make_job(job_id=job_id, tracker_path=tracker_path)
-    server = StubServer(statuses={})
+def test_an_off_scheduler_executor_is_treated_as_dead(running_job: Callable[[str | None], GenericPendingJob]) -> None:
+    """Verifies that a job whose tracker names a bare process identifier is submitted again."""
+    job = running_job("pid:4242")
+    server = _StubServer(statuses={})
 
-    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])  # type: ignore[arg-type]
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
 
+    # A bare process identifier was never a scheduler allocation, so there is nothing to adopt.
     assert not reconciliation.adopted
-    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job_id]
+    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job.job_id]
 
 
-def test_the_ledger_claims_an_allocation_the_tracker_cannot_yet_name(tmp_path: Path) -> None:
-    """A queued allocation has not started, so only the ledger knows it exists."""
-    tracker_path = tmp_path.joinpath("tracker.yaml")
-    tracker = ProcessingTracker(file_path=tracker_path)
-    tracker.align_jobs(jobs=[("motion_energy", "1")], universe=[("motion_energy", "1")])
-    job_id = ProcessingTracker.generate_job_id(job_name="motion_energy", specifier="1")
-    job = make_job(job_id=job_id, tracker_path=tracker_path)
-
+def test_the_ledger_claims_an_allocation_the_tracker_cannot_yet_name(scheduled_job: GenericPendingJob) -> None:
+    """Verifies that the ledger supplies the allocation claim for a job the tracker cannot yet name."""
     record_batch(
         batch=SubmissionBatch(
             batch_id="earlier",
-            submissions=[RemoteSubmission(job_id=job_id, slurm_job_id="777", unit_path=UNIT, pipeline="video")],
+            submissions=[
+                RemoteSubmission(
+                    job_id=scheduled_job.job_id, slurm_job_id="777", unit_path=_UNIT_PATH, pipeline="video"
+                )
+            ],
         )
     )
-    server = StubServer(statuses={"777": JobStatus.PENDING})
+    server = _StubServer(statuses={"777": JobStatus.PENDING})
 
-    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])  # type: ignore[arg-type]
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])
 
-    assert reconciliation.adopted == {(UNIT, job_id): "777"}
+    # A queued allocation has not started, so the ledger is the only source that knows it exists.
+    assert reconciliation.adopted == {(_UNIT_PATH, scheduled_job.job_id): "777"}
     assert not reconciliation.dispatchable
 
 
 def test_a_recorded_batch_outlives_the_process_that_prepared_it() -> None:
-    """Batch identifiers are recorded on disk, so preparing and executing need not share one server lifetime."""
+    """Verifies that a recorded batch is readable after the process that prepared it exits."""
     document = BatchDocument(pipeline="video", host="local", jobs=[{"job_id": "a"}], units=[{"unit_name": "one"}])
 
     batch_id = record_prepared_batch(document=document)
@@ -184,7 +231,7 @@ def test_a_recorded_batch_outlives_the_process_that_prepared_it() -> None:
 
 
 def test_an_unknown_batch_identifier_is_reported_rather_than_guessed() -> None:
-    """A caller naming a batch this host does not hold is told which identifiers were not found."""
+    """Verifies that reading an unknown batch identifier reports it as missing."""
     batch_id = record_prepared_batch(document=BatchDocument(pipeline="video", host="local"))
 
     found, missing = read_prepared_batches(batch_ids=[batch_id, "absent"])
@@ -194,10 +241,23 @@ def test_an_unknown_batch_identifier_is_reported_rather_than_guessed() -> None:
 
 
 def test_batches_prepared_against_different_hosts_are_not_dispatched_together() -> None:
-    """A batch runs where it was prepared, because its jobs read the data that host holds."""
+    """Verifies that batches prepared against different hosts are refused as one dispatch."""
     local = BatchDocument(pipeline="video", host="local")
     remote = BatchDocument(pipeline="video", host="remote")
 
+    # A batch runs where it was prepared, because its jobs read the data that host holds.
     assert resolve_batch_host(documents=[local, local]) == "local"
     with pytest.raises(ValueError, match="prepared against the hosts"):
         resolve_batch_host(documents=[local, remote])
+
+
+def test_a_job_no_allocation_ever_started_is_submitted(scheduled_job: GenericPendingJob) -> None:
+    """Verifies that a job no allocation ever started is submitted without a scheduler query."""
+    server = _StubServer(statuses={})
+
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[scheduled_job])
+
+    assert server.queried == [], "an unclaimed job sent the scheduler a query"
+    assert not reconciliation.adopted
+    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [scheduled_job.job_id]
+    assert [resettable.job_id for resettable in reconciliation.resettable] == [scheduled_job.job_id]

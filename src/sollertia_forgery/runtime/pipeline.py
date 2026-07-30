@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from contextlib import nullcontext
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 import polars as pl
@@ -20,6 +20,7 @@ from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, pinned_worker_threa
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from concurrent.futures import Future
 
     from numpy.typing import NDArray
 
@@ -56,7 +57,8 @@ def run_runtime_processing_pipeline(
     Raises:
         FileNotFoundError: If the session's runtime log archive is not present at its canonical raw behavior data
             location.
-        ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
+        ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member), or if the
+            runtime log archive carries no valid onset timestamp message.
     """
     session, universe, possible = discover_runtime_jobs(session_path=session_path)
     console.echo(
@@ -66,7 +68,7 @@ def run_runtime_processing_pipeline(
 
     # The single-job universe carries the source id as its specifier.
     source_id = universe[0][1]
-    _, parser = resolve_runtime_binding(session.acquisition_system)
+    _, parser = resolve_runtime_binding(system=session.acquisition_system)
 
     log_directory = session.raw_data.behavior_data_path
     output_directory = session.processed_data.runtime_data_path
@@ -107,9 +109,9 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
     Notes:
         The runtime pipeline produces exactly one job, so the universe is always the single
         ``(RUNTIME_JOB_NAME, source_id)`` pair, where the source id is resolved from the session's acquisition system.
-        That job is possible only when its DataLogger archive is present on disk. This is pure discovery that loads no
-        message data and mutates nothing. An absent archive yields an empty possible subset, so a batch layer can
-        align the tracker slot against the universe and skip the job.
+        That job is possible only when its DataLogger archive is present on disk. Discovery tests for the archive's
+        presence alone, leaving its contents and every output file untouched. An absent archive yields an empty
+        possible subset, so a batch layer can align the tracker slot against the universe and skip the job.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -122,7 +124,7 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
     """
     session = SessionData.load(session_path=session_path)
-    source_id, _ = resolve_runtime_binding(session.acquisition_system)
+    source_id, _ = resolve_runtime_binding(system=session.acquisition_system)
     universe = [(RUNTIME_JOB_NAME, source_id)]
     archive_path = session.raw_data.behavior_data_path.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
     possible = list(universe) if archive_path.is_file() else []
@@ -134,10 +136,6 @@ def runtime_job_prerequisites(
     universe: list[tuple[str, str]],
 ) -> dict[tuple[str, str], tuple[tuple[str, str], ...]]:
     """Returns the intra-pipeline job ordering for the runtime pipeline.
-
-    Notes:
-        The runtime pipeline produces a single job with no upstream dependency, so every job maps to an empty
-        prerequisite tuple.
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.

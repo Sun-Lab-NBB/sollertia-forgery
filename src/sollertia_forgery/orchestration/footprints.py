@@ -10,16 +10,13 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from cindra import (
-    SingleRecordingJobNames,
-    MultiRecordingConfiguration,
-    SingleRecordingConfiguration,
-)
+from cindra import SingleRecordingJobNames
 import psutil
 from natsort import natsorted
 from tifffile import TiffFile
 from cindra.io import TIFF_EXTENSIONS, PARAMETERS_FILENAME
 from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
+from cindra.allocation import PLANE_SPECIFIER_PREFIX
 from sollertia_shared_assets import SessionData
 
 from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
@@ -41,6 +38,7 @@ from ..microcontrollers import PARSE_JOB_NAME, EXTRACTION_JOB_NAME
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
     from sollertia_shared_assets import DatasetData
 
 _MEMORY_ESTIMATE_TOLERANCE: float = 1.15
@@ -101,8 +99,7 @@ and the phase-correlation workspace the alignment builds from the pair are live 
 _CHECKSUM_READER_MEMORY_MB: int = 56
 """The resident memory one checksum worker holds, covering its fixed read chunk and the small module its target
 function lives in. It replaces the general per-child allowance for this stage, because a checksum worker re-imports
-only the hashing module rather than this package's import graph. Measured at 49 MB per worker across a sweep from
-one to sixty-four workers, then rounded up."""
+only the hashing module rather than this package's import graph."""
 
 _FLUORESCENCE_FILENAME: str = "cell_fluorescence.npy"
 """The cindra array whose header reports a recording's region and sample counts. Only the header is parsed, so a
@@ -155,7 +152,7 @@ _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the behavior, runtime, and video sub-datasets hold per sample of the clock they are placed on. Each
 emits one array per column and the interpolation that aligns them holds double-precision transients."""
 
-_PERCENT: float = 100.0
+_PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
 
 _COMBINATION_MEMORY_MB: int = 16384
@@ -175,14 +172,26 @@ class _RawImagingGeometry:
         multi-region frame into planes.
     """
 
-    frame_count: int
-    """The samples each plane holds."""
+    sample_count: int
+    """The samples one plane holds, as the floor across the interleave positions the conversion stage fills."""
     sampling_rate: float
     """The rate at which the recording sampled each plane."""
     raw_frame_pixels: int
     """The pixels one unsliced acquisition frame holds, which the conversion stage reads a batch of at a time."""
     plane_extents: tuple[tuple[int, int], ...]
     """The height and width of every plane, ordered by plane index."""
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordingGeometry:
+    """Describes the shape of a two-photon recording as its processing output reports it."""
+
+    regions: int
+    """The regions the single-recording pipeline detected."""
+    samples: int
+    """The samples each region's trace holds."""
+    pixels: int
+    """The pixels one combined multi-plane frame holds, which every multi-day stage works at."""
 
 
 def resolve_host_memory_mb() -> int:
@@ -264,6 +273,58 @@ def estimate_session_job_memory(
     return estimates
 
 
+def estimate_dataset_job_memory(
+    dataset: DatasetData, jobs: list[tuple[str, str, int]]
+) -> dict[tuple[str, str], tuple[int, bool]]:
+    """Estimates the memory every possible forging job occupies, from the processed data it will read.
+
+    Notes:
+        Reads array headers and the recording metadata alone, so estimating a dataset decodes no fluorescence and
+        opens no binary. Each two-photon stage scales with the processed data the single-recording pipeline wrote for
+        the sessions that carry two-photon data.
+
+        Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
+        per job. A job whose processed input is absent falls back to the worker baseline, which the flag marks as a
+        floor to plan around.
+
+    Args:
+        dataset: The resolved dataset the jobs operate on.
+        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
+
+    Returns:
+        A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
+        is True when the estimate follows from the job's own input rather than from a flat allowance.
+    """
+    project_root = dataset.dataset_data_path.parent.parent
+    animals = {entry.session: entry.animal for entry in dataset.sessions}
+    configuration = _resolve_tracking_configuration(dataset=dataset, project_root=project_root)
+
+    estimates: dict[tuple[str, str], tuple[int, bool]] = {}
+    for job_name, specifier, _cores in jobs:
+        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
+            estimates[job_name, specifier] = _estimate_discovery_memory(
+                dataset=dataset, animal=specifier, project_root=project_root
+            )
+        else:
+            animal = animals.get(specifier, "")
+            geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=specifier)
+            regions = _resolve_tracked_regions(
+                dataset=dataset,
+                animal=animal,
+                session=specifier,
+                project_root=project_root,
+                configuration=configuration,
+            )
+            if job_name == MULTIDAY_EXTRACTION_JOB_NAME:
+                estimates[job_name, specifier] = _estimate_extraction_memory(
+                    geometry=geometry, regions=regions, configuration=configuration
+                )
+            else:
+                estimates[job_name, specifier] = _estimate_assembly_memory(geometry=geometry, regions=regions)
+
+    return estimates
+
+
 def _resolve_raw_imaging_geometry(
     session: SessionData, configuration: SingleRecordingConfiguration
 ) -> _RawImagingGeometry | None:
@@ -272,8 +333,13 @@ def _resolve_raw_imaging_geometry(
     Notes:
         Reads the acquisition parameters and the headers of the first and last image files, so the cost stays flat
         as a recording grows and no pixel data is decoded. The sample count follows from the pages those two files
-        report, since a recording's files hold an equal share apart from the last. Region line spans give each
-        plane's height and the image header gives the shared width, which is how the conversion stage sizes a plane.
+        report, since a recording's files hold an equal share apart from the last. Dividing those pages by the
+        interleave stride gives the floor across the interleave positions, and every position below the remainder
+        holds one sample more.
+
+        Region line spans give each plane's height and the first image's header gives the shared width, which is how
+        the conversion stage sizes a plane. That stage requires every image it discovers to carry the same frame
+        shape.
 
         The image set and its order match the ones the conversion stage builds. Both skip the names the
         configuration excludes and order numbered files naturally, so both agree on which file holds the recording's
@@ -326,7 +392,7 @@ def _resolve_raw_imaging_geometry(
     )
 
     return _RawImagingGeometry(
-        frame_count=max(1, total_pages // volumes),
+        sample_count=max(1, total_pages // volumes),
         sampling_rate=float(parameters.get("frame_rate", 1.0)),
         raw_frame_pixels=base_height * base_width,
         plane_extents=extents,
@@ -381,10 +447,9 @@ def _estimate_checksum_memory(cores: int) -> int:
     """Estimates the memory one raw-data checksum job holds.
 
     Notes:
-        The only estimator here that does not scale with the size of its input. Each worker streams its file in
-        fixed chunks and holds one at a time, so a session of a few megabytes and one of eighty gigabytes cost the
-        same. The parent retains one pending result per file, which the largest session in this corpus keeps under a
-        megabyte, so it stays below the rounding this estimate already carries.
+        Each worker streams its file in fixed chunks and holds one at a time, so the figure is flat across every
+        session size. The parent retains one pending result per file, which stays below the rounding this estimate
+        already carries.
 
     Args:
         cores: The cores the job is allocated, which is how many files it hashes at once.
@@ -512,8 +577,8 @@ def _estimate_plane_processing_memory(
     # Mirrors cindra's own bin sizing, which takes the coarsest of a single sample, the ratio that caps the binned
     # sample count, and the transient decay window.
     decay_samples = round(configuration.main.tau * geometry.sampling_rate)
-    bin_size = max(1, geometry.frame_count // max(1, detection.maximum_binned_frames), decay_samples)
-    binned_samples = max(1, geometry.frame_count // bin_size)
+    bin_size = max(1, geometry.sample_count // max(1, detection.maximum_binned_frames), decay_samples)
+    binned_samples = max(1, geometry.sample_count // bin_size)
 
     peak_bytes = _DETECTION_ARRAY_MULTIPLIER * binned_samples * height * width * _SINGLE_PRECISION_BYTES
     return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=peak_bytes))
@@ -529,7 +594,8 @@ def _estimate_two_photon_memory(
 
     Args:
         job_name: The tracker job name identifying the stage.
-        specifier: The plane specifier for a processing job, empty for the other stages.
+        specifier: The plane specifier for a registration or processing job, empty for the binarization and
+            combination stages.
         geometry: The recording's raw geometry.
         configuration: The recording's resolved processing configuration.
 
@@ -560,15 +626,17 @@ def _estimate_two_photon_memory(
 
 
 def _resolve_plane_index(specifier: str) -> int | None:
-    """Reads the plane index a processing job's specifier carries.
+    """Reads the plane index a per-plane job's specifier carries.
 
     Args:
-        specifier: The job specifier, which names a plane by its index.
+        specifier: The job specifier, which names a plane by its index behind cindra's plane specifier prefix.
 
     Returns:
         The plane index, or None when the specifier does not name one.
     """
-    digits = specifier.rsplit("_", maxsplit=1)[-1]
+    if not specifier.startswith(PLANE_SPECIFIER_PREFIX):
+        return None
+    digits = specifier.removeprefix(PLANE_SPECIFIER_PREFIX)
     return int(digits) if digits.isdigit() else None
 
 
@@ -597,69 +665,6 @@ def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio:
     return _apply_tolerance(
         memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
     )
-
-
-def estimate_dataset_job_memory(
-    dataset: DatasetData, jobs: list[tuple[str, str, int]]
-) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the memory every possible forging job occupies at its allocated core count.
-
-    Notes:
-        Reads array headers and the recording metadata alone, so estimating a dataset decodes no fluorescence and
-        opens no binary. Each two-photon stage scales with the processed data the single-recording pipeline wrote for
-        the sessions that carry two-photon data.
-
-        Every job receives a figure, since a remote scheduler reserves memory per job and one submitted at the worker
-        baseline it does not need would be killed.
-
-    Args:
-        dataset: The resolved dataset the jobs operate on.
-        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
-
-    Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
-        is True when the estimate follows from the job's own input rather than from a flat allowance.
-    """
-    project_root = dataset.dataset_data_path.parent.parent
-    animals = {entry.session: entry.animal for entry in dataset.sessions}
-    configuration = _resolve_tracking_configuration(dataset=dataset, project_root=project_root)
-
-    estimates: dict[tuple[str, str], tuple[int, bool]] = {}
-    for job_name, specifier, _cores in jobs:
-        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
-            estimates[job_name, specifier] = _estimate_discovery_memory(
-                dataset=dataset, animal=specifier, project_root=project_root
-            )
-        else:
-            animal = animals.get(specifier, "")
-            geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=specifier)
-            regions = _resolve_tracked_regions(
-                dataset=dataset,
-                animal=animal,
-                session=specifier,
-                project_root=project_root,
-                configuration=configuration,
-            )
-            if job_name == MULTIDAY_EXTRACTION_JOB_NAME:
-                estimates[job_name, specifier] = _estimate_extraction_memory(
-                    geometry=geometry, regions=regions, configuration=configuration
-                )
-            else:
-                estimates[job_name, specifier] = _estimate_assembly_memory(geometry=geometry, regions=regions)
-
-    return estimates
-
-
-@dataclass(frozen=True, slots=True)
-class _RecordingGeometry:
-    """Describes the shape of a two-photon recording as its processing output reports it."""
-
-    regions: int
-    """The regions the single-recording pipeline detected."""
-    samples: int
-    """The samples each region's trace holds."""
-    pixels: int
-    """The pixels one combined multi-plane frame holds, which every multi-day stage works at."""
 
 
 @cache
@@ -734,7 +739,8 @@ def _resolve_tracking_configuration(dataset: DatasetData, project_root: Path) ->
         project_root: The path to the project's root directory.
 
     Returns:
-        The resolved configuration, or None when the dataset's sessions need no multi-day processing.
+        The resolved configuration, or None when the dataset holds no session, or when its sessions need no
+        multi-day processing.
     """
     if not dataset.sessions:
         return None
@@ -753,9 +759,10 @@ def _resolve_tracked_regions(
     """Resolves how many regions a session's multi-day arrays hold.
 
     Notes:
-        Reads the multi-day array directly once it exists. Before the animal's discovery job has run it does not.
-        Tracking keeps a cluster whenever it appears in enough of the animal's recordings, so the pooled region count
-        divided by that minimum bounds the templates, narrowed again to the widest single recording the animal holds.
+        Reads the multi-day array directly once the session's multi-day extraction job has written it, and bounds the
+        count from the single-recording geometries until then. Tracking keeps a cluster whenever it appears in enough
+        of the animal's recordings, so the pooled region count divided by that minimum bounds the templates, narrowed
+        again to the widest single recording the animal holds.
 
     Args:
         dataset: The resolved dataset the session belongs to.
@@ -767,7 +774,7 @@ def _resolve_tracked_regions(
     Returns:
         The tracked region count, or the bound standing in for it.
     """
-    entries = dataset.get_sessions_for_animal(animal)
+    entries = dataset.get_sessions_for_animal(animal=animal)
     geometries = [
         geometry
         for entry in entries
@@ -788,7 +795,7 @@ def _resolve_tracked_regions(
         return tracked[0]
 
     prevalence = configuration.roi_tracking.mask_prevalence if configuration is not None else 0.0
-    minimum_recordings = max(1, math.ceil(prevalence / _PERCENT * len(geometries)))
+    minimum_recordings = max(1, math.ceil(prevalence / _PERCENT_PER_FRACTION * len(geometries)))
     pooled = sum(geometry.regions for geometry in geometries) // minimum_recordings
     # A template is one cluster of regions drawn from several recordings, so the count settles at the scale of a
     # single recording's own regions rather than the pooled total the prevalence term alone allows.
@@ -813,7 +820,7 @@ def _estimate_discovery_memory(dataset: DatasetData, animal: str, project_root: 
     """
     geometries = [
         geometry
-        for entry in dataset.get_sessions_for_animal(animal)
+        for entry in dataset.get_sessions_for_animal(animal=animal)
         if (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
         is not None
     ]
@@ -854,8 +861,8 @@ def _estimate_assembly_memory(geometry: _RecordingGeometry | None, regions: int)
 
     Notes:
         The assembled frame retains every fluorescence column it attaches, and the write that closes the job rechunks
-        the frame into a second copy of the whole thing. A session carrying no fluorescence holds its sub-datasets
-        alone, on a camera clock that runs several times longer than an imaging clock.
+        the frame into a second copy of the whole thing. A session carrying no fluorescence falls back to the worker
+        baseline, which the flag marks as a floor to plan around.
 
     Args:
         geometry: The session's processed geometry.

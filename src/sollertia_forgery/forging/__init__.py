@@ -1,4 +1,4 @@
-"""Provides the system-agnostic dataset forging pipeline: dataset resolution and per-session assembly dispatch."""
+"""Provides the system-agnostic dataset forging pipeline."""
 
 from sollertia_shared_assets import (
     DatasetData,

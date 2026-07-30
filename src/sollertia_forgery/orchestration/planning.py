@@ -11,7 +11,7 @@ import polars as pl
 from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
-from sollertia_shared_assets import DatasetData, iterate_sessions
+from sollertia_shared_assets import iterate_sessions
 from ataraxis_data_structures import YamlConfig, ProcessingTracker
 
 from ..forging import discover_project_datasets
@@ -21,7 +21,7 @@ from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sollertia_shared_assets import SessionData
+    from sollertia_shared_assets import DatasetData, SessionData
 
     from .dispatch import PipelineDispatch
 
@@ -102,14 +102,14 @@ class JobPlan(YamlConfig):
         the new jobs alone. A caller that wants recorded figures re-estimated regenerates the plan, which is the one
         path through this module that changes them.
 
-        Nothing guards the file itself, so a run reading a plan assumes it is the plan its submissions were sized
-        against.
+        Each write to a plan file takes that file's own lock, and the lock spans a single write, so a run reading a
+        plan assumes it is the plan its submissions were sized against.
     """
 
     unit_name: str = ""
     """The name of the unit this plan describes."""
     unit_kind: str = ""
-    """Whether this plan describes a session or a dataset."""
+    """The kind of unit this plan describes, either a session or a dataset."""
     entries: list[JobPlanEntry] = field(default_factory=list)
     """The planned jobs, one entry per job the unit's pipelines resolve."""
 
@@ -172,6 +172,10 @@ def resolve_session_plan(
 
     Returns:
         The session's plan, holding an entry for every job its pipelines resolve.
+
+    Raises:
+        ValueError: If no pipeline resolves any job for this session, since a session with no plannable job names no
+            path to a plan file.
     """
     dispatches = [
         dispatch
@@ -203,6 +207,10 @@ def resolve_dataset_plan(
 
     Returns:
         The dataset's plan, holding an entry for every forging job it resolves.
+
+    Raises:
+        ValueError: If the forging pipeline resolves no job for this dataset, since a dataset with no plannable job
+            names no path to a plan file.
     """
     dispatch = resolve_dispatch(pipeline=ProcessingPipelines.FORGING)
     dispatches = [] if dispatch is None else [dispatch]
@@ -219,9 +227,9 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     """Projects every plan cache under a project into one table and saves it at the project root.
 
     Notes:
-        Reads the caches alone and estimates nothing, so this is the cheap half of planning and the half that ships.
-        A unit carrying no cache contributes no rows, so a reader sizing a submission against this table treats an
-        absent job as unplanned rather than as free.
+        Reads the caches alone, so this is the cheap half of planning and the half that ships. A unit carrying no
+        cache contributes no rows, so a reader sizing a submission against this table treats an absent job as
+        unplanned rather than as free.
 
     Args:
         project_directory: The path to the project whose plan caches to project.
@@ -229,6 +237,9 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
 
     Returns:
         The path the projection was written to.
+
+    Raises:
+        Timeout: If the projection file's lock cannot be acquired within the timeout period.
     """
     rows: list[dict[str, Any]] = []
     planned_units = 0
@@ -309,7 +320,8 @@ def _resolve_unit_plan(
 
     Raises:
         ValueError: If no pipeline resolves any job for this unit, since a unit with no plannable job names no path
-            to a plan file.
+            to a plan file, or if a pipeline requests a job outside its own declared universe.
+        TimeoutError: If a pipeline's processing tracker lock cannot be acquired within the timeout period.
     """
     # Resolves every pipeline's job set first, so the recorded plan seeds the entry set before any pipeline's
     # outstanding jobs are worked out against it.

@@ -43,11 +43,11 @@ MULTIDAY_EXTRACTION_JOB_NAME: str = "multiday_extraction"
 specifier is the session name, and the job runs after its animal's discovery job."""
 
 FORGING_JOB_NAME: str = "session_data_assembly"
-"""The job name identifying per-session assembly jobs in the forging processing tracker."""
+"""The job name identifying per-session assembly jobs in the forging tracker."""
 
 FORGING_JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # Reads every fluorescence array and sub-dataset feather its session holds, then writes the merged result, and
-    # computes almost nothing between the two. Each job holds one core, so this ceiling is what bounds the pool.
+    # computes almost nothing between the two.
     FORGING_JOB_NAME: 4,
 }
 """The jobs of each forging type that may run at once regardless of the cores a budget could still supply, keyed by
@@ -55,9 +55,8 @@ the tracker job name.
 
 Notes:
     Only assembly declares a ceiling. It holds one core per job, so this is what sets the width of the pool it
-    opens. The cross-recording jobs exist for two-photon sessions alone, and cindra classifies its discovery and
-    extraction stages as compute-bound, running them at roughly thirty cores each. Both therefore take a wide core
-    allocation and let the core budget set their concurrency.
+    opens. The cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core
+    allocation of its own, so the core budget already bounds how many run at once and no separate ceiling applies.
 
     This mapping is the single source for both the local assembly pool and the shared batch layer, which merges it
     into its own concurrency table.
@@ -81,8 +80,9 @@ def define_forging_dataset(
 
     Notes:
         Every forging job runs against a hierarchy this call established, so it precedes them rather than joining
-        them on the processing tracker. Rebuilding an animal drops the tracked jobs of the sessions it no longer
-        holds, since a job outside the resulting universe has nothing left to record.
+        them on the processing tracker. Rebuilding an animal resets that animal's tracked jobs, since its new
+        session set makes every stage outstanding again. The tracked jobs of a session the animal no longer holds
+        fall outside the resulting universe and are discarded when the next pipeline run aligns the tracker.
 
     Args:
         name: The unique name of the dataset.
@@ -102,7 +102,9 @@ def define_forging_dataset(
     Raises:
         ValueError: If the arguments contradict each other, or if the dataset's acquisition system is unknown. The
             dataset resolution policy raises for a request it cannot satisfy.
-        FileNotFoundError: If a provided session name resolves to no directory under the project root.
+        FileNotFoundError: If a provided session name resolves to no directory under the project root, or if the
+            acquisition system's resolver reports a missing input it needs for an animal.
+        RuntimeError: If a provided session name resolves to more than one directory under the project root.
     """
     console.echo(message=f"Defining the '{name}' dataset...", level=LogLevel.INFO)
 
@@ -152,13 +154,13 @@ def run_forging_pipeline(
         outstanding. Rebuilding an animal resets that animal's jobs first.
 
         In local mode (``job_id`` is None) every outstanding stage runs in sequence: each animal's discovery and its
-        per-session extractions, then the assembly jobs across a parallel pool.
-        In remote mode (``job_id`` is provided) only the single job matching the identifier runs, so an external
-        scheduler drives cross-job ordering by dispatching each identifier in prerequisite order.
+        per-session extractions, then the assembly jobs across a parallel pool. The assembly stage runs sequentially
+        when the resolved worker count or the outstanding session count is one. In remote mode (``job_id`` is
+        provided) only the single job matching the identifier runs, so an external scheduler drives cross-job
+        ordering by dispatching each identifier in prerequisite order.
 
         ``define_forging_dataset`` owns the hierarchy in both modes, so the session set, ``force_recreate``, and
-        ``recreate_animals`` take effect there alone. A scheduler therefore defines the dataset once and then
-        dispatches the resulting job identifiers in prerequisite order.
+        ``recreate_animals`` take effect there alone.
 
     Args:
         name: The unique name of the dataset, which ``define_forging_dataset`` has already built.
@@ -173,11 +175,12 @@ def run_forging_pipeline(
     Raises:
         ValueError: If the dataset is not defined, if its acquisition system is unknown, or if the provided job_id
             does not match any job.
+        FileNotFoundError: If the dataset carries no ``data_descriptions.feather`` companion file.
     """
     console.echo(message=f"Initializing the forging pipeline for dataset '{name}'...", level=LogLevel.INFO)
 
     dataset = resolve_dataset(name=name, session_names=(), project_root=project_root)
-    worker = resolve_forging_assembly_worker(dataset.acquisition_system)
+    worker = resolve_forging_assembly_worker(system=dataset.acquisition_system)
     described_columns = frozenset(dataset.column_descriptions())
 
     dataset_path = dataset.dataset_data_path.parent
@@ -190,7 +193,7 @@ def run_forging_pipeline(
     }
 
     dataset_path.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=dataset_path.joinpath(ProcessingTrackers.FORGING))
+    tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
 
     # Requesting only the outstanding jobs while declaring the full universe preserves the recorded state of every
     # job this invocation skips.
@@ -300,9 +303,9 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     """Resolves the forging pipeline's job universe and possible subset for an already-defined dataset.
 
     Notes:
-        Mutates nothing and creates nothing. Every job the universe names is possible, because
-        ``define_forging_dataset`` admits a session only once it carries the single-day outputs the forging stages
-        consume, so the possible subset equals the universe.
+        Reads the dataset marker and each animal's first session marker. Every job the universe names is possible,
+        because ``define_forging_dataset`` admits a session only once it carries the single-day outputs the forging
+        stages consume, so the possible subset equals the universe.
 
         Every stage is specified by the animals and sessions the dataset hierarchy holds, so a batch is prepared
         against a dataset ``define_forging_dataset`` has already built. Preparing it afterwards names everything the
@@ -313,7 +316,7 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
 
     Returns:
         A tuple of the loaded dataset, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
-        subset, which equals the universe.
+        subset.
 
     Raises:
         FileNotFoundError: If the dataset's own marker is not present under the provided path.
@@ -351,7 +354,7 @@ def resolve_multiday_plan(dataset: DatasetData, project_root: Path) -> dict[str,
     plan: dict[str, tuple[Path, list[str]]] = {}
     for dataset_animal in dataset.animals:
         animal = dataset_animal.animal
-        animal_entries = dataset.get_sessions_for_animal(animal)
+        animal_entries = dataset.get_sessions_for_animal(animal=animal)
         if not animal_entries:
             continue
 
@@ -401,7 +404,7 @@ def materialize_multiday_plan(
     plan: dict[str, tuple[Path, list[str]]] = {}
     for dataset_animal in dataset.animals:
         animal = dataset_animal.animal
-        animal_entries = dataset.get_sessions_for_animal(animal)
+        animal_entries = dataset.get_sessions_for_animal(animal=animal)
         animal_sessions = [
             SessionData.load(session_path=project_root.joinpath(animal, entry.session)) for entry in animal_entries
         ]
@@ -449,7 +452,7 @@ def load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]
         configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
         if not configuration_path.is_file():
             continue
-        animal_entries = dataset.get_sessions_for_animal(dataset_animal.animal)
+        animal_entries = dataset.get_sessions_for_animal(animal=dataset_animal.animal)
         plan[dataset_animal.animal] = (configuration_path, [entry.session for entry in animal_entries])
 
     return plan
@@ -566,7 +569,7 @@ def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals
         targets.append(ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal))
         targets.extend(
             ProcessingTracker.generate_job_id(job_name=job_name, specifier=entry.session)
-            for entry in dataset.get_sessions_for_animal(animal)
+            for entry in dataset.get_sessions_for_animal(animal=animal)
             for job_name in (MULTIDAY_EXTRACTION_JOB_NAME, FORGING_JOB_NAME)
         )
 
@@ -595,7 +598,10 @@ def _run_discovery_job(
         job_id: The unique hexadecimal identifier for this discovery job.
         workers: The workers this stage runs under.
     """
-    console.echo(message=f"Running multi-day discovery for animal '{animal}' (ID: {job_id})...", level=LogLevel.INFO)
+    console.echo(
+        message=f"Running '{MULTIDAY_DISCOVERY_JOB_NAME}' job with specifier '{animal}' (ID: {job_id})...",
+        level=LogLevel.INFO,
+    )
     execute_multi_recording_job(
         configuration_path=configuration_path,
         job_name=MultiRecordingJobNames.DISCOVER,
@@ -624,7 +630,10 @@ def _run_extraction_job(
         job_id: The unique hexadecimal identifier for this extraction job.
         workers: The workers this stage runs under.
     """
-    console.echo(message=f"Running multi-day extraction for session '{session}' (ID: {job_id})...", level=LogLevel.INFO)
+    console.echo(
+        message=f"Running '{MULTIDAY_EXTRACTION_JOB_NAME}' job with specifier '{session}' (ID: {job_id})...",
+        level=LogLevel.INFO,
+    )
     execute_multi_recording_job(
         configuration_path=configuration_path,
         job_name=MultiRecordingJobNames.EXTRACT,
@@ -799,7 +808,7 @@ def _execute_jobs_parallel(
             session_metadata = session_lookup[session_name]
             source_session_path = project_root.joinpath(session_metadata.animal, session_name)
 
-            console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
+            console.echo(message=f"Running '{FORGING_JOB_NAME}' job with specifier '{session_name}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
             future = executor.submit(
                 _forge_session,
@@ -856,7 +865,7 @@ def _execute_job(
         worker: The registered per-session assembly worker.
         described_columns: The column names the dataset describes, which every assembled session is held to.
     """
-    console.echo(message=f"Running assembly job for session '{session_name}' (ID: {job_id})...")
+    console.echo(message=f"Running '{FORGING_JOB_NAME}' job with specifier '{session_name}' (ID: {job_id})...")
     with tracked_job(tracker=tracker, job_id=job_id):
         session_metadata = session_lookup[session_name]
         source_session_path = project_root.joinpath(session_metadata.animal, session_name)
@@ -877,11 +886,12 @@ def _forge_session(
     worker: ForgingAssembler,
     described_columns: frozenset[str],
 ) -> None:
-    """Forges and assembles a single session: runs the system worker, then re-exports the shared assets.
+    """Assembles a single session by running the system worker, holding the written feather to the dataset's described
+    columns, then re-exporting the shared assets.
 
     Notes:
-        The atomic unit dispatched to worker processes by the parallel path, so it must stay importable at module
-        level and accept only picklable arguments. The session descriptor is written by every acquisition runtime,
+        This is the atomic unit the parallel path dispatches to worker processes, so it stays importable at module
+        level and accepts only picklable arguments. The session descriptor is written by every acquisition runtime,
         while the VR and experiment configurations are present only for the session types that carry them. A session
         missing a required asset fails before any expensive work, and whichever assets the session holds are
         re-exported alongside the assembled feather.
@@ -895,6 +905,8 @@ def _forge_session(
 
     Raises:
         FileNotFoundError: If a shared asset the session is required to carry is missing from the source session.
+        ValueError: If the assembled feather carries a column the dataset's description companion file does not
+            describe.
     """
     session = SessionData.load(session_path=source_session_path)
     reexported_assets = {
@@ -913,11 +925,11 @@ def _forge_session(
             )
             console.error(message=message, error=FileNotFoundError)
 
-    worker(source_session_path, output_path, dataset_name)
+    worker(source_session_path=source_session_path, output_path=output_path, dataset_name=dataset_name)
 
     # The dataset describes the columns its sessions may emit, so the session that emitted an undescribed one is the
     # session whose assembly fails.
-    undescribed = natsorted(set(pl.read_ipc_schema(output_path)) - described_columns)
+    undescribed = natsorted(set(pl.read_ipc_schema(source=output_path)) - described_columns)
     if undescribed:
         message = (
             f"Unable to assemble session '{source_session_path.name}'. Every column written into a session's "

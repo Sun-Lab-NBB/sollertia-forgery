@@ -1,29 +1,25 @@
-"""Contains tests for the ServerConfiguration dataclass and associated helpers relocated from
-sollertia-shared-assets.
-"""
+"""Contains tests for the ServerConfiguration dataclass and the helpers that create and resolve its file."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import pytest
-import platformdirs
-from sollertia_shared_assets import set_working_directory
 
 from sollertia_forgery.server.server_configuration import (
     ServerConfiguration,
+    remote_state_path,
+    remote_state_directory,
     get_server_configuration,
+    get_server_configuration_path,
     create_server_configuration_file,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-@pytest.fixture
-def clean_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Configures platformdirs to resolve to a pristine tmp-backed working directory."""
-    data_dir = tmp_path / "user_data"
-    data_dir.mkdir()
-    monkeypatch.setattr(platformdirs, "user_data_dir", lambda appname, appauthor: str(data_dir))  # noqa: ARG005
-    working_dir = tmp_path / "working"
-    set_working_directory(path=working_dir)
-    return working_dir
+_CONFIGURATION_RELATIVE_PATH: tuple[str, str] = ("configuration", "server_configuration.yaml")
+"""The working-directory-relative location the server configuration file is written to."""
 
 
 # Tests for ServerConfiguration dataclass
@@ -36,6 +32,8 @@ def test_server_configuration_default_initialization() -> None:
     assert config.username == ""
     assert config.password == ""
     assert config.host == ""
+    assert config.root == ""
+    assert config.environment == ""
 
 
 def test_server_configuration_custom_initialization() -> None:
@@ -57,6 +55,8 @@ def test_server_configuration_yaml_roundtrip(tmp_path: Path) -> None:
         username="test_user",
         password="test_pass",  # noqa: S106 - literal test credential.
         host="test.server.com",
+        root="/remote/sollertia/root",
+        environment="forge",
     )
     yaml_path = tmp_path / "server_configuration.yaml"
     original.to_yaml(file_path=yaml_path)
@@ -66,12 +66,14 @@ def test_server_configuration_yaml_roundtrip(tmp_path: Path) -> None:
     assert loaded.username == original.username
     assert loaded.password == original.password
     assert loaded.host == original.host
+    assert loaded.root == original.root
+    assert loaded.environment == original.environment
 
 
 # Tests for create_server_configuration_file
 
 
-def test_create_server_configuration_file(clean_working_directory: Path) -> None:
+def test_create_server_configuration_file(isolated_working_directory: Path) -> None:
     """Verifies that create_server_configuration_file creates a user-visible YAML under the working directory."""
     create_server_configuration_file(
         username="test_user",
@@ -81,19 +83,23 @@ def test_create_server_configuration_file(clean_working_directory: Path) -> None
         environment="forge",
     )
 
-    config_file = clean_working_directory / "configuration" / "server_configuration.yaml"
+    config_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
     assert config_file.exists()
 
     loaded = ServerConfiguration.from_yaml(file_path=config_file)
     assert loaded.username == "test_user"
     assert loaded.password == "test_pass"  # noqa: S105 - literal test credential.
     assert loaded.host == "test.server.com"
+    assert loaded.root == "/remote/sollertia/root"
+    assert loaded.environment == "forge"
 
 
 # Tests for get_server_configuration
 
 
-def test_get_server_configuration_user(clean_working_directory: Path) -> None:
+def test_get_server_configuration_returns_the_written_credentials(
+    isolated_working_directory: Path,  # noqa: ARG001 - requested for working directory isolation.
+) -> None:
     """Verifies that get_server_configuration loads the YAML created by create_server_configuration_file."""
     create_server_configuration_file(
         username="test_user",
@@ -109,16 +115,58 @@ def test_get_server_configuration_user(clean_working_directory: Path) -> None:
     assert config.host == "test.server.com"
 
 
-def test_get_server_configuration_raises_error_if_missing(clean_working_directory: Path) -> None:  # noqa: ARG001
+def test_get_server_configuration_raises_error_if_missing(
+    isolated_working_directory: Path,  # noqa: ARG001 - requested for working directory isolation.
+) -> None:
     """Verifies that get_server_configuration raises FileNotFoundError when no configuration is present."""
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match=r"Unable to locate the 'server_configuration\.yaml' file"):
         get_server_configuration()
 
 
-def test_get_server_configuration_raises_error_if_unconfigured(clean_working_directory: Path) -> None:
+def test_get_server_configuration_raises_error_if_unconfigured(isolated_working_directory: Path) -> None:
     """Verifies that get_server_configuration raises ValueError for a YAML with placeholder credentials."""
-    config_file = clean_working_directory / "configuration" / "server_configuration.yaml"
+    config_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
     ServerConfiguration().to_yaml(file_path=config_file)
 
     with pytest.raises(ValueError, match=r"(?i)unconfigured"):
         get_server_configuration()
+
+
+# Tests for the path helpers
+
+
+def test_get_server_configuration_path_resolves_the_written_file(isolated_working_directory: Path) -> None:
+    """Verifies that the resolved configuration path names the file the creator writes."""
+    create_server_configuration_file(
+        username="test_user",
+        password="test_pass",  # noqa: S106 - literal test credential.
+        host="test.server.com",
+        root="/remote/sollertia/root",
+        environment="forge",
+    )
+
+    resolved = get_server_configuration_path()
+
+    assert resolved == isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
+    assert resolved.exists()
+
+
+def test_get_server_configuration_path_resolves_without_reading_the_file(isolated_working_directory: Path) -> None:
+    """Verifies that the configuration path resolves even when no configuration file has been written."""
+    resolved = get_server_configuration_path()
+
+    assert resolved == isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
+    assert not resolved.exists()
+
+
+def test_remote_state_path_resolves_under_the_working_directory(isolated_working_directory: Path) -> None:
+    """Verifies that the remote state directory sits directly under the platform working directory."""
+    assert remote_state_path() == isolated_working_directory.joinpath("remote_state")
+
+
+def test_remote_state_directory_mirrors_the_project_by_name(isolated_working_directory: Path) -> None:
+    """Verifies that a project's mirror directory reproduces the project name under the remote state directory."""
+    mirror = remote_state_directory(project="TestProject")
+
+    assert mirror == isolated_working_directory.joinpath("remote_state", "TestProject")
+    assert mirror.parent == remote_state_path()

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 _CUE_UNDEFINED: int = 255
 """The sentinel value used to mask the cue column when the system is not in the run state, equal to the maximum value
-of UInt8 so it sits outside the valid cue code range."""
+of UInt8 so it does not collide with the cue codes any Mesoscope-VR task template assigns."""
 
 _TRIAL_UNDEFINED: int = 65535
 """The sentinel value used to mask the trial column when the system is not in the run state, equal to the maximum
@@ -32,6 +32,9 @@ _SYSTEM_STATE_IDLE: int = 0
 """The system state code the acquisition system reports while it is not conducting a session. Every session type
 leaves this state once, at its canonical start, so the first entry carrying a different code marks the moment the
 session's data begins."""
+
+_RUNTIME_STATE_IDLE: int = 0
+"""The runtime state code for the implicit idle state, which the experiment configuration never lists."""
 
 
 def assemble_runtime_dataset(
@@ -47,14 +50,20 @@ def assemble_runtime_dataset(
             encoder feather (the wheel-distance source for interpolation).
         runtime_data_path: The path to the processed runtime-data directory holding the runtime-parsed feathers (VR
             cue, trigger zone, trial, runtime state, and the optional guidance feathers).
-        experiment_configuration: Provides the mappings from integer trial type and runtime state codes to descriptive
-            names, loaded from the session's raw data.
+        experiment_configuration: The session's experiment configuration, supplying the mappings from integer trial
+            type and runtime state codes to descriptive names.
         reference_time: The reference time vector to which to align the assembled dataset.
 
     Returns:
         A DataFrame aligned to the reference time vector with the columns ``trial``, ``trial_type``, ``cue``,
         ``in_trigger_zone``, and ``runtime_state``, plus the optional ``reinforcing_guided`` / ``aversive_guided``
         columns when the corresponding guidance feathers were produced.
+
+    Raises:
+        FileNotFoundError: If any of the required encoder, VR cue, trigger zone, trial, or runtime state feathers is
+            missing from the processed data directories.
+        ValueError: If a recorded trial type index or runtime state code has no entry in the experiment
+            configuration's mappings.
     """
     # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
     # descriptive names. Adds "undefined" as a special value for masking non-run experiment states.
@@ -65,8 +74,7 @@ def assemble_runtime_dataset(
         state_configuration.experiment_state_code: state_name
         for state_name, state_configuration in experiment_configuration.experiment_states.items()
     }
-    # State code 0 is the implicit idle state and is never listed in the experiment_states configuration.
-    runtime_state_mapping[0] = "idle"
+    runtime_state_mapping[_RUNTIME_STATE_IDLE] = "idle"
     runtime_state_enum_dtype = pl.Enum(list(runtime_state_mapping.values()))
 
     encoder_data_frame = pl.read_ipc(
@@ -158,8 +166,8 @@ def assemble_runtime_dataset(
 def mask_non_run_experiment_data(experiment_data: pl.DataFrame) -> pl.DataFrame:
     """Masks cue, trial, and trial_type column values for non-run (idle or rest) system states.
 
-    Sets cue and trial to their dtype sentinels (``_CUE_UNDEFINED`` / ``_TRIAL_UNDEFINED``) and trial_type to the
-    "undefined" Enum member.
+    Sets cue and trial to the maximum value of their unsigned integer dtypes and trial_type to the "undefined" Enum
+    member.
 
     Args:
         experiment_data: The experiment dataset containing system_state, cue, trial, and trial_type columns.
@@ -188,23 +196,13 @@ def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path
     """Discards the assembled samples acquired before the session started and after its runtime ended.
 
     Notes:
-        The acquisition assets start and stop in sequence around the session itself. The state streams begin at
-        system initialization, and the cameras and the mesoscope begin acquiring during the setup that follows.
-        Teardown then stops the cameras about a second after the runtime, while the mesoscope continues for several
-        more seconds and the microcontrollers log for several more minutes.
-
-        The head therefore holds the setup period, which for an experiment session covers the whole mesoscope
-        alignment. The session itself begins when the acquisition system first leaves the idle state, which is the
-        first ``system_state`` entry whose code differs from ``_SYSTEM_STATE_IDLE``. Later idle spans are left in
-        place, since the system also returns to idle when a running session pauses.
-
-        The tail holds the teardown period. On the fluorescence clock its samples carry the last camera value held
-        constant, so clipping there also removes fabricated data. On a camera clock every trailing sample is
-        acquired, so clipping ends the session at the runtime rather than at the camera teardown.
+        The acquisition assets start and stop in sequence around the session, so the head holds the setup period and
+        the tail holds the teardown period. The session begins at the first ``system_state`` entry whose code differs
+        from the idle code, and later idle spans stay in place because a paused session also returns to idle.
 
         Clipping the fully assembled dataset trims every column at once, which keeps the sub-dataset assemblers free
         of setup-specific and teardown-specific handling. A session that never leaves idle keeps its head, and a
-        session with no runtime-state entry keeps its tail, so a partially acquired session still forges.
+        session with no runtime-state entry keeps its tail.
 
     Args:
         assembled_data: The fully assembled DataFrame, ordered by its session's reference clock.
@@ -221,10 +219,10 @@ def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path
     clipped = assembled_data
 
     session_start_times = system_state_data.filter(pl.col("system_state") != _SYSTEM_STATE_IDLE)["time_us"]
-    if session_start_times.len() > 0:
+    if session_start_times.len():
         clipped = clipped.filter(pl.col("time_us") >= session_start_times[0])
 
-    if runtime_state_data.height > 0:
+    if runtime_state_data.height:
         clipped = clipped.filter(pl.col("time_us") <= runtime_state_data["time_us"][-1])
 
     return clipped
@@ -236,8 +234,7 @@ def _check_trigger_zones(
     trigger_zone_starts: NDArray[np.float64],
     trigger_zone_ends: NDArray[np.float64],
 ) -> NDArray[np.uint8]:
-    """Uses the provided trigger zone boundary data to determine which portion of the processed runtime data corresponds
-    to the animal traversing a trigger zone.
+    """Determines which sampled distances fall inside a trigger zone.
 
     Args:
         traversed_distance: The cumulative distance traveled by the animal during the experiment at each sampling
@@ -252,14 +249,12 @@ def _check_trigger_zones(
     trigger_zone_count = len(trigger_zone_starts)
     in_zone: NDArray[np.uint8] = np.zeros(distance_value_count, dtype=np.uint8)
 
-    # If no trigger zones are defined, returns the binary array set to 0 everywhere.
     if not trigger_zone_count:
         return in_zone
 
     zone_index = 0
 
-    # Determines whether each distance-point falls into a trigger zone. This relies on the distance and trigger zone
-    # data being sorted and monotonically increasing.
+    # Relies on the distance and trigger zone data being sorted and monotonically increasing.
     for sample_index in range(distance_value_count):
         evaluated_distance = traversed_distance[sample_index]
 

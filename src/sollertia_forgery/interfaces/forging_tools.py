@@ -25,6 +25,8 @@ from .responses import (
     project_item,
     resolve_page,
     error_response,
+    reject_unknown,
+    frame_breakdown,
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
@@ -48,8 +50,8 @@ _DATASET_SEMI_FIELDS: tuple[str, ...] = (
     "session_count",
     "animal_count",
 )
-"""The fields a dataset listing carries, which is the dataset's identity and how much it holds. Its job counts are
-absent because reading them opens one stored table per dataset, so detail asks for them."""
+"""The fields a dataset listing carries, which is the dataset's identity and how much it holds. Detail adds the job
+counts, since reading them opens one stored table per dataset."""
 
 _STATE_AXES: tuple[str, ...] = ("scope", "animal", "job_name", "status")
 """The snapshot columns a caller may filter by, and the axes its breakdown counts."""
@@ -77,8 +79,9 @@ def define_forging_dataset_tool(
     Every forging job runs against a hierarchy this tool established, so a dataset is defined here before its jobs
     are prepared, and preparing a dataset this tool has not built reports an error. A per-animal configuration is
     written only for the animals whose acquisition system resolves a multi-recording configuration, which is the
-    case for sessions carrying two-photon imaging data. Each configuration names the thread count the batch layer
-    budgets a cross-recording job, since those stages read that count from the file rather than from a call.
+    case for sessions carrying two-photon imaging data. The batch layer names the cores a cross-recording job runs
+    under on the command that dispatches it, so the configuration file carries the recording set and the progress flag
+    alone.
 
     Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
     animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
@@ -140,7 +143,7 @@ def define_forging_dataset_tool(
             recreate_animals=tuple(recreate_animals or ()),
         )
     except Exception as exception:
-        return error_response(message=str(exception))
+        return error_response(message=f"Unable to define the local dataset '{dataset_name}'. {exception}")
 
     return ok_response(
         dataset_name=dataset.name,
@@ -157,8 +160,9 @@ def generate_dataset_state_tool(dataset_paths: list[str], host: str = "local") -
     """Snapshots each named dataset's forging job state into a shippable feather file at the dataset root.
 
     Reads the dataset's forging tracker and rewrites the snapshot, so it is cheap enough to run before deciding
-    what to forge and again once a run finishes. A dataset that cannot be read is reported in its own entry and does
-    not abort the others.
+    what to forge and again once a run finishes. A ``local`` snapshot reports a dataset it cannot read in its own entry
+    and leaves the others alone, while a ``remote`` snapshot fails the whole call, since one server-side invocation
+    covers every named dataset.
 
     Args:
         dataset_paths: The dataset root directories to snapshot, which are paths ON THE SERVER for ``remote``.
@@ -225,7 +229,8 @@ def read_dataset_state_tool(
     to the data it describes. The totals and the breakdown span every job regardless of the filters.
 
     Args:
-        dataset_path: The absolute path to the dataset's root directory.
+        dataset_path: The absolute path to the dataset's root directory, which is a path ON THE SERVER for ``remote``,
+            where the project is resolved from the parent directory's name.
         host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
             compute server. A remote read mirrors the project's artifacts onto this machine and reads the
             mirror, so it reports what the project currently records without regenerating anything.
@@ -269,7 +274,7 @@ def read_dataset_state_tool(
         dataset_path=dataset_path,
         state_path=str(state_path),
         summary=_status_counts(frame=frame),
-        breakdown={axis: count_values(values=frame[axis].to_list()) for axis in _STATE_AXES if axis in frame.columns},
+        breakdown=frame_breakdown(frame=frame, axes=_STATE_AXES),
     )
 
     singles: dict[str, str | None] = {"scope": scope, "animal": animal, "session": session, "status": status}
@@ -280,15 +285,14 @@ def read_dataset_state_tool(
     for column, value in singles.items():
         if value is None:
             continue
-        available = sorted({str(entry) for entry in frame[column].to_list() if entry is not None})
-        if value not in available:
-            return error_response(message=f"No job has '{column}' of '{value}'. Available: {available}.")
+        rejection = reject_unknown(frame=frame, column=column, values=[value], subject="job")
+        if rejection is not None:
+            return rejection
         matched = matched.filter(pl.col(column) == value)
     if job_names is not None:
-        available = sorted({str(entry) for entry in frame["job_name"].to_list() if entry is not None})
-        unknown = sorted({name for name in job_names if name not in available})
-        if unknown:
-            return error_response(message=f"No job has 'job_name' in {unknown}. Available: {available}.")
+        rejection = reject_unknown(frame=frame, column="job_name", values=job_names, subject="job")
+        if rejection is not None:
+            return rejection
         matched = matched.filter(pl.col("job_name").is_in(job_names))
 
     fields = (*_STATE_SEMI_FIELDS, *_STATE_DETAIL_FIELDS) if detailed else _STATE_SEMI_FIELDS
@@ -340,8 +344,9 @@ def list_project_datasets_tool(
         A response dict with ``project_path``, ``total_datasets``, ``total_memberships`` summed across datasets, a
         ``breakdown`` per session type and acquisition system, and a ``datasets`` list alongside ``rows``,
         ``matched_rows``, ``start_row``, and ``next_start_row``. Each entry carries the dataset's ``name``,
-        ``dataset_path``, ``session_type``, ``acquisition_system``, ``session_count``, and ``animal_count``. Returns an
-        error when the project directory cannot be read.
+        ``dataset_path``, ``session_type``, ``acquisition_system``, ``session_count``, and ``animal_count``. A detailed
+        entry adds ``state_exists``, its ``jobs`` counts by status when a snapshot exists, and the ``animals`` it
+        covers. Returns an error when the project directory cannot be read.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))

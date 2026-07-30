@@ -4,7 +4,7 @@ shippable table.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import polars as pl
 from filelock import FileLock
@@ -67,17 +67,14 @@ DATASET_STATE_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType
 """The column layout of the dataset state artifact, one row per forging job.
 
 Notes:
-    ``animal`` and ``session`` are resolved alongside the raw ``specifier`` so the table joins against the project
-    manifest on the pair that identifies a session across animals. An animal-scoped row carries no session, and the
-    timestamps follow the stack-wide microsecond-epoch convention the project manifest already stores.
+    ``animal`` and ``session`` are resolved alongside the raw ``specifier`` so the table joins against the project job
+    artifact on the pair that identifies a session across animals. An animal-scoped row carries no session, and the
+    timestamps follow the stack-wide microsecond-epoch convention that artifact already stores.
 """
 
 
 def dataset_state_path(dataset: DatasetData) -> Path:
     """Resolves the path to a dataset's state artifact.
-
-    This is the single source of the artifact's location, so the writer and every consumer that locates it derive
-    the same path.
 
     Args:
         dataset: The resolved dataset whose state artifact to locate.
@@ -104,6 +101,8 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
 
     Raises:
         Timeout: If the state file's lock cannot be acquired within the timeout period.
+        ValueError: If the dataset's forging tracker records a job name that declares no scope in
+            ``DATASET_JOB_SCOPES``.
     """
     state_path = dataset_state_path(dataset=dataset)
     lock = FileLock(str(state_path.with_suffix(state_path.suffix + ".lock")))
@@ -122,7 +121,7 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
     return state_path
 
 
-def _build_job_rows(dataset: DatasetData) -> list[dict[str, Any]]:
+def _build_job_rows(dataset: DatasetData) -> list[dict[str, str | int | None]]:
     """Reads a dataset's forging tracker into one row per tracked job.
 
     Notes:
@@ -158,7 +157,7 @@ def _build_job_rows(dataset: DatasetData) -> list[dict[str, Any]]:
         )
         console.error(message=message, error=ValueError)
 
-    rows: list[dict[str, Any]] = []
+    rows: list[dict[str, str | int | None]] = []
     for entry in summarize_tracker(jobs=jobs)["jobs"]:
         scope = DATASET_JOB_SCOPES[entry["job_name"]]
         specifier = entry["specifier"]

@@ -38,12 +38,7 @@ if TYPE_CHECKING:
 
 
 class _CalciumIndicator(StrEnum):
-    """Enumerates the calcium indicators the Mesoscope-VR cindra configurations are tuned for.
-
-    Notes:
-        The indicator sets the OASIS decay ``tau``, the neuropil coefficient, and the multi-recording ROI-selection
-        probability threshold. It is resolved from the animal's genotype through ``_resolve_calcium_indicator``.
-    """
+    """Enumerates the calcium indicators the Mesoscope-VR cindra configurations are tuned for."""
 
     GCAMP6F = "GCaMP6f"
     """The Thy1-GCaMP6f transgenic line (GP5.17)."""
@@ -54,13 +49,7 @@ class _CalciumIndicator(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class _IndicatorParameters:
-    """Bundles the cindra configuration parameters that depend on the calcium indicator.
-
-    Notes:
-        ``neuropil_coefficient`` is shared by both the single- and multi-recording configurations, ``tau`` applies only
-        to the single-recording configuration, and ``probability_threshold`` applies only to the multi-recording
-        configuration.
-    """
+    """Bundles the cindra configuration parameters that depend on the calcium indicator."""
 
     tau: float
     """The single-recording OASIS AR(1) sensor decay time constant, in seconds (``main.tau``)."""
@@ -87,7 +76,7 @@ _GENOTYPE_INDICATOR_REGISTRY: dict[str, _CalciumIndicator] = {
 normalized by ``_resolve_calcium_indicator`` (casefolded, whitespace collapsed). Zygosity qualifiers are recorded as
 their own keys, so a hemizygous line resolves to the same indicator as the homozygous line while the surgery metadata
 keeps the distinction. Only the two indicators used with the reference mesoscope-vr system are recognized, so an
-unrecognized genotype fails loudly rather than defaulting to a possibly-wrong sensor."""
+unrecognized genotype raises immediately and the caller resolves the mismatch before any imaging data is processed."""
 
 
 def locate_two_photon_data(session: SessionData) -> Path:
@@ -97,9 +86,7 @@ def locate_two_photon_data(session: SessionData) -> Path:
         session: The loaded session whose raw two-photon imaging directory is resolved.
 
     Returns:
-        The path to the session's ``mesoscope_data`` directory under its raw-data root. This directory stores the
-        compressed 2-Photon Random Access Mesoscope (2P-RAM) acquisition output and accompanying metadata that the
-        cindra single-recording pipeline consumes.
+        The path to the session's ``mesoscope_data`` directory under its raw-data root.
     """
     return session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
 
@@ -155,8 +142,8 @@ def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
         The genotype is normalized before matching. Normalization casefolds the string, strips surrounding whitespace,
         and collapses internal whitespace runs to one space. Zygosity qualifiers such as the ``(hemi)`` in
         ``GP5.17 (hemi)`` are preserved and carry their own registry key. The normalized string is then matched
-        exactly against the recognized genotypes, so a jGCaMP8f or jGCaMP8m line does not silently resolve to the
-        jGCaMP8s configuration.
+        exactly against the recognized genotypes, so every jGCaMP8 variant needs its own registry key before it
+        resolves.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -167,14 +154,15 @@ def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    normalized = re.sub(pattern=r"\s+", repl=" ", string=genotype.strip().casefold())
+    normalized_genotype = re.sub(pattern=r"\s+", repl=" ", string=genotype.strip().casefold())
 
-    indicator = _GENOTYPE_INDICATOR_REGISTRY.get(normalized)
+    indicator = _GENOTYPE_INDICATOR_REGISTRY.get(normalized_genotype)
     if indicator is None:
-        recognized = ", ".join(sorted(_GENOTYPE_INDICATOR_REGISTRY))
+        recognized_genotypes = ", ".join(sorted(_GENOTYPE_INDICATOR_REGISTRY))
         message = (
             f"Unable to resolve the calcium indicator for the genotype '{genotype}'. The genotype normalized to "
-            f"'{normalized}', which does not match a recognized indicator. The recognized genotypes are: {recognized}."
+            f"'{normalized_genotype}', which does not match a recognized indicator. The recognized genotypes are: "
+            f"{recognized_genotypes}."
         )
         console.error(message=message, error=ValueError)
 
@@ -211,7 +199,8 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
         Every parameter is written out explicitly, so the configuration is decoupled from cindra's evolving defaults.
         Only ``main.tau`` and ``spike_deconvolution.neuropil_coefficient`` depend on the indicator. The deploy-time
         fields (``file_io.data_path``, ``file_io.output_path``, and the ``runtime`` settings) are left at their cindra
-        defaults, because the two-photon pipeline overrides them with the session-resolved locations and worker budget.
+        defaults, because the two-photon pipeline overrides them with the session-resolved locations and its
+        progress-bar preference. cindra takes the worker count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -304,7 +293,8 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
         Only ``roi_selection.probability_threshold`` and ``spike_deconvolution.neuropil_coefficient`` depend on the
         indicator. The deploy-time fields (``recording_io.recording_directories``, ``recording_io.dataset_name``, and
         the ``runtime`` settings) are left at their cindra defaults, because the forging pipeline overrides them with
-        the animal's recording directories, the per-animal dataset name, and the worker budget.
+        the animal's recording directories, the per-animal dataset name, and its progress-bar preference. cindra takes
+        the worker count as a call argument, so no configuration field carries it.
 
     Args:
         genotype: The animal's genotype, read from the ``subject.genotype`` field of its surgery metadata.
@@ -370,14 +360,16 @@ def _assert_indicator_coverage() -> None:
 
     Raises:
         RuntimeError: If a ``_CalciumIndicator`` member is missing from ``_INDICATOR_PARAMETERS``. The error names the
-            offending members so an added indicator without parameters fails loudly at import rather than at build time.
+            offending members, so an added indicator without parameters is caught at import time.
     """
-    uncovered = sorted(indicator.name for indicator in _CalciumIndicator if indicator not in _INDICATOR_PARAMETERS)
-    if uncovered:
+    uncovered_members = sorted(
+        indicator.name for indicator in _CalciumIndicator if indicator not in _INDICATOR_PARAMETERS
+    )
+    if uncovered_members:
         message = (
             f"Unable to validate calcium-indicator coverage. Every _CalciumIndicator member must declare its "
             f"indicator-dependent parameters in _INDICATOR_PARAMETERS, but the following members do not: "
-            f"{', '.join(uncovered)}."
+            f"{', '.join(uncovered_members)}."
         )
         console.error(message=message, error=RuntimeError)
 

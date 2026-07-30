@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ataraxis_base_utilities import console
+from ataraxis_base_utilities import LogLevel, console
 from ataraxis_data_structures import ProcessingTracker, delete_directory
 
 from .dispatch import resolve_dispatch
@@ -18,10 +18,10 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
     """Returns the named tracked jobs of several units to the scheduled state.
 
     Notes:
-        Resolves each tracker from its unit rather than taking a path, so a caller names what it wants reset without
-        knowing where the record sits. Identifiers a unit does not track are dropped, because a tracker rejects a
-        request naming a job it does not hold and would then reset nothing at all. That dropping is what lets one call
-        carry a whole batch's identifiers and have each unit reset only its own share.
+        Resolves each tracker from its unit rather than taking a path, so a caller names what it wants to be reset
+        without knowing where the record sits. Identifiers a unit does not track are dropped, because a tracker
+        rejects a request naming a job it does not hold and would then reset nothing at all. That dropping is what
+        lets one call carry a whole batch's identifiers and have each unit reset only its own share.
 
         Naming no identifier resets every job the unit tracks, which is how a caller returns a unit to a clean slate.
 
@@ -31,7 +31,8 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
         job_ids: The identifiers to reset, or empty to reset every job each unit tracks.
 
     Returns:
-        The identifiers that were reset, which repeats an identifier held by more than one unit.
+        The identifiers that were reset, which repeats an identifier held by more than one unit. Naming a pipeline the
+        dispatch table does not support returns nothing.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
@@ -43,14 +44,17 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
         try:
             tracker_path = dispatch.tracker_path(dispatch.load(unit_path))
         except Exception as exception:
-            console.echo(message=f"Unable to locate the '{pipeline}' tracker for '{unit_path}'. {exception}")
+            console.echo(
+                message=f"Unable to locate the '{pipeline}' tracker for '{unit_path}'. {exception}",
+                level=LogLevel.WARNING,
+            )
             continue
         if not tracker_path.is_file():
             continue
 
         tracker = ProcessingTracker(file_path=tracker_path)
-        held = list(tracker.snapshot())
-        targets = held if not requested else [job_id for job_id in held if job_id in requested]
+        held_job_ids = list(tracker.snapshot())
+        targets = [job_id for job_id in held_job_ids if job_id in requested] if requested else held_job_ids
         if targets:
             reset.extend(tracker.reset_jobs(job_ids=targets))
     return reset
@@ -73,7 +77,8 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         unit_paths: The processing units to clean.
 
     Returns:
-        One entry per removed path, carrying the ``path`` and the ``removed_bytes`` it held.
+        One entry per removed path, carrying the ``path`` and the ``removed_bytes`` it held. Naming a pipeline the
+        dispatch table does not support removes nothing.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     if dispatch is None:
@@ -84,7 +89,10 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         try:
             unit = dispatch.load(unit_path)
         except Exception as exception:
-            console.echo(message=f"Unable to load the unit at '{unit_path}'. {exception}")
+            console.echo(
+                message=f"Unable to load the unit at '{unit_path}'. {exception}",
+                level=LogLevel.WARNING,
+            )
             continue
 
         targets = [dispatch.tracker_path(unit)]

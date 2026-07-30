@@ -1,6 +1,20 @@
 """Provides the single ``slf`` console-script root command group for the sollertia-forgery library."""
 
+from __future__ import annotations
+
 import click
+
+from .plan import plan_cli
+from .forge import forge_command
+from .manage import (
+    manifest_cli,
+    clean_command,
+    reset_command,
+    checksum_command,
+    dataset_state_command,
+)
+from .server import server_cli
+from .process import process_cli
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -25,19 +39,7 @@ def run_mcp_server_command() -> None:
 
 
 def _register_subcommands() -> None:
-    """Imports and registers every subcommand group on the top-level ``slf`` Click group."""
-    from .plan import plan_cli  # noqa: PLC0415
-    from .forge import forge_command  # noqa: PLC0415
-    from .manage import (  # noqa: PLC0415
-        manifest_cli,
-        clean_command,
-        reset_command,
-        checksum_command,
-        dataset_state_command,
-    )
-    from .server import server_cli  # noqa: PLC0415
-    from .process import process_cli  # noqa: PLC0415
-
+    """Registers every subcommand and subcommand group on the top-level ``slf`` Click group."""
     slf_cli.add_command(cmd=manifest_cli)
     slf_cli.add_command(cmd=checksum_command)
     slf_cli.add_command(cmd=dataset_state_command)

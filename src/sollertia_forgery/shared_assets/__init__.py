@@ -1,5 +1,6 @@
 """Provides the system-agnostic substrate shared across acquisition systems, including the pipeline-identity
-enumeration and the tracker locations each per-session pipeline records its jobs on.
+enumeration, the per-session tracker locations, the tracked-job execution envelope, the microcontroller feather
+primitives, and the shared utilities.
 """
 
 from .tracking import (

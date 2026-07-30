@@ -8,9 +8,9 @@ import os
 from typing import TYPE_CHECKING
 from threading import Lock, Thread
 import contextlib
-from collections import deque
+from collections import Counter, deque
 from dataclasses import field, dataclass
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
 import cv2
 import numba
@@ -22,6 +22,7 @@ from .graph import PendingJob, resolve_dispatch_priorities
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
+    from concurrent.futures import Future
 
 
 RESERVED_CORES: int = 2
@@ -29,12 +30,10 @@ RESERVED_CORES: int = 2
 forward this to ``resolve_worker_count``, which applies it only to a non-positive budget and honors an explicit
 budget up to the logical core count."""
 
-
 _WORKER_THREAD_CEILING: int = 1
 """The number of threads each pool worker pins its library thread pools to. Every job type either runs
 single-threaded, raises its own thread count once it starts, or fans out into a sub-pool whose children each cost the
 single core the allocation budgeted for them."""
-
 
 _PINNED_THREAD_VARIABLES: tuple[str, ...] = (
     "OMP_NUM_THREADS",
@@ -51,19 +50,17 @@ Notes:
     value it read as the ceiling for the rest of the process. It then re-reads the variable on every compilation and
     raises if the two disagree once its thread pool has started. A worker imports numba before this pin could run, so
     writing the variable here would guarantee that disagreement and fail every job that compiles a numba function.
-    The worker sets Numba's thread count through its runtime API instead, which is the supported way to change it.
+    The worker sets numba's thread count through its runtime API instead, which is the supported way to change it.
 """
-
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
 """The longest the manager blocks on a running job before looking at its state again. A job finishing is the only
 event the loop acts on, so this bound never governs a healthy batch and exists so a future that never resolves
 cannot stall the manager for good."""
 
-
 _TIFF_DECODE_THREAD_CEILING: int = 4
-"""The widest image-decode pool one job may open, whatever cores it holds. The reader sizes that pool for itself,
-outside the batch's allocation, which is what this bounds."""
+"""The widest image-decode pool one job may open, whatever cores it holds. A decode stops shortening once it reaches
+this width, so the cores a job holds beyond it are spent on the stage itself."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,11 +97,9 @@ class ActiveJob[PendingJobT: PendingJob]:
 class JobExecutionState[PendingJobT: PendingJob]:
     """Tracks runtime state for one batch execution session budgeted by both cores and memory.
 
-    The state stores the job queues, the worker callable, the two budgets, the recorded outcomes that resolve
-    ordering, the lock that serializes mutations, and the cancellation flag. The batch tools keep a single one of
-    these, so one pool serves every pipeline and the status and cancel tools read it directly. The manager owns one
-    ``ProcessPoolExecutor`` and admits each pending job once the running set has room for both its cores and its
-    memory.
+    The batch tools keep a single one of these, so one pool serves every pipeline and the status and cancel tools
+    read it directly. The manager owns one ``ProcessPoolExecutor`` and admits each pending job once the running set
+    has room for both its cores and its memory.
 
     Notes:
         Subclasses of ``PendingJob`` carry the fields a worker callable needs at dispatch time, such as the path of
@@ -112,10 +107,9 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """
 
     worker: Callable[[PendingJobT], None]
-    """The picklable module-level function invoked by ``ProcessPoolExecutor.submit`` for each pending job.
-    Must accept a single argument of the pending job subclass associated with this state."""
+    """The picklable module-level function invoked by ``ProcessPoolExecutor.submit`` for each pending job."""
     all_jobs: dict[tuple[str, str], PendingJobT] = field(default_factory=dict)
-    """All submitted jobs keyed by ``(tracker_path, job_id)`` dispatch key."""
+    """All submitted jobs keyed by ``(unit_path, job_id)`` dispatch key."""
     pending_jobs: deque[PendingJobT] = field(default_factory=deque)
     """Jobs awaiting dispatch, held in the order the next admission pass considers them."""
     active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
@@ -150,7 +144,7 @@ class JobExecutionState[PendingJobT: PendingJob]:
     lock: Lock = field(default_factory=Lock)
     """The lock guarding every mutation of the job queues and the recorded outcomes."""
     manager_thread: Thread | None = None
-    """Background execution manager thread reference."""
+    """The background thread running the execution manager, or None before the session starts it."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
 
@@ -173,9 +167,6 @@ def resolve_core_allocations(
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
 
-    Raises:
-        ValueError: If any queued job type has no registered core allocation.
-
     Args:
         job_cores: The cores one job of each type occupies, keyed by tracker job name.
         job_names: The job type names present in the batch.
@@ -188,6 +179,9 @@ def resolve_core_allocations(
 
     Returns:
         A dictionary mapping each job name to its resolved allocation.
+
+    Raises:
+        ValueError: If any queued job type has no registered core allocation.
     """
     unregistered = sorted(name for name in job_names if name not in job_cores)
     if unregistered:
@@ -309,11 +303,15 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
 
 
 def apply_decode_thread_ceiling(cores: int) -> None:
-    """Scopes the image-decode pool to the cores one job holds.
+    """Bounds the default image-decode width of the calling process, from the cores one job holds.
 
     Notes:
-        The reader consults this count when a read is issued rather than when it is imported, so a worker re-scopes
-        it before each job it runs. That is what lets one pool serve job types whose decode widths differ.
+        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
+        life of the process. The value a pool worker writes as it starts is therefore the one every read in that
+        worker sees, and a later write in the same process reaches nothing.
+
+        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
+        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
 
     Args:
         cores: The cores the job about to run holds.
@@ -331,11 +329,13 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         called alongside the variables. A job that needs more threads raises its own count once it starts, which
         numba permits up to the count latched at import.
 
-        numba and OpenCV are pinned through their runtime setters alone, leaving the environment they read at import
-        untouched. Both already hold the count they read when the worker imported them, so rewriting those variables
-        would change nothing they consult again. For numba it would actively break the worker, since it compares
-        the variable against the latched count on every compilation and rejects a disagreement once its threads have
-        started, which is exactly the state a late pin creates.
+        numba is pinned through its runtime setter alone, leaving the variable it reads at import untouched. It
+        already holds the count it read when the worker imported it, so rewriting that variable would break the
+        worker. The library compares the variable against the latched count on every compilation and rejects a
+        disagreement once its threads have started, which is exactly the state a late pin creates.
+
+        OpenCV takes both, since its core thread count is a runtime setter while its FFmpeg decoder reads its own
+        variable when a capture opens.
 
     Args:
         thread_ceiling: The number of threads each library thread pool is pinned to.
@@ -345,7 +345,7 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         os.environ[variable] = str(ceiling)
     apply_decode_thread_ceiling(cores=ceiling)
 
-    numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
+    numba.set_num_threads(n=min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)
 
 
@@ -362,6 +362,9 @@ def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[Pending
 
     Args:
         state: The active job execution state whose jobs are reset. Its trackers are rewritten in place.
+
+    Raises:
+        ValueError: If the batch names an identifier the unit's tracker does not hold.
     """
     for tracker_path, jobs in group_jobs_by_tracker(state=state).items():
         if not tracker_path.is_file():
@@ -438,9 +441,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
     used_cores = sum(active.job.core_weight for active in state.active_jobs)
     used_memory = sum(active.job.memory_mb for active in state.active_jobs)
 
-    running_counts: dict[str, int] = {}
-    for active in state.active_jobs:
-        running_counts[active.job.job_name] = running_counts.get(active.job.job_name, 0) + 1
+    running_counts: Counter[str] = Counter(active.job.job_name for active in state.active_jobs)
 
     admitted_any = False
     remaining: deque[PendingJobT] = deque(

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from time import time_ns
 from typing import TYPE_CHECKING
 from dataclasses import field, dataclass
 
 from filelock import FileLock
+from ataraxis_time import TimestampFormats, TimestampPrecisions, get_timestamp
 from ataraxis_data_structures import YamlConfig
 
 from ..server import TERMINAL_JOB_STATUSES, JobStatus, remote_state_path
@@ -22,7 +22,7 @@ _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for the ledger's lock before giving up, matching the project manifest's writer."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RemoteSubmission:
     """Records one prepared job and the scheduler allocation it was submitted as.
 
@@ -51,14 +51,15 @@ class RemoteSubmission:
     cores: int = 1
     """The cores the allocation requested."""
     memory_mb: int = 0
-    """The memory the allocation requested, as the estimate it was sized from."""
+    """The memory estimate this allocation was sized from, in megabytes. The scheduler request itself is this figure
+    rounded up to whole gigabytes and floored at one."""
     output_log: str = ""
     """The path, on the server, to the file collecting this allocation's standard output."""
     error_log: str = ""
     """The path, on the server, to the file collecting this allocation's standard error."""
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class SubmissionBatch:
     """Records one submitted batch and every allocation it holds."""
 
@@ -84,9 +85,9 @@ class SubmissionLedger(YamlConfig):
     """Records every batch this host submitted to the remote compute server's scheduler."""
 
     batches: list[SubmissionBatch] = field(default_factory=list)
-    """The recorded batches, oldest first."""
+    """The recorded batches, in the order they were last recorded."""
 
-    def batch(self, batch_id: str) -> SubmissionBatch | None:
+    def resolve_batch(self, batch_id: str) -> SubmissionBatch | None:
         """Returns the recorded batch with the given identifier, or None when the ledger holds no such batch.
 
         Args:
@@ -141,6 +142,22 @@ def record_batch(batch: SubmissionBatch) -> SubmissionLedger:
         return ledger
 
 
+def batch_is_settled(batch: SubmissionBatch, statuses: dict[str, JobStatus]) -> bool:
+    """Returns True when every allocation the batch holds has reached a state it never leaves.
+
+    Notes:
+        An allocation the status map does not cover counts as unfinished, so a partial query never reports a batch it
+        did not fully observe as settled.
+
+    Args:
+        batch: The batch to test.
+        statuses: The observed state of each allocation, keyed by its scheduler identifier.
+    """
+    return bool(batch.submissions) and all(
+        statuses.get(submission.slurm_job_id) in TERMINAL_JOB_STATUSES for submission in batch.submissions
+    )
+
+
 def retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
     """Drops every batch whose allocations have all reached a state they never leave.
 
@@ -165,15 +182,11 @@ def retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
 
     with _ledger_lock():
         ledger = read_ledger()
-        retired = [
-            batch.batch_id
-            for batch in ledger.batches
-            if batch.submissions
-            and all(statuses.get(submission.slurm_job_id) in TERMINAL_JOB_STATUSES for submission in batch.submissions)
-        ]
+        retired = [batch.batch_id for batch in ledger.batches if batch_is_settled(batch=batch, statuses=statuses)]
         if not retired:
             return []
-        ledger.batches = [batch for batch in ledger.batches if batch.batch_id not in set(retired)]
+        settled_ids = set(retired)
+        ledger.batches = [batch for batch in ledger.batches if batch.batch_id not in settled_ids]
         _save_ledger(ledger=ledger)
         return retired
 
@@ -192,8 +205,9 @@ def forget_batches(batch_ids: Sequence[str]) -> list[str]:
     """
     with _ledger_lock():
         ledger = read_ledger()
-        dropped = [batch.batch_id for batch in ledger.batches if batch.batch_id in set(batch_ids)]
-        ledger.batches = [batch for batch in ledger.batches if batch.batch_id not in set(batch_ids)]
+        named = set(batch_ids)
+        dropped = [batch.batch_id for batch in ledger.batches if batch.batch_id in named]
+        ledger.batches = [batch for batch in ledger.batches if batch.batch_id not in named]
         _save_ledger(ledger=ledger)
         return dropped
 
@@ -217,11 +231,8 @@ def resolve_batches(ledger: SubmissionLedger, batch_ids: Sequence[str] | None = 
 def current_timestamp() -> int:
     """Returns the current UTC timestamp as a microsecond-precision epoch, matching every other timestamp in this
     stack.
-
-    Returns:
-        The current timestamp.
     """
-    return time_ns() // 1000
+    return int(get_timestamp(output_format=TimestampFormats.INTEGER, precision=TimestampPrecisions.MICROSECOND))
 
 
 def _save_ledger(ledger: SubmissionLedger) -> None:

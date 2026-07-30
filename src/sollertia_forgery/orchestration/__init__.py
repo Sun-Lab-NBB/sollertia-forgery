@@ -1,6 +1,6 @@
-"""Provides the orchestration layer: the shared batch job-execution engine, its resource estimators, the pipeline
-dispatch table, the job plan caches that record each job's resource figures once, and the scheduler backend that runs
-the same prepared jobs on a remote compute server.
+"""Provides the orchestration layer: the shared preparation path, the execution hosts, the batch job-execution engine
+and its resource estimators, the pipeline dispatch table, the job plan caches, the remote scheduler backend, and the
+prepared-batch registry with its closure.
 """
 
 from .graph import (
@@ -43,6 +43,7 @@ from .ledger import (
     record_batch,
     forget_batches,
     resolve_batches,
+    batch_is_settled,
     current_timestamp,
     retire_settled_batches,
 )
@@ -144,6 +145,7 @@ __all__ = [
     "SubmissionBatch",
     "SubmissionLedger",
     "batch_directory",
+    "batch_is_settled",
     "batch_path",
     "build_batch_document",
     "build_job_descriptor",

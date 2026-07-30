@@ -1,21 +1,17 @@
-"""Tests for the Mesoscope-VR genotype-driven cindra configuration resolvers and their registry wiring.
-
-The classifier and both configuration builders are exercised directly, and the session resolvers are exercised with a
-stubbed surgery loader. A golden regression pins each built configuration to the reference mesoscope-vr YAMLs, modulo
-the deploy-time fields the pipelines override. The registry resolvers are checked for dispatch and unknown-system
-handling.
+"""Contains tests for the Mesoscope-VR genotype-driven cindra configuration resolvers, the two-photon input locator,
+and their registry wiring.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from pathlib import Path
 import dataclasses
 
 from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
 import pytest
-from sollertia_shared_assets import SessionTypes, AcquisitionSystems
+from sollertia_shared_assets import SessionTypes, AcquisitionSystems, MesoscopeDirectories
 
 from sollertia_forgery.registries import (
     resolve_multi_recording_configuration_resolver,
@@ -23,7 +19,10 @@ from sollertia_forgery.registries import (
 )
 import sollertia_forgery.mesoscope_vr.two_photon as two_photon_module
 from sollertia_forgery.mesoscope_vr.two_photon import (
+    _INDICATOR_PARAMETERS,
     _CalciumIndicator,
+    locate_two_photon_data,
+    _assert_indicator_coverage,
     _resolve_calcium_indicator,
     _build_multi_recording_configuration,
     _build_single_recording_configuration,
@@ -31,7 +30,12 @@ from sollertia_forgery.mesoscope_vr.two_photon import (
     resolve_single_recording_configuration,
 )
 
-_FIXTURES: Path = Path(__file__).parent / "fixtures" / "cindra"
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sollertia_shared_assets import SessionData
+
+_FIXTURES_DIRECTORY: Path = Path(__file__).parent / "fixtures" / "cindra"
 """The directory holding the reference mesoscope-vr cindra configuration YAMLs the golden regression pins against."""
 
 
@@ -60,7 +64,9 @@ def _stub_surgery_loader(monkeypatch: pytest.MonkeyPatch, genotype: str) -> None
     monkeypatch.setattr(
         two_photon_module,
         "SurgeryData",
-        SimpleNamespace(from_yaml=lambda file_path: SimpleNamespace(subject=SimpleNamespace(genotype=genotype))),  # noqa: ARG005
+        SimpleNamespace(
+            from_yaml=lambda file_path: SimpleNamespace(subject=SimpleNamespace(genotype=genotype))  # noqa: ARG005
+        ),
     )
 
 
@@ -74,6 +80,17 @@ def _stub_session(tmp_path: Path, session_type: SessionTypes, *, surgery_present
         session_type=session_type,
         session_name="test-session",
     )
+
+
+@pytest.fixture
+def stubbed_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callable[..., SimpleNamespace]:
+    """Returns a builder that stubs the surgery loader and produces a matching stand-in session."""
+
+    def _build(genotype: str, session_type: SessionTypes, *, surgery_present: bool = True) -> SimpleNamespace:
+        _stub_surgery_loader(monkeypatch=monkeypatch, genotype=genotype)
+        return _stub_session(tmp_path=tmp_path, session_type=session_type, surgery_present=surgery_present)
+
+    return _build
 
 
 @pytest.mark.parametrize(
@@ -103,8 +120,8 @@ def test_resolve_calcium_indicator_rejects_unknown(genotype: str) -> None:
 
 def test_single_recording_genotype_delta() -> None:
     """Verifies the single-recording tau and neuropil coefficient differ between the two indicators."""
-    gcamp6f = _build_single_recording_configuration("GP5.17")
-    jgcamp8s = _build_single_recording_configuration("GCaMP8s x CamKIICre")
+    gcamp6f = _build_single_recording_configuration(genotype="GP5.17")
+    jgcamp8s = _build_single_recording_configuration(genotype="GCaMP8s x CamKIICre")
     assert gcamp6f.main.tau == pytest.approx(0.4)
     assert jgcamp8s.main.tau == pytest.approx(0.7)
     assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.7)
@@ -115,14 +132,14 @@ def test_multi_recording_genotype_delta() -> None:
     """Verifies the multi-recording probability threshold and neuropil coefficient differ between the two indicators,
     and that the base enables overlapping ROIs for both.
     """
-    gcamp6f = _build_multi_recording_configuration("GP5.17")
-    jgcamp8s = _build_multi_recording_configuration("GCaMP8s x CamKIICre")
+    gcamp6f = _build_multi_recording_configuration(genotype="GP5.17")
+    jgcamp8s = _build_multi_recording_configuration(genotype="GCaMP8s x CamKIICre")
     assert gcamp6f.roi_selection.probability_threshold == pytest.approx(0.85)
     assert jgcamp8s.roi_selection.probability_threshold == pytest.approx(0.80)
     assert gcamp6f.spike_deconvolution.neuropil_coefficient == pytest.approx(0.7)
     assert jgcamp8s.spike_deconvolution.neuropil_coefficient == pytest.approx(0.8)
-    assert gcamp6f.signal_extraction.allow_overlap is True
-    assert jgcamp8s.signal_extraction.allow_overlap is True
+    assert gcamp6f.signal_extraction.allow_overlap
+    assert jgcamp8s.signal_extraction.allow_overlap
 
 
 @pytest.mark.parametrize(
@@ -131,9 +148,9 @@ def test_multi_recording_genotype_delta() -> None:
 )
 def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
     """Verifies each built single-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
-    built = _neutralize_single(dataclasses.asdict(_build_single_recording_configuration(genotype)))
+    built = _neutralize_single(dataclasses.asdict(_build_single_recording_configuration(genotype=genotype)))
     reference = _neutralize_single(
-        dataclasses.asdict(SingleRecordingConfiguration.from_yaml(file_path=_FIXTURES / fixture_name))
+        dataclasses.asdict(SingleRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name))
     )
     assert built == reference
 
@@ -144,39 +161,38 @@ def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: st
 )
 def test_multi_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
     """Verifies each built multi-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
-    built = _neutralize_multi(dataclasses.asdict(_build_multi_recording_configuration(genotype)))
+    built = _neutralize_multi(dataclasses.asdict(_build_multi_recording_configuration(genotype=genotype)))
     reference = _neutralize_multi(
-        dataclasses.asdict(MultiRecordingConfiguration.from_yaml(file_path=_FIXTURES / fixture_name))
+        dataclasses.asdict(MultiRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name))
     )
     assert built == reference
 
 
-def test_resolve_single_recording_configuration_reads_genotype(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_single_recording_configuration_reads_genotype(
+    stubbed_session: Callable[..., SimpleNamespace],
+) -> None:
     """Verifies the single-recording resolver selects the configuration from the session's genotype."""
-    _stub_surgery_loader(monkeypatch=monkeypatch, genotype="GCaMP8s x CamKIICre")
     configuration = resolve_single_recording_configuration(
-        _stub_session(tmp_path=tmp_path, session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
+        stubbed_session(genotype="GCaMP8s x CamKIICre", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
     )
     assert configuration.main.tau == pytest.approx(0.7)
 
 
 def test_resolve_single_recording_configuration_missing_surgery_errors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stubbed_session: Callable[..., SimpleNamespace],
 ) -> None:
     """Verifies the single-recording resolver raises when the session has no surgery metadata to read the genotype."""
-    _stub_surgery_loader(monkeypatch=monkeypatch, genotype="GP5.17")
-    session = _stub_session(tmp_path=tmp_path, session_type=SessionTypes.MESOSCOPE_EXPERIMENT, surgery_present=False)
+    session = stubbed_session(genotype="GP5.17", session_type=SessionTypes.MESOSCOPE_EXPERIMENT, surgery_present=False)
     with pytest.raises(FileNotFoundError, match="Unable to resolve the cindra configuration"):
         resolve_single_recording_configuration(session)
 
 
 def test_resolve_multi_recording_configuration_experiment_reads_genotype(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stubbed_session: Callable[..., SimpleNamespace],
 ) -> None:
     """Verifies the multi-recording resolver returns a genotype-tuned configuration for an experiment session."""
-    _stub_surgery_loader(monkeypatch=monkeypatch, genotype="GP5.17")
     configuration = resolve_multi_recording_configuration(
-        _stub_session(tmp_path=tmp_path, session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
+        stubbed_session(genotype="GP5.17", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
     )
     assert configuration is not None
     assert configuration.roi_selection.probability_threshold == pytest.approx(0.85)
@@ -184,17 +200,35 @@ def test_resolve_multi_recording_configuration_experiment_reads_genotype(
 
 @pytest.mark.parametrize("session_type", [SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING])
 def test_resolve_multi_recording_configuration_training_returns_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_type: SessionTypes
+    stubbed_session: Callable[..., SimpleNamespace], session_type: SessionTypes
 ) -> None:
     """Verifies the multi-recording resolver returns None for a training session, since Mesoscope-VR tracks no cells
     for it.
     """
-    _stub_surgery_loader(monkeypatch=monkeypatch, genotype="GP5.17")
-    assert resolve_multi_recording_configuration(_stub_session(tmp_path=tmp_path, session_type=session_type)) is None
+    assert resolve_multi_recording_configuration(stubbed_session(genotype="GP5.17", session_type=session_type)) is None
 
 
-def test_registry_resolves_resolvers() -> None:
-    """Verifies the cindra configuration registry dispatches to the Mesoscope-VR resolvers by member and string value."""
+def test_locate_two_photon_data_resolves_the_raw_imaging_directory(experiment_session: SessionData) -> None:
+    """Verifies the two-photon input locator points at the session's raw mesoscope_data directory."""
+    located = locate_two_photon_data(experiment_session)
+    assert located.name == "mesoscope_data"
+    assert located.name == MesoscopeDirectories.MESOSCOPE_DATA
+    assert located.parent == experiment_session.raw_data_path
+
+
+def test_assert_indicator_coverage_names_uncovered_indicators(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies the import-time coverage check names every calcium indicator that declares no tuned parameters."""
+    monkeypatch.setattr(
+        two_photon_module,
+        "_INDICATOR_PARAMETERS",
+        {_CalciumIndicator.GCAMP6F: _INDICATOR_PARAMETERS[_CalciumIndicator.GCAMP6F]},
+    )
+    with pytest.raises(RuntimeError, match=r"(?s)members\s+do\s+not:\s+JGCAMP8S"):
+        _assert_indicator_coverage()
+
+
+def test_registry_dispatches_by_member_and_by_value() -> None:
+    """Verifies the cindra configuration registry dispatches to the Mesoscope-VR resolvers by member and by value."""
     assert resolve_single_recording_configuration_resolver(AcquisitionSystems.MESOSCOPE_VR) is (
         resolve_single_recording_configuration
     )

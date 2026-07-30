@@ -3,8 +3,6 @@
 from cindra import SingleRecordingJobNames
 
 from .pipeline import (
-    STAGE_DEFAULT_WORKERS,
-    CINDRA_CONFIGURATION_FILENAME,
     discover_two_photon_jobs,
     prime_two_photon_recording,
     two_photon_job_prerequisites,
@@ -12,8 +10,6 @@ from .pipeline import (
 )
 
 __all__ = [
-    "CINDRA_CONFIGURATION_FILENAME",
-    "STAGE_DEFAULT_WORKERS",
     "SingleRecordingJobNames",
     "discover_two_photon_jobs",
     "prime_two_photon_recording",

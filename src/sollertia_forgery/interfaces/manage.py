@@ -1,6 +1,9 @@
 """Provides the system-agnostic management CLI commands exposed by the ``slf`` root group: project manifest
-generation and inspection, dataset forging-state snapshotting, and session raw-data integrity checksum verification.
+generation and inspection, dataset forging-state snapshotting, session raw-data integrity checksum verification,
+tracked-job resetting, and pipeline output cleaning.
 """
+
+from __future__ import annotations
 
 from pathlib import Path
 from dataclasses import dataclass
@@ -10,8 +13,13 @@ from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData
 
 from ..forging import generate_dataset_state
-from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
-from ..orchestration import reset_tracked_jobs, clean_pipeline_output
+from ..managing import (
+    ProjectManifest,
+    project_manifest_path,
+    generate_project_manifest,
+    run_checksum_processing_pipeline,
+)
+from ..orchestration import BATCH_PIPELINES, reset_tracked_jobs, clean_pipeline_output
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -32,8 +40,11 @@ class _SharedManifestParameters:
     def require_project_path(self) -> Path:
         """Returns the project root path, raising a Click usage error when ``--project-path`` was not supplied."""
         if self.project_path is None:
-            message = "Missing option '-pp' / '--project-path'."
-            raise click.UsageError(message=message)
+            message = (
+                "Unable to resolve the project root directory for the 'manifest' command. The '-pp' / "
+                "'--project-path' option must be supplied before the subcommand name, but it was omitted."
+            )
+            console.error(message=message, error=click.UsageError)
         return self.project_path
 
 
@@ -132,7 +143,7 @@ def print_project_manifest_data(
     # Printing reads an existing manifest snapshot. Generation is a separate step ('manifest create'), so a missing
     # manifest is a loud error rather than an implicit regeneration.
     project_path = shared.require_project_path()
-    manifest_path = project_path.joinpath(f"{project_path.stem}_manifest.feather")
+    manifest_path = project_manifest_path(project_directory=project_path)
     if not manifest_path.exists():
         message = (
             f"Unable to print the manifest data for the '{project_path.stem}' project. No manifest file exists at "
@@ -228,17 +239,16 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
     """
     for path in dataset_path:
         dataset = DatasetData.load(dataset_path=path)
-        click.echo(str(generate_dataset_state(dataset=dataset, display_progress=True)))
+        console.echo(message=str(generate_dataset_state(dataset=dataset, display_progress=True)), raw=True)
 
 
 @click.command("reset", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-p",
     "--pipeline",
-    type=str,
+    type=click.Choice(sorted(str(pipeline) for pipeline in BATCH_PIPELINES), case_sensitive=False),
     required=True,
-    help="The pipeline whose jobs to reset, one of 'checksum', 'runtime', 'microcontroller', 'video', 'two_photon', "
-    "'forging'.",
+    help="The pipeline whose tracked jobs to reset.",
 )
 @click.option(
     "-up",
@@ -246,8 +256,10 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
     type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
     required=True,
     multiple=True,
-    help="The absolute path to a processing unit whose jobs to reset, which is a session root for a session pipeline "
-    "and a dataset root for 'forging'. Can be specified multiple times.",
+    help=(
+        "The absolute path to a processing unit whose jobs to reset, which is a session root for a session pipeline "
+        "and a dataset root for 'forging'. Can be specified multiple times."
+    ),
 )
 @click.option(
     "-id",
@@ -255,8 +267,10 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
     type=str,
     default=(),
     multiple=True,
-    help="The hexadecimal identifier of a tracked job to reset. Can be specified multiple times. Omit to reset every "
-    "job each named unit tracks.",
+    help=(
+        "The hexadecimal identifier of a tracked job to reset. Can be specified multiple times. Omit to reset every "
+        "job each named unit tracks."
+    ),
 )
 def reset_command(pipeline: str, unit_path: tuple[Path, ...], job_id: tuple[str, ...]) -> None:
     """Returns tracked jobs of the named units to the scheduled state, leaving every untargeted job's record intact.
@@ -266,17 +280,16 @@ def reset_command(pipeline: str, unit_path: tuple[Path, ...], job_id: tuple[str,
     identifiers it actually tracks, so a batch spanning many units costs a single call.
     """
     reset = reset_tracked_jobs(pipeline=pipeline, unit_paths=unit_path, job_ids=job_id)
-    click.echo(f"Reset {len(reset)} job(s) across {len(unit_path)} unit(s).")
+    console.echo(message=f"Reset {len(reset)} job(s) across {len(unit_path)} unit(s).")
 
 
 @click.command("clean", context_settings=_CONTEXT_SETTINGS)
 @click.option(
     "-p",
     "--pipeline",
-    type=str,
+    type=click.Choice(sorted(str(pipeline) for pipeline in BATCH_PIPELINES), case_sensitive=False),
     required=True,
-    help="The pipeline whose output to remove, one of 'checksum', 'runtime', 'microcontroller', 'video', "
-    "'two_photon', 'forging'.",
+    help="The pipeline whose output to remove.",
 )
 @click.option(
     "-up",
@@ -294,4 +307,4 @@ def clean_command(pipeline: str, unit_path: tuple[Path, ...]) -> None:
     caller driving this over a command line reads the same figures an in-process call returns.
     """
     for removed in clean_pipeline_output(pipeline=pipeline, unit_paths=unit_path):
-        click.echo(f"{removed['removed_bytes']} {removed['path']}")
+        console.echo(message=f"{removed['removed_bytes']} {removed['path']}", raw=True)

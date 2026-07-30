@@ -1,4 +1,4 @@
-"""Provides the remote halves of the processing tools, which read, cancel, and mirror what the scheduler ran."""
+"""Provides the remote halves of the processing tools, which read and cancel what the scheduler ran."""
 
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ from ..orchestration import (
     close_settled_batches,
 )
 
-_STATUS_AXES: tuple[str, ...] = ("batch_id", "pipeline", "job_name", "status", "unit_path")
+_REMOTE_STATUS_AXES: tuple[str, ...] = ("batch_id", "pipeline", "job_name", "status", "unit_path")
 """The job attributes a caller may filter a remote batch by, and the axes a status breakdown counts."""
 
-_STATUS_SEMI_FIELDS: tuple[str, ...] = (
+_REMOTE_STATUS_SEMI_FIELDS: tuple[str, ...] = (
     "batch_id",
     "job_id",
     "slurm_job_id",
@@ -43,7 +43,7 @@ _STATUS_SEMI_FIELDS: tuple[str, ...] = (
 """The job fields a semi-detail listing carries, which is the job's identity, the allocation it runs as, and its
 scheduler state."""
 
-_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
+_REMOTE_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "cores",
     "memory_mb",
     "slurm_job_name",
@@ -53,17 +53,6 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
 )
 """The job fields detail adds, which are the resources the allocation requested and where its output landed. A caller
 reads the log paths to see a failed allocation's own diagnostics."""
-
-_BLOCKED_SEMI_FIELDS: tuple[str, ...] = (
-    "job_id",
-    "pipeline",
-    "job_name",
-    "specifier",
-    "unit_name",
-    "unsatisfied_prerequisite_ids",
-)
-"""The fields a blocked-job listing carries, naming the job and the upstream jobs this run could neither queue nor
-find already succeeded."""
 
 _FINISHED_BATCH_GUIDANCE: str = (
     "Read what a finished run produced from the outcome closure recorded on the batch, which "
@@ -104,7 +93,8 @@ def remote_batch_status(
     jobs reached.
 
     Args:
-        batch_ids: Restricts the report to these outstanding batches. Omit to cover all of them.
+        batch_ids: Restricts the report to these outstanding batches. Omit to cover all of them. Naming any batch also
+            counts as a filter, so the response carries a page of jobs.
         status_filter: Restricts the listing to one scheduler state, such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
         session_paths: Restricts the listing to these processing unit directories.
         job_ids: Restricts the listing to these tracker job identifiers.
@@ -118,7 +108,8 @@ def remote_batch_status(
 
     Returns:
         A response dict with ``active`` (whether any allocation has yet to reach a terminal state), the ``batches``
-        covered, a ``summary`` counting the allocations by state alongside the total, and a ``breakdown`` per axis.
+        covered, a ``summary`` counting the allocations by state alongside the total, and a ``breakdown`` per axis. It
+        also carries the ``outcomes`` of any batch that settled and closed on this call, which is empty when none did.
         Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a
         filter is named or the listing is requested. If no batch is outstanding, ``active`` is False with an
         explanatory ``message``.
@@ -127,8 +118,16 @@ def remote_batch_status(
     if not ledger.batches:
         return ok_response(active=False, message=_NOTHING_OUTSTANDING)
 
+    if status_filter is not None and status_filter not in {member.value for member in JobStatus}:
+        return error_response(
+            message=(
+                f"Unknown scheduler state '{status_filter}'. "
+                f"Available: {', '.join(sorted(member.value for member in JobStatus))}."
+            )
+        )
+
     if batch_ids is not None:
-        unknown = sorted(batch for batch in batch_ids if ledger.batch(batch_id=batch) is None)
+        unknown = sorted(batch for batch in batch_ids if ledger.resolve_batch(batch_id=batch) is None)
         if unknown:
             return error_response(message=_unknown_batch_message(unknown=unknown, ledger=ledger))
 
@@ -167,7 +166,7 @@ def remote_batch_status(
         ],
         active=any(status not in TERMINAL_JOB_STATUSES for status in statuses.values()),
         summary={"total": len(per_job), **count_values(values=[entry["status"] for entry in per_job])},
-        breakdown={axis: count_values(values=[entry[axis] for entry in per_job]) for axis in _STATUS_AXES},
+        breakdown={axis: count_values(values=[entry[axis] for entry in per_job]) for axis in _REMOTE_STATUS_AXES},
         outcomes=[asdict(outcome) for outcome in closed],
     )
 
@@ -182,20 +181,12 @@ def remote_batch_status(
     if not any(values is not None for values in selectors.values()) and not include_items:
         return response
 
-    if status_filter is not None and status_filter not in {member.value for member in JobStatus}:
-        return error_response(
-            message=(
-                f"Unknown scheduler state '{status_filter}'. "
-                f"Available: {', '.join(sorted(member.value for member in JobStatus))}."
-            )
-        )
-
     matched = [
         entry
         for entry in per_job
         if all(values is None or entry[field] in values for field, values in selectors.items())
     ]
-    fields = (*_STATUS_SEMI_FIELDS, *_STATUS_DETAIL_FIELDS) if detailed else _STATUS_SEMI_FIELDS
+    fields = (*_REMOTE_STATUS_SEMI_FIELDS, *_REMOTE_STATUS_DETAIL_FIELDS) if detailed else _REMOTE_STATUS_SEMI_FIELDS
     window = resolve_page(
         total=len(matched), limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
@@ -220,8 +211,9 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
         batch_ids: The outstanding batches to cancel. Omit to cancel all of them.
 
     Returns:
-        A response dict with ``canceled``, the ``canceled_jobs`` count, and the ``batch_ids`` the cancellation covered.
-        Returns an error when no batch is outstanding.
+        A response dict with ``canceled``, a ``canceled_jobs`` count of every allocation the cancellation named,
+        including the ones that had already finished, the ``batch_ids`` it covered, and a ``message``. Returns an error
+        when no batch is outstanding.
     """
     ledger = read_ledger()
     if not ledger.batches:

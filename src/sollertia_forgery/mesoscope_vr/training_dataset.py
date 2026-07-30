@@ -26,21 +26,21 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     ``DatasetColumn`` and donated to the dataset's ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
     Notes:
-        Training sessions carry no mesoscope imaging, so the assembler requires neither the experiment configuration nor
-        any cindra output, and it takes no dataset name because a training session has no cindra multi-recording output
-        to resolve.
+        Training sessions carry no mesoscope imaging, so the assembler takes no dataset name, since a training session
+        has no cindra multi-recording output to resolve.
 
         The assembled feather is clipped to the session bounds, so it begins when the system first leaves the idle
         state and ends at the final runtime-state entry. That drops the setup span the cameras record before the
-        session and the teardown span they record after it. Experiment sessions are clipped on the same bounds.
+        session and the teardown span they record after it.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
         output_path: The path to the ``data.feather`` file to write inside the forged dataset hierarchy.
 
     Raises:
-        FileNotFoundError: If the session's processed microcontroller-data or runtime-data directory is missing, or if
-            no camera clock is available to serve as the reference clock.
+        FileNotFoundError: If the session's processed microcontroller-data or runtime-data directory is missing, if the
+            session's hardware state file is absent, or if no camera clock is available to serve as the reference
+            clock.
         ValueError: If a sub-dataset cannot be assembled (for example, a required hardware-state field is missing).
     """
     session = SessionData.load(session_path=source_session_path)
