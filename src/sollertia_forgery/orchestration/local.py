@@ -1,12 +1,11 @@
-"""Provides the shared batch execution engine that admits queued jobs against a core and a memory budget and
-dispatches them in their pipelines' dependency order.
+"""Provides the local batch execution engine that admits queued jobs against a core and a memory budget, then
+dispatches them onto a shared process pool in their pipelines' dependency order.
 """
 
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
-from pathlib import Path
+from typing import TYPE_CHECKING
 from threading import Lock, Thread
 import contextlib
 from collections import deque
@@ -18,7 +17,10 @@ import numba
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
+from .graph import PendingJob, resolve_dispatch_priorities
+
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Callable
 
 
@@ -82,77 +84,6 @@ class JobAllocation:
     """The concurrency this type is held to while other work can use the capacity it gives up, or None when it
     competes at its full width. A reserved type runs at this count while other jobs are runnable and widens toward
     ``maximum_parallel`` once nothing else claims the room, so both numbers describe it."""
-
-
-@dataclass(slots=True)
-class PendingJob:
-    """Describes a single batch processing job tracked by a ``ProcessingTracker`` file.
-
-    Notes:
-        Subclasses extend this dataclass with the additional fields their worker callables need. The base fields
-        carry everything the shared execution manager needs, which is the tracker a job is recorded on, the cores and
-        memory it occupies, and the jobs it waits for. That leaves the manager free of any domain-specific detail.
-    """
-
-    tracker_path: Path
-    """The path to the ``ProcessingTracker`` YAML file that tracks this job."""
-    job_id: str
-    """The unique hexadecimal identifier for this job in the tracker."""
-    job_name: str = ""
-    """The pipeline job type name registered in the ``ProcessingTracker``, which keys this job's core allocation."""
-    core_weight: int = 1
-    """The cores this job occupies while it runs, assigned from its type's allocation before dispatch."""
-    memory_mb: int = 0
-    """The memory this job occupies while it runs, estimated from the data it will process."""
-    prerequisite_ids: tuple[str, ...] = ()
-    """The identifiers of the jobs that must succeed before this job may be dispatched. Resolved from the pipeline's
-    own job ordering, and empty for a job that depends on nothing."""
-
-    @property
-    def dispatch_key(self) -> tuple[str, str]:
-        """Returns the composite key that uniquely identifies this job across the entire batch, combining the
-        tracker path with the job ID.
-        """
-        return str(self.tracker_path), self.job_id
-
-    @property
-    def prerequisite_keys(self) -> tuple[tuple[str, str], ...]:
-        """Returns the dispatch keys of this job's upstream jobs.
-
-        Notes:
-            A job identifier is derived from the job name and specifier alone, so the same stage of two different
-            sessions shares one identifier. Pairing each identifier with this job's tracker keeps a batch spanning
-            many sessions from treating one session's completed stage as every session's.
-        """
-        return tuple((str(self.tracker_path), prerequisite) for prerequisite in self.prerequisite_ids)
-
-
-@dataclass(slots=True)
-class GenericPendingJob(PendingJob):
-    """Describes a single batch processing job for the system-agnostic processing tools.
-
-    Notes:
-        Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so one
-        descriptor serves every pipeline. The shared worker routes on ``pipeline`` and each session pipeline's worker
-        reads ``unit_path`` and ``job_id``. Fields a pipeline does not use stay at their defaults, and a descriptor
-        missing a field the engine requires is rejected before dispatch.
-    """
-
-    pipeline: str = ""
-    """The pipeline this job belongs to, which the shared worker routes on so one pool serves every pipeline."""
-    name: str = ""
-    """The human-readable unit name used for logging and status reporting."""
-    unit_path: Path = field(default_factory=Path)
-    """The path to the processing unit this job operates on (the session root for session jobs)."""
-    specifier: str = ""
-    """The specifier that differentiates jobs of the same type within one unit, such as a camera or controller source
-    identifier, a controller-module triple, or a plane index."""
-    project_root: Path | None = None
-    """The project root directory, carried for workers that resolve their output location above the unit path."""
-    options: dict[str, Any] = field(default_factory=dict)
-    """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
-    The execution engine never reads this mapping, so a pipeline's worker interprets whichever keys it declares and
-    ignores the rest. A pipeline that takes no parameters leaves it empty."""
 
 
 @dataclass(slots=True)
@@ -280,58 +211,6 @@ def resolve_core_allocations(
             concurrency_reservation=reservations.get(job_name),
         )
     return allocations
-
-
-def resolve_dispatch_priorities[PendingJobT: PendingJob](
-    jobs: dict[tuple[str, str], PendingJobT],
-) -> dict[tuple[str, str], int]:
-    """Resolves how much queued work waits on each job, which is the weight admission orders candidates by.
-
-    Notes:
-        A job's priority is the cores committed by every job that cannot run until it succeeds, summed over its
-        transitive dependents. Weighing the dependents by their cores rather than counting them separates a job
-        holding back three wide stages from one holding back a single narrow stage. A job nothing waits on weighs
-        zero, whatever its own size.
-
-        Ordering by this weight is what keeps a batch working on its critical path. Admitting by size alone lets a
-        crowd of leaf jobs hold the budget while the root of a long chain waits, which idles the host once those
-        leaves finish and the chain has yet to start. The dependents are collected as a set, so a stage reachable
-        along several paths at once is counted a single time.
-
-        A prerequisite naming a job outside this batch is skipped, since a job the batch does not hold cannot be
-        ordered against the ones it does. Cyclic prerequisites resolve to a finite weight rather than recursing
-        without end, which leaves a malformed pipeline ordering poorly instead of stalling the batch.
-
-    Args:
-        jobs: Every job the batch holds, keyed by dispatch key.
-
-    Returns:
-        A dictionary mapping each job's dispatch key to the cores its transitive dependents commit.
-    """
-    dependents: dict[tuple[str, str], list[tuple[str, str]]] = {key: [] for key in jobs}
-    for key, job in jobs.items():
-        for prerequisite in job.prerequisite_keys:
-            if prerequisite in dependents:
-                dependents[prerequisite].append(key)
-
-    resolved: dict[tuple[str, str], frozenset[tuple[str, str]]] = {}
-
-    def _collect(key: tuple[str, str], visiting: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
-        cached = resolved.get(key)
-        if cached is not None:
-            return cached
-        if key in visiting:
-            return frozenset()
-        visiting.add(key)
-        reachable: set[tuple[str, str]] = set()
-        for dependent in dependents[key]:
-            reachable.add(dependent)
-            reachable |= _collect(dependent, visiting)
-        visiting.discard(key)
-        resolved[key] = frozenset(reachable)
-        return resolved[key]
-
-    return {key: sum(jobs[dependent].core_weight for dependent in _collect(key, set())) for key in jobs}
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
@@ -497,20 +376,23 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
         The trackers are the authoritative record of every job's outcome, so prerequisite satisfaction is read from
         them rather than inferred from the futures. Reading them also picks up prerequisites that succeeded in an
         earlier batch and were never queued in this one. That is how a run asking only for a pipeline's later stages
-        still resolves its ordering. Outcomes are keyed by tracker as well as identifier, so one session's completed
-        stage never satisfies another session's.
+        still resolves its ordering.
+
+        Each tracker's jobs are recorded under the unit that tracker belongs to, matching how a job's dispatch key is
+        formed, so one unit's completed stage never satisfies another unit's. Units are paired with their trackers
+        rather than read from them, because a tracker file states which jobs it holds and not which unit holds it.
 
     Args:
         state: The active job execution state whose tracker files are re-read. Its outcome sets are updated in place.
     """
-    for tracker_path in {job.tracker_path for job in state.all_jobs.values()}:
+    for unit_path, tracker_path in {(job.unit_path, job.tracker_path) for job in state.all_jobs.values()}:
         if not tracker_path.is_file():
             continue
         for job_id, job_state in ProcessingTracker(file_path=tracker_path).snapshot().items():
             if job_state.status is ProcessingStatus.SUCCEEDED:
-                state.succeeded_job_keys.add((str(tracker_path), job_id))
+                state.succeeded_job_keys.add((str(unit_path), job_id))
             elif job_state.status is ProcessingStatus.FAILED:
-                state.failed_job_keys.add((str(tracker_path), job_id))
+                state.failed_job_keys.add((str(unit_path), job_id))
 
 
 def _admit_pending_jobs[PendingJobT: PendingJob](

@@ -10,9 +10,9 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 def slf_cli() -> None:
     """Processes and manages data acquired with the Sollertia data acquisition platform.
 
-    Exposes system-agnostic management commands ('manifest', 'checksum', 'dataset-state', 'server'), the agentic MCP
-    server ('mcp'), and the generic processing, forging, and planning commands ('process', 'forge', 'plan'). The
-    acquisition system is inferred from the data, so no command takes a system selector.
+    Exposes system-agnostic management commands ('manifest', 'checksum', 'dataset-state', 'server', 'reset'), the
+    agentic MCP server ('mcp'), and the generic processing, forging, and planning commands ('process', 'forge',
+    'plan'). The acquisition system is inferred from the data, so no command takes a system selector.
     """
 
 
@@ -28,13 +28,14 @@ def _register_subcommands() -> None:
     """Imports and registers every subcommand group on the top-level ``slf`` Click group."""
     from .plan import plan_cli  # noqa: PLC0415
     from .forge import forge_command  # noqa: PLC0415
-    from .manage import manifest_cli, checksum_command, dataset_state_command  # noqa: PLC0415
+    from .manage import manifest_cli, reset_command, checksum_command, dataset_state_command  # noqa: PLC0415
     from .server import server_cli  # noqa: PLC0415
     from .process import process_cli  # noqa: PLC0415
 
     slf_cli.add_command(cmd=manifest_cli)
     slf_cli.add_command(cmd=checksum_command)
     slf_cli.add_command(cmd=dataset_state_command)
+    slf_cli.add_command(cmd=reset_command)
     slf_cli.add_command(cmd=server_cli)
     slf_cli.add_command(cmd=process_cli)
     slf_cli.add_command(cmd=forge_command)

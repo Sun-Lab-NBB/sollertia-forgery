@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 DATASET_STATE_FILENAME: str = "dataset_state.feather"
 """The filename of the dataset state artifact, written at the dataset's root beside its forging tracker. The remote
-backend resolves the same artifact on a server path, where no dataset can be loaded to resolve it from."""
+backend resolves the same artifact from a server path, without loading the dataset."""
 
 _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for the state file's lock before giving up, matching the project manifest's writer."""

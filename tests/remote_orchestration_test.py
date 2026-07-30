@@ -31,14 +31,29 @@ from sollertia_forgery.orchestration import (
     retire_settled_batches,
 )
 from sollertia_forgery.server.server import _parse_job_status
-from sollertia_forgery.orchestration.remote import (
-    _job_key,
-    _build_batch_document,
-    _resolve_project_root,
-    _pending_job,
-    _partition_blocked_jobs,
-    _resolve_submission_order,
+from sollertia_forgery.orchestration.graph import (
+    BatchDocument,
+    build_pending_job,
+    build_batch_document,
+    partition_blocked_jobs,
+    resolve_submission_order,
 )
+from sollertia_forgery.orchestration.preparation import resolve_project_root
+
+
+def build_document(
+    pipeline: str, plan: pl.DataFrame, state: pl.DataFrame, unit_paths: list[Path], options: dict[str, Any]
+) -> BatchDocument:
+    """Builds a batch document from the stand-in tables, matching how preparation reads its own artifacts."""
+    return build_batch_document(
+        pipeline=pipeline,
+        host="remote",
+        unit_column="dataset" if pipeline == "forging" else "session",
+        plan_rows=plan.to_dicts(),
+        state_rows=state.to_dicts(),
+        unit_paths=unit_paths,
+        options=options,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +124,7 @@ def test_a_job_whose_upstream_stage_cannot_run_is_blocked_rather_than_submitted(
         descriptor(job_id="energy", job_name="motion_energy", specifier="1"),
     ]
 
-    submittable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded=set())
+    submittable, blocked = partition_blocked_jobs(jobs=jobs, succeeded=set())
 
     assert [job["job_id"] for job in submittable] == ["energy"]
     assert [entry["job_id"] for entry in blocked] == ["rename"]
@@ -124,7 +139,7 @@ def test_blocking_propagates_down_the_chain() -> None:
         descriptor(job_id="leaf", job_name="combine", prerequisite_ids=("middle",)),
     ]
 
-    submittable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded=set())
+    submittable, blocked = partition_blocked_jobs(jobs=jobs, succeeded=set())
 
     assert submittable == []
     assert {entry["job_id"] for entry in blocked} == {"root", "middle", "leaf"}
@@ -137,7 +152,7 @@ def test_a_prerequisite_the_batch_holds_does_not_block_its_dependent() -> None:
         descriptor(job_id="rename", job_name="rename", prerequisite_ids=("timestamp",)),
     ]
 
-    submittable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded=set())
+    submittable, blocked = partition_blocked_jobs(jobs=jobs, succeeded=set())
 
     assert {job["job_id"] for job in submittable} == {"timestamp", "rename"}
     assert blocked == []
@@ -146,12 +161,12 @@ def test_a_prerequisite_the_batch_holds_does_not_block_its_dependent() -> None:
 def test_jobs_are_ordered_so_every_job_follows_the_jobs_it_waits_on() -> None:
     """Ordering by dependency depth is what lets each submission name an allocation the scheduler already assigned."""
     jobs = [
-        _pending_job(descriptor=descriptor(job_id="combine", job_name="combine", prerequisite_ids=("process",))),
-        _pending_job(descriptor=descriptor(job_id="process", job_name="process", prerequisite_ids=("binarize",))),
-        _pending_job(descriptor=descriptor(job_id="binarize", job_name="binarize")),
+        build_pending_job(job=descriptor(job_id="combine", job_name="combine", prerequisite_ids=("process",))),
+        build_pending_job(job=descriptor(job_id="process", job_name="process", prerequisite_ids=("binarize",))),
+        build_pending_job(job=descriptor(job_id="binarize", job_name="binarize")),
     ]
 
-    ordered = [job.job_id for job in _resolve_submission_order(jobs=jobs)]
+    ordered = [job.job_id for job in resolve_submission_order(jobs=jobs)]
 
     assert ordered == ["binarize", "process", "combine"]
 
@@ -159,11 +174,11 @@ def test_jobs_are_ordered_so_every_job_follows_the_jobs_it_waits_on() -> None:
 def test_a_cyclic_ordering_resolves_rather_than_recursing_without_end() -> None:
     """A malformed pipeline is submitted in a poor order instead of stalling the submission."""
     jobs = [
-        _pending_job(descriptor=descriptor(job_id="first", job_name="first", prerequisite_ids=("second",))),
-        _pending_job(descriptor=descriptor(job_id="second", job_name="second", prerequisite_ids=("first",))),
+        build_pending_job(job=descriptor(job_id="first", job_name="first", prerequisite_ids=("second",))),
+        build_pending_job(job=descriptor(job_id="second", job_name="second", prerequisite_ids=("first",))),
     ]
 
-    assert {job.job_id for job in _resolve_submission_order(jobs=jobs)} == {"first", "second"}
+    assert {job.job_id for job in resolve_submission_order(jobs=jobs)} == {"first", "second"}
 
 
 def test_a_submission_names_the_allocations_of_the_upstream_jobs_the_batch_holds() -> None:
@@ -230,7 +245,7 @@ def test_each_pipeline_renders_the_command_that_runs_one_of_its_jobs(
     pipeline: str, job_name: str, expected: tuple[str, ...]
 ) -> None:
     """One dispatch table states both how a job runs in-process and how it runs as a scheduled allocation."""
-    job = _pending_job(descriptor=descriptor(job_id="job", job_name=job_name, pipeline=pipeline))
+    job = build_pending_job(job=descriptor(job_id="job", job_name=job_name, pipeline=pipeline))
 
     assert resolve_job_command(job=job) == expected
 
@@ -240,13 +255,13 @@ def test_the_checksum_command_carries_the_mode_the_job_was_prepared_with() -> No
     prepared = descriptor(job_id="job", job_name="checksum", pipeline="checksum")
     prepared["options"] = {"regenerate_checksum": True}
 
-    assert "-rc" in resolve_job_command(job=_pending_job(descriptor=prepared))
+    assert "-rc" in resolve_job_command(job=build_pending_job(job=prepared))
 
 
 def test_the_forging_command_names_the_dataset_and_its_project_root() -> None:
     """A forging job resolves its dataset from the unit directory and its project from that directory's parent."""
-    job = _pending_job(
-        descriptor=descriptor(
+    job = build_pending_job(
+        job=descriptor(
             job_id="job",
             job_name="session_data_assembly",
             pipeline="forging",
@@ -576,45 +591,39 @@ def state_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
 
 def test_a_session_unit_resolves_the_project_two_levels_up() -> None:
     """A session sits under its animal, so its project is two directories above it."""
-    dispatch = resolve_dispatch(pipeline="video")
-
-    resolved = _resolve_project_root(dispatch=dispatch, unit_paths=[Path("/root/Project/305/2024_11_04")])
+    resolved = resolve_project_root(unit_paths=[Path("/root/Project/305/2024_11_04")], unit_kind="session")
 
     assert resolved == Path("/root/Project")
 
 
 def test_a_dataset_unit_resolves_the_project_one_level_up() -> None:
     """A dataset sits directly under its project root, unlike a session."""
-    dispatch = resolve_dispatch(pipeline="forging")
-
-    resolved = _resolve_project_root(dispatch=dispatch, unit_paths=[Path("/root/Project/Dataset")])
+    resolved = resolve_project_root(unit_paths=[Path("/root/Project/Dataset")], unit_kind="dataset")
 
     assert resolved == Path("/root/Project")
 
 
 def test_units_spanning_two_projects_are_rejected() -> None:
     """The tables a batch is resolved from are written per project, so one batch reads one project."""
-    dispatch = resolve_dispatch(pipeline="video")
-
     with pytest.raises(ValueError, match="belong to the same project"):
-        _resolve_project_root(
-            dispatch=dispatch,
+        resolve_project_root(
             unit_paths=[Path("/root/ProjectA/305/2024_11_04"), Path("/root/ProjectB/306/2024_11_05")],
+            unit_kind="session",
         )
 
 
 def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
     """State names which jobs exist and the plan sizes them, which is the whole descriptor."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame([{"job_id": "energy", "cores": 16, "memory_mb": 5000}]),
         state=state_frame([{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
 
-    assert len(document["jobs"]) == 1
-    job = document["jobs"][0]
+    assert len(document.jobs) == 1
+    job = document.jobs[0]
     assert job["cores"] == 16
     assert job["memory_mb"] == 5000
     assert job["unit_path"] == "/root/Project/305/2024_11_04"
@@ -623,64 +632,64 @@ def test_a_batch_joins_the_state_table_to_the_planned_figures() -> None:
 
 def test_a_succeeded_job_is_not_submitted_again() -> None:
     """The state table is what makes a run resumable, so a job it records as succeeded stays done."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame([{"job_id": "done"}, {"job_id": "todo", "specifier": "2"}]),
         state=state_frame([{"job_id": "done", "status": "SUCCEEDED"}, {"job_id": "todo", "specifier": "2"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
 
-    assert [job["job_id"] for job in document["jobs"]] == ["todo"]
+    assert [job["job_id"] for job in document.jobs] == ["todo"]
 
 
 def test_a_job_absent_from_the_state_table_is_never_submitted() -> None:
     """A job the unit cannot run never reaches a tracker, so its absence from state is what rules it out."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame([{"job_id": "possible"}, {"job_id": "impossible", "specifier": "9"}]),
         state=state_frame([{"job_id": "possible"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
 
-    assert [job["job_id"] for job in document["jobs"]] == ["possible"]
+    assert [job["job_id"] for job in document.jobs] == ["possible"]
 
 
 def test_a_unit_the_state_table_does_not_cover_is_reported_without_aborting_the_others() -> None:
     """One unit carrying none of a pipeline's data never stops the units that do."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame([{"job_id": "energy"}]),
         state=state_frame([{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04"), Path("/root/Project/306/2024_11_05")],
         options={},
     )
 
-    covered, uncovered = document["units"]
+    covered, uncovered = document.units
     assert covered["job_count"] == 1
     assert "error" in uncovered
-    assert len(document["jobs"]) == 1
+    assert len(document.jobs) == 1
 
 
 def test_an_outstanding_job_the_plan_does_not_size_is_reported_as_an_error() -> None:
     """A job must be planned before it can be sized for a scheduler, so an unplanned one stops its unit."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame([]),
         state=state_frame([{"job_id": "energy"}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={},
     )
 
-    assert document["jobs"] == []
-    assert "carries no figures" in document["units"][0]["error"]
+    assert document.jobs == []
+    assert "carries no figures" in document.units[0]["error"]
 
 
 def test_the_planned_ordering_reaches_the_descriptor() -> None:
     """The plan carries the edges, which is what lets a scheduler build the graph without resolving the unit."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="video"),
+    document = build_document(
+        pipeline="video",
         plan=plan_frame(
             [
                 {"job_id": "timestamp", "job_name": "timestamp"},
@@ -697,26 +706,57 @@ def test_the_planned_ordering_reaches_the_descriptor() -> None:
         options={},
     )
 
-    rename = next(job for job in document["jobs"] if job["job_id"] == "rename")
+    rename = next(job for job in document.jobs if job["job_id"] == "rename")
     assert rename["prerequisite_ids"] == ["timestamp"]
 
 
 def test_options_are_stamped_onto_every_descriptor() -> None:
     """A pipeline's mode rides on the descriptor, so every job of the batch runs the mode it was prepared for."""
-    document = _build_batch_document(
-        dispatch=resolve_dispatch(pipeline="checksum"),
+    document = build_document(
+        pipeline="checksum",
         plan=plan_frame([{"job_id": "sum", "pipeline": "checksum", "job_name": "checksum", "specifier": ""}]),
         state=state_frame([{"job_id": "sum", "pipeline": "checksum", "job_name": "checksum", "specifier": ""}]),
         unit_paths=[Path("/root/Project/305/2024_11_04")],
         options={"regenerate_checksum": True},
     )
 
-    assert document["jobs"][0]["options"] == {"regenerate_checksum": True}
+    assert document.jobs[0]["options"] == {"regenerate_checksum": True}
 
 
 def test_one_unit_completed_stage_never_satisfies_another_units_dependent() -> None:
     """A job identifier is derived from the job name and specifier alone, so the unit is what separates two copies."""
-    first = _pending_job(descriptor=descriptor(job_id="a", job_name="rename", unit_path="/root/Project/305/one"))
-    second = _pending_job(descriptor=descriptor(job_id="a", job_name="rename", unit_path="/root/Project/305/two"))
+    first = build_pending_job(job=descriptor(job_id="a", job_name="rename", unit_path="/root/Project/305/one"))
+    second = build_pending_job(job=descriptor(job_id="a", job_name="rename", unit_path="/root/Project/305/two"))
 
-    assert _job_key(job=first) != _job_key(job=second)
+    assert first.dispatch_key != second.dispatch_key
+
+
+def test_a_descriptor_carries_the_tracker_location_the_host_resolved() -> None:
+    """The local engine opens these files directly, so a batch dispatched here must carry where they sit."""
+    document = build_batch_document(
+        pipeline="video",
+        host="local",
+        unit_column="session",
+        plan_rows=plan_frame([{"job_id": "energy"}]).to_dicts(),
+        state_rows=state_frame([{"job_id": "energy"}]).to_dicts(),
+        unit_paths=[Path("/root/Project/305/2024_11_04")],
+        options={},
+        tracker_paths={"/root/Project/305/2024_11_04": "/root/Project/305/2024_11_04/processed_data/video.yaml"},
+    )
+
+    assert document.jobs[0]["tracker_path"] == "/root/Project/305/2024_11_04/processed_data/video.yaml"
+
+
+def test_a_descriptor_carries_no_tracker_location_when_the_host_resolves_none() -> None:
+    """A remotely dispatched job records its own outcome on the server, so naming a path here would mislead."""
+    document = build_batch_document(
+        pipeline="video",
+        host="remote",
+        unit_column="session",
+        plan_rows=plan_frame([{"job_id": "energy"}]).to_dicts(),
+        state_rows=state_frame([{"job_id": "energy"}]).to_dicts(),
+        unit_paths=[Path("/data/Project/305/2024_11_04")],
+        options={},
+    )
+
+    assert document.jobs[0]["tracker_path"] == ""

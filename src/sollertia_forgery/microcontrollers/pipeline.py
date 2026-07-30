@@ -185,12 +185,12 @@ def run_microcontroller_processing_pipeline(
 def discover_microcontroller_jobs(
     session_path: Path,
 ) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the microcontroller pipeline's job universe and runnable subset for the target session.
+    """Resolves the microcontroller pipeline's job universe and possible subset for the target session.
 
     Notes:
         The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
         controller that declares at least one module the acquisition system parses, plus one parse job per such
-        module. The runnable subset narrows the universe to controllers whose log archive is present on disk, since a
+        module. The possible subset narrows the universe to controllers whose log archive is present on disk, since a
         controller with no archive can be neither extracted nor parsed. This is discovery only, reading the manifest
         and globbing for archives while decoding no data and mutating nothing.
 
@@ -198,7 +198,7 @@ def discover_microcontroller_jobs(
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
         subset of that universe. Extraction specifiers are controller IDs and parse specifiers are
         ``"{controller_id}-{module_type}-{module_id}"``.
 

@@ -32,8 +32,8 @@ class RemoteSubmission:
     """
 
     job_id: str = ""
-    """The job identifier, which is the key the project job artifact records this job under and the key a pulled
-    artifact is joined to this record on."""
+    """The job identifier, which is both the key the project job artifact records this job under and the key that
+    joins a pulled artifact to this record."""
     slurm_job_id: str = ""
     """The identifier the scheduler assigned to this allocation."""
     slurm_job_name: str = ""

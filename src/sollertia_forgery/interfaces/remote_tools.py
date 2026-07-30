@@ -4,7 +4,6 @@ submitting them to its scheduler as a dependency graph, and checking, canceling,
 
 from __future__ import annotations
 
-from uuid import uuid4
 from typing import Any
 
 from ..server import TERMINAL_JOB_STATUSES, JobStatus, remote_state_directory
@@ -19,25 +18,15 @@ from .responses import (
 )
 from .mcp_instance import mcp
 from ..orchestration import (
-    BATCH_PIPELINES,
-    REMOTE_JOB_WALLTIME_MINUTES,
     SubmissionLedger,
     read_ledger,
-    submit_batch,
     resolve_batches,
     connect_to_server,
     query_submissions,
     render_submission,
     cancel_submissions,
     sync_project_state,
-    prepare_remote_batch,
-    remote_batch_directory,
 )
-
-_PREPARED_REMOTE_BATCHES: dict[str, dict[str, Any]] = {}
-"""The batch documents every remote preparation produced, keyed by the identifier it returned. Submission resolves its
-jobs from here when the caller names a batch, so dispatching a large batch costs one identifier rather than a copy of
-every descriptor."""
 
 _STATUS_AXES: tuple[str, ...] = ("batch_id", "pipeline", "job_name", "status", "unit_path")
 """The job attributes a caller may filter a remote batch by, and the axes a status breakdown counts."""
@@ -63,8 +52,8 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "output_log",
     "error_log",
 )
-"""The job fields detail adds, which are the resources the allocation requested and where its output landed. The log
-paths are what a caller reads a failed allocation's own diagnostics from."""
+"""The job fields detail adds, which are the resources the allocation requested and where its output landed. A caller
+reads the log paths to see a failed allocation's own diagnostics."""
 
 _BLOCKED_SEMI_FIELDS: tuple[str, ...] = (
     "job_id",
@@ -89,131 +78,7 @@ _NOTHING_OUTSTANDING: str = f"No remote batch is outstanding. {_FINISHED_BATCH_G
 ever submitted."""
 
 
-@mcp.tool()
-def prepare_remote_batch_tool(
-    pipeline: str,
-    session_paths: list[str],
-    options: dict[str, Any] | None = None,
-    *,
-    include_job_descriptors: bool = False,
-) -> dict[str, Any]:
-    """Resolves a pipeline's submittable jobs for one or more units on the remote compute server.
-
-    Refreshes the project's plan and state tables on the server before resolving, so the batch reflects what each
-    unit currently holds. A job the unit cannot run is never resolved, and a job whose upstream stage this run can
-    neither queue nor find already succeeded is reported under ``blocked_jobs`` rather than submitted.
-
-    Pass the returned ``batch_id`` to ``execute_remote_jobs_tool`` to submit the batch.
-
-    Args:
-        pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
-            ``two_photon``, ``forging``.
-        session_paths: The processing unit directories ON THE SERVER to prepare jobs for, which are session roots for
-            every session pipeline and dataset roots for ``forging``. Every unit must belong to one project, since the
-            tables a batch is resolved from are written per project.
-        options: The pipeline-specific parameters to run the prepared jobs with. The ``checksum`` pipeline reads
-            ``regenerate_checksum`` and the ``forging`` pipeline reads ``session_names``, ``force_recreate``, and
-            ``recreate_animals``. The other pipelines take no parameters.
-        include_job_descriptors: Determines whether the response carries the full ``jobs`` list. Omitted by default,
-            since submission reads the descriptors from the identifier rather than from this response.
-
-    Returns:
-        A response dict with ``batch_id``, ``pipeline``, ``total_units``, ``total_jobs``, ``total_blocked_jobs``, a
-        ``units`` list carrying each unit's ``unit_path``, ``unit_name``, and ``job_count`` or an ``error``, and a
-        ``blocked_jobs`` list naming what each blocked job waits on.
-    """
-    if pipeline not in {member.value for member in BATCH_PIPELINES}:
-        return error_response(message=_unsupported_message(pipeline=pipeline))
-
-    batch_id = uuid4().hex[:16]
-    try:
-        with connect_to_server() as server:
-            document = prepare_remote_batch(server=server, pipeline=pipeline, unit_paths=session_paths, options=options)
-    except Exception as exception:
-        return error_response(message=f"Unable to prepare the remote '{pipeline}' batch. {exception}")
-
-    _PREPARED_REMOTE_BATCHES[batch_id] = document
-
-    response = ok_response(
-        batch_id=batch_id,
-        pipeline=document["pipeline"],
-        units=document["units"],
-        total_units=len(document["units"]),
-        total_jobs=len(document["jobs"]),
-        total_blocked_jobs=len(document["blocked_jobs"]),
-        blocked_jobs=[project_item(item=entry, fields=_BLOCKED_SEMI_FIELDS) for entry in document["blocked_jobs"]],
-    )
-    if include_job_descriptors:
-        response["jobs"] = document["jobs"]
-    return response
-
-
-@mcp.tool()
-def execute_remote_jobs_tool(batch_ids: list[str], walltime_minutes: int = -1) -> dict[str, Any]:
-    """Submits prepared remote batches to the server's scheduler as a dependency graph, returning immediately.
-
-    Each job is submitted with the cores and memory its preparation sized it at, and waits on the upstream jobs the
-    same batches hold. The scheduler sequences the graph, so nothing has to stay running here for the batch to finish.
-
-    Submitting several batches is safe, since each stays queryable through ``get_remote_processing_status_tool`` until
-    its allocations all finish.
-
-    Args:
-        batch_ids: The identifiers ``prepare_remote_batch_tool`` returned, whose registered descriptors are submitted.
-        walltime_minutes: The wall-time every allocation requests. A non-positive value takes the shared default,
-            which exists to stop a run that has stopped progressing rather than to describe how long a stage takes.
-
-    Returns:
-        A response dict with ``submitted``, ``total_jobs``, the resolved ``walltime_minutes``, a ``pipelines`` list
-        naming what the submission holds, the ``batch_directory`` on the server holding the scripts and logs, and a
-        ``submissions`` list pairing each job with the allocation it runs as.
-    """
-    unknown = sorted(batch for batch in batch_ids if batch not in _PREPARED_REMOTE_BATCHES)
-    if unknown:
-        return error_response(
-            message=(
-                f"No prepared remote batch exists for identifier(s) {unknown}. Prepare the pipeline again to register "
-                f"its jobs, since identifiers live only for the lifetime of the server that issued them."
-            )
-        )
-
-    descriptors = [job for batch in batch_ids for job in _PREPARED_REMOTE_BATCHES[batch]["jobs"]]
-    if not descriptors:
-        return error_response(message="No submittable jobs to execute. Every prepared job is blocked or absent.")
-
-    # A submission spanning several batches writes the scripts and logs of them all into one directory, named after
-    # the first batch.
-    batch_id = batch_ids[0]
-    walltime = walltime_minutes if walltime_minutes > 0 else REMOTE_JOB_WALLTIME_MINUTES
-    try:
-        with connect_to_server() as server:
-            submissions = submit_batch(server=server, jobs=descriptors, batch_id=batch_id, walltime_minutes=walltime)
-            batch_directory = str(remote_batch_directory(server=server, batch_id=batch_id))
-
-            # Retires the earlier batches that finished while this one was prepared, so the ledger sheds them without
-            # waiting for a status read that may never come.
-            outstanding = [submission for batch in read_ledger().batches for submission in batch.submissions]
-            if outstanding:
-                query_submissions(server=server, submissions=outstanding)
-    except Exception as exception:
-        return error_response(message=f"Unable to submit the remote batch. {exception}")
-
-    return ok_response(
-        submitted=True,
-        batch_id=batch_id,
-        total_jobs=len(submissions),
-        walltime_minutes=walltime,
-        pipelines=sorted({submission.pipeline for submission in submissions}),
-        batch_directory=batch_directory,
-        submissions=[
-            {"job_id": submission.job_id, "slurm_job_id": submission.slurm_job_id, "job_name": submission.job_name}
-            for submission in submissions
-        ],
-    )
-
-
-@mcp.tool()
-def get_remote_processing_status_tool(
+def remote_batch_status(
     batch_ids: list[str] | None = None,
     status_filter: str | None = None,
     session_paths: list[str] | None = None,
@@ -227,6 +92,8 @@ def get_remote_processing_status_tool(
     detailed: bool = False,
 ) -> dict[str, Any]:
     """Reports the scheduler state of the outstanding remote batches, in three widening stages.
+
+    ``get_processing_status_tool`` delegates a ``remote`` request here.
 
     A bare call covers every outstanding batch, queries the scheduler for all of them in one accounting call, and
     reports the counts alongside a ``breakdown`` naming every batch, pipeline, job type, state, and unit. Naming a
@@ -334,9 +201,10 @@ def get_remote_processing_status_tool(
     return response
 
 
-@mcp.tool()
-def cancel_remote_processing_tool(batch_ids: list[str] | None = None) -> dict[str, Any]:
+def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
     """Cancels the allocations of the outstanding remote batches.
+
+    ``cancel_processing_tool`` delegates a ``remote`` request here.
 
     Cancels queued and running allocations alike in one command. A dependent of a canceled allocation is canceled by
     the scheduler in turn, because its dependency can no longer complete successfully. The batches are resolved from
@@ -434,9 +302,3 @@ def _unknown_batch_message(unknown: list[str], ledger: SubmissionLedger) -> str:
         f"finish, so a batch that is absent here has either finished or was never submitted. Outstanding: "
         f"{sorted(batch.batch_id for batch in ledger.batches)}. {_FINISHED_BATCH_GUIDANCE}"
     )
-
-
-def _unsupported_message(pipeline: str) -> str:
-    """Builds the error message returned when a caller names a pipeline the batch tools do not support."""
-    available = ", ".join(sorted(member.value for member in BATCH_PIPELINES))
-    return f"Unsupported batch pipeline '{pipeline}'. Available: {available}."

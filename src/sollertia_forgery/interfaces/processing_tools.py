@@ -5,17 +5,15 @@ they will cost, running them as one local batch, and checking, canceling, or res
 from __future__ import annotations
 
 from time import time_ns
-from uuid import uuid4
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
+from contextlib import contextmanager
 from collections import deque
 
 from ataraxis_base_utilities import resolve_worker_count
-from sollertia_shared_assets import DatasetData, SessionData
 from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker, delete_directory
 
-from ..forging import forging_tracker_path
 from .responses import (
     ok_response,
     page_fields,
@@ -26,35 +24,60 @@ from .responses import (
     resolve_detail_limit,
 )
 from .mcp_instance import mcp
+from .remote_tools import remote_batch_cancel, remote_batch_status
 from ..orchestration import (
     RESERVED_CORES,
     BATCH_PIPELINES,
+    LOCAL_HOST_LABEL,
+    REMOTE_HOST_LABEL,
+    REMOTE_JOB_WALLTIME_MINUTES,
+    LocalHost,
+    RemoteHost,
     JobExecutionState,
+    read_ledger,
+    submit_batch,
+    prepare_batch,
     run_batch_job,
     resolve_dispatch,
     build_pending_job,
+    connect_to_server,
+    query_submissions,
+    resolve_batch_host,
+    reconcile_local_jobs,
     group_jobs_by_tracker,
     job_execution_manager,
-    prepare_pipeline_jobs,
+    read_prepared_batches,
+    reconcile_remote_jobs,
+    record_prepared_batch,
+    remote_batch_directory,
     resolve_host_memory_mb,
     resolve_core_allocations,
     resolve_concurrency_limits,
     resolve_concurrency_reservations,
 )
-from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
 
 if TYPE_CHECKING:
-    from ..orchestration import GenericPendingJob
+    from collections.abc import Iterator
+
+    from ..orchestration import ExecutionHost, GenericPendingJob
 
 _EXECUTION_STATE: JobExecutionState[GenericPendingJob] | None = None
 """The single batch execution state. One pool serves every pipeline, so a batch may hold any mix of jobs and the
 engine packs them against one pair of budgets."""
 
-_PREPARED_BATCHES: dict[str, list[dict[str, Any]]] = {}
-"""The job descriptors every preparation produced, keyed by the identifier it returned. Execution resolves its jobs
-from here when the caller names a batch, so dispatching a large batch costs one identifier rather than a copy of
-every descriptor. Preparing one pipeline at a time yields one identifier each, and execution accepts them together,
-which is how a single pool run comes to hold every pipeline."""
+_HOST_LABELS: frozenset[str] = frozenset({LOCAL_HOST_LABEL, REMOTE_HOST_LABEL})
+"""The hosts a batch may be prepared against and dispatched to."""
+
+_BLOCKED_SEMI_FIELDS: tuple[str, ...] = (
+    "job_id",
+    "pipeline",
+    "job_name",
+    "specifier",
+    "unit_name",
+    "unsatisfied_prerequisite_ids",
+)
+"""The fields a blocked-job listing carries, naming the job and the upstream jobs this run could neither dispatch nor
+find already succeeded."""
 
 _MEMORY_BUDGET_FRACTION: float = 0.85
 """The share of the host's memory a batch commits when the caller does not name one."""
@@ -66,8 +89,8 @@ _STATUS_AXES: tuple[str, ...] = ("pipeline", "job_name", "status", "session_path
 """The job attributes a caller may filter a batch by, and the axes a status breakdown counts."""
 
 _STATUS_SEMI_FIELDS: tuple[str, ...] = ("job_id", "pipeline", "job_name", "specifier", "status", "session_path")
-"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the key a caller resets a job
-by."""
+"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
+targets."""
 
 _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
     "cores",
@@ -85,8 +108,8 @@ _STATUS_DETAIL_FIELDS: tuple[str, ...] = (
 parameters it ran with, and the jobs it waited for."""
 
 _RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "cores", "memory_mb")
-"""The job fields a semi-detail resource listing carries, which is the job's identity and the figures it is planned
-at. The unit path sits on the unit entry rather than on every job of that unit."""
+"""The job fields a semi-detail resource listing carries, which is the job's identity and its planned figures. The
+unit path sits on the unit entry rather than on every job of that unit."""
 
 _RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled", "prerequisite_ids", "unit_path", "options")
 """The job fields detail adds, stating whether the memory figure was modeled, which jobs it waits for, and the
@@ -106,68 +129,79 @@ def prepare_batch_tool(
     pipeline: str,
     session_paths: list[str],
     options: dict[str, Any] | None = None,
+    host: str = "local",
     *,
+    replan: bool = False,
     include_job_descriptors: bool = False,
 ) -> dict[str, Any]:
-    """Discovers and tracker-aligns the batch jobs for a session pipeline over one or more sessions.
+    """Resolves a pipeline's dispatchable jobs for one or more units, on this machine or on the compute server.
 
-    For each session, resolves the pipeline's runnable jobs, aligns the session's processing tracker so the job
-    slots exist, and registers the dispatchable job descriptors under a returned ``batch_id``. A session that cannot
-    be prepared is reported in its own entry with an ``error`` key and does not abort the others.
+    Runs the project's planning and state steps on whichever host holds the data, reads the resulting artifacts here,
+    and builds the batch from them. One path serves both hosts, so a local batch and a remote one are the same
+    document and differ only in where their jobs will run.
 
-    Pass the returned ``batch_id`` to ``execute_jobs_tool`` to dispatch the batch. Preparing several pipelines
-    yields one identifier each, and execution accepts them together, which is how one pool run holds every pipeline.
+    A job the unit cannot run never reaches its processing tracker, so its absence from the project's state artifact is
+    what rules it out. A job whose upstream stage this run can neither dispatch nor find already succeeded is reported
+    under ``blocked_jobs`` rather than dispatched.
+
+    Pass the returned ``batch_id`` to ``execute_jobs_tool``. A batch runs where it was prepared, so execution reads the
+    host from the batch itself. Identifiers are recorded on disk and outlive the server that issued them.
 
     Args:
         pipeline: The batch pipeline to prepare, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
-        session_paths: The processing unit directories to prepare jobs for, which are session roots for every
-            session pipeline and dataset roots for ``forging``.
-        options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this
-            call registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting
-            re-baselining of the stored value over verification against it, which defaults to verification. The
-            ``forging`` pipeline reads ``session_names``, ``force_recreate``, and ``recreate_animals``, which its
-            definition job applies to the dataset hierarchy and every other forging job ignores. The other pipelines
-            take no parameters.
-        include_job_descriptors: Determines whether each unit carries its full ``jobs`` list. Omitted by default,
-            since dispatch reads the descriptors from the identifier rather than from this response, so a batch
-            spanning many sessions reports counts alone unless the descriptors are asked for.
+        session_paths: The processing unit directories to prepare jobs for, which are session roots for every session
+            pipeline and dataset roots for ``forging``. For ``remote`` these are paths ON THE SERVER. Every unit must
+            belong to one project, since the artifacts a batch is resolved from are written per project.
+        options: The pipeline-specific parameters to run the prepared jobs with, carried on every descriptor this call
+            registers. The ``checksum`` pipeline reads ``regenerate_checksum``, a boolean selecting re-baselining of
+            the stored value over verification against it, which defaults to verification. The ``forging`` pipeline
+            reads ``session_names``, ``force_recreate``, and ``recreate_animals``, which its definition job applies to
+            the dataset hierarchy and every other forging job ignores. The other pipelines take no parameters.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
+        replan: Determines whether to re-estimate the cores and memory the units' plan caches already hold. Leave False
+            unless a deliberate retune should be adopted, since a submission may already have been sized against the
+            recorded figures.
+        include_job_descriptors: Determines whether the response carries the full ``jobs`` list. Omitted by default,
+            since dispatch reads the descriptors from the identifier rather than from this response.
 
     Returns:
-        A response dict with ``batch_id``, ``pipeline``, ``total_units``, ``total_jobs``, and a ``units`` list, one
-        entry per session carrying its ``session_path``, ``session_name``, ``tracker_path``, and its ``job_count``,
-        or an ``error``. Each unit also carries its ``jobs`` list unless the descriptors were omitted.
+        A response dict with ``batch_id``, ``pipeline``, ``host``, ``total_units``, ``total_jobs``,
+        ``total_blocked_jobs``, a ``units`` list carrying each unit's ``unit_path``, ``unit_name`` and ``job_count`` or
+        an ``error``, and a ``blocked_jobs`` list naming what each blocked job waits on. Carries a ``jobs`` list when
+        the descriptors are asked for.
     """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
+    if pipeline not in {member.value for member in BATCH_PIPELINES}:
         return error_response(message=_unsupported_message(pipeline=pipeline))
+    if host not in _HOST_LABELS:
+        return error_response(message=_unsupported_host_message(host=host))
 
-    units: list[dict[str, Any]] = []
-    descriptors: list[dict[str, Any]] = []
-    for session_path in session_paths:
-        try:
-            prepared = prepare_pipeline_jobs(dispatch=dispatch, unit_path=Path(session_path), options=options)
-        except Exception as exception:
-            units.append({"session_path": session_path, "error": str(exception), "job_count": 0, "jobs": []})
-            continue
-        prepared["session_name"] = prepared.pop("unit_name")
-        prepared["session_path"] = session_path
-        descriptors.extend(prepared["jobs"])
-        prepared["job_count"] = len(prepared["jobs"])
-        if not include_job_descriptors:
-            del prepared["jobs"]
-        units.append(prepared)
+    try:
+        with _resolve_host(host=host) as execution_host:
+            document = prepare_batch(
+                host=execution_host,
+                pipeline=pipeline,
+                unit_paths=session_paths,
+                options=options,
+                replan=replan,
+            )
+    except Exception as exception:
+        return error_response(message=f"Unable to prepare the {host} '{pipeline}' batch. {exception}")
 
-    batch_id = uuid4().hex[:16]
-    _PREPARED_BATCHES[batch_id] = descriptors
-
-    return ok_response(
+    batch_id = record_prepared_batch(document=document)
+    response = ok_response(
         batch_id=batch_id,
-        pipeline=dispatch.pipeline.value,
-        units=units,
-        total_units=len(units),
-        total_jobs=len(descriptors),
+        pipeline=document.pipeline,
+        host=document.host,
+        units=document.units,
+        total_units=len(document.units),
+        total_jobs=len(document.jobs),
+        total_blocked_jobs=len(document.blocked_jobs),
+        blocked_jobs=[project_item(item=entry, fields=_BLOCKED_SEMI_FIELDS) for entry in document.blocked_jobs],
     )
+    if include_job_descriptors:
+        response["jobs"] = document.jobs
+    return response
 
 
 @mcp.tool()
@@ -175,6 +209,7 @@ def inspect_job_resources_tool(
     pipeline: str,
     session_paths: list[str],
     options: dict[str, Any] | None = None,
+    host: str = "local",
     job_names: list[str] | None = None,
     limit: int | None = None,
     start_row: int = 0,
@@ -182,7 +217,7 @@ def inspect_job_resources_tool(
     include_items: bool = False,
     detailed: bool = False,
 ) -> dict[str, Any]:
-    """Reports the cores and memory a pipeline's runnable jobs will need, in three widening stages, running none.
+    """Reports the cores and memory a pipeline's possible jobs will need, in three widening stages, running none.
 
     A bare call reports the figures a batch is planned against alongside a ``breakdown`` naming every job type and how
     many of each the named sessions resolve. Naming a filter adds a page of jobs carrying their figures, and opting into
@@ -199,6 +234,7 @@ def inspect_job_resources_tool(
         session_paths: The session root directories to inspect.
         options: The pipeline-specific parameters the inspected jobs would run with, forwarded to preparation. See
             ``prepare_batch_tool`` for the keys each pipeline reads.
+        host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
         job_names: Restricts the listing to these job type names.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
@@ -214,13 +250,13 @@ def inspect_job_resources_tool(
         ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
     """
     prepared = prepare_batch_tool(
-        pipeline=pipeline, session_paths=session_paths, options=options, include_job_descriptors=True
+        pipeline=pipeline, session_paths=session_paths, options=options, host=host, include_job_descriptors=True
     )
     if not prepared["success"]:
         return prepared
 
-    jobs = [job for unit in prepared["units"] for job in unit.get("jobs", [])]
-    units = [{key: value for key, value in unit.items() if key != "jobs"} for unit in prepared["units"]]
+    jobs = prepared.get("jobs", [])
+    units = prepared["units"]
     response = ok_response(
         pipeline=prepared["pipeline"],
         units=units,
@@ -253,59 +289,62 @@ def inspect_job_resources_tool(
 
 @mcp.tool()
 def execute_jobs_tool(
-    jobs: list[dict[str, Any]] | None = None,
-    batch_ids: list[str] | None = None,
+    batch_ids: list[str],
     *,
     core_budget_override: int = -1,
     memory_budget_mb: int = -1,
+    walltime_minutes: int = -1,
 ) -> dict[str, Any]:
-    """Dispatches prepared jobs of any pipeline onto the shared pool, returning immediately.
+    """Dispatches prepared batches, onto this machine's process pool or onto the server's scheduler.
 
-    One pool serves every pipeline, so a single call may mix jobs from as many pipelines and sessions as the caller
-    wants. Each job carries the cores and memory it needs, and the engine admits jobs continuously against both
-    budgets, refilling the capacity a finished job frees as soon as it is released. Jobs run in their pipeline's
-    own dependency order, so a batch may safely hold every stage of a pipeline at once.
+    A batch runs where it was prepared, so the host is read from the batch itself rather than named again. Batches
+    prepared against different hosts are rejected rather than mixed.
 
-    Name the batches to dispatch by their identifiers, which is what keeps the cost of starting a large run flat.
-    Passing descriptors directly stays available for a caller that assembled or filtered its own job list.
+    Before anything is dispatched, every job the trackers already record as running is reconciled. Locally that record
+    describes a pool that died, so the job is rerun. Remotely the submission ledger and the tracker's executor
+    identifier are consulted, and a job whose allocation is still live is adopted rather than submitted twice, with its
+    dependents wired to wait on the allocation already running it. Every job that is dispatched has its recorded state
+    cleared first, which is what keeps a status read honest across the window before it starts.
+
+    Locally one pool serves every pipeline, so several batches may be dispatched together and the engine packs them
+    against one pair of budgets. Remotely the scheduler sequences the dependency graph, so nothing has to stay running
+    here for the batch to finish.
 
     Args:
-        jobs: The job descriptors to dispatch, each carrying ``tracker_path``, ``job_id``, ``unit_path``,
-            ``pipeline``, ``job_name``, ``specifier``, ``cores``, ``memory_mb``, ``prerequisite_ids``, and
-            ``options``. Supply this or ``batch_ids``, or both to dispatch their union.
-        batch_ids: The identifiers ``prepare_batch_tool`` returned, whose registered descriptors are dispatched.
-        core_budget_override: The cores the batch may use in total. A non-positive value auto-resolves to all cores
-            minus the reserved system cores.
-        memory_budget_mb: The memory the batch may use in total. A non-positive value auto-resolves to a share of
-            the host's memory.
+        batch_ids: The identifiers ``prepare_batch_tool`` returned, whose recorded jobs are dispatched.
+        core_budget_override: The cores a local batch may use in total. A non-positive value auto-resolves to all cores
+            minus the reserved system cores. Ignored for a remote batch, where each job requests its own allocation.
+        memory_budget_mb: The memory a local batch may use in total. A non-positive value auto-resolves to a share of
+            the host's memory. Ignored for a remote batch.
+        walltime_minutes: The wall-time every remote allocation requests. A non-positive value takes the shared
+            default, which exists to stop a run that has stopped progressing. Ignored for a local batch.
 
     Returns:
-        A response dict with ``started``, ``total_jobs`` dispatched, the resolved ``core_budget`` and
-        ``memory_budget_mb``, the ``pool_size``, a ``pipelines`` list naming what the batch holds, and a
-        ``job_allocations`` entry per job type giving the cores it was narrowed to. A partial batch also carries
-        ``invalid_jobs``.
+        A response dict with ``started``, the ``host`` it dispatched to, ``total_jobs``, the ``pipelines`` the batch
+        holds, and any ``adopted_jobs`` it left to an allocation already running them. A local dispatch adds the
+        resolved ``core_budget``, ``memory_budget_mb``, ``pool_size``, and a ``job_allocations`` entry per job type. A
+        remote dispatch adds ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list
+        pairing each job with the allocation it runs as.
     """
-    global _EXECUTION_STATE
-
-    if _EXECUTION_STATE is not None and (
-        _EXECUTION_STATE.manager_thread is not None and _EXECUTION_STATE.manager_thread.is_alive()
-    ):
-        return error_response(
-            message="A batch is already running. Wait for it to finish or cancel it before starting another."
-        )
-
-    unknown = sorted(batch for batch in (batch_ids or []) if batch not in _PREPARED_BATCHES)
-    if unknown:
+    documents, missing = read_prepared_batches(batch_ids=batch_ids)
+    if missing:
         return error_response(
             message=(
-                f"No prepared batch exists for identifier(s) {unknown}. Prepare the pipeline again to register its "
-                f"jobs, since identifiers live only for the lifetime of the server that issued them."
+                f"No prepared batch exists for identifier(s) {missing}. Prepare the pipeline again to register its "
+                f"jobs."
             )
         )
+    if not documents:
+        return error_response(message="No batch was named.")
 
-    descriptors: list[dict[str, Any]] = list(jobs or [])
-    for batch in batch_ids or []:
-        descriptors.extend(_PREPARED_BATCHES[batch])
+    try:
+        host = resolve_batch_host(documents=documents)
+    except ValueError as exception:
+        return error_response(message=str(exception))
+
+    descriptors = [job for document in documents for job in document.jobs]
+    if not descriptors:
+        return error_response(message="No dispatchable jobs. Every prepared job is blocked or already succeeded.")
 
     pending: list[GenericPendingJob] = []
     invalid_jobs: list[dict[str, Any]] = []
@@ -321,83 +360,30 @@ def execute_jobs_tool(
                     "error": str(exception),
                 }
             )
-
-    unsupported = sorted({job.pipeline for job in pending if resolve_dispatch(pipeline=job.pipeline) is None})
-    if unsupported:
-        return error_response(message=_unsupported_message(pipeline=unsupported[0]))
-
     if not pending:
         response = error_response(message="No valid jobs to execute.")
         if invalid_jobs:
             response["invalid_jobs"] = invalid_jobs
         return response
 
-    core_budget = resolve_worker_count(requested_workers=core_budget_override, reserved_cores=RESERVED_CORES)
-    resolved_memory = (
-        memory_budget_mb
-        if memory_budget_mb > 0
-        else max(_MINIMUM_MEMORY_BUDGET_MB, int(resolve_host_memory_mb() * _MEMORY_BUDGET_FRACTION))
-    )
-
-    # Narrows every job to the resolved budget, since a descriptor prepared against a larger host would otherwise
-    # tell its pipeline to fan out wider than this host can supply. The concurrency limits enter here too, so the
-    # reported maximum for a storage-bound job type is the one admission will actually hold it to.
-    concurrency_limits = resolve_concurrency_limits(job_names={job.job_name for job in pending})
-    concurrency_reservations = resolve_concurrency_reservations(job_names={job.job_name for job in pending})
-    allocations = resolve_core_allocations(
-        job_cores={job.job_name: job.core_weight for job in pending},
-        job_names={job.job_name for job in pending},
-        core_budget=core_budget,
-        job_limits=concurrency_limits,
-        job_reservations=concurrency_reservations,
-    )
-    for pending_job in pending:
-        pending_job.core_weight = allocations[pending_job.job_name].cores_per_job
-
-    # Sizes the pool by how many of the narrowest jobs the core budget could admit at once, so worker processes are
-    # never spawned for capacity the core budget cannot supply.
-    narrowest = min((job.core_weight for job in pending), default=1)
-    pool_size = max(1, min(len(pending), core_budget // max(1, narrowest)))
-
-    state: JobExecutionState[GenericPendingJob] = JobExecutionState(
-        worker=run_batch_job,
-        all_jobs={job.dispatch_key: job for job in pending},
-        pending_jobs=deque(pending),
-        core_budget=core_budget,
-        memory_budget_mb=resolved_memory,
-        concurrency_limits=concurrency_limits,
-        concurrency_reservations=concurrency_reservations,
-        pool_size=pool_size,
-    )
-    _EXECUTION_STATE = state
-    thread = Thread(target=job_execution_manager, args=(state,), daemon=True)
-    state.manager_thread = thread
-    thread.start()
-
-    response = ok_response(
-        started=True,
-        total_jobs=len(pending),
-        core_budget=core_budget,
-        memory_budget_mb=resolved_memory,
-        pool_size=pool_size,
-        pipelines=sorted({job.pipeline for job in pending}),
-        job_allocations={
-            job_name: {
-                "cores_per_job": allocation.cores_per_job,
-                "maximum_parallel": allocation.maximum_parallel,
-                "concurrency_limit": allocation.concurrency_limit,
-                "concurrency_reservation": allocation.concurrency_reservation,
-            }
-            for job_name, allocation in allocations.items()
-        },
-    )
-    if invalid_jobs:
+    if host == REMOTE_HOST_LABEL:
+        response = _execute_remote_batch(pending=pending, batch_id=batch_ids[0], walltime_minutes=walltime_minutes)
+    else:
+        response = _execute_local_batch(
+            host=LocalHost(),
+            pending=pending,
+            core_budget_override=core_budget_override,
+            memory_budget_mb=memory_budget_mb,
+        )
+    if invalid_jobs and response["success"]:
         response["invalid_jobs"] = invalid_jobs
     return response
 
 
 @mcp.tool()
 def get_processing_status_tool(
+    host: str = "local",
+    batch_ids: list[str] | None = None,
     status_filter: str | None = None,
     session_paths: list[str] | None = None,
     job_ids: list[str] | None = None,
@@ -419,8 +405,12 @@ def get_processing_status_tool(
     which jobs failed, and opting into detail adds each one's error text, timing, and the resources it was admitted at.
 
     Args:
-        status_filter: Restricts the listing to one status, one of ``succeeded``, ``failed``, ``running``, or
-            ``scheduled``.
+        host: Which batch to report on, either ``local`` for this machine's pool or ``remote`` for the outstanding
+            allocations on the server's scheduler.
+        batch_ids: Restricts a ``remote`` report to these outstanding batches. Omit to cover all of them. Ignored for
+            ``local``, where one pool holds one batch.
+        status_filter: Restricts the listing to one status. Locally one of ``succeeded``, ``failed``, ``running``, or
+            ``scheduled``, and remotely a scheduler state such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
         session_paths: Restricts the listing to these session root directories.
         job_ids: Restricts the listing to these tracker job identifiers.
         job_names: Restricts the listing to these job type names, such as ``motion_energy``.
@@ -432,13 +422,31 @@ def get_processing_status_tool(
         detailed: Determines whether the listed jobs carry their resources, timing, provenance, and error text.
 
     Returns:
-        A response dict with ``active`` (whether the manager thread is still running), ``canceled``, a ``summary``
+        For ``remote``, a response dict with ``active``, the ``batches`` covered, a ``summary`` counting the allocations
+        by scheduler state, and a ``breakdown`` per axis. For ``local``, a response dict with ``active`` (whether the
+        manager thread is still running), ``canceled``, a ``summary``
         counting succeeded, failed, running, and scheduled jobs, and a ``breakdown`` per axis. Carries a ``jobs`` list
         with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the
         listing is requested. A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a
         ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is
         False with an explanatory ``message``.
     """
+    if host not in _HOST_LABELS:
+        return error_response(message=_unsupported_host_message(host=host))
+    if host == REMOTE_HOST_LABEL:
+        return remote_batch_status(
+            batch_ids=batch_ids,
+            status_filter=status_filter,
+            session_paths=session_paths,
+            job_ids=job_ids,
+            job_names=job_names,
+            pipelines=pipelines,
+            limit=limit,
+            start_row=start_row,
+            include_items=include_items,
+            detailed=detailed,
+        )
+
     state = _EXECUTION_STATE
     if state is None:
         return ok_response(active=False, message="No batch has been executed yet.")
@@ -488,15 +496,28 @@ def get_processing_status_tool(
 
 
 @mcp.tool()
-def cancel_processing_tool() -> dict[str, Any]:
-    """Cooperatively cancels the active batch.
+def cancel_processing_tool(host: str = "local", batch_ids: list[str] | None = None) -> dict[str, Any]:
+    """Cancels the active local batch, or the outstanding allocations of the remote batches.
 
-    In-flight jobs finish and queued jobs are dropped.
+    Locally this is cooperative: in-flight jobs finish and queued jobs are dropped. Remotely it cancels queued and
+    running allocations alike, and the scheduler cancels a dependent of a canceled allocation in turn because its
+    dependency can no longer complete successfully.
+
+    Args:
+        host: Which batch to cancel, either ``local`` for this machine's pool or ``remote`` for the server's scheduler.
+        batch_ids: The outstanding remote batches to cancel. Omit to cancel all of them. Ignored for ``local``, where
+            one pool holds one batch.
 
     Returns:
-        A response dict with ``canceled`` and the number of queued jobs in ``dropped_jobs``. Returns an error when no
-        batch is currently running.
+        A response dict with ``canceled`` and, for ``local``, the number of queued jobs in ``dropped_jobs``. For
+        ``remote`` it carries the ``canceled_jobs`` count and the ``batch_ids`` the cancellation covered. Returns an
+        error when nothing is running or outstanding.
     """
+    if host not in _HOST_LABELS:
+        return error_response(message=_unsupported_host_message(host=host))
+    if host == REMOTE_HOST_LABEL:
+        return remote_batch_cancel(batch_ids=batch_ids)
+
     state = _EXECUTION_STATE
     if state is None or state.manager_thread is None or not state.manager_thread.is_alive():
         return error_response(message="No batch is running.")
@@ -540,12 +561,7 @@ def reset_processing_jobs_tool(pipeline: str, unit_path: str, job_ids: list[str]
 
     # Resolves the tracker without running discovery, so resetting never writes anything the way a preparation does.
     try:
-        if dispatch.pipeline is ProcessingPipelines.FORGING:
-            path = forging_tracker_path(dataset=DatasetData.load(dataset_path=Path(unit_path)))
-        else:
-            path = resolve_session_tracker_path(
-                session=SessionData.load(session_path=Path(unit_path)), pipeline=dispatch.pipeline
-            )
+        path = dispatch.tracker_path(dispatch.load(Path(unit_path)))
     except Exception as exception:
         return error_response(message=f"Unable to load the unit at '{unit_path}'. {exception}")
 
@@ -607,8 +623,10 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dic
     units: list[dict[str, Any]] = []
     total_removed = 0
     for session_path in session_paths:
+        # Loads the unit rather than resolving its jobs, since a cleanup needs the unit's own locations alone and a
+        # unit whose pipeline has never been prepared still has output to remove.
         try:
-            unit, _, _ = dispatch.discover(Path(session_path))
+            unit = dispatch.load(Path(session_path))
         except Exception as exception:
             units.append({"session_path": session_path, "error": str(exception)})
             continue
@@ -648,6 +666,218 @@ def clean_processing_output_tool(pipeline: str, session_paths: list[str]) -> dic
         total_units=len(units),
         removed_bytes=total_removed,
     )
+
+
+@contextmanager
+def _resolve_host(host: str) -> Iterator[ExecutionHost]:
+    """Opens the named execution host, closing a server connection when the caller is done with it.
+
+    Args:
+        host: Either ``local`` for this machine or ``remote`` for the configured compute server.
+
+    Yields:
+        The execution host preparation drives.
+    """
+    if host == REMOTE_HOST_LABEL:
+        with connect_to_server() as server:
+            yield RemoteHost(server=server)
+        return
+    yield LocalHost()
+
+
+def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> None:
+    """Clears the recorded state of every job about to be dispatched, on the host that records it.
+
+    Notes:
+        Jobs are grouped by the pipeline and unit that record them, so each tracker is rewritten once however many of
+        its jobs the batch holds.
+
+    Args:
+        host: The host holding the trackers.
+        jobs: The jobs whose records to clear.
+    """
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for job in jobs:
+        grouped.setdefault((job.pipeline, str(job.unit_path)), []).append(job.job_id)
+    for (pipeline, unit_path), job_ids in grouped.items():
+        host.reset_jobs(pipeline=pipeline, unit_path=Path(unit_path), job_ids=job_ids)
+
+
+def _execute_local_batch(
+    host: ExecutionHost, pending: list[GenericPendingJob], core_budget_override: int, memory_budget_mb: int
+) -> dict[str, Any]:
+    """Reconciles a local batch and dispatches it onto the shared process pool.
+
+    Args:
+        host: The host holding the trackers, which the reset is applied through.
+        pending: The batch's jobs.
+        core_budget_override: The cores the batch may use in total, or a non-positive value to auto-resolve.
+        memory_budget_mb: The memory the batch may use in total, or a non-positive value to auto-resolve.
+
+    Returns:
+        The response dict the calling tool returns.
+    """
+    global _EXECUTION_STATE
+
+    if _EXECUTION_STATE is not None and (
+        _EXECUTION_STATE.manager_thread is not None and _EXECUTION_STATE.manager_thread.is_alive()
+    ):
+        return error_response(
+            message="A batch is already running. Wait for it to finish or cancel it before starting another."
+        )
+
+    reconciliation = reconcile_local_jobs(jobs=pending)
+    _reset_batch_jobs(host=host, jobs=reconciliation.resettable)
+    dispatchable = reconciliation.dispatchable
+
+    core_budget = resolve_worker_count(requested_workers=core_budget_override, reserved_cores=RESERVED_CORES)
+    resolved_memory = (
+        memory_budget_mb
+        if memory_budget_mb > 0
+        else max(_MINIMUM_MEMORY_BUDGET_MB, int(resolve_host_memory_mb() * _MEMORY_BUDGET_FRACTION))
+    )
+
+    # Narrows every job to the resolved budget, since a descriptor planned against a wider host would otherwise tell
+    # its pipeline to fan out wider than this host can supply. The concurrency limits enter here too, so the reported
+    # maximum for a storage-bound job type is the one admission actually enforces.
+    concurrency_limits = resolve_concurrency_limits(job_names={job.job_name for job in dispatchable})
+    concurrency_reservations = resolve_concurrency_reservations(job_names={job.job_name for job in dispatchable})
+    allocations = resolve_core_allocations(
+        job_cores={job.job_name: job.core_weight for job in dispatchable},
+        job_names={job.job_name for job in dispatchable},
+        core_budget=core_budget,
+        job_limits=concurrency_limits,
+        job_reservations=concurrency_reservations,
+    )
+    for pending_job in dispatchable:
+        pending_job.core_weight = allocations[pending_job.job_name].cores_per_job
+
+    # Sizes the pool by how many of the narrowest jobs the core budget could admit at once, so worker processes are
+    # never spawned for capacity the core budget cannot supply.
+    narrowest = min((job.core_weight for job in dispatchable), default=1)
+    pool_size = max(1, min(len(dispatchable), core_budget // max(1, narrowest)))
+
+    state: JobExecutionState[GenericPendingJob] = JobExecutionState(
+        worker=run_batch_job,
+        all_jobs={job.dispatch_key: job for job in dispatchable},
+        pending_jobs=deque(dispatchable),
+        core_budget=core_budget,
+        memory_budget_mb=resolved_memory,
+        concurrency_limits=concurrency_limits,
+        concurrency_reservations=concurrency_reservations,
+        pool_size=pool_size,
+    )
+    _EXECUTION_STATE = state
+    thread = Thread(target=job_execution_manager, args=(state,), daemon=True)
+    state.manager_thread = thread
+    thread.start()
+
+    return ok_response(
+        started=True,
+        host=LOCAL_HOST_LABEL,
+        total_jobs=len(dispatchable),
+        core_budget=core_budget,
+        memory_budget_mb=resolved_memory,
+        pool_size=pool_size,
+        pipelines=sorted({job.pipeline for job in dispatchable}),
+        adopted_jobs=[],
+        job_allocations={
+            job_name: {
+                "cores_per_job": allocation.cores_per_job,
+                "maximum_parallel": allocation.maximum_parallel,
+                "concurrency_limit": allocation.concurrency_limit,
+                "concurrency_reservation": allocation.concurrency_reservation,
+            }
+            for job_name, allocation in allocations.items()
+        },
+    )
+
+
+def _execute_remote_batch(pending: list[GenericPendingJob], batch_id: str, walltime_minutes: int) -> dict[str, Any]:
+    """Reconciles a remote batch and submits it to the server's scheduler as a dependency graph.
+
+    Notes:
+        A submission spanning several batches writes the scripts and logs of them all into one directory, named after
+        the first batch.
+
+    Args:
+        pending: The batch's jobs.
+        batch_id: The identifier naming the directory the scripts and logs are written into.
+        walltime_minutes: The wall-time every allocation requests, or a non-positive value to take the shared default.
+
+    Returns:
+        The response dict the calling tool returns.
+    """
+    walltime = walltime_minutes if walltime_minutes > 0 else REMOTE_JOB_WALLTIME_MINUTES
+    try:
+        with connect_to_server() as server:
+            reconciliation = reconcile_remote_jobs(server=server, jobs=pending)
+            _reset_batch_jobs(host=RemoteHost(server=server), jobs=reconciliation.resettable)
+            descriptors = [_render_descriptor(job=job) for job in reconciliation.dispatchable]
+
+            submissions = submit_batch(
+                server=server,
+                jobs=descriptors,
+                batch_id=batch_id,
+                adopted=reconciliation.adopted,
+                walltime_minutes=walltime,
+            )
+            batch_directory = str(remote_batch_directory(server=server, batch_id=batch_id))
+
+            # Retires the earlier batches that finished while this one was prepared, so the ledger sheds them without
+            # waiting for a status read that may never come.
+            outstanding = [submission for batch in read_ledger().batches for submission in batch.submissions]
+            if outstanding:
+                query_submissions(server=server, submissions=outstanding)
+    except Exception as exception:
+        return error_response(message=f"Unable to submit the remote batch. {exception}")
+
+    return ok_response(
+        started=True,
+        host=REMOTE_HOST_LABEL,
+        batch_id=batch_id,
+        total_jobs=len(submissions),
+        walltime_minutes=walltime,
+        pipelines=sorted({submission.pipeline for submission in submissions}),
+        batch_directory=batch_directory,
+        adopted_jobs=[
+            {"unit_path": unit_path, "job_id": job_id, "slurm_job_id": allocation}
+            for (unit_path, job_id), allocation in sorted(reconciliation.adopted.items())
+        ],
+        submissions=[
+            {"job_id": submission.job_id, "slurm_job_id": submission.slurm_job_id, "job_name": submission.job_name}
+            for submission in submissions
+        ],
+    )
+
+
+def _render_descriptor(job: GenericPendingJob) -> dict[str, Any]:
+    """Renders one reconciled job as the descriptor a submission dispatches.
+
+    Args:
+        job: The job to render.
+
+    Returns:
+        The job descriptor.
+    """
+    return {
+        "job_id": job.job_id,
+        "job_name": job.job_name,
+        "specifier": job.specifier,
+        "unit_path": str(job.unit_path),
+        "unit_name": job.name,
+        "pipeline": job.pipeline,
+        "tracker_path": str(job.tracker_path),
+        "cores": job.core_weight,
+        "memory_mb": job.memory_mb,
+        "prerequisite_ids": list(job.prerequisite_ids),
+        "options": dict(job.options),
+    }
+
+
+def _unsupported_host_message(host: str) -> str:
+    """Builds the error message returned when a caller names a host the tools do not support."""
+    return f"Unsupported host '{host}'. Available: {', '.join(sorted(_HOST_LABELS))}."
 
 
 def _directory_size(path: Path) -> int:

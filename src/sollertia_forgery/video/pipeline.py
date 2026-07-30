@@ -37,8 +37,8 @@ depends on another: it links the feathers the per-camera parse jobs write, so it
 TRACKING_JOB_NAME: str = "pose_tracking"
 """The job name used to identify the single video-tracking job in the video processing tracker. The job uses an empty
 specifier because the acquisition system's donated function performs all of that session's tracking in one pass. It
-reads only the raw pose predictions, so it is independent of the timestamp and motion-energy jobs it shares the
-tracker with."""
+reads only the raw pose predictions, so it is independent of the timestamp and motion-energy jobs that share its
+tracker."""
 
 ENERGY_JOB_NAME: str = "motion_energy"
 """The job name used to identify a single camera's motion-energy job in the video processing tracker. The job uses the
@@ -283,23 +283,23 @@ def run_video_processing_pipeline(
 
 
 def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the video pipeline's job universe and runnable subset for the target session.
+    """Resolves the video pipeline's job universe and possible subset for the target session.
 
     Notes:
         The universe is the full acquisition-time job set the camera manifest defines. It holds one timestamp job and
-        one motion-energy job per registered camera, plus the single rename and tracking jobs. The runnable subset is
-        the job set a full local run dispatches. A timestamp job is runnable only when its camera's
-        ``{source_id}_log.npz`` archive is on disk, and the rename job joins them when at least one is runnable. The
-        tracking and energy jobs are always runnable because they read only their own inputs and complete with no
+        one motion-energy job per registered camera, plus the single rename and tracking jobs. The possible subset is
+        the job set the session's own data supports. A timestamp job is possible only when its camera's
+        ``{source_id}_log.npz`` archive is on disk, and the rename job joins them when at least one is possible. The
+        tracking and energy jobs are always possible because they read only their own inputs and complete with no
         output when those are absent. A camera with a recording but no log archive therefore keeps its energy job
-        runnable while its timestamp job stays in the universe alone. This is discovery only, reading the manifest and
+        possible while its timestamp job stays in the universe alone. This is discovery only, reading the manifest and
         globbing for archives while decoding no data and mutating nothing.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
         subset of that universe. Timestamp and energy specifiers are camera source IDs, and the rename and tracking
         specifiers are empty.
 
@@ -328,13 +328,13 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
         if (source_id := _extract_camera_source_id(log_path=log_path)) in camera_names
     }
 
-    runnable: list[tuple[str, str]] = [(TIMESTAMP_JOB_NAME, str(source_id)) for source_id in log_paths]
+    possible: list[tuple[str, str]] = [(TIMESTAMP_JOB_NAME, str(source_id)) for source_id in log_paths]
     if log_paths:
-        runnable.append((RENAME_JOB_NAME, ""))
-    runnable.append((TRACKING_JOB_NAME, ""))
-    runnable.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+        possible.append((RENAME_JOB_NAME, ""))
+    possible.append((TRACKING_JOB_NAME, ""))
+    possible.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
 
-    return session, universe, runnable
+    return session, universe, possible
 
 
 def video_job_prerequisites(
@@ -346,14 +346,14 @@ def video_job_prerequisites(
     Notes:
         The rename job hardlinks the parsed timestamp feathers under their canonical names, so it must run after the
         timestamp parse jobs that write them and depends on every timestamp job present in the given set. The tracking
-        and energy jobs read only their own inputs and have no upstream dependency. Passing the runnable subset scopes
+        and energy jobs read only their own inputs and have no upstream dependency. Passing the possible subset scopes
         the rename job to the timestamp jobs that can actually produce feathers, while passing the full universe scopes
         it to all registered cameras.
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
         universe: The job set to build ordering over, as returned by ``discover_video_jobs`` (either the universe or
-            its runnable subset).
+            its possible subset).
 
     Returns:
         A mapping of each job to its tuple of prerequisite jobs. The rename job maps to the timestamp jobs in the set,

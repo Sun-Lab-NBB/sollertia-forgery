@@ -8,9 +8,11 @@ from dataclasses import dataclass
 import click
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData
+from ataraxis_data_structures import ProcessingTracker
 
 from ..forging import generate_dataset_state
 from ..managing import ProjectManifest, generate_project_manifest, run_checksum_processing_pipeline
+from ..orchestration import resolve_dispatch
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -228,3 +230,52 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
     for path in dataset_path:
         dataset = DatasetData.load(dataset_path=path)
         click.echo(str(generate_dataset_state(dataset=dataset, display_progress=True)))
+
+
+@click.command("reset", context_settings=_CONTEXT_SETTINGS)
+@click.option(
+    "-p",
+    "--pipeline",
+    type=str,
+    required=True,
+    help="The pipeline whose jobs to reset, one of 'checksum', 'runtime', 'microcontroller', 'video', 'two_photon', "
+    "'forging'.",
+)
+@click.option(
+    "-up",
+    "--unit-path",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    required=True,
+    help="The absolute path to the processing unit, which is a session root for a session pipeline and a dataset root "
+    "for 'forging'.",
+)
+@click.option(
+    "-id",
+    "--job-id",
+    type=str,
+    required=True,
+    multiple=True,
+    help="The hexadecimal identifier of a tracked job to reset. Can be specified multiple times.",
+)
+def reset_command(pipeline: str, unit_path: Path, job_id: tuple[str, ...]) -> None:
+    """Returns the named tracked jobs to the scheduled state, leaving every untargeted job's record intact.
+
+    This is what a submission calls before dispatching a job, so a status read never reports the previous attempt's
+    outcome while the new one waits to start. Identifiers the tracker does not hold are ignored.
+    """
+    dispatch = resolve_dispatch(pipeline=pipeline)
+    if dispatch is None:
+        message = f"Unsupported pipeline '{pipeline}'."
+        raise click.UsageError(message=message)
+
+    tracker_path = dispatch.tracker_path(dispatch.load(unit_path))
+    if not tracker_path.is_file():
+        click.echo(f"No '{pipeline}' tracker exists for '{unit_path}'.")
+        return
+
+    tracker = ProcessingTracker(file_path=tracker_path)
+    targets = [identifier for identifier in job_id if identifier in tracker.snapshot()]
+    if not targets:
+        click.echo("None of the requested job identifiers exist in the tracker.")
+        return
+    click.echo(f"Reset {len(tracker.reset_jobs(job_ids=targets))} job(s) on '{tracker_path}'.")

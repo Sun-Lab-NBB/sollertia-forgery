@@ -50,6 +50,12 @@ MEMORY_BUDGET_MB = 65536
 TRACKER = Path("/nonexistent/tracker.yaml")
 OTHER_TRACKER = Path("/nonexistent/other_tracker.yaml")
 
+UNIT = Path("/nonexistent/session")
+"""The processing unit the admission tests place their jobs under, which is what scopes a job identifier."""
+
+OTHER_UNIT = Path("/nonexistent/other_session")
+"""A second processing unit, used where a test must show that two units' identical identifiers stay separate."""
+
 
 class RecordingPool:
     """Stands in for a process pool, recording each submitted job instead of running it."""
@@ -71,11 +77,13 @@ def make_job(
     memory_mb: int = 512,
     prerequisites: tuple[str, ...] = (),
     tracker_path: Path = TRACKER,
+    unit_path: Path = UNIT,
 ) -> PendingJob:
     """Builds a pending job with explicit resource weights and prerequisite identifiers."""
     return PendingJob(
         tracker_path=tracker_path,
         job_id=job_id,
+        unit_path=unit_path,
         job_name=job_name,
         core_weight=cores,
         memory_mb=memory_mb,
@@ -221,8 +229,10 @@ def test_one_sessions_completed_stage_does_not_satisfy_another_sessions() -> Non
     A job identifier is derived from the job name and specifier alone, so every session's binarization shares one
     identifier. A batch spanning sessions must not treat one session's completed stage as every session's.
     """
-    first_upstream = make_job(job_id="shared", job_name="binarization", tracker_path=TRACKER)
-    second_downstream = make_job(job_id="down", prerequisites=("shared",), tracker_path=OTHER_TRACKER)
+    first_upstream = make_job(job_id="shared", job_name="binarization", tracker_path=TRACKER, unit_path=UNIT)
+    second_downstream = make_job(
+        job_id="down", prerequisites=("shared",), tracker_path=OTHER_TRACKER, unit_path=OTHER_UNIT
+    )
     state = build_state(jobs=[first_upstream, second_downstream])
 
     pool = admit(state)
@@ -237,7 +247,7 @@ def test_admission_blocks_a_dependent_whose_prerequisite_failed() -> None:
     """Verifies that a job whose upstream failed is moved aside rather than waiting for an outcome that cannot come."""
     downstream = make_job(job_id="down", prerequisites=("up",))
     state = build_state(jobs=[downstream])
-    state.failed_job_keys.add((str(TRACKER), "up"))
+    state.failed_job_keys.add((str(UNIT), "up"))
 
     assert not admit(state).submitted
     assert [job.job_id for job in state.blocked_jobs] == ["down"]

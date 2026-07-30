@@ -297,22 +297,23 @@ def forging_tracker_path(dataset: DatasetData) -> Path:
 
 
 def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the forging pipeline's job universe and runnable subset for an already-defined dataset.
+    """Resolves the forging pipeline's job universe and possible subset for an already-defined dataset.
 
     Notes:
-        Mutates nothing and creates nothing. The runnable subset holds whatever the tracker does not record as
-        succeeded, so preparing a dataset twice queues only the jobs still outstanding.
+        Mutates nothing and creates nothing. Every job the universe names is possible, because
+        ``define_forging_dataset`` admits a session only once it carries the single-day outputs the forging stages
+        consume, so the possible subset equals the universe.
 
         Every stage is specified by the animals and sessions the dataset hierarchy holds, so a batch is prepared
-        against a dataset ``define_forging_dataset`` has already built. Preparing it afterwards queues everything the
-        hierarchy now names.
+        against a dataset ``define_forging_dataset`` has already built. Preparing it afterwards names everything the
+        hierarchy now holds, and the recorded job state decides which of those a run dispatches.
 
     Args:
         dataset_path: The path to the dataset's root directory inside the project hierarchy.
 
     Returns:
-        A tuple of the loaded dataset, the job universe as a list of ``(job_name, specifier)`` pairs, and the
-        outstanding subset of that universe.
+        A tuple of the loaded dataset, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
+        subset, which equals the universe.
 
     Raises:
         FileNotFoundError: If the dataset's own marker is not present under the provided path.
@@ -321,8 +322,7 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     dataset = DatasetData.load(dataset_path=dataset_path)
     multiday_plan = resolve_multiday_plan(dataset=dataset, project_root=dataset_path.parent)
     universe = build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
-    tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
-    return dataset, universe, _resolve_runnable_jobs(tracker=tracker, universe=universe)
+    return dataset, universe, list(universe)
 
 
 def resolve_multiday_plan(dataset: DatasetData, project_root: Path) -> dict[str, tuple[Path, list[str]]]:

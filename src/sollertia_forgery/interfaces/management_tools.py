@@ -69,8 +69,8 @@ _JOB_AXES: tuple[str, ...] = ("animal", "pipeline", "job_name", "status")
 """The job columns a caller may filter by, and the axes the job breakdown counts."""
 
 _JOB_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "pipeline", "job_name", "specifier", "status", "job_id")
-"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the key a caller resets a job
-by, so a listing that omitted it could not be acted on."""
+"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset targets,
+so a listing that omitted it could not be acted on."""
 
 _JOB_DETAIL_FIELDS: tuple[str, ...] = ("executor_id", "error_message", "started_at", "completed_at")
 """The job fields detail adds, which are the provenance and timing a caller reads when examining one job closely."""

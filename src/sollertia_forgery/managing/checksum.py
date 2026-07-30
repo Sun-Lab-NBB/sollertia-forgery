@@ -62,13 +62,13 @@ def run_checksum_processing_pipeline(
         FileNotFoundError: If the source path does not contain a valid session data hierarchy, or if verification is
             requested for a session that stores no checksum value.
     """
-    session, universe, runnable = discover_checksum_jobs(session_path=session_path)
+    session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
     # universe resets foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
-    tracker.align_jobs(jobs=runnable, universe=universe)
+    tracker.align_jobs(jobs=possible, universe=universe)
 
     checksum_path = session.raw_data.checksum_path
 
@@ -138,12 +138,12 @@ def run_checksum_processing_pipeline(
 
 
 def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the checksum pipeline's job universe and runnable subset for the target session.
+    """Resolves the checksum pipeline's job universe and possible subset for the target session.
 
     Notes:
         The checksum pipeline produces exactly one job, so the universe is always the single
         ``(CHECKSUM_JOB_NAME, session_name)`` pair. Both pipeline modes share that job, because a session carries one
-        integrity state whether the run establishes it or confirms it. That job is runnable once the session holds
+        integrity state whether the run establishes it or confirms it. That job is possible once the session holds
         raw data the checksum covers, which excludes the checksum file, the tracker, and the tracker lock. This is
         pure discovery that reads no file contents and mutates nothing.
 
@@ -151,7 +151,7 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
         subset of that universe.
 
     Raises:
@@ -159,8 +159,8 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
     """
     session = SessionData.load(session_path=session_path)
     universe = [(CHECKSUM_JOB_NAME, session.session_name)]
-    runnable = list(universe) if _has_checksummable_data(raw_data_path=session.raw_data_path) else []
-    return session, universe, runnable
+    possible = list(universe) if _has_checksummable_data(raw_data_path=session.raw_data_path) else []
+    return session, universe, possible
 
 
 def checksum_job_prerequisites(

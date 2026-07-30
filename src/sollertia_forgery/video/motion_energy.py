@@ -32,7 +32,8 @@ _SPATIAL_BIN_SIZE: int = 3
 """The edge length, in pixels, of the square block each frame is mean-binned over before differencing. A small block
 averages out the single-pixel sensor and codec noise that the later absolute difference would otherwise rectify into a
 positive bias, while staying small enough to leave the movement the measure captures intact. An odd edge keeps the box
-filter's anchor on the pixel at each block's center, which the strided sampling that reads the block means relies on."""
+filter's anchor on the pixel at each block's center, which is what lets the strided sampling read those block means
+correctly."""
 
 _MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the

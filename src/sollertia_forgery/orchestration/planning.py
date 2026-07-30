@@ -294,6 +294,9 @@ def _resolve_unit_plan(
         artifact is built from, which is how a scheduler on another host learns which jobs exist. A job the unit
         cannot run never reaches the tracker, so its absence there is the statement that it is not possible.
 
+        The recorded figures cover the whole universe while the tracker holds the possible subset, so a plan describes
+        every job the pipeline defines and the job artifact states which of them this unit supports.
+
     Args:
         dispatches: The dispatch entries of the pipelines that operate on this kind of unit.
         unit_path: The path to the unit to plan.
@@ -317,13 +320,13 @@ def _resolve_unit_plan(
         discovered = _discover_unit(dispatch=dispatch, unit_path=unit_path, skipped=skipped)
         if discovered is None:
             continue
-        unit, universe, runnable = discovered
+        unit, universe, possible = discovered
         if located is None:
             unit_plan_path = (
                 session_plan_path(session=unit) if unit_kind == SESSION_UNIT else dataset_plan_path(dataset=unit)
             )
             located = (unit_plan_path, dispatch.unit_name(unit))
-        resolved.append((dispatch, unit, universe, runnable))
+        resolved.append((dispatch, unit, universe, possible))
 
     if located is None:
         message = (
@@ -343,15 +346,16 @@ def _resolve_unit_plan(
         {} if recorded is None or regenerate_plan else dict(recorded.entry_map())
     )
 
-    for dispatch, unit, universe, runnable in resolved:
+    for dispatch, unit, universe, possible in resolved:
         # Registers the jobs this unit can run, so the job artifact built from this tracker enumerates them.
         tracker_path = dispatch.tracker_path(unit)
         tracker_path.parent.mkdir(parents=True, exist_ok=True)
-        ProcessingTracker(file_path=tracker_path).align_jobs(jobs=runnable, universe=universe)
+        ProcessingTracker(file_path=tracker_path).align_jobs(jobs=possible, universe=universe)
 
-        # Ordering resolves over the runnable subset, so a stage waits only on the upstream jobs this unit can
-        # produce. Resolving it over the whole universe would make a stage wait on a job whose input never existed.
-        ordering = dispatch.prerequisites(unit, runnable)
+        # Ordering resolves over the whole universe, so every recorded edge is the pipeline's own, independent of what
+        # this unit happened to carry when it was planned. A consumer drops the edges whose upstream job carries no
+        # recorded state, which is how a stage stops waiting on a job the unit can never produce.
+        ordering = dispatch.prerequisites(unit, universe)
 
         cores = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
         outstanding = [
@@ -389,7 +393,14 @@ def _resolve_unit_plan(
 def _discover_unit(
     dispatch: PipelineDispatch[Any], unit_path: Path, skipped: dict[str, str]
 ) -> tuple[Any, list[tuple[str, str]], list[tuple[str, str]]] | None:
-    """Resolves one pipeline's job sets for a unit, recording the reason when the pipeline resolves nothing.
+    """Primes a unit if its pipeline needs it, then resolves the pipeline's job sets, recording the reason when the
+    pipeline resolves nothing.
+
+    Notes:
+        Priming belongs to planning, because planning is the preparation pass that runs before anything reads a unit's
+        job set. A pipeline whose job model lives in state that a dependency writes therefore has that state
+        materialized here. Priming is idempotent, so a unit already carrying what it needs is read rather than
+        rewritten, and resolution itself stays read-only.
 
     Args:
         dispatch: The pipeline's dispatch entry.
@@ -401,11 +412,13 @@ def _discover_unit(
         the unit.
     """
     try:
-        unit, universe, runnable = dispatch.discover(unit_path)
+        if dispatch.prime is not None:
+            dispatch.prime(unit_path)
+        unit, universe, possible = dispatch.discover(unit_path)
     except Exception as exception:
         skipped[dispatch.pipeline.value] = str(exception)
         return None
-    return unit, universe, runnable
+    return unit, universe, possible
 
 
 def _load_plan(plan_path: Path) -> JobPlan | None:

@@ -43,8 +43,8 @@ _STATE_AXES: tuple[str, ...] = ("scope", "animal", "job_name", "status")
 """The snapshot columns a caller may filter by, and the axes its breakdown counts."""
 
 _STATE_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "scope", "job_name", "specifier", "status", "job_id")
-"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the key a caller resets a job
-by."""
+"""The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
+targets."""
 
 _STATE_DETAIL_FIELDS: tuple[str, ...] = ("executor_id", "error_message", "started_at", "completed_at")
 """The job fields detail adds, which are the provenance and timing a caller reads when examining one job closely."""

@@ -309,7 +309,7 @@ def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
 
 
 def _plan_breakdown(frame: pl.DataFrame) -> list[dict[str, Any]]:
-    """Groups a plan projection by pipeline, which is the grain a caller admits work at.
+    """Groups a plan projection by pipeline, which is the grain at which a caller admits work.
 
     Args:
         frame: The whole plan projection.

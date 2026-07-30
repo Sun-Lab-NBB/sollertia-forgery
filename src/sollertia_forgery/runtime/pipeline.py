@@ -58,7 +58,7 @@ def run_runtime_processing_pipeline(
             location.
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member).
     """
-    session, universe, runnable = discover_runtime_jobs(session_path=session_path)
+    session, universe, possible = discover_runtime_jobs(session_path=session_path)
     console.echo(
         message=f"Initializing runtime processing pipeline for session '{session.session_name}'...",
         level=LogLevel.INFO,
@@ -71,9 +71,9 @@ def run_runtime_processing_pipeline(
     log_directory = session.raw_data.behavior_data_path
     output_directory = session.processed_data.runtime_data_path
 
-    # The resolver reports an absent archive as unrunnable, which this single-job pipeline escalates to a failure
-    # because it leaves nothing to run.
-    if not runnable:
+    # The resolver reports an absent archive as leaving no possible job, which this single-job pipeline escalates to a
+    # failure because it leaves nothing to run.
+    if not possible:
         message = (
             f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
             f"'{source_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
@@ -86,7 +86,7 @@ def run_runtime_processing_pipeline(
 
     output_directory.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=output_directory.joinpath(ProcessingTrackers.RUNTIME))
-    tracker.align_jobs(jobs=runnable, universe=universe)
+    tracker.align_jobs(jobs=possible, universe=universe)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
     with tracked_job(tracker=tracker, job_id=job_identifier):
@@ -102,20 +102,20 @@ def run_runtime_processing_pipeline(
 
 
 def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the runtime pipeline's job universe and runnable subset for the target session.
+    """Resolves the runtime pipeline's job universe and possible subset for the target session.
 
     Notes:
         The runtime pipeline produces exactly one job, so the universe is always the single
         ``(RUNTIME_JOB_NAME, source_id)`` pair, where the source id is resolved from the session's acquisition system.
-        That job is runnable only when its DataLogger archive is present on disk. This is pure discovery that loads no
-        message data and mutates nothing. An absent archive yields an empty runnable subset, so a batch layer can
+        That job is possible only when its DataLogger archive is present on disk. This is pure discovery that loads no
+        message data and mutates nothing. An absent archive yields an empty possible subset, so a batch layer can
         align the tracker slot against the universe and skip the job.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
         subset of that universe.
 
     Raises:
@@ -125,8 +125,8 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
     source_id, _ = resolve_runtime_binding(session.acquisition_system)
     universe = [(RUNTIME_JOB_NAME, source_id)]
     archive_path = session.raw_data.behavior_data_path.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
-    runnable = list(universe) if archive_path.is_file() else []
-    return session, universe, runnable
+    possible = list(universe) if archive_path.is_file() else []
+    return session, universe, possible
 
 
 def runtime_job_prerequisites(

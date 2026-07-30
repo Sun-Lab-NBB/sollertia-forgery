@@ -80,7 +80,7 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
         JobStatus.BLOCKED,
     }
 )
-"""The statuses a job never leaves, which is what a caller polls a submission against.
+"""The statuses a job never leaves, which is what tells a caller a polled submission has settled.
 
 Notes:
     ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one

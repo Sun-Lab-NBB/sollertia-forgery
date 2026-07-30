@@ -6,14 +6,12 @@ import re
 from math import ceil
 import shlex
 from typing import TYPE_CHECKING, Any
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from dataclasses import asdict
 
-import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 
-from .local import GenericPendingJob
+from .graph import BatchDocument, build_pending_job, resolve_submission_order
+from .hosts import RemoteHost, environment_command
 from .ledger import (
     SubmissionBatch,
     RemoteSubmission,
@@ -23,15 +21,17 @@ from .ledger import (
 )
 from ..server import Job, Server, JobStatus, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME, DATASET_MARKER_FILENAME
-from .dispatch import resolve_dispatch, resolve_job_command
+from .dispatch import resolve_job_command
 from .planning import project_plan_path
 from ..managing import project_jobs_path, project_manifest_path
-from ..shared_assets import ProcessingPipelines
+from .preparation import prepare_batch
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Sequence
 
-    from .dispatch import PipelineDispatch
+    from .graph import GenericPendingJob
+
 
 REMOTE_JOB_WALLTIME_MINUTES: int = 480
 """The wall-time every remote allocation requests, in minutes.
@@ -50,9 +50,6 @@ _MEGABYTES_PER_GIGABYTE: int = 1024
 _SLURM_NAME_SANITIZER: re.Pattern[str] = re.compile(r"[^A-Za-z0-9._-]+")
 """Matches the characters a SLURM job name and its script filename should not carry."""
 
-_SUCCEEDED_STATUS: str = "SUCCEEDED"
-"""The state a job's recorded status carries once it has completed successfully, as the state tables spell it."""
-
 
 def remote_batch_directory(server: Server, batch_id: str) -> Path:
     """Resolves the server-side directory holding one batch's job scripts and logs.
@@ -69,15 +66,12 @@ def remote_batch_directory(server: Server, batch_id: str) -> Path:
 
 def prepare_remote_batch(
     server: Server, pipeline: str, unit_paths: Sequence[str], options: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Resolves a pipeline's submittable jobs for the named units out of the project's own artifacts.
+) -> BatchDocument:
+    """Resolves a pipeline's submittable jobs for the named units on the remote compute server.
 
     Notes:
-        A job the unit cannot run never reaches its processing tracker, so its absence from the state table is what
-        rules it out.
-
-        A job whose upstream stage neither runs in this batch nor already succeeded is reported as blocked rather
-        than submitted.
+        Delegates to the shared preparation, so a remote batch is resolved by the same code that resolves a local one.
+        The only difference is the host that materializes the artifacts and delivers them here.
 
     Args:
         server: The connected server holding the units.
@@ -86,340 +80,21 @@ def prepare_remote_batch(
         options: The pipeline-specific parameters to run the prepared jobs with.
 
     Returns:
-        The batch document, carrying the ``pipeline``, the per-unit ``units`` entries, the submittable ``jobs``
-        descriptors, and the ``blocked_jobs`` entries naming what each blocked job waits on.
+        The prepared batch document.
 
     Raises:
         ValueError: If the named pipeline is not a supported batch pipeline, or if the named units do not share one
             project.
         RuntimeError: If a server-side command fails.
     """
-    dispatch = resolve_dispatch(pipeline=pipeline)
-    if dispatch is None:
-        message = (
-            f"Unable to prepare a remote batch for pipeline '{pipeline}', which is not a supported batch pipeline."
-        )
-        console.error(message=message, error=ValueError)
-
-    units = [Path(unit_path) for unit_path in unit_paths]
-    project_root = _resolve_project_root(dispatch=dispatch, unit_paths=units)
-    _refresh_remote_artifacts(server=server, dispatch=dispatch, project_root=project_root, unit_paths=units)
-
-    with TemporaryDirectory() as staging_directory:
-        plan, state = _pull_remote_artifacts(
-            server=server,
-            dispatch=dispatch,
-            project_root=project_root,
-            unit_paths=units,
-            staging_directory=Path(staging_directory),
-        )
-
-    return _build_batch_document(
-        dispatch=dispatch, plan=plan, state=state, unit_paths=units, options=dict(options or {})
-    )
-
-
-def _resolve_project_root(dispatch: PipelineDispatch[Any], unit_paths: Sequence[Path]) -> Path:
-    """Resolves the project the named units belong to.
-
-    Notes:
-        A dataset sits directly under its project root while a session sits under its animal, which sets the two
-        depths.
-
-    Args:
-        dispatch: The pipeline's dispatch entry.
-        unit_paths: The processing unit directories to resolve the project of.
-
-    Returns:
-        The path to the project root on the server.
-
-    Raises:
-        ValueError: If no unit is named, or if the named units span more than one project.
-    """
-    if not unit_paths:
-        message = "Unable to prepare a remote batch. No processing unit was named."
-        console.error(message=message, error=ValueError)
-
-    depth = 1 if dispatch.pipeline is ProcessingPipelines.FORGING else 2
-    roots = {unit_path.parents[depth - 1] for unit_path in unit_paths}
-    if len(roots) > 1:
-        message = (
-            f"Unable to prepare a remote batch spanning the projects {sorted(str(root) for root in roots)}. The plan "
-            f"and state tables a batch is resolved from are written per project, so every unit of one batch must "
-            f"belong to the same project."
-        )
-        console.error(message=message, error=ValueError)
-    return roots.pop()
-
-
-def _refresh_remote_artifacts(
-    server: Server, dispatch: PipelineDispatch[Any], project_root: Path, unit_paths: Sequence[Path]
-) -> None:
-    """Rewrites the project artifacts a batch is resolved from, on the host that holds the data.
-
-    Notes:
-        Planning must run first, since it registers a unit's runnable jobs on its processing tracker and state
-        generation reads those trackers.
-
-    Args:
-        server: The connected server holding the units.
-        dispatch: The pipeline's dispatch entry.
-        project_root: The path to the project root on the server.
-        unit_paths: The processing unit directories the batch covers.
-
-    Raises:
-        RuntimeError: If a server-side command fails.
-    """
-    named = [str(unit_path) for unit_path in unit_paths]
-    if dispatch.pipeline is ProcessingPipelines.FORGING:
-        commands = [
-            ["slf", "plan", "dataset", *_repeated(flag="-dp", values=named)],
-            ["slf", "plan", "project", "-pp", str(project_root)],
-            ["slf", "dataset-state", *_repeated(flag="-dp", values=named)],
-        ]
-    else:
-        commands = [
-            ["slf", "plan", "session", *_repeated(flag="-sp", values=named)],
-            ["slf", "plan", "project", "-pp", str(project_root)],
-            ["slf", "manifest", "-pp", str(project_root), "create"],
-        ]
-
-    for command in commands:
-        result = server.execute_command(command=environment_command(environment=server.environment, command=command))
-        if result.return_code != 0:
-            message = (
-                f"Unable to prepare the '{dispatch.pipeline.value}' batch. The server-side command "
-                f"'{shlex.join(command)}' exited with code {result.return_code}. {result.stderr.strip()}"
-            )
-            console.error(message=message, error=RuntimeError)
-
-
-def _pull_remote_artifacts(
-    server: Server,
-    dispatch: PipelineDispatch[Any],
-    project_root: Path,
-    unit_paths: Sequence[Path],
-    staging_directory: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Copies the plan and state tables home and reads them.
-
-    Args:
-        server: The connected server holding the artifacts.
-        dispatch: The pipeline's dispatch entry.
-        project_root: The path to the project root on the server.
-        unit_paths: The processing unit directories the batch covers.
-        staging_directory: The local directory the tables are copied into.
-
-    Returns:
-        A tuple of the project plan table and the job state table.
-
-    Raises:
-        FileNotFoundError: If the server holds no plan table for the project.
-    """
-    plan_path = project_plan_path(project_directory=project_root)
-    if not server.exists(remote_path=plan_path):
-        message = (
-            f"Unable to prepare the batch. The remote compute server holds no plan table at '{plan_path}', so the "
-            f"planning step wrote nothing for this project."
-        )
-        console.error(message=message, error=FileNotFoundError)
-
-    local_plan = staging_directory.joinpath(plan_path.name)
-    server.pull(local_path=local_plan, remote_path=plan_path)
-
-    if dispatch.pipeline is ProcessingPipelines.FORGING:
-        remote_state = [unit_path.joinpath(DATASET_STATE_FILENAME) for unit_path in unit_paths]
-    else:
-        remote_state = [project_jobs_path(project_directory=project_root)]
-
-    frames: list[pl.DataFrame] = []
-    for index, remote_path in enumerate(remote_state):
-        if not server.exists(remote_path=remote_path):
-            continue
-        local_path = staging_directory.joinpath(f"{index:04d}_{remote_path.name}")
-        server.pull(local_path=local_path, remote_path=remote_path)
-        frames.append(pl.read_ipc(source=local_path, memory_map=False))
-
-    plan = pl.read_ipc(source=local_plan, memory_map=False)
-    return plan, pl.concat(frames) if frames else pl.DataFrame()
-
-
-def _build_batch_document(
-    dispatch: PipelineDispatch[Any],
-    plan: pl.DataFrame,
-    state: pl.DataFrame,
-    unit_paths: Sequence[Path],
-    options: dict[str, Any],
-) -> dict[str, Any]:
-    """Joins the plan and state tables into the job descriptors a submission dispatches.
-
-    Args:
-        dispatch: The pipeline's dispatch entry.
-        plan: The project plan table.
-        state: The job state table.
-        unit_paths: The processing unit directories the batch covers.
-        options: The pipeline-specific parameters to stamp onto every descriptor.
-
-    Returns:
-        The batch document.
-    """
-    unit_column = "dataset" if dispatch.pipeline is ProcessingPipelines.FORGING else "session"
-    pipeline_value = dispatch.pipeline.value
-
-    planned = _index_by_unit(frame=plan.filter(pl.col("pipeline") == pipeline_value), unit_column=unit_column)
-    recorded = _index_by_unit(
-        frame=state if "pipeline" not in state.columns else state.filter(pl.col("pipeline") == pipeline_value),
-        unit_column=unit_column,
-    )
-
-    units: list[dict[str, Any]] = []
-    jobs: list[dict[str, Any]] = []
-    blocked: list[dict[str, Any]] = []
-    for unit_path in unit_paths:
-        unit_name = unit_path.name
-        unit_state = recorded.get(unit_name, {})
-        unit_plan = planned.get(unit_name, {})
-        if not unit_state:
-            units.append(
-                {
-                    "unit_path": str(unit_path),
-                    "unit_name": unit_name,
-                    "error": (
-                        f"The project's state table records no '{pipeline_value}' job for this unit, so the unit "
-                        f"carries none of the data that pipeline consumes."
-                    ),
-                    "job_count": 0,
-                }
-            )
-            continue
-
-        succeeded = {job_id for job_id, row in unit_state.items() if row["status"] == _SUCCEEDED_STATUS}
-        unplanned = sorted(job_id for job_id in unit_state if job_id not in unit_plan and job_id not in succeeded)
-        if unplanned:
-            units.append(
-                {
-                    "unit_path": str(unit_path),
-                    "unit_name": unit_name,
-                    "error": (
-                        f"The project's plan table carries no figures for job(s) {unplanned}. Every outstanding job "
-                        f"must be planned before it can be sized for a scheduler."
-                    ),
-                    "job_count": 0,
-                }
-            )
-            continue
-
-        outstanding = [
-            _descriptor(
-                state_row=row,
-                plan_row=unit_plan[job_id],
-                unit_path=unit_path,
-                unit_name=unit_name,
-                pipeline=pipeline_value,
-                options=options,
-            )
-            for job_id, row in unit_state.items()
-            if job_id not in succeeded
-        ]
-        submittable, unit_blocked = _partition_blocked_jobs(jobs=outstanding, succeeded=succeeded)
-        jobs.extend(submittable)
-        blocked.extend(unit_blocked)
-        units.append(
-            {
-                "unit_path": str(unit_path),
-                "unit_name": unit_name,
-                "job_count": len(submittable),
-                "blocked_count": len(unit_blocked),
-            }
-        )
-
-    return {
-        "pipeline": pipeline_value,
-        "options": dict(options),
-        "units": units,
-        "jobs": jobs,
-        "blocked_jobs": blocked,
-    }
-
-
-def _descriptor(
-    state_row: dict[str, Any],
-    plan_row: dict[str, Any],
-    unit_path: Path,
-    unit_name: str,
-    pipeline: str,
-    options: dict[str, Any],
-) -> dict[str, Any]:
-    """Renders one job as the descriptor a submission dispatches.
-
-    Args:
-        state_row: The job's row in the state table.
-        plan_row: The job's row in the plan table.
-        unit_path: The path, on the server, to the unit the job operates on.
-        unit_name: The name of that unit.
-        pipeline: The pipeline the job belongs to.
-        options: The pipeline-specific parameters to run the job with.
-
-    Returns:
-        The job descriptor.
-    """
-    return {
-        "job_id": state_row["job_id"],
-        "job_name": state_row["job_name"],
-        "specifier": state_row["specifier"] or "",
-        "unit_path": str(unit_path),
-        "unit_name": unit_name,
-        "pipeline": pipeline,
-        "cores": int(plan_row["cores"]),
-        "memory_mb": int(plan_row["memory_mb"]),
-        "memory_modeled": bool(plan_row["memory_modeled"]),
-        "prerequisite_ids": list(plan_row["prerequisite_ids"] or []),
-        "options": dict(options),
-    }
-
-
-def _index_by_unit(frame: pl.DataFrame, unit_column: str) -> dict[str, dict[str, dict[str, Any]]]:
-    """Indexes a table's rows by their unit and then by their job identifier.
-
-    Notes:
-        A job identifier is derived from the job name and specifier alone, so the same stage of two different units
-        shares one identifier.
-
-    Args:
-        frame: The table to index.
-        unit_column: The column naming each row's unit.
-
-    Returns:
-        The rows, keyed by unit name and then by job identifier.
-    """
-    indexed: dict[str, dict[str, dict[str, Any]]] = {}
-    if unit_column not in frame.columns:
-        return indexed
-    for row in frame.iter_rows(named=True):
-        unit = row[unit_column]
-        if unit is None:
-            continue
-        indexed.setdefault(str(unit), {})[row["job_id"]] = row
-    return indexed
-
-
-def _repeated(flag: str, values: Sequence[str]) -> list[str]:
-    """Expands one repeated command-line option over every value it is given.
-
-    Args:
-        flag: The option flag to repeat.
-        values: The values to pass.
-
-    Returns:
-        The flattened argument list.
-    """
-    return [argument for value in values for argument in (flag, value)]
+    return prepare_batch(host=RemoteHost(server=server), pipeline=pipeline, unit_paths=unit_paths, options=options)
 
 
 def submit_batch(
     server: Server,
     jobs: Sequence[dict[str, Any]],
     batch_id: str,
+    adopted: dict[tuple[str, str], str] | None = None,
     *,
     walltime_minutes: int = REMOTE_JOB_WALLTIME_MINUTES,
     verbose: bool = False,
@@ -432,13 +107,18 @@ def submit_batch(
         Every accepted allocation is recorded in the submission ledger, including when the scheduler rejects a later
         job of the same batch, since the allocations it already accepted stay queued.
 
+        An adopted job's allocation seeds the dependency map before anything is submitted, so a dependent of a job that
+        is already running waits on the allocation running it rather than on a second one.
+
         The concurrency ceilings the local engine applies do not reach the scheduler. Expressing one natively needs a
-        job array, whose tasks share a single memory request.
+        job array, whose tasks share a single memory request, so the scheduler is left to sequence the whole batch.
 
     Args:
         server: The connected server to submit to.
         jobs: The job descriptors to submit.
         batch_id: The identifier of the batch, which names the directory the scripts and logs are written into.
+        adopted: The allocation already running each adopted job, keyed by dispatch key. These jobs are not submitted,
+            and their allocations are what their dependents wait on.
         walltime_minutes: The wall-time every allocation requests.
         verbose: Determines whether to report each submission as it is accepted.
 
@@ -451,11 +131,11 @@ def submit_batch(
     batch_directory = remote_batch_directory(server=server, batch_id=batch_id)
     server.create(remote_path=batch_directory, is_dir=True, parents=True)
 
-    pending = [_pending_job(descriptor=descriptor) for descriptor in jobs]
-    ordered = _resolve_submission_order(jobs=pending)
+    pending = [build_pending_job(job=descriptor) for descriptor in jobs]
+    ordered = resolve_submission_order(jobs=pending)
 
     submissions: list[RemoteSubmission] = []
-    allocation_of_job: dict[tuple[str, str], str] = {}
+    allocation_of_job: dict[tuple[str, str], str] = dict(adopted or {})
     try:
         _submit_ordered_jobs(
             server=server,
@@ -516,7 +196,7 @@ def _submit_ordered_jobs(
         error_log = batch_directory.joinpath(f"{slurm_job_name}.err")
         dependencies = [
             allocation_of_job[prerequisite]
-            for prerequisite in _prerequisite_keys(job=job)
+            for prerequisite in job.prerequisite_keys
             if prerequisite in allocation_of_job
         ]
 
@@ -536,7 +216,7 @@ def _submit_ordered_jobs(
 
         # submit_job() raises rather than returning an unidentified job, so the identifier is always present here.
         slurm_job_id = str(allocation.job_id)
-        allocation_of_job[_job_key(job=job)] = slurm_job_id
+        allocation_of_job[job.dispatch_key] = slurm_job_id
         submissions.append(
             RemoteSubmission(
                 job_id=job.job_id,
@@ -638,20 +318,6 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
     return mirrored
 
 
-def environment_command(environment: str, command: Sequence[str]) -> str:
-    """Wraps a command so it runs inside the server's shared processing environment.
-
-    Args:
-        environment: The name of the conda environment to activate.
-        command: The command to run, as an argument vector.
-
-    Returns:
-        The shell command to issue on the server.
-    """
-    activation = f'eval "$(conda shell.bash hook)" && source activate {shlex.quote(environment)}'
-    return f"bash -lc {shlex.quote(f'{activation} && {shlex.join(command)}')}"
-
-
 def connect_to_server() -> Server:
     """Opens a connection to the configured remote compute server.
 
@@ -671,152 +337,6 @@ def render_submission(submission: RemoteSubmission) -> dict[str, Any]:
         The submission's fields as a plain dictionary.
     """
     return asdict(submission)
-
-
-def _partition_blocked_jobs(
-    jobs: list[dict[str, Any]], succeeded: set[str]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Splits a unit's outstanding jobs into the ones that may be submitted and the ones that may not.
-
-    Notes:
-        A prerequisite that neither runs in this batch nor already succeeded is one this run cannot produce. Blocking
-        propagates, so a stage waiting on a blocked stage is blocked in turn.
-
-    Args:
-        jobs: The unit's outstanding job descriptors.
-        succeeded: The identifiers of the unit's jobs already recorded as succeeded.
-
-    Returns:
-        A tuple of the submittable descriptors and the blocked entries, each naming the prerequisites it waits on.
-    """
-    runnable: dict[str, dict[str, Any]] = {descriptor["job_id"]: descriptor for descriptor in jobs}
-    blocked: dict[str, list[str]] = {}
-    while True:
-        newly_blocked = {
-            job_id: unsatisfied
-            for job_id, descriptor in runnable.items()
-            if job_id not in blocked
-            and (
-                unsatisfied := [
-                    prerequisite
-                    for prerequisite in descriptor.get("prerequisite_ids", ())
-                    if prerequisite not in succeeded and (prerequisite not in runnable or prerequisite in blocked)
-                ]
-            )
-        }
-        if not newly_blocked:
-            break
-        blocked.update(newly_blocked)
-
-    submittable = [descriptor for descriptor in jobs if descriptor["job_id"] not in blocked]
-    blocked_entries = [
-        {
-            "job_id": descriptor["job_id"],
-            "job_name": descriptor["job_name"],
-            "specifier": descriptor["specifier"],
-            "pipeline": descriptor["pipeline"],
-            "unit_path": descriptor["unit_path"],
-            "unit_name": descriptor["unit_name"],
-            "unsatisfied_prerequisite_ids": blocked[descriptor["job_id"]],
-        }
-        for descriptor in jobs
-        if descriptor["job_id"] in blocked
-    ]
-    return submittable, blocked_entries
-
-
-def _pending_job(descriptor: dict[str, Any]) -> GenericPendingJob:
-    """Builds the pending job a submission renders from one remote descriptor.
-
-    Args:
-        descriptor: The job descriptor to build from.
-
-    Returns:
-        The pending job.
-    """
-    return GenericPendingJob(
-        tracker_path=Path(),
-        job_id=descriptor["job_id"],
-        job_name=descriptor["job_name"],
-        name=descriptor["unit_name"],
-        specifier=descriptor["specifier"],
-        pipeline=descriptor["pipeline"],
-        unit_path=Path(descriptor["unit_path"]),
-        core_weight=int(descriptor["cores"]),
-        memory_mb=int(descriptor["memory_mb"]),
-        prerequisite_ids=tuple(descriptor.get("prerequisite_ids", ())),
-        options=dict(descriptor.get("options") or {}),
-    )
-
-
-def _job_key(job: GenericPendingJob) -> tuple[str, str]:
-    """Returns the key uniquely identifying one job across a remote batch.
-
-    Notes:
-        A job identifier is derived from the job name and specifier alone, so the same stage of two different units
-        shares one identifier.
-
-    Args:
-        job: The job to key.
-
-    Returns:
-        The unit path paired with the job identifier.
-    """
-    return str(job.unit_path), job.job_id
-
-
-def _prerequisite_keys(job: GenericPendingJob) -> tuple[tuple[str, str], ...]:
-    """Returns the keys of the jobs one job waits on, scoped to its own unit.
-
-    Args:
-        job: The job whose upstream jobs to key.
-
-    Returns:
-        The upstream jobs' keys.
-    """
-    return tuple((str(job.unit_path), prerequisite) for prerequisite in job.prerequisite_ids)
-
-
-def _resolve_submission_order(jobs: Sequence[GenericPendingJob]) -> list[GenericPendingJob]:
-    """Orders a batch's jobs so every job follows the jobs it waits on.
-
-    Notes:
-        A scheduler names a dependency by the identifier it assigned to the upstream allocation, so an upstream job
-        must already be submitted before its dependents are.
-
-        A prerequisite outside this batch contributes no depth, and a cyclic ordering resolves to a finite depth, so a
-        malformed pipeline is ordered poorly rather than stalling the submission.
-
-    Args:
-        jobs: The batch's pending jobs.
-
-    Returns:
-        The jobs, ordered by dependency depth and then by their position in the input.
-    """
-    by_key = {_job_key(job=job): job for job in jobs}
-    depths: dict[tuple[str, str], int] = {}
-
-    def _depth(key: tuple[str, str], visiting: set[tuple[str, str]]) -> int:
-        cached = depths.get(key)
-        if cached is not None:
-            return cached
-        if key in visiting:
-            return 0
-        visiting.add(key)
-        resolved = max(
-            (
-                _depth(prerequisite, visiting) + 1
-                for prerequisite in _prerequisite_keys(job=by_key[key])
-                if prerequisite in by_key
-            ),
-            default=0,
-        )
-        visiting.discard(key)
-        depths[key] = resolved
-        return resolved
-
-    order = sorted(range(len(jobs)), key=lambda position: (_depth(_job_key(job=jobs[position]), set()), position))
-    return [jobs[position] for position in order]
 
 
 def _resolve_slurm_job_name(job: GenericPendingJob, index: int) -> str:

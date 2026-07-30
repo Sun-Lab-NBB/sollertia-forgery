@@ -197,7 +197,7 @@ def resolve_host_memory_mb() -> int:
 def estimate_session_job_memory(
     pipeline: ProcessingPipelines, session: SessionData, jobs: list[tuple[str, str, int]]
 ) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the memory every runnable job of one session occupies at its allocated core count.
+    """Estimates the memory every possible job of one session occupies at its allocated core count.
 
     Notes:
         Reads on-disk metadata alone, so estimating a session never decodes a frame or opens a log archive. Every
@@ -213,7 +213,7 @@ def estimate_session_job_memory(
     Args:
         pipeline: The pipeline the jobs belong to.
         session: The loaded session the jobs operate on.
-        jobs: The runnable jobs as ``(job_name, specifier, cores)`` triples.
+        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
 
     Returns:
         A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
@@ -602,7 +602,7 @@ def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio:
 def estimate_dataset_job_memory(
     dataset: DatasetData, jobs: list[tuple[str, str, int]]
 ) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the memory every runnable forging job occupies at its allocated core count.
+    """Estimates the memory every possible forging job occupies at its allocated core count.
 
     Notes:
         Reads array headers and the recording metadata alone, so estimating a dataset decodes no fluorescence and
@@ -614,7 +614,7 @@ def estimate_dataset_job_memory(
 
     Args:
         dataset: The resolved dataset the jobs operate on.
-        jobs: The runnable jobs as ``(job_name, specifier, cores)`` triples.
+        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
 
     Returns:
         A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
