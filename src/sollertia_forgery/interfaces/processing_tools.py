@@ -11,7 +11,7 @@ from threading import Thread
 from contextlib import contextmanager
 from collections import deque
 
-from ataraxis_base_utilities import resolve_worker_count
+from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker, delete_directory
 
 from .responses import (
@@ -34,6 +34,7 @@ from ..orchestration import (
     LocalHost,
     RemoteHost,
     JobExecutionState,
+    close_batch,
     read_ledger,
     submit_batch,
     prepare_batch,
@@ -42,6 +43,7 @@ from ..orchestration import (
     build_pending_job,
     connect_to_server,
     query_submissions,
+    read_batch_outcome,
     resolve_batch_host,
     reconcile_local_jobs,
     group_jobs_by_tracker,
@@ -67,6 +69,13 @@ engine packs them against one pair of budgets."""
 
 _HOST_LABELS: frozenset[str] = frozenset({LOCAL_HOST_LABEL, REMOTE_HOST_LABEL})
 """The hosts a batch may be prepared against and dispatched to."""
+
+_CLOSED_BATCH_MESSAGE: str = (
+    "No batch is running in this process. The named batches have closed, so their outcomes are read from the snapshot "
+    "closure recorded rather than from a live pool."
+)
+"""The message returned when a caller asks about batches that already reached closure. Their counts are durable, so an
+answer survives the process that ran them."""
 
 _BLOCKED_SEMI_FIELDS: tuple[str, ...] = (
     "job_id",
@@ -372,6 +381,7 @@ def execute_jobs_tool(
         response = _execute_local_batch(
             host=LocalHost(),
             pending=pending,
+            batch_ids=batch_ids,
             core_budget_override=core_budget_override,
             memory_budget_mb=memory_budget_mb,
         )
@@ -421,10 +431,15 @@ def get_processing_status_tool(
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry their resources, timing, provenance, and error text.
 
+    A batch that has finished carries an ``outcomes`` entry, which is the durable snapshot closure took of what its
+    jobs recorded. Read ``complete``, ``succeeded``, ``failed``, ``blocked``, and ``outstanding`` from it to decide
+    whether the run needs anything further, and ``failed_jobs`` for the error text each failure recorded.
+
     Returns:
         For ``remote``, a response dict with ``active``, the ``batches`` covered, a ``summary`` counting the allocations
-        by scheduler state, and a ``breakdown`` per axis. For ``local``, a response dict with ``active`` (whether the
-        manager thread is still running), ``canceled``, a ``summary``
+        by scheduler state, a ``breakdown`` per axis, and the ``outcomes`` of any batch that closed on this call. For
+        ``local``, a response dict with ``active`` (whether the manager thread is still running), ``canceled``, a
+        ``summary``
         counting succeeded, failed, running, and scheduled jobs, and a ``breakdown`` per axis. Carries a ``jobs`` list
         with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the
         listing is requested. A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a
@@ -449,7 +464,10 @@ def get_processing_status_tool(
 
     state = _EXECUTION_STATE
     if state is None:
-        return ok_response(active=False, message="No batch has been executed yet.")
+        recorded = [outcome for batch in batch_ids or [] if (outcome := read_batch_outcome(batch_id=batch)) is not None]
+        if recorded:
+            return ok_response(active=False, outcomes=recorded, message=_CLOSED_BATCH_MESSAGE)
+        return ok_response(active=False, message="No batch is running in this process.")
 
     if status_filter is not None and status_filter not in _STATUS_COUNT_KEYS.values():
         return error_response(
@@ -703,14 +721,44 @@ def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> Non
         host.reset_jobs(pipeline=pipeline, unit_path=Path(unit_path), job_ids=job_ids)
 
 
+def _run_and_close_local_batch(
+    state: JobExecutionState[GenericPendingJob], host: ExecutionHost, batch_ids: list[str]
+) -> None:
+    """Runs a local batch to completion, then closes every batch it held.
+
+    Notes:
+        Closure runs in the same thread the manager did, so it happens the moment the queue drains rather than waiting
+        for a caller to ask. A failure to close is reported and swallowed, because the jobs themselves have already run
+        and recorded their outcomes.
+
+    Args:
+        state: The batch execution state the manager dispatches from.
+        host: The host holding the data the batch's jobs read.
+        batch_ids: The identifiers of the batches this run dispatched.
+    """
+    job_execution_manager(state=state)
+    for batch_id in batch_ids:
+        try:
+            close_batch(host=host, batch_id=batch_id)
+        except Exception as exception:
+            console.echo(
+                message=f"Unable to close the finished batch '{batch_id}'. {exception}", level=LogLevel.WARNING
+            )
+
+
 def _execute_local_batch(
-    host: ExecutionHost, pending: list[GenericPendingJob], core_budget_override: int, memory_budget_mb: int
+    host: ExecutionHost,
+    pending: list[GenericPendingJob],
+    batch_ids: list[str],
+    core_budget_override: int,
+    memory_budget_mb: int,
 ) -> dict[str, Any]:
     """Reconciles a local batch and dispatches it onto the shared process pool.
 
     Args:
         host: The host holding the trackers, which the reset is applied through.
         pending: The batch's jobs.
+        batch_ids: The identifiers of the batches this run dispatches, which closure records its outcome onto.
         core_budget_override: The cores the batch may use in total, or a non-positive value to auto-resolve.
         memory_budget_mb: The memory the batch may use in total, or a non-positive value to auto-resolve.
 
@@ -768,7 +816,7 @@ def _execute_local_batch(
         pool_size=pool_size,
     )
     _EXECUTION_STATE = state
-    thread = Thread(target=job_execution_manager, args=(state,), daemon=True)
+    thread = Thread(target=_run_and_close_local_batch, args=(state, host, batch_ids), daemon=True)
     state.manager_thread = thread
     thread.start()
 

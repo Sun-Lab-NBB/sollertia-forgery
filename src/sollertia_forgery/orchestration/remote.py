@@ -12,13 +12,7 @@ from ataraxis_base_utilities import LogLevel, console
 
 from .graph import BatchDocument, build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
-from .ledger import (
-    SubmissionBatch,
-    RemoteSubmission,
-    record_batch,
-    current_timestamp,
-    retire_settled_batches,
-)
+from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
 from ..server import Job, Server, JobStatus, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME, DATASET_MARKER_FILENAME
 from .dispatch import resolve_job_command
@@ -236,10 +230,12 @@ def _submit_ordered_jobs(
 
 
 def query_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -> dict[str, JobStatus]:
-    """Queries the scheduler for the state of every submitted allocation and records what it observed.
+    """Queries the scheduler for the state of every submitted allocation.
 
     Notes:
-        A batch this query observes as wholly finished is retired from the submission ledger.
+        Observing a state and acting on it are separate, so this retires nothing. A batch leaves the submission ledger
+        only once closure has snapshotted what its jobs recorded, which keeps a finished batch answerable rather than
+        forgotten the moment it settles.
 
     Args:
         server: The connected server the batch runs on.
@@ -248,9 +244,7 @@ def query_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -
     Returns:
         A dictionary mapping each submission's allocation identifier to its scheduler state.
     """
-    statuses = server.get_job_statuses(slurm_job_ids=[submission.slurm_job_id for submission in submissions])
-    retire_settled_batches(statuses=statuses)
-    return statuses
+    return server.get_job_statuses(slurm_job_ids=[submission.slurm_job_id for submission in submissions])
 
 
 def cancel_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -> list[str]:

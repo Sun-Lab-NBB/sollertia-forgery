@@ -1,0 +1,281 @@
+"""Provides the closure that snapshots what a finished batch's jobs recorded, before anything stops tracking it."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from dataclasses import field, asdict, dataclass
+
+from ataraxis_base_utilities import LogLevel, console
+
+from .graph import SUCCEEDED_STATUS, index_rows_by_unit
+from .hosts import state_artifact_paths
+from .ledger import current_timestamp, retire_settled_batches
+from ..server import TERMINAL_JOB_STATUSES
+from .batches import batch_directory, read_prepared_batch, record_batch_outcome
+from .planning import DATASET_UNIT, SESSION_UNIT
+from .preparation import resolve_project_root
+from ..shared_assets import ProcessingPipelines
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from .graph import BatchDocument
+    from .hosts import ExecutionHost
+    from .ledger import SubmissionBatch
+    from ..server import JobStatus
+
+_FAILED_STATUS: str = "FAILED"
+"""The value a job's recorded status carries once it has failed, as the state tables write it."""
+
+_OUTCOME_FIELD_LIMIT: int = 50
+"""The failed and blocked jobs one outcome enumerates. The counts always cover the whole batch, so a larger batch
+reports every total while listing this many examples of each problem."""
+
+
+@dataclass(slots=True)
+class BatchOutcome:
+    """Records what one batch's jobs finally recorded, read back from the project's own state artifact."""
+
+    batch_id: str = ""
+    """The identifier of the batch this outcome describes."""
+    pipeline: str = ""
+    """The pipeline the batch dispatched."""
+    host: str = ""
+    """The host the batch ran on."""
+    total: int = 0
+    """The jobs the batch held, counting the ones it dispatched and the ones it reported blocked."""
+    succeeded: int = 0
+    """The dispatched jobs the state artifact records as succeeded."""
+    failed: int = 0
+    """The dispatched jobs the state artifact records as failed."""
+    blocked: int = 0
+    """The jobs that never ran because an upstream job could not supply their input, counting the ones preparation
+    reported and the ones whose prerequisite failed during the run."""
+    outstanding: int = 0
+    """The dispatched jobs that neither succeeded nor failed and wait on nothing that failed, which is what a batch cut
+    short leaves behind."""
+    complete: bool = False
+    """Determines whether every job the batch held succeeded."""
+    failed_jobs: list[dict[str, Any]] = field(default_factory=list)
+    """The failed jobs, each naming its unit and carrying the error text its worker recorded."""
+    blocked_jobs: list[dict[str, Any]] = field(default_factory=list)
+    """The blocked jobs, each naming its unit and the upstream jobs it waited on."""
+    snapshot_paths: list[str] = field(default_factory=list)
+    """Where this machine holds the state artifacts the outcome was read from, so a caller can inspect them after the
+    run without reaching back to the host."""
+    verified_at: int = 0
+    """The UTC timestamp (microsecond-precision epoch) the outcome was read at."""
+
+
+def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
+    """Snapshots what one finished batch's jobs recorded and stores the result on the batch itself.
+
+    Notes:
+        Rewrites the project's artifacts on the host, delivers the state artifacts to this machine, and reads each of
+        the batch's jobs out of them. Regenerating first is what makes the snapshot describe the state after the run
+        rather than the state the run was prepared against.
+
+        The outcome is written onto the batch's own record, so a finished batch stays answerable once nothing is
+        running and nothing is queued.
+
+    Args:
+        host: The host that holds the data the batch's jobs read.
+        batch_id: The identifier of the batch to close.
+
+    Returns:
+        The recorded outcome, or None when this host holds no batch under that identifier.
+    """
+    document = read_prepared_batch(batch_id=batch_id)
+    if document is None:
+        return None
+
+    outcome = verify_batch(host=host, document=document, batch_id=batch_id)
+    record_batch_outcome(batch_id=batch_id, outcome=asdict(outcome))
+    return outcome
+
+
+def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -> BatchOutcome:
+    """Reads what a batch's jobs recorded, out of freshly regenerated project artifacts.
+
+    Notes:
+        A job absent from the state artifact counts as outstanding rather than missing, since a tracker that lost an
+        entry describes a job that never ran.
+
+        A job that neither succeeded nor failed is reported as blocked when any of its prerequisites failed, because
+        no rerun of it alone can succeed. That is what separates work a batch was cut short of from work it can never
+        reach.
+
+    Args:
+        host: The host that holds the data the batch's jobs read.
+        document: The prepared batch to verify.
+        batch_id: The identifier the outcome is recorded under.
+
+    Returns:
+        The batch's outcome.
+    """
+    unit_kind = DATASET_UNIT if document.pipeline == ProcessingPipelines.FORGING.value else SESSION_UNIT
+    unit_paths = [Path(entry["unit_path"]) for entry in document.units]
+    project_root = resolve_project_root(unit_paths=unit_paths, unit_kind=unit_kind)
+
+    host.materialize(project_root=project_root, unit_paths=unit_paths, unit_kind=unit_kind, replan=False)
+
+    snapshots = [
+        delivered
+        for artifact in state_artifact_paths(project_root=project_root, unit_paths=unit_paths, unit_kind=unit_kind)
+        if (delivered := host.fetch(path=artifact, destination=batch_directory().joinpath(batch_id))) is not None
+    ]
+    recorded = index_rows_by_unit(rows=[row for path in snapshots for row in host.read_rows(path=path)], key=unit_kind)
+
+    return _resolve_outcome(document=document, batch_id=batch_id, recorded=recorded, snapshots=snapshots)
+
+
+def close_settled_batches(
+    host: ExecutionHost, batches: Sequence[SubmissionBatch], statuses: dict[str, JobStatus]
+) -> list[BatchOutcome]:
+    """Closes every batch whose allocations have all reached a state they never leave, then retires them.
+
+    Notes:
+        Closure runs before retirement, so a batch leaves the submission ledger only once this machine holds a durable
+        snapshot of what its jobs recorded. A batch that fails to close stays in the ledger, which leaves it
+        answerable and lets the next query try again.
+
+        An allocation the query did not cover counts as unfinished, so a partial query never closes a batch it did not
+        fully observe.
+
+    Args:
+        host: The host that holds the data the batches' jobs read.
+        batches: The batches the query covered.
+        statuses: The observed state of each allocation, keyed by its scheduler identifier.
+
+    Returns:
+        The outcomes of the batches that were closed and retired.
+    """
+    settled = [
+        batch
+        for batch in batches
+        if batch.submissions
+        and all(statuses.get(submission.slurm_job_id) in TERMINAL_JOB_STATUSES for submission in batch.submissions)
+    ]
+
+    closed: list[BatchOutcome] = []
+    for batch in settled:
+        try:
+            outcome = close_batch(host=host, batch_id=batch.batch_id)
+        except Exception as exception:
+            console.echo(
+                message=(
+                    f"Unable to close the finished batch '{batch.batch_id}', which stays outstanding so the next "
+                    f"query can try again. {exception}"
+                ),
+                level=LogLevel.WARNING,
+            )
+            continue
+        if outcome is not None:
+            closed.append(outcome)
+        retire_settled_batches(statuses=statuses)
+
+    return closed
+
+
+def _resolve_outcome(
+    document: BatchDocument,
+    batch_id: str,
+    recorded: dict[str, dict[str, dict[str, Any]]],
+    snapshots: Sequence[Path],
+) -> BatchOutcome:
+    """Counts a batch's jobs against the status each one recorded.
+
+    Args:
+        document: The prepared batch being verified.
+        batch_id: The identifier the outcome is recorded under.
+        recorded: The refreshed state rows, keyed by unit name and then by job identifier.
+        snapshots: Where this machine holds the artifacts the rows were read from.
+
+    Returns:
+        The batch's outcome.
+    """
+    outcome = BatchOutcome(
+        batch_id=batch_id,
+        pipeline=document.pipeline,
+        host=document.host,
+        total=len(document.jobs) + len(document.blocked_jobs),
+        blocked=len(document.blocked_jobs),
+        blocked_jobs=[
+            {
+                "job_id": entry["job_id"],
+                "job_name": entry["job_name"],
+                "specifier": entry["specifier"],
+                "unit_name": entry["unit_name"],
+                "unsatisfied_prerequisite_ids": entry["unsatisfied_prerequisite_ids"],
+            }
+            for entry in document.blocked_jobs[:_OUTCOME_FIELD_LIMIT]
+        ],
+        snapshot_paths=[str(path) for path in snapshots],
+        verified_at=current_timestamp(),
+    )
+
+    for job in document.jobs:
+        unit_state = recorded.get(job["unit_name"], {})
+        status = (unit_state.get(job["job_id"]) or {}).get("status")
+        if status == SUCCEEDED_STATUS:
+            outcome.succeeded += 1
+            continue
+        if status == _FAILED_STATUS:
+            outcome.failed += 1
+            if len(outcome.failed_jobs) < _OUTCOME_FIELD_LIMIT:
+                outcome.failed_jobs.append(_failed_entry(job=job, state_row=unit_state.get(job["job_id"]) or {}))
+            continue
+
+        unsatisfied = [
+            prerequisite
+            for prerequisite in job.get("prerequisite_ids", ())
+            if (unit_state.get(prerequisite) or {}).get("status") == _FAILED_STATUS
+        ]
+        if unsatisfied:
+            outcome.blocked += 1
+            if len(outcome.blocked_jobs) < _OUTCOME_FIELD_LIMIT:
+                outcome.blocked_jobs.append(_blocked_entry(job=job, unsatisfied=unsatisfied))
+            continue
+        outcome.outstanding += 1
+
+    outcome.complete = outcome.succeeded == outcome.total
+    return outcome
+
+
+def _failed_entry(job: dict[str, Any], state_row: dict[str, Any]) -> dict[str, Any]:
+    """Renders one failed job, carrying the error text its worker recorded.
+
+    Args:
+        job: The job's descriptor.
+        state_row: The job's row in the refreshed state artifact.
+
+    Returns:
+        The failed-job entry.
+    """
+    return {
+        "job_id": job["job_id"],
+        "job_name": job["job_name"],
+        "specifier": job["specifier"],
+        "unit_name": job["unit_name"],
+        "error_message": state_row.get("error_message"),
+    }
+
+
+def _blocked_entry(job: dict[str, Any], unsatisfied: list[str]) -> dict[str, Any]:
+    """Renders one job blocked by a prerequisite that failed during the run.
+
+    Args:
+        job: The job's descriptor.
+        unsatisfied: The identifiers of the prerequisites that failed.
+
+    Returns:
+        The blocked-job entry.
+    """
+    return {
+        "job_id": job["job_id"],
+        "job_name": job["job_name"],
+        "specifier": job["specifier"],
+        "unit_name": job["unit_name"],
+        "unsatisfied_prerequisite_ids": unsatisfied,
+    }

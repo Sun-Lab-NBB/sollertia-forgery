@@ -40,6 +40,9 @@ class PreparedBatch(YamlConfig):
     """The host the batch was prepared against, recorded for the same reason."""
     document: dict[str, Any] = field(default_factory=dict)
     """The batch document's fields, held as a plain mapping so it serializes without a nested dataclass schema."""
+    outcome: dict[str, Any] = field(default_factory=dict)
+    """What the batch's jobs finally recorded, written at closure and empty until then. This is the durable snapshot a
+    caller reads after the run, so a finished batch stays answerable once nothing is running and nothing is queued."""
 
     def as_document(self) -> BatchDocument:
         """Returns the recorded batch as the document both execution backends dispatch."""
@@ -175,3 +178,46 @@ def forget_prepared_batches(batch_ids: list[str]) -> list[str]:
         path.with_suffix(path.suffix + ".lock").unlink(missing_ok=True)
         removed.append(batch_id)
     return removed
+
+
+def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
+    """Writes what a batch's jobs finally recorded onto its own file.
+
+    Notes:
+        This is the step that makes a finished batch answerable, so it runs before the batch is retired from anything
+        that tracks it as outstanding.
+
+    Args:
+        batch_id: The identifier of the batch to record against.
+        outcome: The rendered outcome to store.
+
+    Returns:
+        True when the batch was held and updated, and False when this host holds no such batch.
+
+    Raises:
+        Timeout: If the batch file's lock cannot be acquired within the timeout period.
+    """
+    path = batch_path(batch_id=batch_id)
+    if not path.is_file():
+        return False
+    with FileLock(str(path.with_suffix(path.suffix + ".lock"))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
+        recorded = PreparedBatch.from_yaml(file_path=path)
+        recorded.outcome = dict(outcome)
+        recorded.to_yaml(file_path=path)
+    return True
+
+
+def read_batch_outcome(batch_id: str) -> dict[str, Any] | None:
+    """Reads what a batch's jobs finally recorded.
+
+    Args:
+        batch_id: The identifier of the batch to read.
+
+    Returns:
+        The stored outcome, or None when this host holds no such batch or the batch has yet to reach closure.
+    """
+    path = batch_path(batch_id=batch_id)
+    if not path.is_file():
+        return None
+    outcome = PreparedBatch.from_yaml(file_path=path).outcome
+    return outcome or None

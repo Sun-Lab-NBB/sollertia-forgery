@@ -1,10 +1,9 @@
-"""Provides the Model Context Protocol (MCP) tools for preparing processing jobs on the remote compute server,
-submitting them to its scheduler as a dependency graph, and checking, canceling, or mirroring what they produced.
-"""
+"""Provides the remote halves of the processing tools, which read, cancel, and mirror what the scheduler ran."""
 
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import asdict
 
 from ..server import TERMINAL_JOB_STATUSES, JobStatus, remote_state_directory
 from .responses import (
@@ -18,6 +17,7 @@ from .responses import (
 )
 from .mcp_instance import mcp
 from ..orchestration import (
+    RemoteHost,
     SubmissionLedger,
     read_ledger,
     resolve_batches,
@@ -26,6 +26,7 @@ from ..orchestration import (
     render_submission,
     cancel_submissions,
     sync_project_state,
+    close_settled_batches,
 )
 
 _STATUS_AXES: tuple[str, ...] = ("batch_id", "pipeline", "job_name", "status", "unit_path")
@@ -139,6 +140,10 @@ def remote_batch_status(
     try:
         with connect_to_server() as server:
             statuses = query_submissions(server=server, submissions=[entry for _, entry in submissions])
+
+            # Closes every batch the scheduler has finished with before it leaves the ledger, so a settled batch is
+            # answerable from a durable snapshot rather than forgotten the moment it stops being outstanding.
+            closed = close_settled_batches(host=RemoteHost(server=server), batches=batches, statuses=statuses)
     except Exception as exception:
         return error_response(message=f"Unable to query the remote batches. {exception}")
 
@@ -165,6 +170,7 @@ def remote_batch_status(
         active=any(status not in TERMINAL_JOB_STATUSES for status in statuses.values()),
         summary={"total": len(per_job), **count_values(values=[entry["status"] for entry in per_job])},
         breakdown={axis: count_values(values=[entry[axis] for entry in per_job]) for axis in _STATUS_AXES},
+        outcomes=[asdict(outcome) for outcome in closed],
     )
 
     selectors: dict[str, list[str] | None] = {
@@ -232,9 +238,10 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
         with connect_to_server() as server:
             allocations = cancel_submissions(server=server, submissions=submissions)
 
-            # Re-reads the scheduler after canceling, so the ledger observes the terminal states and retires these
-            # batches.
-            query_submissions(server=server, submissions=submissions)
+            # Re-reads the scheduler after canceling, then closes these batches so a canceled run leaves the same
+            # durable record of what its jobs reached as a completed one.
+            statuses = query_submissions(server=server, submissions=submissions)
+            close_settled_batches(host=RemoteHost(server=server), batches=batches, statuses=statuses)
     except Exception as exception:
         return error_response(message=f"Unable to cancel the remote batches. {exception}")
 

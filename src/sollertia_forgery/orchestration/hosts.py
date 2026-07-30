@@ -50,6 +50,10 @@ class ExecutionHost(Protocol):
         """Reads a stored table into plain rows, returning nothing when the host holds no such table."""
         ...
 
+    def fetch(self, path: Path, destination: Path) -> Path | None:
+        """Delivers a stored artifact to this machine durably, returning where it landed."""
+        ...
+
     def reset_jobs(self, pipeline: str, unit_path: Path, job_ids: Sequence[str]) -> None:
         """Returns the named tracked jobs to the scheduled state on the host that records them."""
         ...
@@ -126,6 +130,23 @@ class LocalHost:
         if not path.is_file():
             return []
         return pl.read_ipc(source=path, memory_map=True).to_dicts()
+
+    @staticmethod
+    def fetch(path: Path, destination: Path) -> Path | None:  # noqa: ARG004
+        """Reports where a stored artifact already sits, since this machine holds it.
+
+        Notes:
+            The artifact is already durable on this machine, so nothing is copied and the destination is ignored. A
+            caller recording where a snapshot landed therefore records the artifact's own location.
+
+        Args:
+            path: The path to the artifact.
+            destination: The directory a copy would land in, unused here.
+
+        Returns:
+            The artifact's own path, or None when it is absent.
+        """
+        return path if path.is_file() else None
 
     @staticmethod
     def reset_jobs(pipeline: str, unit_path: Path, job_ids: Sequence[str]) -> None:
@@ -249,6 +270,27 @@ class RemoteHost:
             self._server.pull(local_path=local_path, remote_path=path)
             return pl.read_ipc(source=local_path, memory_map=False).to_dicts()
 
+    def fetch(self, path: Path, destination: Path) -> Path | None:
+        """Copies a stored artifact off the server so this machine keeps it.
+
+        Notes:
+            Unlike a read, this leaves the copy in place, so a snapshot taken at a run's closure survives the server
+            regenerating its own artifacts afterward.
+
+        Args:
+            path: The path to the artifact on the server.
+            destination: The local directory the copy lands in.
+
+        Returns:
+            The local path the copy landed at, or None when the server holds no such artifact.
+        """
+        if not self._server.exists(remote_path=path):
+            return None
+        destination.mkdir(parents=True, exist_ok=True)
+        local_path = destination.joinpath(path.name)
+        self._server.pull(local_path=local_path, remote_path=path)
+        return local_path
+
     def reset_jobs(self, pipeline: str, unit_path: Path, job_ids: Sequence[str]) -> None:
         """Returns the named tracked jobs to the scheduled state on the server.
 
@@ -271,10 +313,10 @@ class RemoteHost:
             command.extend(("-id", job_id))
         self._run(commands=[command])
 
+    @staticmethod
     def resolve_tracker_paths(
-        self,
-        pipeline: str,  # noqa: ARG002
-        unit_paths: Sequence[Path],  # noqa: ARG002
+        pipeline: str,  # noqa: ARG004
+        unit_paths: Sequence[Path],  # noqa: ARG004
     ) -> dict[str, str]:
         """Resolves nothing, because this host's trackers are only ever read and written on the server.
 
