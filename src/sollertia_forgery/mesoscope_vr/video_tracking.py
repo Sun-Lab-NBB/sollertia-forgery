@@ -53,11 +53,13 @@ _EYE_POINTS: tuple[str, ...] = ("eye_right", "eye_bottom", "eye_left", "eye_top"
 _CANONICAL_POINTS: tuple[str, ...] = (_REFLECTION_POINT, *_PUPIL_POINTS, *_EYE_POINTS)
 """All thirteen canonical bodyparts the DLC ``.h5`` must provide for this function to parse it."""
 
-_LIKELIHOOD_THRESHOLD: float = 0.9
-"""The minimum DLC likelihood for a point to be trusted in a frame, set at the strict end of the field's 0.6-0.9
-``pcutoff`` band. The gate is strict because the labeled-angle fit trusts each surviving point's ring identity, so a
-mislabeled low-confidence point biases the ellipse directly rather than averaging out. It applies uniformly to the
-pupil ring, the eye ring, and the corneal reflection."""
+_LIKELIHOOD_THRESHOLD: float = 0.8
+"""The minimum DLC likelihood for a point to be trusted in a frame, set within the field's 0.6-0.9 ``pcutoff`` band.
+The gate stays high because the labeled-angle fit trusts each surviving point's ring identity, so a mislabeled
+low-confidence point biases the ellipse directly rather than averaging out. It stays off the top of the band because
+the eye ring carries four points against a three-point minimum, leaving it one point of redundancy: a gate that
+rejects a merely borderline point costs the whole eye fit, and with it the openness a squinting eye is read from. It
+applies uniformly to the pupil ring, the eye ring, and the corneal reflection."""
 
 _MINIMUM_PERIMETER_POINTS: int = 3
 """The number of a feature's ring points that must clear the likelihood threshold for its ellipse to be determined.
@@ -123,18 +125,19 @@ class PupilColumn(StrEnum):
     """Ratio of the fitted eye ellipse's height to its width at each frame, a distance-invariant measure of how open
     the eye is. NaN wherever the eye ring cannot be fit."""
     BLINKING_STATE = "blinking_state"
-    """Boolean flag marking frames where the eye is closed or covered, leaving no measurable pupil. True when the eye
-    ring cannot be fit, the corneal reflection is lost, or the eye opens less than half its session-median amount."""
+    """Boolean flag marking frames where the eye is closed or covered, leaving no measurable pupil. True when a fitted
+    eye opens less than half its session-median amount, and when a lost eye ring or corneal reflection leaves no pupil
+    fit either. A pupil that resolves keeps the frame open, since a covered eye presents no pupil ring to fit."""
     DILATION_STATE = "dilation_state"
     """Boolean flag marking frames where the pupil dilated past the eye's aperture and was clipped too far to fit a
     diameter. True only on non-blink frames whose pupil is otherwise unmeasurable. A fully visible dilated pupil is
     measured normally and flagged False."""
     REFLECTION_X_PX = "reflection_x_px"
     """Horizontal position of the corneal reflection in pixels at each frame. NaN wherever the reflection falls below
-    the likelihood threshold, which also flags the frame as a blink."""
+    the likelihood threshold, which flags the frame as a blink unless the pupil still resolves."""
     REFLECTION_Y_PX = "reflection_y_px"
     """Vertical position of the corneal reflection in pixels at each frame. NaN wherever the reflection falls below the
-    likelihood threshold, which also flags the frame as a blink."""
+    likelihood threshold, which flags the frame as a blink unless the pupil still resolves."""
     PUPIL_REFLECTION_OFFSET_X_PX = "pupil_reflection_offset_x_px"
     """Horizontal offset in pixels of the pupil center from the corneal reflection at each frame. Referencing the
     reflection cancels the eye's common-mode motion relative to the camera, making this a motion-robust horizontal
@@ -306,19 +309,25 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     reflection = points[_REFLECTION_POINT][:, :2]
     reflection_valid = points[_REFLECTION_POINT][:, 2] >= _LIKELIHOOD_THRESHOLD
 
-    # A blink is read from the eye and its cornea alone, never from the pupil. Something covering the eye takes the
+    # A blink is read from the eye and its cornea, never from a missing pupil. Something covering the eye takes the
     # eye ring, the corneal reflection, and the opening down together, and the cause does not change the consequence:
-    # a lid and a paw read the same. The pupil is deliberately excluded because a pupil that vanishes under an OPEN
-    # eye has outgrown the aperture rather than been hidden by a lid. Folding that in here would delete the most
-    # dilated pupils from the arousal signal exactly when arousal is highest.
-    is_blink = (
-        ~(eye_fit.valid & reflection_valid) | ~np.isfinite(eye_openness) | (eye_openness < _BLINK_FRACTION * baseline)
-    )
+    # a lid and a paw read the same. A pupil that VANISHES under an open eye stays out of this, because it has
+    # outgrown the aperture rather than been hidden by a lid, and folding that in would delete the most dilated pupils
+    # from the arousal signal exactly when arousal is highest.
+    eye_evidence_lost = ~(eye_fit.valid & reflection_valid) | ~np.isfinite(eye_openness)
+
+    # A pupil that RESOLVES is the converse case, and it is positive evidence of an open eye: a covered eye presents no
+    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above,
+    # which infer a blink from evidence that is merely absent, and which a lost eye ring alone would otherwise let a
+    # tracking failure impersonate. The measured-openness term below stands on its own, since a fitted eye observed to
+    # be closing is an observation rather than a gap, and no evidence can be absent from it.
+    is_blink = (eye_evidence_lost & ~pupil_fit.valid) | (eye_openness < _BLINK_FRACTION * baseline)
     not_blink = ~is_blink
 
-    # Behind a shut lid there is no pupil to measure, so a pupil fit that happens to converge on a blink frame is
-    # reporting on points the eye was covering. The pupil columns answer to the blink as well as to their own fit.
-    # The eye columns answer only to theirs, since their openness is what detects the blink in the first place.
+    # Behind a lid the eye is observed to be closing, so a pupil fit that converges anyway is reporting on points that
+    # lid was covering. Only the measured-openness term reaches this far, the absence terms above having already
+    # yielded to any pupil they saw. The pupil columns answer to the blink as well as to their own fit. The eye columns
+    # answer only to theirs, since their openness is what detects the blink in the first place.
     pupil_measured = pupil_fit.valid & not_blink
 
     # The remaining way to lose the pupil is for it to outgrow the palpebral opening, which then clips it past what

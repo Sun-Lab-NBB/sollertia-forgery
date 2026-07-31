@@ -258,28 +258,42 @@ def test_read_points_from_h5_returns_rows_in_ascending_frame_order(
     assert points[_REFLECTION_POINT][:, 0].tolist() == [1.0, 2.0, 3.0]
 
 
-def test_compute_pupil_metrics_flags_a_blink_when_the_eye_ring_is_lost() -> None:
+def test_compute_pupil_metrics_keeps_a_lost_eye_ring_open_while_the_pupil_resolves() -> None:
     points = _build_points([_frame_specification(), _frame_specification(eye_confident=(0, 1))])
 
     metrics = _compute_pupil_metrics(points=points)
 
-    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, True]
+    # A covered eye presents no pupil ring to fit, so a pupil that resolves is positive evidence of an open eye and
+    # overrides an eye ring that is merely absent.
+    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False]
     assert metrics[PupilColumn.DILATION_STATE].tolist() == [False, False]
-    # The pupil answers to the blink, so its geometry is dropped even though its own ring stayed confident.
+    assert metrics[PupilColumn.PUPIL_DIAMETER_PX][1] == pytest.approx(metrics[PupilColumn.PUPIL_DIAMETER_PX][0])
+    # The eye columns answer only to their own fit, which stays lost.
+    assert np.isnan(metrics[PupilColumn.EYE_WIDTH_PX][1])
+
+
+def test_compute_pupil_metrics_flags_a_blink_when_the_eye_ring_and_the_pupil_are_both_lost() -> None:
+    points = _build_points([_frame_specification(), _frame_specification(eye_confident=(0, 1), pupil_confident=(0, 1))])
+
+    metrics = _compute_pupil_metrics(points=points)
+
+    # With no pupil to vouch for an open eye, a lost eye ring carries the flag on its own.
+    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, True]
     assert np.isnan(metrics[PupilColumn.PUPIL_DIAMETER_PX][1])
     assert np.isnan(metrics[PupilColumn.EYE_WIDTH_PX][1])
 
 
-def test_compute_pupil_metrics_flags_a_blink_when_the_corneal_reflection_is_lost() -> None:
+def test_compute_pupil_metrics_keeps_a_lost_reflection_open_while_the_pupil_resolves() -> None:
     points = _build_points([_frame_specification(), _frame_specification(reflection_confident=False)])
 
     metrics = _compute_pupil_metrics(points=points)
 
-    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, True]
+    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False]
     assert np.isnan(metrics[PupilColumn.REFLECTION_X_PX][1])
     assert np.isnan(metrics[PupilColumn.REFLECTION_Y_PX][1])
+    # The offset needs both of its endpoints, so it drops with the reflection even on a frame that is not a blink.
     assert np.isnan(metrics[PupilColumn.PUPIL_REFLECTION_OFFSET_X_PX][1])
-    # The eye ring is untouched by a lost reflection, so the eye columns stay populated through the blink.
+    # The eye ring is untouched by a lost reflection, so the eye columns stay populated.
     assert metrics[PupilColumn.EYE_WIDTH_PX][1] == pytest.approx(80.0)
 
 
@@ -290,6 +304,8 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_closes_below_half_its_
 
     metrics = _compute_pupil_metrics(points=_build_points([*open_frames, closed]))
 
+    # The closed frame keeps a fully confident pupil ring, so this also pins the openness term as the one term a
+    # resolving pupil does not override: a fitted eye measured to be closing is an observation rather than a gap.
     assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False, False, False, True]
     assert metrics[PupilColumn.EYE_OPENNESS][4] == pytest.approx(0.025)
     assert np.isnan(metrics[PupilColumn.PUPIL_CENTER_X_PX][4])
@@ -308,15 +324,16 @@ def test_compute_pupil_metrics_flags_dilation_when_the_pupil_is_lost_under_an_op
     assert metrics[PupilColumn.EYE_HEIGHT_PX][1] == pytest.approx(20.0)
 
 
-def test_compute_pupil_metrics_flags_every_frame_as_a_blink_when_no_eye_fit_survives() -> None:
+def test_compute_pupil_metrics_keeps_every_frame_open_when_no_eye_fit_survives_but_the_pupil_does() -> None:
     points = _build_points([_frame_specification(eye_confident=(0,)), _frame_specification(eye_confident=(1,))])
 
     metrics = _compute_pupil_metrics(points=points)
 
-    # With no openness baseline anywhere in the session the openness term drops out and the lost eye carries the flag.
-    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [True, True]
+    # With no openness baseline anywhere in the session the openness term drops out, leaving the pupil to vouch for
+    # every frame the lost eye would otherwise have flagged.
+    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False]
     assert np.isnan(metrics[PupilColumn.EYE_OPENNESS]).all()
-    assert np.isnan(metrics[PupilColumn.PUPIL_AREA_PX2]).all()
+    assert not np.isnan(metrics[PupilColumn.PUPIL_AREA_PX2]).any()
 
 
 def test_compute_pupil_metrics_returns_not_a_number_for_a_zero_extent_eye_fit() -> None:
@@ -329,7 +346,8 @@ def test_compute_pupil_metrics_returns_not_a_number_for_a_zero_extent_eye_fit() 
     # A collapsed eye divides to not-a-number rather than to an infinity on both normalized in-eye axes.
     assert np.isnan(metrics[PupilColumn.PUPIL_IN_EYE_X][0])
     assert np.isnan(metrics[PupilColumn.PUPIL_IN_EYE_Y][0])
-    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [True]
+    # A collapsed ring is a degenerate fit rather than a shut lid, and the pupil resolving through it says as much.
+    assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False]
 
 
 def test_compute_pupil_metrics_reports_a_residual_only_for_an_overdetermined_pupil_ring() -> None:
