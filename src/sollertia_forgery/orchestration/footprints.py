@@ -142,9 +142,9 @@ _ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
 """The fluorescence columns an experiment assembly retains at once. Every column is attached under its own name and
 none replaces another, so each stays live in the assembled frame for the rest of the job."""
 
-_ASSEMBLY_WRITE_COPIES: int = 2
-"""The copies of the assembled fluorescence volume charged at the write. Writing rechunks a frame the earlier stages
-left fragmented, which materializes the whole frame a second time beside the one already resident."""
+_ASSEMBLY_WRITE_COPIES: int = 1
+"""The copies of the assembled fluorescence volume charged at the write. The write streams the frame it was handed
+rather than rebuilding it, so the columns the assembly already holds are what the stage peaks at."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the behavior, runtime, and video sub-datasets hold per sample of the clock they are placed on. Each
