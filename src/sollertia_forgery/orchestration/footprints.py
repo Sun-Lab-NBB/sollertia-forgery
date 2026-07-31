@@ -54,6 +54,9 @@ _SUBPROCESS_MEMORY_MB: int = 200
 """The resident memory each child of a job's own worker pool occupies before it touches data. Processes are spawned
 rather than forked, so every child re-imports the module its target function lives in."""
 
+_MEGABYTES_PER_GIGABYTE: int = 1024
+"""The megabytes one gigabyte holds, which every reportable estimate is rounded up to a multiple of."""
+
 _BYTES_PER_MEGABYTE: int = 1024 * 1024
 """The divisor converting a byte count into megabytes."""
 
@@ -63,7 +66,7 @@ _SINGLE_PRECISION_BYTES: int = 4
 _RAW_SAMPLE_BYTES: int = 2
 """The width of one raw imaging sample as it is read from and written to the converted binary."""
 
-_ARCHIVE_DIRECTORY_RATIO: float = 2.6
+_ARCHIVE_DIRECTORY_RATIO: float = 4.0
 """The resident memory a log-archive reader holds per byte of archive on disk. Reading an archive builds one
 directory entry per logged message, which dominates the decoded payload itself."""
 
@@ -76,30 +79,27 @@ _POSE_PREDICTION_RATIO: float = 6.0
 """The resident memory the pose-tracking job holds per byte of its prediction file. The table is promoted to double
 precision and expanded into per-bodypart and per-metric arrays."""
 
-_DECODER_BUFFER_MEMORY_MB: int = 32
-"""The resident memory one decode worker holds for its codec reference frames, beyond the frame buffers the
-measurement itself retains."""
+_DECODER_BUFFER_MEMORY_MB: int = 96
+"""The resident memory one decode worker holds for its codec reference frames and its decoder state, beyond the frame
+buffers the measurement itself retains."""
 
 _RETAINED_FRAME_BUFFERS: int = 2
 """The number of full-resolution single-precision frame buffers a decode worker keeps live. Binning produces a
 strided view that retains its full-frame base, and the current and previous binned frames are live at once."""
 
-_DETECTION_ARRAY_MULTIPLIER: int = 3
+_DETECTION_ARRAY_MULTIPLIER: int = 4
 """The number of copies of the binned movie live at the two-photon detection peak. Computing the temporal standard
-deviation holds the frames, their difference, and the squared difference at once."""
+deviation holds the frames, their difference, and the squared difference at once, alongside the working copy the
+reduction accumulates into."""
 
 _BINARIZATION_BATCH_COPIES: int = 2
 """The number of copies of a raw frame batch binarization holds. Indexing each plane out of the batch allocates a
 second full batch alongside the one that was read."""
 
-_REGISTRATION_BATCH_COPIES: int = 3
-"""The number of copies of a registration batch the stage holds. The batch read from the binary, its shifted result,
-and the phase-correlation workspace the alignment builds from the pair are live at once."""
-
-_CHECKSUM_READER_MEMORY_MB: int = 56
-"""The resident memory one checksum worker holds, covering its fixed read chunk and the small module its target
-function lives in. It replaces the general per-child allowance for this stage, because a checksum worker re-imports
-only the hashing module rather than this package's import graph."""
+_CHECKSUM_READER_MEMORY_MB: int = 285
+"""The resident memory one checksum worker holds, covering its fixed read chunk and the interpreter and import graph
+the worker starts with. The figure holds steady across sessions of any size, because a worker streams its file in
+fixed chunks and never holds more than one at a time."""
 
 _FLUORESCENCE_FILENAME: str = "cell_fluorescence.npy"
 """The cindra array whose header reports a recording's region and sample counts. Only the header is parsed, so a
@@ -155,11 +155,24 @@ emits one array per column and the interpolation that aligns them holds double-p
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
 
-_COMBINATION_MEMORY_MB: int = 16384
+_COMBINATION_MEMORY_MB: int = 8192
 """The memory the combination job is charged. The stage concatenates every plane's traces into dense arrays, so its
 size follows the region count that only detection resolves, which no reading of the raw data predicts. It therefore
-takes a flat allowance comparable to one plane job rather than a projection. The allowance covers the trace volume a
-recording of any attainable length produces, so the estimate tolerance does not apply on top."""
+takes a flat allowance rather than a projection, covering the trace volume a recording of any attainable length
+produces."""
+
+_REGISTRATION_MEMORY_MB: int = 14848
+"""The memory one plane-registration job is charged.
+
+Notes:
+    Charged flat rather than projected from the plane. The stage streams the plane in batches whose size its
+    configuration fixes, yet its footprint neither follows that batch nor the plane's own extent, and across planes
+    it moves opposite to the extent rather than with it. What the footprint does follow has not been established, so
+    a projection built on any of those terms would be a shape the stage does not have.
+
+    The allowance therefore covers the widest footprint the stage has been observed to reach. Narrowing it wants the
+    driver identified first, since a plane far outside the observed shapes is the case a flat allowance cannot
+    reason about."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -412,15 +425,21 @@ def _bytes_to_megabytes(byte_count: float) -> int:
 
 
 def _apply_tolerance(memory_mb: int) -> int:
-    """Applies the shared estimate tolerance to a modeled memory figure.
+    """Applies the shared estimate tolerance to a modeled memory figure and rounds it to a whole gigabyte.
+
+    Notes:
+        A scheduler reserves memory in whole gigabytes, so an estimate landing mid-gigabyte is rounded there by
+        whatever consumes it. Rounding here instead keeps the figure a plan records identical to the figure a
+        submission requests, which is what lets a planned batch and a submitted one be compared directly.
 
     Args:
         memory_mb: The modeled memory in megabytes, before any margin.
 
     Returns:
-        The reportable memory in megabytes, rounded up.
+        The reportable memory in megabytes, carrying the tolerance and rounded up to a whole gigabyte.
     """
-    return int(memory_mb * _MEMORY_ESTIMATE_TOLERANCE) + 1
+    reportable = int(memory_mb * _MEMORY_ESTIMATE_TOLERANCE) + 1
+    return math.ceil(reportable / _MEGABYTES_PER_GIGABYTE) * _MEGABYTES_PER_GIGABYTE
 
 
 def _estimate_archive_reader_memory(archive_path: Path, cores: int) -> int:
@@ -531,25 +550,18 @@ def _estimate_binarization_memory(geometry: _RawImagingGeometry, configuration: 
     return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes))
 
 
-def _estimate_plane_registration_memory(extent: tuple[int, int], configuration: SingleRecordingConfiguration) -> int:
-    """Estimates the memory one two-photon plane-registration job holds, from that plane's shape.
+def _estimate_plane_registration_memory() -> int:
+    """Reports the memory one two-photon plane-registration job is charged.
 
     Notes:
-        Registration streams the plane in batches rather than holding it whole, so its own batch bounds the job and
-        the recording's length does not enter the figure.
-
-    Args:
-        extent: The plane's height and width in pixels.
-        configuration: The recording's resolved processing configuration.
+        Takes a flat allowance rather than a projection from the plane, for the reasons ``_REGISTRATION_MEMORY_MB``
+        records. Kept as a function so the stage is routed like every other, and so a projection can replace the
+        allowance here once what the footprint follows is known.
 
     Returns:
         The reportable memory in megabytes.
     """
-    height, width = extent
-    batch_bytes = (
-        configuration.registration.batch_size * height * width * _SINGLE_PRECISION_BYTES * _REGISTRATION_BATCH_COPIES
-    )
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes))
+    return _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB)
 
 
 def _estimate_plane_processing_memory(
@@ -605,13 +617,10 @@ def _estimate_two_photon_memory(
     if job_name == str(SingleRecordingJobNames.BINARIZE):
         return _estimate_binarization_memory(geometry=geometry, configuration=configuration)
     if job_name == str(SingleRecordingJobNames.COMBINE):
-        return _COMBINATION_MEMORY_MB
+        return _apply_tolerance(memory_mb=_COMBINATION_MEMORY_MB)
 
     if job_name == str(SingleRecordingJobNames.REGISTER):
-        estimates = [
-            _estimate_plane_registration_memory(extent=extent, configuration=configuration)
-            for extent in geometry.plane_extents
-        ]
+        estimates = [_estimate_plane_registration_memory() for _ in geometry.plane_extents]
     else:
         estimates = [
             _estimate_plane_processing_memory(extent=extent, geometry=geometry, configuration=configuration)

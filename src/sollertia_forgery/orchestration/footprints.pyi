@@ -40,6 +40,7 @@ from ..microcontrollers import (
 _MEMORY_ESTIMATE_TOLERANCE: float
 _WORKER_MEMORY_MB: int
 _SUBPROCESS_MEMORY_MB: int
+_MEGABYTES_PER_GIGABYTE: int
 _BYTES_PER_MEGABYTE: int
 _SINGLE_PRECISION_BYTES: int
 _RAW_SAMPLE_BYTES: int
@@ -50,7 +51,6 @@ _DECODER_BUFFER_MEMORY_MB: int
 _RETAINED_FRAME_BUFFERS: int
 _DETECTION_ARRAY_MULTIPLIER: int
 _BINARIZATION_BATCH_COPIES: int
-_REGISTRATION_BATCH_COPIES: int
 _CHECKSUM_READER_MEMORY_MB: int
 _FLUORESCENCE_FILENAME: str
 _COMBINED_METADATA_FILENAME: str
@@ -66,6 +66,7 @@ _ASSEMBLY_WRITE_COPIES: int
 _SUB_DATASET_BYTES_PER_SAMPLE: int
 _PERCENT_PER_FRACTION: float
 _COMBINATION_MEMORY_MB: int
+_REGISTRATION_MEMORY_MB: int
 
 @dataclass(frozen=True, slots=True)
 class _RawImagingGeometry:
@@ -99,9 +100,7 @@ def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> int: ...
 def _estimate_binarization_memory(
     geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration
 ) -> int: ...
-def _estimate_plane_registration_memory(
-    extent: tuple[int, int], configuration: SingleRecordingConfiguration
-) -> int: ...
+def _estimate_plane_registration_memory() -> int: ...
 def _estimate_plane_processing_memory(
     extent: tuple[int, int], geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration
 ) -> int: ...
