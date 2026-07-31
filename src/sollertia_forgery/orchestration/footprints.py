@@ -119,34 +119,32 @@ _DISCOVERY_PLANES_PER_RECORDING: int = 12
 recording's accumulated and cached deformation fields, its scale-space pyramid, its transformed reference images, and
 the per-thread warp transients live alongside them."""
 
-_DISCOVERY_CLUSTERING_MEMORY_MB: int = 2048
+_DISCOVERY_CLUSTERING_MEMORY_MB: int = 5632
 """The memory the cross-recording clustering stage is charged. The stage builds a pairwise matrix over the regions
 falling inside one spatial bin, so its size follows local region crowding, which no reading of the processed data
 predicts. The allowance covers the crowding this corpus produces."""
 
-_EXTRACTION_TRACE_COPIES: int = 4
-"""The copies of a recording's traces the extraction stage retains, which are the cell, neuropil, subtracted, and
-spike arrays it returns together. The stages that derive the later three release their working arrays, so the
-retained set rather than any transient peak sizes this term."""
+_EXTRACTION_TRACE_COPIES: int = 2
+"""The copies of a recording's traces the extraction stage holds at once. The stage returns the cell, neuropil,
+subtracted, and spike arrays together, and the stages deriving the later three release their working arrays as they
+go, so the arrays live in turn rather than all at their peak together."""
 
 _EXTRACTION_BATCH_BYTES_PER_PIXEL: int = 6
 """The memory one extraction batch holds per combined pixel, covering the batch at its stored width and the
 single-precision copy the kernel consumes."""
 
-_EXTRACTION_BATCH_RETENTION: int = 20
+_EXTRACTION_BATCH_RETENTION: int = 2
 """The batch working sets an extraction job holds at its peak. The stage reads its recording in batches and releases
-each one, but the allocator returns little of that memory between iterations, so the peak settles far above the
-working set of any single batch. The retained multiple varies between runs of identical work, so this covers the
-widest settling point rather than a typical one."""
+each one, and the allocator carries a share of the released memory into the next iteration, so the peak settles
+somewhat above the working set of any single batch."""
 
 _ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
 """The fluorescence columns an experiment assembly retains at once. Every column is attached under its own name and
 none replaces another, so each stays live in the assembled frame for the rest of the job."""
 
-_ASSEMBLY_WRITE_COPIES: int = 3
+_ASSEMBLY_WRITE_COPIES: int = 2
 """The copies of the assembled fluorescence volume charged at the write. Writing rechunks a frame the earlier stages
-left fragmented, which materializes the whole frame a second time beside the one already resident, and the allocator
-holds a further share of what the column builds released."""
+left fragmented, which materializes the whole frame a second time beside the one already resident."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
 """The memory the behavior, runtime, and video sub-datasets hold per sample of the clock they are placed on. Each
