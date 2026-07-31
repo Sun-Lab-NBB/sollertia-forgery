@@ -1,5 +1,5 @@
-"""Provides assets for assembling two-photon fluorescence datasets from cindra single-recording and multi-recording
-processing pipeline outputs.
+"""Provides the Mesoscope-VR two-photon fluorescence sub-dataset assembler donated to the system-agnostic forging
+pipeline.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ _MILLISECONDS_PER_SECOND: int = 1000
 _MICROSECONDS_PER_MILLISECOND: int = 1000
 """The number of microseconds in one millisecond."""
 
-_MICROSECONDS_PER_SECOND: int = 1_000_000
+_MICROSECONDS_PER_SECOND: float = 1_000_000.0
 """The number of microseconds in one second."""
 
 _MICROSECONDS_PER_MINUTE: int = 60 * 1_000_000
@@ -40,21 +40,23 @@ _FRAME_VARIANT_METADATA_FILENAME: str = "frame_variant_metadata.npz"
 """The filename of the ScanImage per-frame metadata archive (one entry per acquired TIFF frame) in each session's
 raw mesoscope_data directory."""
 
-_SI_FRAME_NUMBER_KEY: str = "frameNumberAcquisition"
-"""The key name of the strictly monotonic per-frame counter inside the ScanImage frame_variant_metadata archive."""
+_SCANIMAGE_FRAME_NUMBER_KEY: str = "frameNumberAcquisition"
+"""The key name of the per-frame ScanImage frame counter inside the frame_variant_metadata archive. The counter
+increases with acquisition time within one acquisition and restarts at one for each further acquisition a session
+records."""
 
-_SI_FRAME_TIMESTAMP_KEY: str = "frameTimestamps_sec"
+_SCANIMAGE_FRAME_TIMESTAMP_KEY: str = "frameTimestamps_sec"
 """The key name of the per-frame ScanImage clock timestamps (seconds) inside the frame_variant_metadata archive."""
 
-_SI_MATCH_TOLERANCE_US: int = 50_000
+_SCANIMAGE_MATCH_TOLERANCE_US: int = 50_000
 """The tolerance, in microseconds, applied when matching microcontroller-logged TTL pulse rising edges to
 ScanImage-recorded frame timestamps in the fallback alignment path."""
 
-_SI_ANCHOR_SEARCH_LIMIT: int = 10
+_SCANIMAGE_ANCHOR_SEARCH_LIMIT: int = 10
 """The maximum number of leading TTL pulses considered as candidate clock-offset anchors in the fallback alignment
 path."""
 
-_SI_ACQUISITION_NUMBER_KEY: str = "acquisitionNumbers"
+_SCANIMAGE_ACQUISITION_NUMBER_KEY: str = "acquisitionNumbers"
 """The key name of the per-frame ScanImage acquisition index inside the frame_variant_metadata archive."""
 
 _PULSE_RUN_GAP_FACTOR: float = 3.0
@@ -62,7 +64,8 @@ _PULSE_RUN_GAP_FACTOR: float = 3.0
 acquisition is harmless, since the run-to-acquisition matching rejoins the pieces, so this is deliberately eager."""
 
 _MINIMUM_SPLITTABLE_PULSE_COUNT: int = 3
-"""The smallest number of pulses from which a median period, and therefore a run boundary, can be derived."""
+"""The fewest pulses the run-splitting step accepts. A shorter log carries too few inter-pulse periods for a median
+period to separate an idle gap from the scan cadence."""
 
 _UNMATCHED_COST: int = sys.maxsize
 """The sentinel cost standing for a run-span assignment that leaves at least one acquisition unplaced."""
@@ -89,18 +92,22 @@ def assemble_cindra_dataset(
             expected frame count.
 
     Returns:
-        The assembled single-recording and multi-recording cell fluorescence data.
+        The frame-aligned fluorescence table, carrying the ``frame``, ``time_us``, and ``elapsed_minutes`` columns
+        plus the single-recording and multi-recording cell, neuropil, subtracted, and spike traces. Its ``time_us``
+        column is the session's fluorescence reference clock.
 
     Raises:
+        FileNotFoundError: If a required cindra output or the processed mesoscope-frame feather is missing. The
+            single-recording directory must hold the combined metadata, the cell classification, and the four trace
+            arrays, the multi-recording directory must hold the same four trace arrays, and the processed
+            microcontroller directory must hold the mesoscope-frame feather.
         ValueError: If the ScanImage-based fallback alignment is triggered and the per-frame metadata archive is
             missing, its frame count disagrees with the cindra frame count, or the produced alignment does not
             contain exactly the expected number of rows.
     """
-    # Queries the number of frames processed by cindra via a memory-mapped header read. This handles rare cases where
-    # the log has more frame stamps than recorded frames, which happens when the user manually triggers mesoscope
-    # scanning outside the expected time slot. When the log has more frames than the cindra data, the log is clipped
-    # at the front, since aberrant frames must come from a period before the main experiment runtime.
-    _, frames = np.load(file=cindra_data_path.joinpath("cell_fluorescence.npy"), mmap_mode="r").shape
+    # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the
+    # authoritative target the pulse alignment below is reconciled against.
+    _, frame_count = np.load(file=cindra_data_path.joinpath("cell_fluorescence.npy"), mmap_mode="r").shape
 
     # Loads the combined cindra metadata archive and extracts the per-plane sampling rate in Hz. NPZ archives do not
     # support memory mapping, so the context manager is used to keep the archive open only long enough to pull the
@@ -128,8 +135,8 @@ def assemble_cindra_dataset(
     )
 
     # Extracts one row per pulse via separate rising-edge (pulse start) and falling-edge (pulse end) filters, then
-    # joins by pulse ID. This avoids intermediate boolean columns and per-row window evaluation (forward_fill /
-    # backward_fill over groups). Pulses missing either edge are excluded by the inner join.
+    # joins by pulse ID. Two filters and a join stay in Polars' vectorized path, so the pulse table is built without a
+    # per-row window pass. Pulses missing either edge are excluded by the inner join.
     rising_edges = mesoscope_frame_data.filter(pl.col("ttl_diff") == 1).select(
         "pulse_id",
         pl.col("time_us").alias("pulse_start"),
@@ -143,7 +150,7 @@ def assemble_cindra_dataset(
     # retained because the ScanImage-based fallback alignment path consumes it whenever the duration-tolerance
     # filter alone cannot recover the expected frame count.
     paired_pulses: pl.DataFrame = (
-        rising_edges.join(falling_edges, on="pulse_id", how="inner")
+        rising_edges.join(other=falling_edges, on="pulse_id", how="inner")
         .with_columns(
             ((pl.col("pulse_end") - pl.col("pulse_start")) / _MICROSECONDS_PER_MILLISECOND).alias("duration_ms")
         )
@@ -152,7 +159,7 @@ def assemble_cindra_dataset(
 
     # Primary alignment path: keeps only those pulses whose duration falls within the expected scan-pulse window.
     frame_aligned_data: pl.DataFrame = (
-        paired_pulses.filter(pl.col("duration_ms").is_between(min_duration, max_duration))
+        paired_pulses.filter(pl.col("duration_ms").is_between(lower_bound=min_duration, upper_bound=max_duration))
         .select(
             pl.col("pulse_id").alias("frame"),
             pl.col("pulse_start").alias("time_us"),
@@ -171,13 +178,18 @@ def assemble_cindra_dataset(
     # fewer in-window pulses than the cindra frame count, the duration filter has rejected real frames whose TTL
     # signal briefly fell outside the tolerance window. The ScanImage-based fallback recovers them by matching
     # each logged TTL rising edge to its nearest ScanImage-recorded frame timestamp.
-    if len(frame_aligned_data) > frames:
-        frame_aligned_data = frame_aligned_data.tail(frames)
-    elif len(frame_aligned_data) < frames:
+    #
+    # Clipping the front assumes the surplus sits before the acquisition, which holds while every plane contributes
+    # the same sample count. The reference mesoscope-vr recording guarantees that by acquiring one physical plane on
+    # one channel. cindra's plane combination trims each plane to the shortest one it holds, so a recording that
+    # interleaves several planes or two channels would carry part of its surplus at the tail instead.
+    if len(frame_aligned_data) > frame_count:
+        frame_aligned_data = frame_aligned_data.tail(frame_count)
+    elif len(frame_aligned_data) < frame_count:
         frame_aligned_data = _align_pulses_to_scanimage(
             paired_pulses=paired_pulses,
             raw_data_path=raw_data_path,
-            expected_frame_count=frames,
+            expected_frame_count=frame_count,
         )
 
     # Normalizes frame IDs to a contiguous 1-based range and records session-relative elapsed minutes, so downstream
@@ -196,8 +208,8 @@ def assemble_cindra_dataset(
     classification = np.load(file=cindra_data_path.joinpath("cell_classification.npy"), mmap_mode="r")
     is_cell_mask: NDArray[np.bool_] = classification[:, 0] == 1
 
-    # Streams fluorescence Series into the DataFrame one file at a time to keep peak memory at one
-    # array-worth instead of eight.
+    # Streams fluorescence Series into the DataFrame one file at a time, so peak memory holds a single fluorescence
+    # array.
     fluorescence_sources: tuple[tuple[Path, str, str, NDArray[np.bool_] | None], ...] = (
         (cindra_data_path, "cell_fluorescence.npy", DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE, is_cell_mask),
         (cindra_data_path, "neuropil_fluorescence.npy", DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE, is_cell_mask),
@@ -221,74 +233,6 @@ def assemble_cindra_dataset(
         del series
 
     return frame_aligned_data
-
-
-def _load_cindra_fluorescence(
-    data_path: Path,
-    filename: str,
-    column_name: str,
-    *,
-    cell_mask: NDArray[np.bool_] | None = None,
-) -> pl.Series:
-    """Loads fluorescence data from a cindra .npy file and returns it as a Polars Array-typed Series.
-
-    Args:
-        data_path: The path to the directory that stores the fluorescence data to be loaded.
-        filename: The name of the .npy file that stores the data to be loaded.
-        column_name: The name to assign to the returned Series.
-        cell_mask: The mask that filters out non-cell ROIs. Must match the ROI axis of the loaded
-            fluorescence array.
-
-    Returns:
-        A Polars Array-typed Series containing the fluorescence data with shape (frames, rois).
-    """
-    # Memory-maps the cindra fluorescence array to defer reading the pixel data until the selection is applied.
-    fluorescence = np.load(file=data_path.joinpath(filename), mmap_mode="r")
-
-    # Drops the masked intermediate before returning to keep peak memory at one array-worth instead of two.
-    if cell_mask is not None:
-        masked = fluorescence[cell_mask, :]
-        transposed = np.ascontiguousarray(masked.T, dtype=np.float32)
-        del masked
-    else:
-        transposed = np.ascontiguousarray(fluorescence.T, dtype=np.float32)
-
-    return pl.Series(name=column_name, values=transposed)
-
-
-def _resolve_acquisition_sizes(raw_data_path: Path) -> list[int]:
-    """Returns the frame count of every mesoscope acquisition that contributed to the session, in descending order.
-
-    Notes:
-        Sessions preprocessed with acquisition-aware frame numbering carry an explicit per-frame acquisition index,
-        which is read directly. Older sessions number every acquisition from one, so a frame number appearing in the
-        archive N times was produced by N separate acquisitions. Counting how many frame numbers survive each
-        successive peel of that multiset recovers the same sizes from the multiset alone, which holds for any row
-        order the archive happens to carry.
-
-    Args:
-        raw_data_path: The path to the session's raw_data directory.
-
-    Returns:
-        The per-acquisition frame counts, or an empty list when the ScanImage metadata archive is absent.
-    """
-    metadata_path = raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA, _FRAME_VARIANT_METADATA_FILENAME)
-    if not metadata_path.is_file():
-        return []
-
-    with np.load(file=metadata_path) as metadata:
-        if _SI_ACQUISITION_NUMBER_KEY in metadata:
-            acquisitions = np.asarray(metadata[_SI_ACQUISITION_NUMBER_KEY])
-            if np.unique(acquisitions).size > 1:
-                return sorted((int(count) for count in np.unique(acquisitions, return_counts=True)[1]), reverse=True)
-        frame_numbers = np.asarray(metadata[_SI_FRAME_NUMBER_KEY])
-
-    counts = np.unique(frame_numbers, return_counts=True)[1]
-    sizes: list[int] = []
-    while counts.max(initial=0) > 0:
-        sizes.append(int(np.count_nonzero(counts)))
-        counts = np.maximum(counts - 1, 0)
-    return sizes
 
 
 def _discard_unacquired_pulse_runs(frame_aligned_data: pl.DataFrame, raw_data_path: Path) -> pl.DataFrame:
@@ -344,6 +288,41 @@ def _discard_unacquired_pulse_runs(frame_aligned_data: pl.DataFrame, raw_data_pa
     return frame_aligned_data.filter(pl.Series(values=keep))
 
 
+def _resolve_acquisition_sizes(raw_data_path: Path) -> list[int]:
+    """Returns the frame count of every mesoscope acquisition that contributed to the session, in descending order.
+
+    Notes:
+        Sessions preprocessed with acquisition-aware frame numbering carry an explicit per-frame acquisition index,
+        which is read directly. Older sessions number every acquisition from one, so a frame number appearing in the
+        archive N times was produced by N separate acquisitions. Counting how many frame numbers survive each
+        successive peel of that multiset recovers the same sizes from the multiset alone, which holds for any row
+        order the archive happens to carry.
+
+    Args:
+        raw_data_path: The path to the session's raw_data directory.
+
+    Returns:
+        The per-acquisition frame counts, or an empty list when the ScanImage metadata archive is absent.
+    """
+    metadata_path = raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA, _FRAME_VARIANT_METADATA_FILENAME)
+    if not metadata_path.is_file():
+        return []
+
+    with np.load(file=metadata_path) as metadata:
+        if _SCANIMAGE_ACQUISITION_NUMBER_KEY in metadata:
+            acquisitions = np.asarray(metadata[_SCANIMAGE_ACQUISITION_NUMBER_KEY])
+            if np.unique(acquisitions).size > 1:
+                return sorted((int(count) for count in np.unique(acquisitions, return_counts=True)[1]), reverse=True)
+        frame_numbers = np.asarray(metadata[_SCANIMAGE_FRAME_NUMBER_KEY])
+
+    counts = np.unique(frame_numbers, return_counts=True)[1]
+    sizes: list[int] = []
+    while counts.max(initial=0) > 0:
+        sizes.append(int(np.count_nonzero(counts)))
+        counts = np.maximum(counts - 1, 0)
+    return sizes
+
+
 def _match_runs_to_acquisitions(run_lengths: list[int], acquisition_sizes: list[int]) -> list[tuple[int, int]] | None:
     """Assigns each acquisition the consecutive run span whose pulse count best accounts for its frame count.
 
@@ -354,7 +333,7 @@ def _match_runs_to_acquisitions(run_lengths: list[int], acquisition_sizes: list[
         a consecutive span rather than a single run.
 
     Args:
-        run_lengths: The pulse count of every run, in acquisition order.
+        run_lengths: The pulse count of every run, in chronological order.
         acquisition_sizes: The frame count of every acquisition.
 
     Returns:
@@ -397,7 +376,7 @@ def _search_run_spans(
         search over run spans tractable as the run count grows.
 
     Args:
-        run_lengths: The pulse count of every run, in acquisition order.
+        run_lengths: The pulse count of every run, in chronological order.
         acquisition_sizes: The frame count of every acquisition.
         order: The order in which the acquisitions claim their run spans.
         run_index: The first run available to the acquisition being placed.
@@ -438,10 +417,10 @@ def _align_pulses_to_scanimage(
     paired_pulses: pl.DataFrame, raw_data_path: Path, expected_frame_count: int
 ) -> pl.DataFrame:
     """Aligns microcontroller-logged TTL pulses to ScanImage-acquired frames using ScanImage's per-frame metadata
-    archive. This is the fallback path used when the duration-tolerance filter on TTL pulses produces fewer rows
-    than the cindra fluorescence frame count.
+    archive.
 
-    Pulses with no ScanImage frame inside the tolerance window are dropped as noise.
+    Serves as the fallback path taken when the duration-tolerance filter on TTL pulses produces fewer rows than the
+    cindra fluorescence frame count. Pulses with no ScanImage frame inside the tolerance window are dropped as noise.
 
     Args:
         paired_pulses: The DataFrame of unfiltered paired rising/falling TTL edges with the columns ``pulse_id``,
@@ -469,22 +448,27 @@ def _align_pulses_to_scanimage(
         console.error(message=message, error=ValueError)
 
     # ScanImage writes its per-frame metadata in TIFF-page-concatenation order, which interleaves frames across
-    # stack files. Sorting by the strictly monotonic frame counter restores chronological order before the
-    # timestamps can be matched against TTL rising edges. NPZ archives do not support memory mapping, so the
-    # context manager is used to keep the archive open only long enough to copy the two arrays.
+    # stack files. Sorting by the per-frame frame counter restores chronological order before the timestamps can be
+    # matched against TTL rising edges. NPZ archives do not support memory mapping, so the context manager is used
+    # to keep the archive open only long enough to copy the two arrays.
     with np.load(file=metadata_path) as metadata:
-        frame_numbers = np.asarray(metadata[_SI_FRAME_NUMBER_KEY])
-        frame_seconds = np.asarray(metadata[_SI_FRAME_TIMESTAMP_KEY])
+        frame_numbers = np.asarray(metadata[_SCANIMAGE_FRAME_NUMBER_KEY])
+        frame_seconds = np.asarray(metadata[_SCANIMAGE_FRAME_TIMESTAMP_KEY])
     chronological_order = np.argsort(frame_numbers, kind="stable")
-    si_microseconds = (frame_seconds[chronological_order] * _MICROSECONDS_PER_SECOND).astype(np.int64)
+    scanimage_microseconds = (frame_seconds[chronological_order] * _MICROSECONDS_PER_SECOND).astype(np.int64)
 
     # The ScanImage archive must contain exactly as many entries as cindra's frame count. If it does not, the
     # input data is internally inconsistent and alignment cannot proceed.
-    if si_microseconds.size != expected_frame_count:
+    #
+    # This one-to-one equality holds while the recording delivers one cindra sample per ScanImage frame, which the
+    # reference mesoscope-vr configuration guarantees by acquiring one physical plane on one channel. cindra sizes
+    # each plane from its own interleave position, so a recording carrying several planes or two channels reports a
+    # per-position count that this comparison would read as an inconsistency.
+    if scanimage_microseconds.size != expected_frame_count:
         message = (
             f"Unable to apply the ScanImage-based fallback alignment for the cindra dataset assembly. The cindra "
             f"processing pipeline reported {expected_frame_count} frames, but the ScanImage metadata archive "
-            f"'{metadata_path}' contains {si_microseconds.size} entries."
+            f"'{metadata_path}' contains {scanimage_microseconds.size} entries."
         )
         console.error(message=message, error=ValueError)
 
@@ -497,37 +481,39 @@ def _align_pulses_to_scanimage(
     # yields the most pulse-to-frame matches within the tolerance window.
     best_match_count = -1
     best_offset = 0
-    anchor_count = min(_SI_ANCHOR_SEARCH_LIMIT, pulse_microseconds.size)
+    anchor_count = min(_SCANIMAGE_ANCHOR_SEARCH_LIMIT, pulse_microseconds.size)
     for anchor_index in range(anchor_count):
-        candidate_offset = int(pulse_microseconds[anchor_index]) - int(si_microseconds[0])
+        candidate_offset = int(pulse_microseconds[anchor_index]) - int(scanimage_microseconds[0])
         match_count = _count_matches_within_tolerance(
             pulse_microseconds=pulse_microseconds,
-            si_microseconds=si_microseconds + candidate_offset,
+            scanimage_microseconds=scanimage_microseconds + candidate_offset,
         )
         if match_count > best_match_count:
             best_match_count = match_count
             best_offset = candidate_offset
 
-    aligned_si_microseconds = si_microseconds + best_offset
+    aligned_scanimage_microseconds = scanimage_microseconds + best_offset
 
     # Matches each TTL pulse to the nearest aligned ScanImage frame. Resolves conflicts where multiple pulses claim
     # the same frame by keeping the pulse closer to the frame's expected time. Treats pulses outside the tolerance
     # window as noise and drops them.
-    nearest_si_index = _nearest_target_index(values=pulse_microseconds, sorted_targets=aligned_si_microseconds)
-    nearest_distance = np.abs(pulse_microseconds - aligned_si_microseconds[nearest_si_index])
-    within_tolerance = nearest_distance < _SI_MATCH_TOLERANCE_US
+    nearest_scanimage_index = _nearest_target_index(
+        values=pulse_microseconds, sorted_targets=aligned_scanimage_microseconds
+    )
+    nearest_distance = np.abs(pulse_microseconds - aligned_scanimage_microseconds[nearest_scanimage_index])
+    within_tolerance = nearest_distance < _SCANIMAGE_MATCH_TOLERANCE_US
 
     keep_pulse = np.zeros(pulse_microseconds.size, dtype=np.bool_)
     closest_pulse_per_frame: dict[int, tuple[int, int]] = {}
     for pulse_index in np.flatnonzero(within_tolerance):
-        si_index = int(nearest_si_index[pulse_index])
+        scanimage_index = int(nearest_scanimage_index[pulse_index])
         distance = int(nearest_distance[pulse_index])
-        existing = closest_pulse_per_frame.get(si_index)
+        existing = closest_pulse_per_frame.get(scanimage_index)
         if existing is not None and existing[0] <= distance:
             continue
         if existing is not None:
             keep_pulse[existing[1]] = False
-        closest_pulse_per_frame[si_index] = (distance, int(pulse_index))
+        closest_pulse_per_frame[scanimage_index] = (distance, int(pulse_index))
         keep_pulse[pulse_index] = True
 
     if int(keep_pulse.sum()) != expected_frame_count:
@@ -535,7 +521,7 @@ def _align_pulses_to_scanimage(
             f"Unable to apply the ScanImage-based fallback alignment for the cindra dataset assembly. The "
             f"matching produced {int(keep_pulse.sum())} pulses, but cindra reports {expected_frame_count} "
             f"frames. The TTL log and ScanImage metadata cannot be reconciled within the configured "
-            f"±{_SI_MATCH_TOLERANCE_US // _MICROSECONDS_PER_MILLISECOND} ms tolerance window."
+            f"±{_SCANIMAGE_MATCH_TOLERANCE_US // _MICROSECONDS_PER_MILLISECOND} ms tolerance window."
         )
         console.error(message=message, error=ValueError)
 
@@ -548,34 +534,66 @@ def _align_pulses_to_scanimage(
     ).sort("frame")
 
 
-def _count_matches_within_tolerance(pulse_microseconds: NDArray[np.int64], si_microseconds: NDArray[np.int64]) -> int:
-    """Counts how many TTL pulse rising edges have a ScanImage frame within ``_SI_MATCH_TOLERANCE_US``.
+def _count_matches_within_tolerance(
+    pulse_microseconds: NDArray[np.int64], scanimage_microseconds: NDArray[np.int64]
+) -> int:
+    """Counts how many TTL pulse rising edges have a ScanImage frame within ``_SCANIMAGE_MATCH_TOLERANCE_US``.
 
     Args:
         pulse_microseconds: The microcontroller-logged TTL pulse rising-edge timestamps in microseconds.
-        si_microseconds: The ScanImage per-frame timestamps in microseconds, sorted in ascending order and shifted
-            into the microcontroller's clock frame by the candidate offset.
+        scanimage_microseconds: The ScanImage per-frame timestamps in microseconds, sorted in ascending order and
+            shifted into the microcontroller's clock frame by the candidate offset.
 
     Returns:
         The number of pulses whose nearest ScanImage frame is within the tolerance window.
     """
-    nearest_index = _nearest_target_index(values=pulse_microseconds, sorted_targets=si_microseconds)
-    nearest_distance = np.abs(pulse_microseconds - si_microseconds[nearest_index])
-    return int((nearest_distance < _SI_MATCH_TOLERANCE_US).sum())
+    nearest_index = _nearest_target_index(values=pulse_microseconds, sorted_targets=scanimage_microseconds)
+    nearest_distance = np.abs(pulse_microseconds - scanimage_microseconds[nearest_index])
+    return int((nearest_distance < _SCANIMAGE_MATCH_TOLERANCE_US).sum())
 
 
 def _nearest_target_index(values: NDArray[np.int64], sorted_targets: NDArray[np.int64]) -> NDArray[np.intp]:
     """Returns the index, into ``sorted_targets``, of the nearest target for each query value.
 
     Args:
-        values: The query values.
+        values: The values whose nearest target is resolved.
         sorted_targets: The candidate targets, sorted in strictly ascending order. Must contain at least two
             elements.
+    """
+    upper_index = np.clip(np.searchsorted(sorted_targets, values), 1, sorted_targets.size - 1)
+    left_distance = np.abs(values - sorted_targets[upper_index - 1])
+    right_distance = np.abs(values - sorted_targets[upper_index])
+    return np.where(left_distance < right_distance, upper_index - 1, upper_index)
+
+
+def _load_cindra_fluorescence(
+    data_path: Path,
+    filename: str,
+    column_name: str,
+    *,
+    cell_mask: NDArray[np.bool_] | None = None,
+) -> pl.Series:
+    """Loads the fluorescence traces stored in a cindra .npy file.
+
+    Args:
+        data_path: The path to the directory that stores the fluorescence data to be loaded.
+        filename: The name of the .npy file that stores the data to be loaded.
+        column_name: The name to assign to the returned Series.
+        cell_mask: The mask that filters out non-cell ROIs, matching the ROI axis of the loaded fluorescence array.
+            Defaults to None, which keeps every ROI.
 
     Returns:
-        The index, into ``sorted_targets``, of the nearest target for each query value.
+        The fluorescence traces of the retained ROIs, transposed to (frames, rois).
     """
-    upper = np.clip(np.searchsorted(sorted_targets, values), 1, sorted_targets.size - 1)
-    left_distance = np.abs(values - sorted_targets[upper - 1])
-    right_distance = np.abs(values - sorted_targets[upper])
-    return np.where(left_distance < right_distance, upper - 1, upper)
+    # Memory-maps the cindra fluorescence array to defer reading the pixel data until the selection is applied.
+    fluorescence = np.load(file=data_path.joinpath(filename), mmap_mode="r")
+
+    # Drops the masked intermediate before returning, so peak memory holds a single fluorescence array.
+    if cell_mask is not None:
+        masked = fluorescence[cell_mask, :]
+        transposed = np.ascontiguousarray(masked.T, dtype=np.float32)
+        del masked
+    else:
+        transposed = np.ascontiguousarray(fluorescence.T, dtype=np.float32)
+
+    return pl.Series(name=column_name, values=transposed)

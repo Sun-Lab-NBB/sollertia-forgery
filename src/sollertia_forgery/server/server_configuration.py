@@ -14,13 +14,17 @@ from ataraxis_data_structures import YamlConfig
 if TYPE_CHECKING:
     from pathlib import Path
 
-_SERVER_CONFIG_FILENAME: str = "server_configuration.yaml"
+_SERVER_CONFIGURATION_FILENAME: str = "server_configuration.yaml"
 """Canonical filename for the ServerConfiguration YAML stored under the working directory's configuration
 subdirectory."""
 
-_CONFIGURATION_DIR: str = "configuration"
+_CONFIGURATION_DIRECTORY: str = "configuration"
 """Subdirectory under the working directory that stores the server configuration YAML alongside other Sollertia
 configuration assets."""
+
+_REMOTE_STATE_DIRECTORY: str = "remote_state"
+"""Subdirectory under the working directory that holds this host's remote-run state, which is the artifacts mirrored
+from the compute server alongside this host's own record of what it submitted."""
 
 
 @dataclass
@@ -49,8 +53,8 @@ def create_server_configuration_file(
     root: str,
     environment: str,
 ) -> None:
-    """Creates the .YAML configuration file for the Sollertia platform compute server and configures the local machine
-    (PC) to use this file for all future server-related calls.
+    """Creates the ``server_configuration.yaml`` file for the Sollertia platform compute server at the canonical path
+    every server-related call resolves.
 
     Args:
         username: The username to use for server authentication.
@@ -60,14 +64,14 @@ def create_server_configuration_file(
         environment: The name of the shared conda environment, on the remote compute server, in which
             sollertia-forgery and all of its processing dependencies are installed.
     """
-    output_directory = get_working_directory().joinpath(_CONFIGURATION_DIR)
+    output_directory = get_working_directory().joinpath(_CONFIGURATION_DIRECTORY)
     ServerConfiguration(
         username=username,
         password=password,
         host=host,
         root=root,
         environment=environment,
-    ).to_yaml(file_path=output_directory.joinpath(_SERVER_CONFIG_FILENAME))
+    ).to_yaml(file_path=output_directory.joinpath(_SERVER_CONFIGURATION_FILENAME))
     console.echo(message="Server configuration file: Created.", level=LogLevel.SUCCESS)
 
 
@@ -83,18 +87,19 @@ def get_server_configuration() -> ServerConfiguration:
             working directory.
         ValueError: If the loaded server configuration is unconfigured or contains placeholder access credentials.
     """
-    configuration_directory = get_working_directory().joinpath(_CONFIGURATION_DIR)
+    configuration_directory = get_working_directory().joinpath(_CONFIGURATION_DIRECTORY)
 
-    config_path = configuration_directory.joinpath(_SERVER_CONFIG_FILENAME)
+    configuration_path = configuration_directory.joinpath(_SERVER_CONFIGURATION_FILENAME)
 
-    if not config_path.exists():
+    if not configuration_path.exists():
         message = (
             f"Unable to locate the 'server_configuration.yaml' file in the Sollertia platform working directory "
-            f"{config_path}. Call the 'sl-server configure' CLI command to create the server configuration file."
+            f"{configuration_path}. Call the 'slf server configure' CLI command to create the server configuration "
+            f"file."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    configuration = ServerConfiguration.from_yaml(file_path=config_path)
+    configuration = ServerConfiguration.from_yaml(file_path=configuration_path)
 
     if not all(
         (
@@ -120,7 +125,39 @@ def get_server_configuration() -> ServerConfiguration:
 def get_server_configuration_path() -> Path:
     """Returns the path under which the ``server_configuration.yaml`` file is stored.
 
-    Used by tools that write to the configuration file directly and need to verify its destination path without
-    loading the configuration contents.
+    Returns:
+        The path to the configuration file under the Sollertia platform working directory, resolved without reading
+        the file.
     """
-    return get_working_directory().joinpath(_CONFIGURATION_DIR, _SERVER_CONFIG_FILENAME)
+    return get_working_directory().joinpath(_CONFIGURATION_DIRECTORY, _SERVER_CONFIGURATION_FILENAME)
+
+
+def remote_state_path() -> Path:
+    """Returns the local directory holding everything this host records about remote runs.
+
+    Notes:
+        One directory holds both halves of what a remote run leaves behind, namely the state artifacts pulled from
+        the server and this host's own record of what it submitted. Keeping them together means a run's whole local
+        footprint is one directory to find, inspect, or remove.
+
+    Returns:
+        The path to the remote state directory under the Sollertia platform working directory.
+    """
+    return get_working_directory().joinpath(_REMOTE_STATE_DIRECTORY)
+
+
+def remote_state_directory(project: str) -> Path:
+    """Returns the local directory mirroring one remote project's state artifacts.
+
+    Notes:
+        The mirror reproduces the project directory by name, so an artifact pulled into it keeps the filename its
+        writer derived from the project. Every read tool resolves an artifact from the project directory it is given,
+        so a mirrored project is read exactly as a local one is.
+
+    Args:
+        project: The name of the project whose remote state is mirrored.
+
+    Returns:
+        The path to the project's mirror directory under the Sollertia platform working directory.
+    """
+    return remote_state_path().joinpath(project)

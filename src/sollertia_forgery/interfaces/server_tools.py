@@ -1,10 +1,9 @@
-"""Provides Model Context Protocol (MCP) tools for authoring and reading the remote compute server configuration."""
+"""Provides the Model Context Protocol (MCP) tools for authoring and reading the remote compute server configuration."""
 
 from __future__ import annotations
 
 import uuid
 from typing import Any
-import contextlib
 
 import yaml  # type: ignore[import-untyped]
 
@@ -13,28 +12,8 @@ from ..server import (
     get_server_configuration,
     get_server_configuration_path,
 )
+from .responses import ok_response, error_response
 from .mcp_instance import mcp
-
-
-def _ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Constructs a successful response dict with a ``success`` flag set to True."""
-    return {"success": True, **payload}
-
-
-def _error_response(message: str) -> dict[str, Any]:
-    """Constructs a failure response dict with a ``success`` flag set to False and the provided error message."""
-    return {"success": False, "error": message}
-
-
-def _serialize(instance: ServerConfiguration) -> dict[str, Any]:
-    """Converts a ServerConfiguration instance into a JSON-friendly dict."""
-    return {
-        "username": instance.username,
-        "password": instance.password,
-        "host": instance.host,
-        "root": instance.root,
-        "environment": instance.environment,
-    }
 
 
 @mcp.tool()
@@ -47,11 +26,11 @@ def read_server_configuration_tool() -> dict[str, Any]:
     """
     try:
         instance = get_server_configuration()
-    except (FileNotFoundError, OSError, ValueError) as exception:
-        return _error_response(message=str(exception))
-    serialized = _serialize(instance=instance)
+    except (OSError, ValueError) as exception:
+        return error_response(message=f"Unable to read the server configuration. {exception}")
+    serialized = _render_configuration(instance=instance)
     serialized["password"] = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
-    return _ok_response(data=serialized)
+    return ok_response(data=serialized)
 
 
 @mcp.tool()
@@ -63,8 +42,8 @@ def write_server_configuration_tool(
     """Creates or replaces the ServerConfiguration YAML in the working directory.
 
     Args:
-        configuration_payload: The complete ServerConfiguration payload (must include ``username``, ``password``,
-            ``host``, ``root``, and ``environment``).
+        configuration_payload: The complete ServerConfiguration payload. Supply ``username``, ``password``, ``host``,
+            ``root``, and ``environment``, since an omitted field is persisted as an empty string rather than rejected.
         overwrite: Determines whether to overwrite an existing server configuration file.
 
     Returns:
@@ -73,10 +52,15 @@ def write_server_configuration_tool(
     try:
         file_path = get_server_configuration_path()
     except FileNotFoundError as exception:
-        return _error_response(message=str(exception))
+        return error_response(message=f"Unable to resolve the server configuration path. {exception}")
 
     if file_path.exists() and not overwrite:
-        return _error_response(message=f"File already exists: {file_path}. Pass overwrite=True to replace.")
+        return error_response(
+            message=(
+                f"Unable to write the server configuration. A file already exists at '{file_path}'. Pass "
+                f"overwrite=True to replace it."
+            )
+        )
 
     file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -88,18 +72,33 @@ def write_server_configuration_tool(
         temp_path.write_text(yaml.safe_dump(data=configuration_payload, sort_keys=False))
         instance = ServerConfiguration.from_yaml(file_path=temp_path)
     except Exception as exception:
-        with contextlib.suppress(FileNotFoundError):
-            temp_path.unlink()
-        return _error_response(message=f"Validation failed for ServerConfiguration: {exception}")
+        return error_response(message=f"Unable to validate the supplied server configuration payload. {exception}")
     finally:
-        with contextlib.suppress(FileNotFoundError):
-            temp_path.unlink()
+        temp_path.unlink(missing_ok=True)
 
     try:
         instance.to_yaml(file_path=file_path)
     except Exception as exception:
-        return _error_response(message=f"Failed to persist ServerConfiguration to {file_path}: {exception}")
+        return error_response(message=f"Unable to write the server configuration to '{file_path}'. {exception}")
 
-    serialized = _serialize(instance=instance)
+    serialized = _render_configuration(instance=instance)
     serialized["password"] = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
-    return _ok_response(file_path=str(file_path), data=serialized)
+    return ok_response(file_path=str(file_path), data=serialized)
+
+
+def _render_configuration(instance: ServerConfiguration) -> dict[str, Any]:
+    """Converts a ServerConfiguration instance into a JSON-friendly dict.
+
+    Args:
+        instance: The configuration to render.
+
+    Returns:
+        A dictionary carrying the username, password, host, root, and environment the configuration holds.
+    """
+    return {
+        "username": instance.username,
+        "password": instance.password,
+        "host": instance.host,
+        "root": instance.root,
+        "environment": instance.environment,
+    }

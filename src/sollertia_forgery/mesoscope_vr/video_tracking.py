@@ -1,12 +1,10 @@
-"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline. The
-function post-processes externally-produced DeepLabCut pose predictions for the face camera into per-frame pupil and
-eye metrics.
-"""
+"""Provides the Mesoscope-VR video-tracking function donated to the system-agnostic video-processing pipeline."""
 
 from __future__ import annotations
 
 from enum import StrEnum
 from typing import TYPE_CHECKING
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -20,13 +18,14 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
 
+
 _EYE_TRACKING_PROJECT_NAME: str = "eye_tracking"
 """The DeepLabCut project name baked into the prediction filename, used to select this pipeline's ``.h5`` from
 the predictions written beside the face-camera video in the session's raw camera_data directory."""
 
 PUPIL_CAMERA_NAME: str = "face_camera"
-"""The colloquial camera name whose recordings carry the eye, used to name this function's output feather
-(``{camera}_{target}.feather``)."""
+"""The colloquial camera name whose recordings carry the eye. It names the pupil-tracking output feather
+(``{camera}_{target}.feather``) and prefixes the face camera's motion-energy and frame-luminance dataset columns."""
 
 _PUPIL_TARGET: str = "pupil"
 """The tracking-target label used to name this function's output feather (``{camera}_{target}.feather``)."""
@@ -54,22 +53,24 @@ _EYE_POINTS: tuple[str, ...] = ("eye_right", "eye_bottom", "eye_left", "eye_top"
 _CANONICAL_POINTS: tuple[str, ...] = (_REFLECTION_POINT, *_PUPIL_POINTS, *_EYE_POINTS)
 """All thirteen canonical bodyparts the DLC ``.h5`` must provide for this function to parse it."""
 
-_LIKELIHOOD_THRESHOLD: float = 0.9
-"""The minimum DLC likelihood for a point to be trusted in a frame, set at the strict end of the field's 0.6-0.9
-``pcutoff`` band. The gate is strict because the labeled-angle fit trusts each surviving point's ring identity, so a
-mislabeled low-confidence point biases the ellipse directly rather than averaging out. It applies uniformly to the
-pupil ring, the eye ring, and the corneal reflection."""
+_LIKELIHOOD_THRESHOLD: float = 0.8
+"""The minimum DLC likelihood for a point to be trusted in a frame, set within the field's 0.6-0.9 ``pcutoff`` band.
+The gate stays high because the labeled-angle fit trusts each surviving point's ring identity, so a mislabeled
+low-confidence point biases the ellipse directly rather than averaging out. It stays off the top of the band because
+the eye ring carries four points against a three-point minimum, leaving it one point of redundancy: a gate that
+rejects a merely borderline point costs the whole eye fit, and with it the openness a squinting eye is read from. It
+applies uniformly to the pupil ring, the eye ring, and the corneal reflection."""
 
 _MINIMUM_PERIMETER_POINTS: int = 3
 """The number of a feature's ring points that must clear the likelihood threshold for its ellipse to be determined.
 Each point's ring position fixes its parametric angle, so three points supply six equations for the fit's six
-unknowns regardless of where on the ring they sit. Two can never suffice."""
+unknowns regardless of where on the ring they sit."""
 
 _MAXIMUM_FIT_CONDITION: float = 12.0
-"""The largest condition number a feature's ellipse fit may have and still be trusted, above which the frame is
-rejected as underdetermined. The condition number measures how far the surviving arc must reach to pin the rest
-of the ellipse. This cap is the worst value a minimally-determined three-point fit produces, so it admits every
-frame with enough confident points to fit."""
+"""The largest condition number a feature's ellipse fit may have and still be trusted. The condition number measures
+how far the surviving arc must reach to pin the rest of the ellipse. The cap sits at the worst value a
+minimally-determined three-point fit on an evenly spaced ring produces, so it admits every fit the pupil and eye rings
+produce and guards a ring that samples the ellipse less evenly."""
 
 _BLINK_FRACTION: float = 0.5
 """The fraction of the session-median eye openness below which a frame is flagged as a blink."""
@@ -124,16 +125,19 @@ class PupilColumn(StrEnum):
     """Ratio of the fitted eye ellipse's height to its width at each frame, a distance-invariant measure of how open
     the eye is. NaN wherever the eye ring cannot be fit."""
     BLINKING_STATE = "blinking_state"
-    """Boolean flag marking frames where the eye is closed or covered, leaving no measurable pupil. True when the eye
-    ring cannot be fit, the corneal reflection is lost, or the eye opens less than half its session-median amount."""
+    """Boolean flag marking frames where the eye is closed or covered, leaving no measurable pupil. True when a fitted
+    eye opens less than half its session-median amount, and when a lost eye ring or corneal reflection leaves no pupil
+    fit either. A pupil that resolves keeps the frame open, since a covered eye presents no pupil ring to fit."""
     DILATION_STATE = "dilation_state"
     """Boolean flag marking frames where the pupil dilated past the eye's aperture and was clipped too far to fit a
     diameter. True only on non-blink frames whose pupil is otherwise unmeasurable. A fully visible dilated pupil is
     measured normally and flagged False."""
     REFLECTION_X_PX = "reflection_x_px"
-    """Horizontal position of the corneal reflection in pixels at each frame."""
+    """Horizontal position of the corneal reflection in pixels at each frame. NaN wherever the reflection falls below
+    the likelihood threshold, which flags the frame as a blink unless the pupil still resolves."""
     REFLECTION_Y_PX = "reflection_y_px"
-    """Vertical position of the corneal reflection in pixels at each frame."""
+    """Vertical position of the corneal reflection in pixels at each frame. NaN wherever the reflection falls below the
+    likelihood threshold, which flags the frame as a blink unless the pupil still resolves."""
     PUPIL_REFLECTION_OFFSET_X_PX = "pupil_reflection_offset_x_px"
     """Horizontal offset in pixels of the pupil center from the corneal reflection at each frame. Referencing the
     reflection cancels the eye's common-mode motion relative to the camera, making this a motion-robust horizontal
@@ -165,7 +169,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     Notes:
         The predictions are produced upstream rather than here because DeepLabCut pins ``numpy<2`` while
         sollertia-forgery runs ``numpy>=2`` on Python 3.14, so DeepLabCut cannot be imported in-process. This worker
-        only reads DeepLabCut's ``.h5`` output and never depends on the ``deeplabcut`` library.
+        only reads DeepLabCut's ``.h5`` output, keeping the ``deeplabcut`` library out of this environment.
 
     Args:
         session: The loaded session whose pupil DLC predictions are post-processed. Its raw camera_data directory
@@ -176,9 +180,7 @@ def process_mesoscope_video_tracking(session: SessionData, output_directory: Pat
     Raises:
         ValueError: If a DLC ``.h5`` is present but is missing a canonical bodypart or has an unrecognized layout.
     """
-    # DeepLabCut runs upstream on the acquisition rig, which writes its predictions beside the face-camera video in
-    # the session's raw camera_data directory during preprocessing. This pipeline's file is identified by the
-    # DeepLabCut project name baked into its filename. When several match, the natural-sort-first one is used.
+    # When several prediction files match, the natural-sort-first one is used.
     matches = natsorted(session.raw_data.camera_data_path.glob(f"*{_EYE_TRACKING_PROJECT_NAME}*.h5"))
     if not matches:
         console.echo(
@@ -215,8 +217,8 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
     """Reads the requested bodyparts from a DeepLabCut prediction ``.h5`` into per-bodypart coordinate arrays.
 
     DeepLabCut serializes its predictions with ``pandas.DataFrame.to_hdf`` as a PyTables ``table``-format HDF5, so they
-    are read back with ``pandas``. The columns are a ``(scorer, bodypart, coordinate)`` MultiIndex, so this returns one
-    ``(frame_count, 3)`` array of ``(x, y, likelihood)`` per requested bodypart, with rows in ascending frame order.
+    are read back with ``pandas``. The columns are a ``(scorer, bodypart, coordinate)`` MultiIndex, which this flattens
+    into one array per requested bodypart, with rows in ascending frame order.
 
     Args:
         h5_path: The path to the DLC prediction ``.h5`` file.
@@ -228,7 +230,7 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
     Raises:
         ValueError: If the file does not hold a DeepLabCut prediction frame, or a requested bodypart is missing.
     """
-    predictions = pd.read_hdf(h5_path)
+    predictions = pd.read_hdf(path_or_buf=h5_path)
     if not isinstance(predictions, pd.DataFrame):
         message = (
             f"Unable to read pupil tracking from '{h5_path.name}'. The file does not contain a DeepLabCut prediction "
@@ -250,7 +252,7 @@ def _read_points_from_h5(h5_path: Path, bodyparts: tuple[str, ...]) -> dict[str,
 
     result: dict[str, NDArray[np.float64]] = {}
     for bodypart in bodyparts:
-        channels = []
+        channels: list[NDArray[np.float64]] = []
         for coordinate in _COORDINATES:
             position = column_position.get((bodypart, coordinate))
             if position is None:
@@ -280,85 +282,93 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     """
     # A feature is measurable exactly when its fit is determined and well enough conditioned to trust. The pupil
     # columns additionally answer to the blink. The eye columns answer only to their own fit.
-    pupil_center, pupil_semi_a, pupil_semi_b, pupil_condition, pupil_residual, pupil_valid = _fit_ring_ellipse(
-        points=points, names=_PUPIL_POINTS
-    )
+    pupil_fit = _fit_ring_ellipse(points=points, names=_PUPIL_POINTS)
     # The ellipse area is pi times the cross-product magnitude of its two conjugate semi-diameters.
-    pupil_area = np.pi * np.abs(pupil_semi_a[:, 0] * pupil_semi_b[:, 1] - pupil_semi_a[:, 1] * pupil_semi_b[:, 0])
+    pupil_area = np.pi * np.abs(
+        pupil_fit.semi_a[:, 0] * pupil_fit.semi_b[:, 1] - pupil_fit.semi_a[:, 1] * pupil_fit.semi_b[:, 0]
+    )
     # The pupil diameter is the mean of the ellipse's two full-axis diameters, (2|semi_a| + 2|semi_b|) / 2, i.e. the
-    # sum of the two semi-diameter lengths. There is no pupil width or height output column, so neither is materialized.
-    pupil_diameter = _norm(pupil_semi_a) + _norm(pupil_semi_b)
+    # sum of the two semi-diameter lengths. The output columns carry the mean alone.
+    pupil_diameter = _norm(vectors=pupil_fit.semi_a) + _norm(vectors=pupil_fit.semi_b)
 
-    eye_center, eye_semi_a, eye_semi_b, _, _, eye_valid = _fit_ring_ellipse(points=points, names=_EYE_POINTS)
-    eye_semi_width, eye_semi_height = _norm(eye_semi_a), _norm(eye_semi_b)
+    eye_fit = _fit_ring_ellipse(points=points, names=_EYE_POINTS)
+    eye_semi_width, eye_semi_height = _norm(vectors=eye_fit.semi_a), _norm(vectors=eye_fit.semi_b)
     eye_width, eye_height = 2.0 * eye_semi_width, 2.0 * eye_semi_height
     # Eye openness is the eye's vertical-to-horizontal aspect ratio, which is invariant to camera distance. A
     # zero-width eye is a degenerate fit rather than a closed eye, so it yields NaN instead of dividing.
-    eye_openness = np.divide(eye_height, eye_width, out=np.full_like(eye_height, np.nan), where=eye_width > 0.0)
+    eye_openness = np.divide(
+        eye_height, eye_width, out=np.full_like(a=eye_height, fill_value=np.nan), where=eye_width > 0.0
+    )
 
     # With no confident, non-degenerate eye fit anywhere in the session there is no openness baseline to compare
     # against. Resolves to NaN and the openness term drops out of the flag below, leaving the eye's visibility
     # to carry it.
-    confident_openness = eye_openness[eye_valid]
+    confident_openness = eye_openness[eye_fit.valid]
     baseline = float(np.nanmedian(confident_openness)) if np.isfinite(confident_openness).any() else np.nan
 
     reflection = points[_REFLECTION_POINT][:, :2]
     reflection_valid = points[_REFLECTION_POINT][:, 2] >= _LIKELIHOOD_THRESHOLD
 
-    # A blink is read from the eye and its cornea alone, never from the pupil. Something covering the eye takes the
+    # A blink is read from the eye and its cornea, never from a missing pupil. Something covering the eye takes the
     # eye ring, the corneal reflection, and the opening down together, and the cause does not change the consequence:
-    # a lid and a paw read the same. The pupil is deliberately excluded because a pupil that vanishes under an OPEN
-    # eye has outgrown the aperture rather than been hidden by a lid. Folding that in here would delete the most
-    # dilated pupils from the arousal signal exactly when arousal is highest.
-    is_blink = (
-        ~(eye_valid & reflection_valid) | ~np.isfinite(eye_openness) | (eye_openness < _BLINK_FRACTION * baseline)
-    )
+    # a lid and a paw read the same. A pupil that VANISHES under an open eye stays out of this, because it has
+    # outgrown the aperture rather than been hidden by a lid, and folding that in would delete the most dilated pupils
+    # from the arousal signal exactly when arousal is highest.
+    eye_evidence_lost = ~(eye_fit.valid & reflection_valid) | ~np.isfinite(eye_openness)
+
+    # A pupil that RESOLVES is the converse case, and it is positive evidence of an open eye: a covered eye presents no
+    # pupil ring to fit, so a confident fit cannot have come from behind a lid. It therefore overrides the terms above,
+    # which infer a blink from evidence that is merely absent, and which a lost eye ring alone would otherwise let a
+    # tracking failure impersonate. The measured-openness term below stands on its own, since a fitted eye observed to
+    # be closing is an observation rather than a gap, and no evidence can be absent from it.
+    is_blink = (eye_evidence_lost & ~pupil_fit.valid) | (eye_openness < _BLINK_FRACTION * baseline)
     not_blink = ~is_blink
 
-    # Behind a shut lid there is no pupil to measure, so a pupil fit that happens to converge on a blink frame is
-    # reporting on points the eye was covering. The pupil columns answer to the blink as well as to their own fit.
-    # The eye columns answer only to theirs, since their openness is what detects the blink in the first place.
-    pupil_measured = pupil_valid & not_blink
+    # Behind a lid the eye is observed to be closing, so a pupil fit that converges anyway is reporting on points that
+    # lid was covering. Only the measured-openness term reaches this far, the absence terms above having already
+    # yielded to any pupil they saw. The pupil columns answer to the blink as well as to their own fit. The eye columns
+    # answer only to theirs, since their openness is what detects the blink in the first place.
+    pupil_measured = pupil_fit.valid & not_blink
 
     # The remaining way to lose the pupil is for it to outgrow the palpebral opening, which then clips it past what
     # the surviving arc can reconstruct. The eye is plainly open, so this is dilation rather than a blink, and the two
     # flags partition every unmeasured frame between them: a frame is measured, dilated, or blinked, never two.
     is_dilated = not_blink & ~pupil_measured
 
-    pupil_reflection_offset = pupil_center - reflection
+    pupil_reflection_offset = pupil_fit.center - reflection
     pupil_reflection_offset = np.where((pupil_measured & reflection_valid)[:, None], pupil_reflection_offset, np.nan)
     # Normalizes the pupil's offset to the eye's semi-axes. A degenerate zero-extent eye divides to NaN on the
     # collapsed axis rather than to an infinity, matching how eye openness handles the same fit.
     eye_semi_axes = np.stack([eye_semi_width, eye_semi_height], axis=1)
     pupil_in_eye = np.divide(
-        pupil_center - eye_center,
+        pupil_fit.center - eye_fit.center,
         eye_semi_axes,
-        out=np.full_like(eye_semi_axes, np.nan),
+        out=np.full_like(a=eye_semi_axes, fill_value=np.nan),
         where=eye_semi_axes > 0.0,
     )
-    pupil_in_eye = np.where((pupil_measured & eye_valid)[:, None], pupil_in_eye, np.nan)
+    pupil_in_eye = np.where((pupil_measured & eye_fit.valid)[:, None], pupil_in_eye, np.nan)
 
     # Masks geometry of frames whose source points were gated out so downstream consumers see NaN, not a bad fit.
     pupil_metrics = _mask_invalid(
         metrics={
-            PupilColumn.PUPIL_CENTER_X_PX: pupil_center[:, 0],
-            PupilColumn.PUPIL_CENTER_Y_PX: pupil_center[:, 1],
+            PupilColumn.PUPIL_CENTER_X_PX: pupil_fit.center[:, 0],
+            PupilColumn.PUPIL_CENTER_Y_PX: pupil_fit.center[:, 1],
             PupilColumn.PUPIL_DIAMETER_PX: pupil_diameter,
             PupilColumn.PUPIL_AREA_PX2: pupil_area,
-            PupilColumn.PUPIL_FIT_CONDITION: pupil_condition,
-            PupilColumn.PUPIL_FIT_RESIDUAL_PX: pupil_residual,
+            PupilColumn.PUPIL_FIT_CONDITION: pupil_fit.condition,
+            PupilColumn.PUPIL_FIT_RESIDUAL_PX: pupil_fit.residual,
         },
         valid=pupil_measured,
     )
     eye_metrics = _mask_invalid(
         metrics={
-            PupilColumn.EYE_CENTER_X_PX: eye_center[:, 0],
-            PupilColumn.EYE_CENTER_Y_PX: eye_center[:, 1],
+            PupilColumn.EYE_CENTER_X_PX: eye_fit.center[:, 0],
+            PupilColumn.EYE_CENTER_Y_PX: eye_fit.center[:, 1],
             PupilColumn.EYE_WIDTH_PX: eye_width,
             PupilColumn.EYE_HEIGHT_PX: eye_height,
             PupilColumn.EYE_OPENNESS: eye_openness,
         },
-        valid=eye_valid,
+        valid=eye_fit.valid,
     )
 
     return {
@@ -375,51 +385,57 @@ def _compute_pupil_metrics(points: dict[str, NDArray[np.float64]]) -> dict[str, 
     }
 
 
-def _fit_ring_ellipse(
-    points: dict[str, NDArray[np.float64]], names: tuple[str, ...]
-) -> tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.bool_],
-]:
+@dataclass(frozen=True, slots=True)
+class _RingFit:
+    """Holds the per-frame ellipse fit of one feature's ring points."""
+
+    center: NDArray[np.float64]
+    """The fitted ellipse centers, NaN on rejected frames."""
+    semi_a: NDArray[np.float64]
+    """The first conjugate semi-diameters, NaN on rejected frames."""
+    semi_b: NDArray[np.float64]
+    """The second conjugate semi-diameters, NaN on rejected frames."""
+    condition: NDArray[np.float64]
+    """The per-frame design-matrix condition numbers, NaN on rejected frames."""
+    residual: NDArray[np.float64]
+    """The per-frame RMS point-to-ellipse distances in pixels, NaN on rejected and exactly-determined frames."""
+    valid: NDArray[np.bool_]
+    """The mask of frames that were fitted."""
+
+
+def _fit_ring_ellipse(points: dict[str, NDArray[np.float64]], names: tuple[str, ...]) -> _RingFit:
     """Fits a centrally symmetric ellipse per frame from whichever of a feature's ring points are confident.
 
     A point's position in the ring fixes its parametric angle, so a point labeled ``t`` lies at
     ``P(t) = center + cos(t) * semi_a + sin(t) * semi_b``, where ``semi_a`` and ``semi_b`` are the ellipse's conjugate
     semi-diameters. That is linear in the unknowns and separates by axis, so both coordinates share one
     ``[1, cos(t), sin(t)]`` design matrix and three confident points already determine the fit, wherever on the ring
-    they sit. Points are used as they come: no point is ever reconstructed or imputed.
+    they sit. Each confident point is used exactly as DeepLabCut reported it.
 
-    Determined is not the same as trustworthy. The design matrix depends only on which points survived, so its
-    condition number measures how far the surviving arc has to reach to pin the rest of the ellipse. Frames whose arc
-    is too narrow to carry a measurement are rejected rather than fitted.
+    Determined is not the same as trustworthy, so each occlusion pattern's design matrix is also checked for
+    conditioning. Its condition number measures how far the surviving arc has to reach to pin the rest of the ellipse.
+    The ``_MAXIMUM_FIT_CONDITION`` cap admits every arc the pupil and eye rings produce, so it guards a ring that
+    samples the ellipse less evenly. Frames that keep too few confident points are rejected rather than fitted.
 
     Args:
         points: A mapping from each canonical bodypart to its ``(frame_count, 3)`` ``(x, y, likelihood)`` array.
         names: The feature's ring bodyparts, in ring order.
 
     Returns:
-        A ``(center, semi_a, semi_b, condition, residual, valid)`` tuple. ``center``, ``semi_a`` and ``semi_b`` are
-        ``(frame_count, 2)`` arrays, NaN wherever the fit was rejected. ``condition`` is the per-frame fit condition
-        number (NaN where rejected), ``residual`` is the per-frame RMS point-to-ellipse distance in pixels, NaN where
-        rejected or where the fit was exactly determined (too few points to over-constrain it). ``valid`` is the
-        per-frame mask of frames that were fitted.
+        The feature's per-frame ellipse fit.
     """
     frame_count = points[names[0]].shape[0]
-    # The evenly spaced parametric angle of each ring point, in radians and starting at zero.
+    # Assigns each ring point its evenly spaced parametric angle, in radians and starting at zero.
     angles = 2.0 * np.pi * np.arange(len(names), dtype=np.float64) / len(names)
     confident = np.stack([points[name][:, 2] >= _LIKELIHOOD_THRESHOLD for name in names], axis=1)
     coordinates = np.stack([points[name][:, :2] for name in names], axis=1)
 
-    center = np.full((frame_count, 2), np.nan)
-    semi_a = np.full((frame_count, 2), np.nan)
-    semi_b = np.full((frame_count, 2), np.nan)
-    condition = np.full(frame_count, np.nan)
-    residual = np.full(frame_count, np.nan)
-    valid = np.zeros(frame_count, dtype=np.bool_)
+    center = np.full(shape=(frame_count, 2), fill_value=np.nan, dtype=np.float64)
+    semi_a = np.full(shape=(frame_count, 2), fill_value=np.nan, dtype=np.float64)
+    semi_b = np.full(shape=(frame_count, 2), fill_value=np.nan, dtype=np.float64)
+    condition = np.full(shape=frame_count, fill_value=np.nan, dtype=np.float64)
+    residual = np.full(shape=frame_count, fill_value=np.nan, dtype=np.float64)
+    valid = np.zeros(shape=frame_count, dtype=np.bool_)
 
     # Frames that lost the same points share a design matrix, and therefore a conditioning verdict, so each distinct
     # occlusion pattern is solved once for every frame that carries it. Packing each frame's confidence mask into one
@@ -432,13 +448,16 @@ def _fit_ring_ellipse(
         kept = np.flatnonzero(confident[representatives[index]])
         if kept.size < _MINIMUM_PERIMETER_POINTS:
             continue
-        design = np.stack([np.ones(kept.size), np.cos(angles[kept]), np.sin(angles[kept])], axis=1)
+        design = np.stack(
+            [np.ones(shape=kept.size, dtype=np.float64), np.cos(angles[kept]), np.sin(angles[kept])], axis=1
+        )
         condition_number = float(np.linalg.cond(design))
+        # Negated so a non-finite condition number rejects the pattern, since every comparison against NaN is False.
         if not condition_number <= _MAXIMUM_FIT_CONDITION:
             continue
         rows = np.flatnonzero(inverse == index)
         observed = coordinates[np.ix_(rows, kept)].transpose(1, 0, 2).reshape(kept.size, -1)
-        solution = np.linalg.lstsq(design, observed, rcond=None)[0]
+        solution = np.linalg.lstsq(a=design, b=observed, rcond=None)[0]
         center[rows], semi_a[rows], semi_b[rows] = solution.reshape(3, rows.size, 2)
         condition[rows] = condition_number
 
@@ -449,17 +468,14 @@ def _fit_ring_ellipse(
             deviations = (design @ solution - observed).reshape(kept.size, rows.size, 2)
             residual[rows] = np.sqrt(np.mean(deviations[:, :, 0] ** 2 + deviations[:, :, 1] ** 2, axis=0))
         valid[rows] = True
-    return center, semi_a, semi_b, condition, residual, valid
+    return _RingFit(center=center, semi_a=semi_a, semi_b=semi_b, condition=condition, residual=residual, valid=valid)
 
 
 def _norm(vectors: NDArray[np.float64]) -> NDArray[np.float64]:
     """Computes the per-frame length of a ``(frame_count, 2)`` array of vectors.
 
     Args:
-        vectors: The ``(frame_count, 2)`` array of per-frame vectors.
-
-    Returns:
-        The per-frame vector lengths.
+        vectors: The vectors to measure.
     """
     return np.hypot(vectors[:, 0], vectors[:, 1])
 
@@ -469,9 +485,6 @@ def _mask_invalid(metrics: dict[str, NDArray[np.float64]], valid: NDArray[np.boo
 
     Args:
         metrics: A mapping from each metric column name to its per-frame array.
-        valid: The per-frame validity mask.
-
-    Returns:
-        A new mapping with the same keys whose values are NaN where ``valid`` is False.
+        valid: The mask marking the frames whose values survive.
     """
     return {name: np.where(valid, values, np.nan) for name, values in metrics.items()}

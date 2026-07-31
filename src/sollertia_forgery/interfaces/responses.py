@@ -5,17 +5,20 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from dataclasses import dataclass
 
+from ataraxis_time import TimeUnits, convert_time
+
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
-DEFAULT_ITEM_LIMIT: int = 200
-"""The items a semi-detail page carries when the caller names no limit. A semi-detail row runs to roughly two hundred
-bytes, so a full page stays near forty kilobytes."""
+    import polars as pl
+    from ataraxis_time import PrecisionTimer
 
-DEFAULT_DETAILED_LIMIT: int = 50
-"""The items a detailed page carries when the caller names no limit. A detailed row runs to roughly five hundred
-bytes, so this holds a full page near twenty-five kilobytes. Detail is meant for reading a few items closely, so its
-page is deliberately far shorter than a semi-detail one."""
+_DEFAULT_ITEM_LIMIT: int = 200
+"""The items a semi-detail page carries when the caller names no limit."""
+
+_DEFAULT_DETAILED_LIMIT: int = 50
+"""The items a detailed page carries when the caller names no limit. Detail is meant for reading a few items closely,
+so its page is deliberately shorter."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +43,8 @@ def resolve_page(total: int, limit: int, start_row: int) -> PageWindow:
     """Resolves which slice of a matched item set a response carries.
 
     Notes:
-        Container-agnostic by design. The caller slices its own frame or list from the returned window, so one paging
-        rule serves the tools backed by a stored table and the tools backed by an in-memory job set alike.
+        The caller slices its own frame or list from the returned window, so one paging rule serves the tools backed by
+        a stored table and the tools backed by an in-memory job set alike.
 
         A limit at or below zero lifts the cap and returns every match from the requested start. That escape exists so
         a caller reading under a tight filter can take the whole result in one response, and so the useful page size
@@ -106,6 +109,38 @@ def count_values(values: Iterable[Any]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
+def frame_breakdown(frame: pl.DataFrame, axes: tuple[str, ...]) -> dict[str, dict[str, int]]:
+    """Counts how many rows of a stored table carry each value of every filterable axis.
+
+    Notes:
+        This is what a bare call reports in place of a listing. It names the values a caller can filter on and how much
+        each would match, so an agent orients itself on one response rather than paging a whole artifact.
+
+    Args:
+        frame: The whole stored table.
+        axes: The columns to count, which are the columns a caller may filter by.
+
+    Returns:
+        A dictionary mapping each present axis to its value counts.
+    """
+    return {axis: count_values(values=frame[axis].to_list()) for axis in axes if axis in frame.columns}
+
+
+def resolve_elapsed_seconds(timer: PrecisionTimer) -> float:
+    """Resolves how long an operation ran as the seconds a response reports it in.
+
+    Args:
+        timer: The millisecond-precision timer instantiated when the operation began.
+
+    Returns:
+        The elapsed seconds, rounded to the millisecond.
+    """
+    seconds = convert_time(
+        time=timer.elapsed, from_units=TimeUnits.MILLISECOND, to_units=TimeUnits.SECOND, as_float=True
+    )
+    return round(seconds, 3)
+
+
 def resolve_detail_limit(limit: int | None, *, detailed: bool) -> int:
     """Resolves the page size to use when the caller named none, from the detail the response carries.
 
@@ -116,7 +151,7 @@ def resolve_detail_limit(limit: int | None, *, detailed: bool) -> int:
 
     Args:
         limit: The limit the caller named, or None to take the default.
-        detailed: Whether the response carries full per-item fields.
+        detailed: Determines whether the response carries full per-item fields.
 
     Returns:
         The page size to apply.
@@ -124,8 +159,8 @@ def resolve_detail_limit(limit: int | None, *, detailed: bool) -> int:
     if limit is not None:
         return limit
     if not detailed:
-        return DEFAULT_ITEM_LIMIT
-    return DEFAULT_DETAILED_LIMIT
+        return _DEFAULT_ITEM_LIMIT
+    return _DEFAULT_DETAILED_LIMIT
 
 
 def project_item(item: dict[str, Any], fields: Sequence[str], *, drop_empty: bool = True) -> dict[str, Any]:
@@ -139,7 +174,8 @@ def project_item(item: dict[str, Any], fields: Sequence[str], *, drop_empty: boo
     Args:
         item: The item to narrow.
         fields: The fields to keep, in the order they should appear.
-        drop_empty: Determines whether to leave out the fields whose value is None or an empty collection.
+        drop_empty: Determines whether to leave out the fields whose value is None, an empty string, or an empty list
+            or dictionary.
 
     Returns:
         The narrowed item.
@@ -156,10 +192,49 @@ def project_item(item: dict[str, Any], fields: Sequence[str], *, drop_empty: boo
 
 
 def ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
-    """Constructs a successful response dict with a ``success`` flag set to True."""
+    """Constructs a successful response dict with a ``success`` flag set to True.
+
+    Args:
+        payload: The response fields to carry alongside the success flag.
+
+    Returns:
+        The response dictionary.
+    """
     return {"success": True, **payload}
 
 
 def error_response(message: str) -> dict[str, Any]:
-    """Constructs a failure response dict with a ``success`` flag set to False and the provided error message."""
+    """Constructs a failure response dict with a ``success`` flag set to False and the provided error message.
+
+    Args:
+        message: The error text to report.
+
+    Returns:
+        The response dictionary.
+    """
     return {"success": False, "error": message}
+
+
+def reject_unknown(frame: pl.DataFrame, column: str, values: list[str], subject: str) -> dict[str, Any] | None:
+    """Builds the error response for a filter naming a value the stored table does not hold.
+
+    Notes:
+        Reports what is available rather than returning an empty page, because an empty page and a mistyped filter look
+        identical to a caller otherwise.
+
+    Args:
+        frame: The whole stored table.
+        column: The column being filtered.
+        values: The values the caller named.
+        subject: The noun naming what one row of the table describes.
+
+    Returns:
+        The error response, or None when every named value is present.
+    """
+    if column not in frame.columns:
+        return error_response(message=f"Unknown column '{column}'. Available: {sorted(frame.columns)}.")
+    available = sorted({str(entry) for entry in frame[column].to_list() if entry is not None})
+    unknown = sorted({value for value in values if value not in available})
+    if unknown:
+        return error_response(message=f"No {subject} has '{column}' in {unknown}. Available: {available}.")
+    return None

@@ -6,7 +6,7 @@ for the session's acquisition system.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import polars as pl
@@ -127,7 +127,7 @@ def run_microcontroller_processing_pipeline(
     # tracker without resetting its sibling jobs.
     tracker_directory = session.processed_data.microcontroller_data_path
     tracker_directory.mkdir(parents=True, exist_ok=True)
-    tracker = ProcessingTracker(file_path=tracker_directory / ProcessingTrackers.MICROCONTROLLER)
+    tracker = ProcessingTracker(file_path=tracker_directory.joinpath(ProcessingTrackers.MICROCONTROLLER))
     tracker.align_jobs(jobs=requested, universe=universe)
 
     if job_id is not None:
@@ -148,13 +148,16 @@ def run_microcontroller_processing_pipeline(
     else:
         # Resolves the worker budget once and creates a single process pool that spans BOTH stages. The stages run
         # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
-        # parse stage (one future per module), avoiding a worker re-spawn between them. The caps are placed around
-        # the pool's construction, since each child sizes its library thread pools while importing, before any code
-        # of this pipeline runs inside it.
+        # parse stage (one future per module) with a single worker spawn. The caps cover the pool's whole life,
+        # since it starts its children on demand and each child sizes its library thread pools while importing,
+        # before any code of this pipeline runs inside it.
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        with pinned_worker_threads():
-            shared_executor = ProcessPoolExecutor(max_workers=resolved_workers) if resolved_workers > 1 else None
-        try:
+        with pinned_worker_threads(), ExitStack() as pool_scope:
+            shared_executor = (
+                pool_scope.enter_context(ProcessPoolExecutor(max_workers=resolved_workers))
+                if resolved_workers > 1
+                else None
+            )
             _run_extraction_stage(
                 extraction_archives=extraction_archives,
                 controllers=controllers,
@@ -175,9 +178,6 @@ def run_microcontroller_processing_pipeline(
                 executor=shared_executor,
                 display_progress=display_progress,
             )
-        finally:
-            if shared_executor is not None:
-                shared_executor.shutdown(wait=True)
 
     console.echo(message="All microcontroller processing jobs completed successfully.", level=LogLevel.SUCCESS)
 
@@ -185,20 +185,20 @@ def run_microcontroller_processing_pipeline(
 def discover_microcontroller_jobs(
     session_path: Path,
 ) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
-    """Resolves the microcontroller pipeline's job universe and runnable subset for the target session.
+    """Resolves the microcontroller pipeline's job universe and possible subset for the target session.
 
     Notes:
         The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
-        controller that declares at least one module the acquisition system parses, plus one parse job per such
-        module. The runnable subset narrows the universe to controllers whose log archive is present on disk, since a
-        controller with no archive can be neither extracted nor parsed. This is discovery only, reading the manifest
-        and globbing for archives while decoding no data and mutating nothing.
+        controller that declares at least one module the acquisition system parses and the session configured for use,
+        plus one parse job per such module. The possible subset narrows the universe to controllers whose log archive
+        is present on disk, since a controller with no archive can be neither extracted nor parsed. Discovery reads
+        the manifest and globs for archives, leaving the archives' contents and every output file untouched.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
-        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the runnable
+        A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
         subset of that universe. Extraction specifiers are controller IDs and parse specifiers are
         ``"{controller_id}-{module_type}-{module_id}"``.
 
@@ -275,16 +275,17 @@ def _resolve_controllers(
         The configurations are built in memory. The microcontroller manifest written alongside the log archives
         supplies the controller and module topology, and the session's acquisition system supplies the event codes
         each module's parser reads (resolved via ``resolve_microcontroller_event_codes``). A manifest module the
-        system does not parse is excluded, since extracting it would produce an intermediate feather nothing consumes,
-        and a controller left with no such module contributes no configuration at all. Requiring the manifest also
+        system does not parse, or that the session did not configure for use, is excluded, since extracting it would
+        produce an intermediate feather nothing consumes, and a controller left with no such module contributes no
+        configuration at all. Requiring the manifest also
         confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
         microcontroller controllers from the runtime DataLogger archive that shares the same directory. Kernel
         extraction is never configured, because this pipeline does not consume the kernel feather.
 
     Args:
         session: The loaded session whose microcontroller logs are being processed.
-        event_codes: The event codes registered for the session's acquisition system, keyed by
-            ``(module_type, module_id)``.
+        event_codes: The event codes of the modules that the session's acquisition system parses and the session
+            configured for use, keyed by ``(module_type, module_id)``.
 
     Returns:
         An ordered mapping from each manifest controller ID (as a string) to its derived ControllerExtractionConfig.
@@ -339,8 +340,8 @@ def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | 
     """Locates the raw log archive for a controller, if it is present under the log directory.
 
     Notes:
-        Searches recursively for the ``{controller_id}_log.npz`` archive and takes the first match when several
-        exist. An absent archive yields None, so an unstaged controller is skipped and the session continues.
+        Takes the first match when several archives exist. An absent archive yields None, so an unstaged controller
+        is skipped and the session continues.
 
     Args:
         log_directory: The session's raw behavior data directory holding the controller log archives.
@@ -499,9 +500,6 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
-    # The acquisition binding announces each job as it runs, which would bisect the progress bar, so its console
-    # output is silenced for the duration of each extraction. console.error still raises while the console is
-    # disabled, so a failing extraction still surfaces.
     extraction_job_ids = {
         controller_id: ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
         for controller_id in extraction_archives
@@ -522,7 +520,8 @@ def _run_extraction_stage(
     with progress_context as progress_bar:
         for controller_id, archive_path in extraction_archives.items():
             # Silences the binding's per-controller announcement so it does not bisect the bar, restoring the
-            # console's prior state once the extraction returns.
+            # console's prior state once the extraction returns. console.error still raises while the console is
+            # disabled, so a failing extraction still surfaces.
             console_enabled = console.enabled
             console.disable()
             try:
@@ -559,11 +558,10 @@ def _run_parse_stage(
 
     Notes:
         The extraction outputs are indexed once up front, so each parse job resolves its input feather with a single
-        O(1) dict lookup. The acquisition binding
-        writes a raw feather only for modules that produced at least one message, so a configured, eligible module
-        can legitimately have no feather. Such a parse job is completed with no output rather than left unresolved.
-        Modules with a feather are dispatched to the shared process pool when one is available and more than one
-        module is runnable, with the parent owning all tracker state transitions.
+        O(1) dict lookup. The acquisition binding writes a raw feather only for modules that produced at least one
+        message, so a configured, eligible module can legitimately have no feather. Such a parse job is completed
+        with no output. Modules with a feather are dispatched to the shared process pool when one is available and
+        more than one module is runnable, with the parent owning all tracker state transitions.
 
     Args:
         parse_specifiers: The requested parse specifiers mapped to their ``(controller_id, type, id)`` triples.
@@ -683,8 +681,11 @@ def _execute_parse_jobs_parallel(
         tracker: The shared processing tracker.
         session: The loaded session, passed through to each parser. Must be picklable for the worker processes.
         parse_output: The directory the parsers write their domain-specific feathers into.
-        executor: The shared process pool to submit the parse jobs to. Owned by the caller. Not shut down here.
+        executor: The shared process pool to submit the parse jobs to, owned by the caller.
         display_progress: Determines whether to display a per-module progress bar.
+
+    Raises:
+        Exception: The first exception raised by any parse job, re-raised after every dispatched future resolves.
     """
     first_exception: Exception | None = None
 
@@ -853,10 +854,6 @@ def _run_parse(
 
 def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int], Path]:
     """Indexes the raw module feathers in the extraction output directory by their module identity.
-
-    Notes:
-        Globs the directory once and parses each feather name a single time, building a lookup keyed by
-        ``(controller_id, module_type, module_id)``. Callers resolve a module's feather with a single O(1) dict lookup.
 
     Args:
         extraction_output: The directory holding the raw per-module feathers.

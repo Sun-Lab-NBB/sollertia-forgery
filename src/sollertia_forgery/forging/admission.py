@@ -1,9 +1,4 @@
-"""Provides the admission gate that holds a session out of a forged dataset until its processing has completed.
-
-Assembly reads processed outputs directly, so a session admitted before its pipelines finished fails deep inside an
-assembler with whatever error the missing file raises. This gate moves that failure to dataset definition, where the
-session that caused it is still the subject of the call.
-"""
+"""Provides the admission gate that holds a session out of a forged dataset until its processing has completed."""
 
 from __future__ import annotations
 
@@ -25,6 +20,9 @@ _COMPLETED_STATE: str = "completed"
 _NOT_STARTED_STATE: str = "not_started"
 """The state label of a pipeline that holds no tracker or no tracked jobs for the session."""
 
+_PARTIAL_STATE_TEMPLATE: str = "{unfinished} of {total} job(s) not succeeded"
+"""The state label template of a pipeline that has tracked jobs which have not all succeeded."""
+
 
 def verify_session_admissibility(session: SessionData) -> None:
     """Verifies that one session has completed every pipeline its acquisition system requires for forging.
@@ -38,12 +36,12 @@ def verify_session_admissibility(session: SessionData) -> None:
         them before dispatching any.
 
     Args:
-        session: The loaded source session being admitted. The caller loads it, so one load serves both this check and
-            the caller's own compatibility checks.
+        session: The loaded source session being admitted.
 
     Raises:
-        ValueError: If the session's type joins no dataset for its acquisition system, or if any required pipeline
-            has not completed. The error names the pipelines that are outstanding and the state each is in.
+        ValueError: If the session's acquisition system is unknown, if the session's type joins no dataset for that
+            system, or if any required pipeline has not completed. The error names the pipelines that are outstanding
+            and the state each is in.
     """
     requirements = resolve_forging_admission_pipelines(system=session.acquisition_system)
 
@@ -58,7 +56,7 @@ def verify_session_admissibility(session: SessionData) -> None:
         console.error(message=message, error=ValueError)
 
     outstanding: dict[str, str] = {}
-    for pipeline in sorted(required or ()):
+    for pipeline in sorted(required):
         state = _resolve_pipeline_state(session=session, pipeline=pipeline)
         if state != _COMPLETED_STATE:
             outstanding[pipeline.value] = state
@@ -94,4 +92,4 @@ def _resolve_pipeline_state(session: SessionData, pipeline: ProcessingPipelines)
     unfinished = sum(1 for state in jobs.values() if state.status is not ProcessingStatus.SUCCEEDED)
     if unfinished == 0:
         return _COMPLETED_STATE
-    return f"{unfinished} of {len(jobs)} job(s) not succeeded"
+    return _PARTIAL_STATE_TEMPLATE.format(unfinished=unfinished, total=len(jobs))

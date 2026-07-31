@@ -1,10 +1,11 @@
-"""Provides the camera-data processing pipeline."""
+"""Provides the camera video-processing pipeline."""
+
+from ataraxis_video_system.video import TIMESTAMP_JOB_NAME
 
 from .pipeline import (
     ENERGY_JOB_NAME,
     RENAME_JOB_NAME,
     TRACKING_JOB_NAME,
-    TIMESTAMP_JOB_NAME,
     discover_video_jobs,
     video_job_prerequisites,
     run_video_processing_pipeline,

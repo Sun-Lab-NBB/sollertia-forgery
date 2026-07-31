@@ -1,12 +1,9 @@
-"""Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-The worker combines a run or lick training session's behavior and video sub-datasets on the slowest camera's clock into
-the session's unified ``data.feather``, since a training session carries no mesoscope fluorescence clock.
-"""
+"""Provides the Mesoscope-VR training-session data-assembly worker donated to the system-agnostic forging pipeline."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from functools import reduce
 
 import polars as pl
 from ataraxis_base_utilities import console, ensure_directory_exists
@@ -30,21 +27,21 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     ``DatasetColumn`` and donated to the dataset's ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
     Notes:
-        Training sessions carry no mesoscope imaging, so the assembler requires neither the experiment configuration nor
-        any cindra output, and it takes no dataset name because a training session has no cindra multi-recording output
-        to resolve.
+        Training sessions carry no mesoscope imaging, so the assembler takes no dataset name, since a training session
+        has no cindra multi-recording output to resolve.
 
         The assembled feather is clipped to the session bounds, so it begins when the system first leaves the idle
         state and ends at the final runtime-state entry. That drops the setup span the cameras record before the
-        session and the teardown span they record after it. Experiment sessions are clipped on the same bounds.
+        session and the teardown span they record after it.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
         output_path: The path to the ``data.feather`` file to write inside the forged dataset hierarchy.
 
     Raises:
-        FileNotFoundError: If the session's processed microcontroller-data or runtime-data directory is missing, or if
-            no camera clock is available to serve as the reference clock.
+        FileNotFoundError: If the session's processed microcontroller-data or runtime-data directory is missing, if the
+            session's hardware state file is absent, or if no camera clock is available to serve as the reference
+            clock.
         ValueError: If a sub-dataset cannot be assembled (for example, a required hardware-state field is missing).
     """
     session = SessionData.load(session_path=source_session_path)
@@ -89,11 +86,13 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     )
     video_data = assemble_video_dataset(video_data_path=video_data_path, reference_time=reference_time)
 
-    # Concatenates the behavior and video sub-datasets into the unified feather and writes it uncompressed so downstream
-    # consumers can memory-map it. The video sub-dataset joins only when it produced columns.
+    # Stacks the behavior and video sub-datasets into the unified feather and writes it uncompressed so downstream
+    # consumers can memory-map it. Stacking requires both sub-datasets to carry the reference clock's height, so one
+    # that drifts off that clock raises rather than being padded. The video sub-dataset joins only when it produced
+    # columns.
     sub_datasets = [behavior_data]
     if video_data.width > 0:
         sub_datasets.append(video_data)
-    result = pl.concat(items=sub_datasets, how="horizontal")
+    result = reduce(pl.DataFrame.hstack, sub_datasets)
     result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)

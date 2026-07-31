@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 # Project metadata section. Provides the general ID information about the project.
 [project]
 name = "sollertia-forgery"
-version = "1.0.0rc4"
+version = "1.0.0rc5"
 description = "Provides tools for processing and managing the data acquired using the Sollertia data acquisition platform."
 readme = "README.md"
 license = "Apache-2.0"
@@ -44,13 +44,13 @@ dependencies = [
     # Sollertia Libraries
     "ataraxis-time>=6,<7",
     "ataraxis-base-utilities>=6.0.2,<7",
-    "ataraxis-data-structures>=6.1.2,<7",
+    "ataraxis-data-structures>=6.2.0rc1,<7",
     "sollertia-shared-assets>=9.1.0rc4,<10",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
     "ataraxis-video-system>=4,<5",
     "ataraxis-communication-interface>=6,<7",
-    "cindra>=1.2.0rc2,<2",
+    "cindra>=2.0.0rc3,<3",
 
     # Machine Vision (GenICam runtime for ataraxis-video-system, sourced from TestPyPI via [tool.uv.sources])
     "genicam==1.6.0",
@@ -104,7 +104,7 @@ dev = [
     "uv>=0,<1",
     "tox-uv>=1,<2",
 
-    # Development Automation (>=8.1.1 required alongside cindra>=1.2.0rc2, which needs importlib-metadata>=9)
+    # Development Automation (>=8.1.1 required alongside cindra>=2.0.0rc3, which needs importlib-metadata>=9)
     "ataraxis-automation>=8.1.1,<9",
 
     # Architecture (enforces the dependency-direction contracts declared under [tool.importlinter])
@@ -182,6 +182,16 @@ convention = "google"
     "F401", # Imported but unused
     "F403", # Wildcard imports
 ]
+"**/tests/**/*.py" = [
+    "ANN",     # Type annotations are not required in tests
+    "D",       # Docstring enforcement is relaxed in tests
+    "INP001",  # Tests use implicit namespace packages
+    "PLR2004", # Magic values are common in test assertions
+    "PT006",   # Parametrize argument-name style is a project choice
+    "S101",    # Assert statements are how pytest tests verify behavior
+    "SLF001",  # Private member access is needed for testing internals
+    "T201",    # Print statements are allowed in tests
+]
 
 [tool.ruff.lint.isort]
 case-sensitive = true              # Takes case into account when sorting imports
@@ -215,12 +225,29 @@ module = [
 ]
 ignore_errors = true
 
-# Excludes MCP tool modules and CLI/server interface entry points from coverage measurement because they only run
-# inside a live MCP server or CLI invocation.
+# Pytest configuration. The import mode is declared here so that a bare 'pytest' invocation resolves test modules the
+# same way the 'py314-test' tox task does.
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
+
+# Places the repository root on sys.path, so that the 'tests' package is importable from the subprocesses the parallel
+# pipeline tests spawn. The import mode above resolves test modules without touching sys.path, and a spawned worker
+# inherits the parent's sys.path to import the module defining the callable it unpickles. The src layout keeps this
+# entry from shadowing the installed distribution the tests measure coverage against.
+pythonpath = ["."]
+
+# This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
 [tool.coverage.run]
+
+# Measures branch coverage in addition to statement coverage, so that partial branches (one side of a conditional or
+# loop that no test exercises) are reported as gaps rather than hidden behind full line coverage.
+branch = true
+
+# Excludes the interface layer from coverage measurement. Its modules (the Click CLI, the MCP server, and the MCP tool
+# groups) only run inside a live CLI invocation or MCP session, so they require external infrastructure to exercise.
 omit = [
-    "*mcp_tools.py",
-    "*/interfaces/*.py",
+    "src/sollertia_forgery/interfaces/*",
+    "*/sollertia_forgery/interfaces/*",
 ]
 
 # This is used by the 'test' tox tasks to aggregate coverage data produced during pytest runtimes.
@@ -235,6 +262,15 @@ directory = "reports/coverage_html"
 
 # Specifies additional ignore directives
 [tool.coverage.report]
+omit = [
+    "src/sollertia_forgery/interfaces/*",
+    "*/sollertia_forgery/interfaces/*",
+]
+
+# Fails the coverage report if combined statement and branch coverage drops below 100%, locking in full coverage of all
+# measured modules and preventing regressions. The interface layer is omitted above, and pragma-excluded lines do not
+# count against this threshold.
+fail_under = 100
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

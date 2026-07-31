@@ -1,14 +1,12 @@
 """Provides assets for generating, visualizing, and querying the session-rowed project manifest .feather file that
 captures the snapshot of a project's state.
-
-Generation walks the project once and writes two artifacts under one lock. This module builds the manifest itself and
-hands the per-job rows it collects to the job artifact's own writer, so the two can never disagree about a session.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 from datetime import UTC, datetime
+from collections import Counter
 
 import polars as pl
 from filelock import FileLock
@@ -34,9 +32,6 @@ from ..shared_assets import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-_COMPLETED_STATUS: str = "completed"
-"""The rolled-up tracker label that counts as a finished pipeline, which the manifest stores as 1."""
-
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
@@ -55,7 +50,33 @@ Notes:
     column. The manifest answers whether a pipeline is done, and nothing finer.
 
     Every pipeline in ``SESSION_PIPELINES`` declares a column here, since the manifest reports one per pipeline a
-    session carries a tracker for."""
+    session carries a tracker for.
+"""
+
+PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
+    "animal": pl.UInt64,
+    "date": pl.Datetime,
+    "session": pl.String,
+    "session_path": pl.String,
+    "type": pl.String,
+    "system": pl.String,
+    "notes": pl.String,
+    "complete": pl.UInt8,
+    "integrity": pl.UInt8,
+    "two_photon": pl.UInt8,
+    "runtime": pl.UInt8,
+    "microcontroller": pl.UInt8,
+    "video": pl.UInt8,
+}
+"""The column layout of the project manifest artifact, one row per session.
+
+Notes:
+    The ``complete`` column and the five pipeline columns each hold a 0 or a 1, so a reader applies one done or
+    not-done convention across all six.
+"""
+
+_COMPLETED_STATUS: str = "completed"
+"""The rolled-up tracker label that counts as a finished pipeline, which the manifest stores as 1."""
 
 
 def project_manifest_path(project_directory: Path) -> Path:
@@ -122,23 +143,21 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
     manifest_lock = manifest_path.with_suffix(manifest_path.suffix + ".lock")
 
     # Initializes the processing tracker in the project directory alongside the manifest output. Applies stale
-    # entry detection so that foreign or outdated job entries are reset before the new job is registered.
+    # entry detection so that foreign or outdated job entries are discarded before the new job is registered.
     tracker = ProcessingTracker(file_path=project_directory.joinpath(ProcessingTrackers.MANIFEST))
     jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
     tracker.align_jobs(jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
-    # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     job_rows: list[dict[str, Any]] = []
 
+    # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
         tracker.start_job(job_id=job_id)
         try:
-            manifest: dict[str, list] = {
-                # Animal IDs.
+            manifest: dict[str, list[Any]] = {
                 "animal": [],
-                # Session names.
                 "session": [],
                 # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored
                 # relative rather than absolute so a manifest generated on one machine resolves against any data
@@ -150,20 +169,19 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "type": [],
                 # The acquisition system that recorded the session, an AcquisitionSystems enumeration value.
                 "system": [],
-                # The experimenter notes about the session.
                 "notes": [],
                 # Determines whether the session's data is complete and ready for unsupervised processing.
                 "complete": [],
-                # The rolled-up status label of the checksum (data-integrity) pipeline. A label rather than a
-                # boolean, so a failed pipeline is distinguishable from one that has not started.
+                # Whether the checksum (data-integrity) pipeline finished for this session, stored as 1 when every
+                # job succeeded and 0 otherwise. Which jobs failed, and why, are read from the project job artifact.
                 "integrity": [],
-                # The rolled-up status label of the two-photon (cindra) processing pipeline.
+                # Whether the two-photon (cindra) processing pipeline finished for this session.
                 "two_photon": [],
-                # The rolled-up status label of the runtime processing pipeline.
+                # Whether the runtime processing pipeline finished for this session.
                 "runtime": [],
-                # The rolled-up status label of the microcontroller processing pipeline.
+                # Whether the microcontroller processing pipeline finished for this session.
                 "microcontroller": [],
-                # The rolled-up status label of the video (timestamp, tracking, motion energy) pipeline.
+                # Whether the video (timestamp, tracking, motion energy) pipeline finished for this session.
                 "video": [],
             }
 
@@ -187,23 +205,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
             # Converts animal IDs from strings to integers for proper numeric sorting.
             manifest["animal"] = [int(animal) for animal in manifest["animal"]]
 
-            # Converts the manifest dictionary to a Polars DataFrame.
-            schema: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
-                "animal": pl.UInt64,
-                "date": pl.Datetime,
-                "session": pl.String,
-                "session_path": pl.String,
-                "type": pl.String,
-                "system": pl.String,
-                "notes": pl.String,
-                "complete": pl.UInt8,
-                "integrity": pl.UInt8,
-                "two_photon": pl.UInt8,
-                "runtime": pl.UInt8,
-                "microcontroller": pl.UInt8,
-                "video": pl.UInt8,
-            }
-            manifest_frame = pl.DataFrame(data=manifest, schema=schema, strict=False)
+            manifest_frame = pl.DataFrame(data=manifest, schema=PROJECT_MANIFEST_SCHEMA, strict=False)
 
             # Sorts the DataFrame by animal, then session. Animal IDs are monotonically increasing per Sollertia
             # standards and session names are acquisition timestamps, so rows are grouped by animal and ordered
@@ -235,10 +237,6 @@ class ProjectManifest:
     """Provides methods for visualizing and working with the data stored inside the managed project manifest .feather
     file.
 
-    Notes:
-        This class provides the entry-point API for working with Sollertia research project data. It is used by most
-        data processing and dataset forging pipelines to work with the processed project's data.
-
     Args:
         manifest_file: The path to the .feather manifest file that stores the snapshot of the target project's state.
 
@@ -266,20 +264,20 @@ class ProjectManifest:
             console.echo(message=str(self._data), raw=True)
 
     def print_summary(self, animal: int | None = None) -> None:
-        """Prints a summary view of the manifest file to the terminal, excluding the 'experimenter notes' data for
+        """Prints a summary view of the manifest file to the terminal, excluding the experimenter notes data for
         each session.
 
         This data view is optimized for tracking which processing steps have been applied to each of the project's data
-        acquisition sessions. The 'session' column shows the per-animal 1-based session index, and the 'date' column
-        shows the UTC acquisition time truncated to the second. Every pipeline column reports 1 when that pipeline
-        finished and 0 otherwise, matching the numeric 'complete' column, so the operator reads one done or not-done
-        convention throughout.
+        acquisition sessions. The ``session`` column shows the per-animal 1-based session index, and the ``date``
+        column shows the UTC acquisition time truncated to the second. Every pipeline column reports 1 when that
+        pipeline finished and 0 otherwise, matching the numeric ``complete`` column, so the operator reads one done or
+        not-done convention throughout.
 
         Args:
             animal: The unique identifier of the animal for which to display the data. If provided, this method only
                 displays the data for that animal. Otherwise, it displays the data for all animals.
         """
-        summary_cols = [
+        summary_columns = [
             "animal",
             "session",
             "date",
@@ -294,12 +292,11 @@ class ProjectManifest:
         ]
 
         # The stored pipeline columns are already the 0/1 indicator this view wants, so nothing needs reducing.
-        data_frame = self._display_frame().select(summary_cols)
+        data_frame = self._display_frame().select(summary_columns)
 
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
-        # Ensures the data displays properly.
         with pl.Config(
             set_tbl_rows=-1,
             set_tbl_cols=-1,
@@ -314,20 +311,18 @@ class ProjectManifest:
         experimenter notes data for each project's session to the terminal.
 
         This data view is optimized for determining what data acquisition sessions have been carried out and checking
-        the outcomes of each session recorded in the experimenter notes. The 'session' column shows the per-animal
-        1-based session index, and the 'date' column shows the UTC acquisition time truncated to the second.
+        the outcomes of each session recorded in the experimenter notes. The ``session`` column shows the per-animal
+        1-based session index, and the ``date`` column shows the UTC acquisition time truncated to the second.
 
         Args:
             animal: The unique identifier of the animal for which to display the data. If provided, this method only
                 displays the data for that animal. Otherwise, it displays the data for all animals.
         """
-        # Pre-selects the columns to display.
         data_frame = self._display_frame().select(["animal", "session", "date", "type", "system", "notes"])
 
         if animal is not None:
             data_frame = data_frame.filter(pl.col("animal") == int(animal))
 
-        # Prints the extracted data.
         with pl.Config(
             set_tbl_rows=-1,
             set_tbl_cols=-1,
@@ -337,6 +332,11 @@ class ProjectManifest:
             set_fmt_str_lengths=2000,
         ):
             console.echo(message=str(data_frame), raw=True)
+
+    @property
+    def data(self) -> pl.DataFrame:
+        """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
+        return self._data
 
     @property
     def animals(self) -> tuple[int, ...]:
@@ -375,11 +375,11 @@ class ProjectManifest:
             session: The unique identifier of the session for which to retrieve the data.
 
         Returns:
-            A Polars DataFrame containing all manifest columns for the specified session: 'animal', 'date',
-            'session', 'session_path', 'type', 'system', 'notes', 'complete', the per-pipeline done columns
-            ('integrity', 'two_photon', 'runtime', 'microcontroller', 'video').
+            A Polars DataFrame containing all manifest columns for the specified session: ``animal``, ``date``,
+            ``session``, ``session_path``, ``type``, ``system``, ``notes``, ``complete``, and the per-pipeline done
+            columns ``integrity``, ``two_photon``, ``runtime``, ``microcontroller``, and ``video``.
         """
-        return self._data.filter(pl.col("session").eq(session))
+        return self._data.filter(pl.col("session") == session)
 
     def get_animal_for_session(self, session: str) -> int:
         """Returns the unique identifier of the animal that participated in the specified session.
@@ -393,7 +393,6 @@ class ProjectManifest:
         Raises:
             ValueError: If the specified session is not found in the manifest file.
         """
-        # Filters the data for the specified session.
         data_frame = self._data.filter(pl.col("session") == session)
 
         if data_frame.is_empty():
@@ -418,7 +417,6 @@ class ProjectManifest:
         Raises:
             ValueError: If the specified session is not found in the manifest file.
         """
-        # Filters the data for the specified session.
         data_frame = self._data.filter(pl.col("session") == session)
 
         if data_frame.is_empty():
@@ -435,13 +433,12 @@ class ProjectManifest:
         """Returns a structured summary of the project manifest for programmatic consumption.
 
         Counts the sessions each pipeline finished, alongside the session type and acquisition system distributions.
-        Designed for MCP tool responses where a structured dictionary is more useful than a printed table. A dataset's
-        own artifacts report its forging state, so nothing here speaks for a dataset.
+        Reports on sessions only, since a dataset's forging state is recorded on that dataset's own artifacts.
 
         Returns:
             A dictionary containing ``total_sessions``, ``total_animals``, ``animals``, ``session_types``,
-            ``acquisition_systems``, ``complete_count``, ``pipeline_status_counts`` (the per-status session
-            distribution of every per-session pipeline), ``columns``, and ``total_rows``.
+            ``acquisition_systems``, ``complete_count``, ``pipeline_status_counts`` (the count of sessions that
+            finished and of sessions that did not, keyed by pipeline identifier), ``columns``, and ``total_rows``.
         """
         data = self._data
         total_rows = data.height
@@ -457,15 +454,10 @@ class ProjectManifest:
             finished = int(data.filter(pl.col(column) == 1).height)
             pipeline_status_counts[pipeline.value] = {"done": finished, "not_done": total_rows - finished}
 
-        # Computes session type distribution.
-        session_types: dict[str, int] = {}
-        for row in data.select("type").to_series().to_list():
-            session_types[str(row)] = session_types.get(str(row), 0) + 1
-
-        # Computes acquisition system distribution.
-        acquisition_systems: dict[str, int] = {}
-        for row in data.select("system").to_series().to_list():
-            acquisition_systems[str(row)] = acquisition_systems.get(str(row), 0) + 1
+        session_types: dict[str, int] = dict(Counter(str(row) for row in data.select("type").to_series().to_list()))
+        acquisition_systems: dict[str, int] = dict(
+            Counter(str(row) for row in data.select("system").to_series().to_list())
+        )
 
         return {
             "total_sessions": total_rows,
@@ -479,16 +471,11 @@ class ProjectManifest:
             "total_rows": total_rows,
         }
 
-    @property
-    def data(self) -> pl.DataFrame:
-        """Returns the Polars DataFrame instance that stores the managed manifest file's data."""
-        return self._data
-
     def _display_frame(self) -> pl.DataFrame:
         """Returns a manifest copy prepared for terminal display, with the session name replaced by a per-animal
         1-based session index and the acquisition date truncated to the second as a timezone-aware UTC datetime.
 
-        The stored 'session' and 'date' columns are left untouched on the underlying data, so this transformation
+        The stored ``session`` and ``date`` columns are left untouched on the underlying data, so this transformation
         only affects the printed views and never the identifiers the other query methods resolve against.
         """
         return self._data.sort(by=["animal", "session"]).with_columns(
@@ -503,9 +490,6 @@ class ProjectManifest:
         exclude_incomplete: bool = True,
     ) -> tuple[str, ...]:
         """Builds a tuple of unique session identifiers with optional filtering.
-
-        Notes:
-            User-facing methods call this worker method under-the-hood to fetch the filtered tuple of session IDs.
 
         Args:
             animal: An optional animal identifier for which to retrieve the sessions. If set to None, the method

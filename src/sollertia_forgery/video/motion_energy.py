@@ -1,8 +1,4 @@
-"""Provides the system-agnostic per-camera motion-energy analysis run by the video-processing pipeline.
-
-The analysis reduces each camera recording to a per-frame scalar indexing how much the animal moved, and as a pure
-function of pixels it applies to every camera the manifest names rather than being donated per acquisition system.
-"""
+"""Provides the system-agnostic per-camera motion-energy analysis run by the video-processing pipeline."""
 
 from __future__ import annotations
 
@@ -29,19 +25,20 @@ MOTION_ENERGY_SUFFIX: str = "_energy.feather"
 ``left_camera`` source produces ``left_camera_energy.feather``)."""
 
 _VIDEO_SUFFIX: str = ".mp4"
-"""The container suffix of the camera recordings this analysis reads. Every VideoSystem writes its recordings into the
-session's raw camera-data directory under this suffix."""
+"""The container suffix of the camera recordings this analysis reads. Every VideoSystem encodes its recording as an
+``.mp4``, and the acquisition runtime places it in the session's raw camera-data directory."""
 
 _SPATIAL_BIN_SIZE: int = 3
 """The edge length, in pixels, of the square block each frame is mean-binned over before differencing. A small block
 averages out the single-pixel sensor and codec noise that the later absolute difference would otherwise rectify into a
 positive bias, while staying small enough to leave the movement the measure captures intact. An odd edge keeps the box
-filter's anchor on the pixel at each block's center, which the strided sampling that reads the block means relies on."""
+filter's anchor on the pixel at each block's center, which is what lets the strided sampling read those block means
+correctly."""
 
 _MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
-preceding keyframe, so each chunk discards up to one group of frames worth of decoded frames. At roughly sixteen
-times the typical keyframe interval, that waste stays under seven percent of the chunk."""
+preceding keyframe, so each chunk discards up to one group of frames' worth of decoded frames. The floor sits high
+enough relative to the keyframe interval to keep those discarded frames a small fraction of the chunk."""
 
 _SINGLE_PLANE_DIMENSIONS: int = 2
 """The dimension count that identifies a decoded frame as a single grayscale plane. A frame matching it is used as-is,
@@ -53,7 +50,7 @@ source's channels are identical, so any one carries the image."""
 
 
 class MotionEnergyColumn(StrEnum):
-    """Every column written into a camera's motion-energy feather by the video-processing pipeline.
+    """Defines every column written into a camera's motion-energy feather by the video-processing pipeline.
 
     Notes:
         Values are raw, un-normalized gray levels, so motion energy is a within-session signal. The feather is a
@@ -66,17 +63,17 @@ class MotionEnergyColumn(StrEnum):
     predecessor, and nowhere else."""
     FRAME_LUMINANCE = "frame_luminance"
     """Mean intensity of the same binned frame, in gray levels. It separates a scene-illumination change from a behavior
-    change, since a whole-field brightness shift inflates ``motion_energy`` without anything moving. Use its slow
-    session-scale drift to detrend energy across a recording. Defined at every frame."""
+    change, since a whole-field brightness shift inflates ``motion_energy`` without anything moving. Its slow
+    session-scale drift supports detrending energy across a recording. Defined at every frame."""
 
 
 def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_name: str) -> Path | None:
     """Resolves the recording a camera produced within the session's raw camera-data directory.
 
-    Every VideoSystem names its recording ``{session_name}_{camera_name}.mp4``, so the recording is resolved by
-    reconstructing that exact name rather than by pattern-matching the camera name against the directory. Matching on
-    a suffix would be ambiguous: a camera named ``camera`` would match a ``left_camera`` recording, since that name
-    also ends in ``_camera``.
+    Each recording reaches the session's raw camera-data directory named ``{session_name}_{camera_name}.mp4``, so the
+    recording is resolved by reconstructing that exact name rather than by pattern-matching the camera name against the
+    directory. Matching on a suffix would be ambiguous: a camera named ``camera`` would match a ``left_camera``
+    recording, since that name also ends in ``_camera``.
 
     Args:
         camera_data_directory: The session's raw camera-data directory (``session.raw_data.camera_data_path``), which
@@ -115,12 +112,12 @@ def compute_camera_motion_energy(
 
     Notes:
         "Motion energy" here means frame-differencing motion energy, the mean absolute inter-frame intensity change.
-        Nothing filters for direction or speed, so the measure is undirected and unsigned. Binning before differencing
-        is load-bearing: the absolute difference rectifies per-pixel sensor and codec noise into a positive bias, so
-        binning afterward would not suppress it.
+        The measure is undirected and unsigned, integrating movement of every direction and speed. Binning before
+        differencing is load-bearing: the absolute difference rectifies per-pixel sensor and codec noise into a
+        positive bias, so binning afterward would not suppress it.
 
         The bin-then-difference extraction is modeled on Facemap (Syeda et al., 2024, Nature Neuroscience, 27(1),
-        187-195) with numerous local efficiency enhancements.
+        187-195).
 
     Args:
         video_path: The path to the camera recording to analyze.
@@ -128,8 +125,8 @@ def compute_camera_motion_energy(
         workers: The number of worker processes to decode with. Set to -1 to use all available CPU cores (minus
             reserved cores).
         executor: An optional process pool to submit the decode chunks into, shared across cameras so the cost of
-            spawning worker processes is paid once. When None, a pool is created and torn down for this recording,
-            unless the recording plans a single decode chunk, which runs in-process with no pool.
+            spawning worker processes is paid once. When None, a pool is created and torn down for this recording. A
+            recording that plans a single decode chunk runs in-process either way and touches no pool.
         display_progress: Determines whether per-chunk completion is reported as the analysis runs.
 
     Raises:
@@ -145,7 +142,9 @@ def compute_camera_motion_energy(
     if len(chunks) == 1:
         results = [_energy_chunk(video_path=str(video_path), start_frame=0, frame_count=frame_count)]
     elif executor is not None:
-        results = _submit_chunks(executor=executor, video_path=video_path, chunks=chunks, display=display_progress)
+        results = _submit_chunks(
+            executor=executor, video_path=video_path, chunks=chunks, display_progress=display_progress
+        )
     else:
         # Caps the worker threading layers before the pool starts its children, so each of them costs the single
         # core it was budgeted. A shared pool is instead capped by whoever created it, since its children may
@@ -155,7 +154,7 @@ def compute_camera_motion_energy(
             ProcessPoolExecutor(max_workers=min(resolved_workers, len(chunks))) as own_executor,
         ):
             results = _submit_chunks(
-                executor=own_executor, video_path=video_path, chunks=chunks, display=display_progress
+                executor=own_executor, video_path=video_path, chunks=chunks, display_progress=display_progress
             )
 
     energy, luminance = _join_chunks(results=results, chunks=chunks, video_path=video_path)
@@ -164,7 +163,7 @@ def compute_camera_motion_energy(
     # no explicit index column is stored. This is the same index-free positional convention the camera's timestamp and
     # other per-frame feathers follow.
     pl.DataFrame(
-        {
+        data={
             MotionEnergyColumn.MOTION_ENERGY: energy,
             MotionEnergyColumn.FRAME_LUMINANCE: luminance,
         }
@@ -188,7 +187,7 @@ def _read_frame_count(video_path: Path) -> int:
     Raises:
         ValueError: If the recording cannot be opened or reports no frames.
     """
-    capture = cv2.VideoCapture(str(video_path))
+    capture = cv2.VideoCapture(filename=str(video_path))
     try:
         if not capture.isOpened():
             message = (
@@ -202,7 +201,8 @@ def _read_frame_count(video_path: Path) -> int:
 
     if frame_count <= 0:
         message = (
-            f"Unable to compute motion energy for '{video_path.name}'. The recording reports {frame_count} frames."
+            f"Unable to compute motion energy for '{video_path.name}'. The reported frame count must be a positive "
+            f"integer, but got {frame_count}."
         )
         console.error(message=message, error=ValueError)
 
@@ -220,15 +220,15 @@ def _plan_chunks(frame_count: int, workers: int) -> list[tuple[int, int]]:
         A list of ``(start_frame, frame_count)`` pairs covering the recording with no gap and no overlap.
     """
     chunk_count = max(1, min(workers, frame_count // _MINIMUM_CHUNK_FRAMES))
-    base, remainder = divmod(frame_count, chunk_count)
+    base_frame_count, remainder = divmod(frame_count, chunk_count)
 
     chunks: list[tuple[int, int]] = []
-    start = 0
+    start_frame = 0
     for index in range(chunk_count):
         # Spreads the remainder across the leading chunks so every chunk differs in size by at most one frame.
-        size = base + 1 if index < remainder else base
-        chunks.append((start, size))
-        start += size
+        chunk_frames = base_frame_count + 1 if index < remainder else base_frame_count
+        chunks.append((start_frame, chunk_frames))
+        start_frame += chunk_frames
     return chunks
 
 
@@ -237,7 +237,7 @@ def _submit_chunks(
     video_path: Path,
     chunks: list[tuple[int, int]],
     *,
-    display: bool,
+    display_progress: bool,
 ) -> list[tuple[NDArray[np.float32], NDArray[np.float32]]]:
     """Submits every decode chunk into a process pool and collects the results in chunk order.
 
@@ -245,7 +245,7 @@ def _submit_chunks(
         executor: The process pool to submit the chunks into.
         video_path: The path to the camera recording.
         chunks: The planned ``(start_frame, frame_count)`` chunks.
-        display: Determines whether per-chunk completion is reported.
+        display_progress: Determines whether per-chunk completion is reported.
 
     Returns:
         The per-chunk ``(energy, luminance)`` arrays, ordered to match the input chunks.
@@ -257,7 +257,7 @@ def _submit_chunks(
 
     progress_context = (
         console.progress(total=len(futures), description="Decoding motion-energy chunks", unit="chunk")
-        if display
+        if display_progress
         else nullcontext()
     )
 
@@ -291,12 +291,12 @@ def _join_chunks(
     Raises:
         ValueError: If a chunk other than the last ended early.
     """
-    for index, ((energy, _), (_, planned)) in enumerate(zip(results, chunks, strict=True)):
-        if energy.size != planned and index != len(chunks) - 1:
+    for index, ((chunk_energy, _), (_, planned_frames)) in enumerate(zip(results, chunks, strict=True)):
+        if chunk_energy.size != planned_frames and index != len(chunks) - 1:
             message = (
                 f"Unable to compute motion energy for '{video_path.name}'. Decode chunk {index + 1} of "
-                f"{len(chunks)} ended after {energy.size} of its {planned} frames, which means the recording is "
-                f"truncated and every later frame index would be misaligned."
+                f"{len(chunks)} ended after {chunk_energy.size} of its {planned_frames} frames, which means the "
+                f"recording is truncated and every later frame index would be misaligned."
             )
             console.error(message=message, error=ValueError)
 
@@ -305,7 +305,7 @@ def _join_chunks(
 
     # A short final chunk is benign but must be announced: a consumer joining on frame index needs to know the feather
     # covers fewer frames than the recording claimed.
-    planned_total = sum(planned for _, planned in chunks)
+    planned_total = sum(planned_frames for _, planned_frames in chunks)
     if energy.size != planned_total:
         console.echo(
             message=(
@@ -340,13 +340,11 @@ def _energy_chunk(
     Raises:
         ValueError: If the recording cannot be opened, or if the priming frame preceding a chunk cannot be decoded.
     """
-    # Pins every layer of threading to one thread per worker. The decoder honors this environment variable when the
-    # capture is constructed rather than at import, and it is the knob that reaches the decoder without rebuilding the
-    # capture. The alternative cv2.CAP_PROP_N_THREADS also does, but only through the VideoCapture constructor's params
-    # argument, and the OpenCV thread count governs its own kernels instead. Left unpinned, each of the many workers
-    # spawns its own decode threads and the pool oversubscribes the machine several times over.
+    # Pins every layer of threading to one thread per worker. The decoder reads this environment variable when the
+    # capture is constructed, so setting it here reaches the decoder each chunk builds. Left unpinned, each of the many
+    # workers spawns its own decode threads and the pool oversubscribes the machine several times over.
     os.environ["OPENCV_FFMPEG_THREADS"] = "1"
-    cv2.setNumThreads(1)
+    cv2.setNumThreads(nthreads=1)
     # The recordings are encoded as yuv420p, which the decoder does not recognize and reports as an unsupported
     # picture format on every single frame before handing back its luma plane. Silenced here rather than per frame,
     # since a chunk decodes many thousands.
@@ -355,7 +353,7 @@ def _energy_chunk(
     energy = np.full(frame_count, fill_value=np.nan, dtype=np.float32)
     luminance = np.full(frame_count, fill_value=np.nan, dtype=np.float32)
 
-    capture = cv2.VideoCapture(video_path)
+    capture = cv2.VideoCapture(filename=video_path)
     try:
         if not capture.isOpened():
             message = f"Unable to open '{video_path}' to decode motion-energy frames {start_frame} onward."
@@ -411,15 +409,15 @@ def _bin_frame(frame: NDArray[np.uint8]) -> NDArray[np.float32]:
     # The decoder yields one plane for monochrome sources. When it falls back to a BGR expansion, the three channels
     # carry the same content and the second is taken. Rows and columns past the last whole block are dropped, since a
     # partial block would average fewer pixels and carry different noise statistics than every other block.
-    gray = frame if frame.ndim == _SINGLE_PLANE_DIMENSIONS else frame[:, :, _MONOCHROME_PLANE_INDEX]
-    height, width = gray.shape
-    bin_height = height // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
-    bin_width = width // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
+    gray_plane = frame if frame.ndim == _SINGLE_PLANE_DIMENSIONS else frame[:, :, _MONOCHROME_PLANE_INDEX]
+    height, width = gray_plane.shape
+    whole_block_height = height // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
+    whole_block_width = width // _SPATIAL_BIN_SIZE * _SPATIAL_BIN_SIZE
 
     # The filter's anchor is the block center, so sampling from index 1 on a stride of 3 reads exactly the block
     # means, and every sampled neighborhood is fully interior so border handling never applies. The depth is fixed
     # to single precision by the CV_32F argument, which the OpenCV stubs do not express in their return type.
     binned: NDArray[np.float32] = cv2.boxFilter(  # type: ignore[assignment]
-        src=gray, ddepth=cv2.CV_32F, ksize=(_SPATIAL_BIN_SIZE, _SPATIAL_BIN_SIZE), normalize=True
-    )[1:bin_height:_SPATIAL_BIN_SIZE, 1:bin_width:_SPATIAL_BIN_SIZE]
+        src=gray_plane, ddepth=cv2.CV_32F, ksize=(_SPATIAL_BIN_SIZE, _SPATIAL_BIN_SIZE), normalize=True
+    )[1:whole_block_height:_SPATIAL_BIN_SIZE, 1:whole_block_width:_SPATIAL_BIN_SIZE]
     return binned

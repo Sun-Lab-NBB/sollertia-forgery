@@ -1,4 +1,4 @@
-"""Provides the system-agnostic dataset forging pipeline: dataset resolution and per-session assembly dispatch."""
+"""Provides the system-agnostic dataset forging pipeline."""
 
 from sollertia_shared_assets import (
     DatasetData,
@@ -12,6 +12,7 @@ from .state import (
     SESSION_SCOPE,
     DATASET_JOB_SCOPES,
     DATASET_STATE_SCHEMA,
+    DATASET_STATE_FILENAME,
     dataset_state_path,
     generate_dataset_state,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "ANIMAL_SCOPE",
     "DATASET_JOB_SCOPES",
     "DATASET_MARKER_FILENAME",
+    "DATASET_STATE_FILENAME",
     "DATASET_STATE_SCHEMA",
     "FORGING_JOB_CONCURRENCY_LIMITS",
     "FORGING_JOB_NAME",

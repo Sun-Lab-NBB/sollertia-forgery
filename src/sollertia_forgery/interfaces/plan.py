@@ -1,9 +1,5 @@
 """Provides the ``slf plan`` CLI group that records what a unit's jobs will cost and projects those records into one
 table per project.
-
-Planning reads a unit's raw acquisition data, so it is invoked deliberately rather than as a step inside manifest
-generation or dataset definition. The commands run on whichever host holds the data, which is what lets a remote
-submission be sized from figures measured against the data it will process.
 """
 
 from __future__ import annotations
@@ -11,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import click
+from ataraxis_base_utilities import console
 
 from ..orchestration import (
     project_plan_path,
@@ -56,8 +53,12 @@ def plan_cli() -> None:
 def plan_session_command(session_path: tuple[Path, ...], *, regenerate_plan: bool) -> None:
     """Records what every processing job of each named session will cost."""
     for path in session_path:
-        plan = resolve_session_plan(session_path=path, regenerate_plan=regenerate_plan, display_progress=True)
-        click.echo(f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
+        try:
+            plan = resolve_session_plan(session_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        except Exception as exception:
+            console.echo(message=f"{path.name}: planned nothing. {exception}")
+            continue
+        console.echo(message=f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
 
 
 @plan_cli.command("dataset", context_settings=_CONTEXT_SETTINGS)
@@ -83,8 +84,12 @@ def plan_session_command(session_path: tuple[Path, ...], *, regenerate_plan: boo
 def plan_dataset_command(dataset_path: tuple[Path, ...], *, regenerate_plan: bool) -> None:
     """Records what every forging job of each named dataset will cost."""
     for path in dataset_path:
-        plan = resolve_dataset_plan(dataset_path=path, regenerate_plan=regenerate_plan, display_progress=True)
-        click.echo(f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
+        try:
+            plan = resolve_dataset_plan(dataset_path=path, regenerate_plan=regenerate_plan, display_progress=True)
+        except Exception as exception:
+            console.echo(message=f"{path.name}: planned nothing. {exception}")
+            continue
+        console.echo(message=f"{plan.unit_name}: {len(plan.entries)} job(s) planned.")
 
 
 @plan_cli.command("project", context_settings=_CONTEXT_SETTINGS)
@@ -98,7 +103,7 @@ def plan_dataset_command(dataset_path: tuple[Path, ...], *, regenerate_plan: boo
 def plan_project_command(project_path: Path) -> None:
     """Projects every plan cache under the project into one table at the project root.
 
-    Reads the caches alone and estimates nothing, so a unit that has not been planned contributes no rows.
+    Reads the plan caches already on disk, so the table covers exactly the units that have been planned.
     """
     generate_project_plan(project_directory=project_path, display_progress=True)
-    click.echo(str(project_plan_path(project_directory=project_path)))
+    console.echo(message=str(project_plan_path(project_directory=project_path)), raw=True)

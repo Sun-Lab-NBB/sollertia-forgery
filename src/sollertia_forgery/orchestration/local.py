@@ -1,25 +1,28 @@
-"""Provides the shared batch execution engine that admits queued jobs against a core and a memory budget and
-dispatches them in their pipelines' dependency order.
+"""Provides the local batch execution engine that admits queued jobs against a core and a memory budget, then
+dispatches them onto a shared process pool in their pipelines' dependency order.
 """
 
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
-from pathlib import Path
+from typing import TYPE_CHECKING
 from threading import Lock, Thread
 import contextlib
-from collections import deque
+from collections import Counter, deque
 from dataclasses import field, dataclass
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
 import cv2
 import numba
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
+from .graph import PendingJob, resolve_dispatch_priorities
+
 if TYPE_CHECKING:
+    from pathlib import Path
     from collections.abc import Callable
+    from concurrent.futures import Future
 
 
 RESERVED_CORES: int = 2
@@ -27,12 +30,10 @@ RESERVED_CORES: int = 2
 forward this to ``resolve_worker_count``, which applies it only to a non-positive budget and honors an explicit
 budget up to the logical core count."""
 
-
 _WORKER_THREAD_CEILING: int = 1
 """The number of threads each pool worker pins its library thread pools to. Every job type either runs
 single-threaded, raises its own thread count once it starts, or fans out into a sub-pool whose children each cost the
 single core the allocation budgeted for them."""
-
 
 _PINNED_THREAD_VARIABLES: tuple[str, ...] = (
     "OMP_NUM_THREADS",
@@ -49,19 +50,17 @@ Notes:
     value it read as the ceiling for the rest of the process. It then re-reads the variable on every compilation and
     raises if the two disagree once its thread pool has started. A worker imports numba before this pin could run, so
     writing the variable here would guarantee that disagreement and fail every job that compiles a numba function.
-    The worker sets Numba's thread count through its runtime API instead, which is the supported way to change it.
+    The worker sets numba's thread count through its runtime API instead, which is the supported way to change it.
 """
-
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
 """The longest the manager blocks on a running job before looking at its state again. A job finishing is the only
 event the loop acts on, so this bound never governs a healthy batch and exists so a future that never resolves
 cannot stall the manager for good."""
 
-
 _TIFF_DECODE_THREAD_CEILING: int = 4
-"""The widest image-decode pool one job may open, whatever cores it holds. The reader sizes that pool for itself,
-outside the batch's allocation, which is what this bounds."""
+"""The widest image-decode pool one job may open, whatever cores it holds. A decode stops shortening once it reaches
+this width, so the cores a job holds beyond it are spent on the stage itself."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,77 +84,6 @@ class JobAllocation:
 
 
 @dataclass(slots=True)
-class PendingJob:
-    """Describes a single batch processing job tracked by a ``ProcessingTracker`` file.
-
-    Notes:
-        Subclasses extend this dataclass with the additional fields their worker callables need. The base fields
-        carry everything the shared execution manager needs, which is the tracker a job is recorded on, the cores and
-        memory it occupies, and the jobs it waits for. That leaves the manager free of any domain-specific detail.
-    """
-
-    tracker_path: Path
-    """The path to the ``ProcessingTracker`` YAML file that tracks this job."""
-    job_id: str
-    """The unique hexadecimal identifier for this job in the tracker."""
-    job_name: str = ""
-    """The pipeline job type name registered in the ``ProcessingTracker``, which keys this job's core allocation."""
-    core_weight: int = 1
-    """The cores this job occupies while it runs, assigned from its type's allocation before dispatch."""
-    memory_mb: int = 0
-    """The memory this job occupies while it runs, estimated from the data it will process."""
-    prerequisite_ids: tuple[str, ...] = ()
-    """The identifiers of the jobs that must succeed before this job may be dispatched. Resolved from the pipeline's
-    own job ordering, and empty for a job that depends on nothing."""
-
-    @property
-    def dispatch_key(self) -> tuple[str, str]:
-        """Returns the composite key that uniquely identifies this job across the entire batch, combining the
-        tracker path with the job ID.
-        """
-        return str(self.tracker_path), self.job_id
-
-    @property
-    def prerequisite_keys(self) -> tuple[tuple[str, str], ...]:
-        """Returns the dispatch keys of this job's upstream jobs.
-
-        Notes:
-            A job identifier is derived from the job name and specifier alone, so the same stage of two different
-            sessions shares one identifier. Pairing each identifier with this job's tracker keeps a batch spanning
-            many sessions from treating one session's completed stage as every session's.
-        """
-        return tuple((str(self.tracker_path), prerequisite) for prerequisite in self.prerequisite_ids)
-
-
-@dataclass(slots=True)
-class GenericPendingJob(PendingJob):
-    """Describes a single batch processing job for the system-agnostic processing tools.
-
-    Notes:
-        Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so one
-        descriptor serves every pipeline. The shared worker routes on ``pipeline`` and each session pipeline's worker
-        reads ``unit_path`` and ``job_id``. Fields a pipeline does not use stay at their defaults, and a descriptor
-        missing a field the engine requires is rejected before dispatch.
-    """
-
-    pipeline: str = ""
-    """The pipeline this job belongs to, which the shared worker routes on so one pool serves every pipeline."""
-    name: str = ""
-    """The human-readable unit name used for logging and status reporting."""
-    unit_path: Path = field(default_factory=Path)
-    """The path to the processing unit this job operates on (the session root for session jobs)."""
-    specifier: str = ""
-    """The specifier that differentiates jobs of the same type within one unit, such as a camera or controller source
-    identifier, a controller-module triple, or a plane index."""
-    project_root: Path | None = None
-    """The project root directory, carried for workers that resolve their output location above the unit path."""
-    options: dict[str, Any] = field(default_factory=dict)
-    """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
-    The execution engine never reads this mapping, so a pipeline's worker interprets whichever keys it declares and
-    ignores the rest. A pipeline that takes no parameters leaves it empty."""
-
-
-@dataclass(slots=True)
 class ActiveJob[PendingJobT: PendingJob]:
     """Tracks a single pending job currently executing as a ``Future`` on the shared process pool."""
 
@@ -169,11 +97,9 @@ class ActiveJob[PendingJobT: PendingJob]:
 class JobExecutionState[PendingJobT: PendingJob]:
     """Tracks runtime state for one batch execution session budgeted by both cores and memory.
 
-    The state stores the job queues, the worker callable, the two budgets, the recorded outcomes that resolve
-    ordering, the lock that serializes mutations, and the cancellation flag. The batch tools keep a single one of
-    these, so one pool serves every pipeline and the status and cancel tools read it directly. The manager owns one
-    ``ProcessPoolExecutor`` and admits each pending job once the running set has room for both its cores and its
-    memory.
+    The batch tools keep a single one of these, so one pool serves every pipeline and the status and cancel tools
+    read it directly. The manager owns one ``ProcessPoolExecutor`` and admits each pending job once the running set
+    has room for both its cores and its memory.
 
     Notes:
         Subclasses of ``PendingJob`` carry the fields a worker callable needs at dispatch time, such as the path of
@@ -181,10 +107,9 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """
 
     worker: Callable[[PendingJobT], None]
-    """The picklable module-level function invoked by ``ProcessPoolExecutor.submit`` for each pending job.
-    Must accept a single argument of the pending job subclass associated with this state."""
+    """The picklable module-level function invoked by ``ProcessPoolExecutor.submit`` for each pending job."""
     all_jobs: dict[tuple[str, str], PendingJobT] = field(default_factory=dict)
-    """All submitted jobs keyed by ``(tracker_path, job_id)`` dispatch key."""
+    """All submitted jobs keyed by ``(unit_path, job_id)`` dispatch key."""
     pending_jobs: deque[PendingJobT] = field(default_factory=deque)
     """Jobs awaiting dispatch, held in the order the next admission pass considers them."""
     active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
@@ -219,7 +144,7 @@ class JobExecutionState[PendingJobT: PendingJob]:
     lock: Lock = field(default_factory=Lock)
     """The lock guarding every mutation of the job queues and the recorded outcomes."""
     manager_thread: Thread | None = None
-    """Background execution manager thread reference."""
+    """The background thread running the execution manager, or None before the session starts it."""
     canceled: bool = False
     """Determines whether the execution session has been canceled."""
 
@@ -242,9 +167,6 @@ def resolve_core_allocations(
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
 
-    Raises:
-        ValueError: If any queued job type has no registered core allocation.
-
     Args:
         job_cores: The cores one job of each type occupies, keyed by tracker job name.
         job_names: The job type names present in the batch.
@@ -257,6 +179,9 @@ def resolve_core_allocations(
 
     Returns:
         A dictionary mapping each job name to its resolved allocation.
+
+    Raises:
+        ValueError: If any queued job type has no registered core allocation.
     """
     unregistered = sorted(name for name in job_names if name not in job_cores)
     if unregistered:
@@ -280,58 +205,6 @@ def resolve_core_allocations(
             concurrency_reservation=reservations.get(job_name),
         )
     return allocations
-
-
-def resolve_dispatch_priorities[PendingJobT: PendingJob](
-    jobs: dict[tuple[str, str], PendingJobT],
-) -> dict[tuple[str, str], int]:
-    """Resolves how much queued work waits on each job, which is the weight admission orders candidates by.
-
-    Notes:
-        A job's priority is the cores committed by every job that cannot run until it succeeds, summed over its
-        transitive dependents. Weighing the dependents by their cores rather than counting them separates a job
-        holding back three wide stages from one holding back a single narrow stage. A job nothing waits on weighs
-        zero, whatever its own size.
-
-        Ordering by this weight is what keeps a batch working on its critical path. Admitting by size alone lets a
-        crowd of leaf jobs hold the budget while the root of a long chain waits, which idles the host once those
-        leaves finish and the chain has yet to start. The dependents are collected as a set, so a stage reachable
-        along several paths at once is counted a single time.
-
-        A prerequisite naming a job outside this batch is skipped, since a job the batch does not hold cannot be
-        ordered against the ones it does. Cyclic prerequisites resolve to a finite weight rather than recursing
-        without end, which leaves a malformed pipeline ordering poorly instead of stalling the batch.
-
-    Args:
-        jobs: Every job the batch holds, keyed by dispatch key.
-
-    Returns:
-        A dictionary mapping each job's dispatch key to the cores its transitive dependents commit.
-    """
-    dependents: dict[tuple[str, str], list[tuple[str, str]]] = {key: [] for key in jobs}
-    for key, job in jobs.items():
-        for prerequisite in job.prerequisite_keys:
-            if prerequisite in dependents:
-                dependents[prerequisite].append(key)
-
-    resolved: dict[tuple[str, str], frozenset[tuple[str, str]]] = {}
-
-    def _collect(key: tuple[str, str], visiting: set[tuple[str, str]]) -> frozenset[tuple[str, str]]:
-        cached = resolved.get(key)
-        if cached is not None:
-            return cached
-        if key in visiting:
-            return frozenset()
-        visiting.add(key)
-        reachable: set[tuple[str, str]] = set()
-        for dependent in dependents[key]:
-            reachable.add(dependent)
-            reachable |= _collect(dependent, visiting)
-        visiting.discard(key)
-        resolved[key] = frozenset(reachable)
-        return resolved[key]
-
-    return {key: sum(jobs[dependent].core_weight for dependent in _collect(key, set())) for key in jobs}
 
 
 def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:
@@ -430,11 +303,15 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
 
 
 def apply_decode_thread_ceiling(cores: int) -> None:
-    """Scopes the image-decode pool to the cores one job holds.
+    """Bounds the default image-decode width of the calling process, from the cores one job holds.
 
     Notes:
-        The reader consults this count when a read is issued rather than when it is imported, so a worker re-scopes
-        it before each job it runs. That is what lets one pool serve job types whose decode widths differ.
+        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
+        life of the process. The value a pool worker writes as it starts is therefore the one every read in that
+        worker sees, and a later write in the same process reaches nothing.
+
+        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
+        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
 
     Args:
         cores: The cores the job about to run holds.
@@ -452,11 +329,13 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         called alongside the variables. A job that needs more threads raises its own count once it starts, which
         numba permits up to the count latched at import.
 
-        numba and OpenCV are pinned through their runtime setters alone, leaving the environment they read at import
-        untouched. Both already hold the count they read when the worker imported them, so rewriting those variables
-        would change nothing they consult again. For numba it would actively break the worker, since it compares
-        the variable against the latched count on every compilation and rejects a disagreement once its threads have
-        started, which is exactly the state a late pin creates.
+        numba is pinned through its runtime setter alone, leaving the variable it reads at import untouched. It
+        already holds the count it read when the worker imported it, so rewriting that variable would break the
+        worker. The library compares the variable against the latched count on every compilation and rejects a
+        disagreement once its threads have started, which is exactly the state a late pin creates.
+
+        OpenCV takes both, since its core thread count is a runtime setter while its FFmpeg decoder reads its own
+        variable when a capture opens.
 
     Args:
         thread_ceiling: The number of threads each library thread pool is pinned to.
@@ -466,7 +345,7 @@ def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> 
         os.environ[variable] = str(ceiling)
     apply_decode_thread_ceiling(cores=ceiling)
 
-    numba.set_num_threads(min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
+    numba.set_num_threads(n=min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)
 
 
@@ -483,6 +362,9 @@ def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[Pending
 
     Args:
         state: The active job execution state whose jobs are reset. Its trackers are rewritten in place.
+
+    Raises:
+        ValueError: If the batch names an identifier the unit's tracker does not hold.
     """
     for tracker_path, jobs in group_jobs_by_tracker(state=state).items():
         if not tracker_path.is_file():
@@ -497,20 +379,23 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
         The trackers are the authoritative record of every job's outcome, so prerequisite satisfaction is read from
         them rather than inferred from the futures. Reading them also picks up prerequisites that succeeded in an
         earlier batch and were never queued in this one. That is how a run asking only for a pipeline's later stages
-        still resolves its ordering. Outcomes are keyed by tracker as well as identifier, so one session's completed
-        stage never satisfies another session's.
+        still resolves its ordering.
+
+        Each tracker's jobs are recorded under the unit that tracker belongs to, matching how a job's dispatch key is
+        formed, so one unit's completed stage never satisfies another unit's. Units are paired with their trackers
+        rather than read from them, because a tracker file states which jobs it holds and not which unit holds it.
 
     Args:
         state: The active job execution state whose tracker files are re-read. Its outcome sets are updated in place.
     """
-    for tracker_path in {job.tracker_path for job in state.all_jobs.values()}:
+    for unit_path, tracker_path in {(job.unit_path, job.tracker_path) for job in state.all_jobs.values()}:
         if not tracker_path.is_file():
             continue
         for job_id, job_state in ProcessingTracker(file_path=tracker_path).snapshot().items():
             if job_state.status is ProcessingStatus.SUCCEEDED:
-                state.succeeded_job_keys.add((str(tracker_path), job_id))
+                state.succeeded_job_keys.add((str(unit_path), job_id))
             elif job_state.status is ProcessingStatus.FAILED:
-                state.failed_job_keys.add((str(tracker_path), job_id))
+                state.failed_job_keys.add((str(unit_path), job_id))
 
 
 def _admit_pending_jobs[PendingJobT: PendingJob](
@@ -556,9 +441,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
     used_cores = sum(active.job.core_weight for active in state.active_jobs)
     used_memory = sum(active.job.memory_mb for active in state.active_jobs)
 
-    running_counts: dict[str, int] = {}
-    for active in state.active_jobs:
-        running_counts[active.job.job_name] = running_counts.get(active.job.job_name, 0) + 1
+    running_counts: Counter[str] = Counter(active.job.job_name for active in state.active_jobs)
 
     admitted_any = False
     remaining: deque[PendingJobT] = deque(

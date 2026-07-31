@@ -1,13 +1,9 @@
-"""Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline.
-
-The worker combines a mesoscope experiment session's fluorescence, behavior, runtime, and video sub-datasets on the
-fluorescence reference clock into the session's unified ``data.feather``.
-"""
+"""Provides the Mesoscope-VR experiment-session data-assembly worker donated to the system-agnostic forging pipeline."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from functools import partial
+from functools import reduce, partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import polars as pl
@@ -39,10 +35,6 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     meaning of each emitted column is documented by ``DatasetColumn`` and donated to the dataset's
     ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
 
-    Notes:
-        Requires a fully processed mesoscope experiment session: the experiment configuration and the single- and
-        multi-recording cindra outputs must be present on disk.
-
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.
         output_path: The path to the ``data.feather`` file to write inside the forged dataset hierarchy.
@@ -51,8 +43,9 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
 
     Raises:
         FileNotFoundError: If the session's processed microcontroller-data, runtime-data, or single-recording cindra
-            output directory is missing, or if the multi-recording cindra output (cell_fluorescence.npy and its
-            companions under the resolved multi-recording directory) is absent.
+            output directory is missing. Also raised when the multi-recording cindra output (cell_fluorescence.npy
+            and its companions under the resolved multi-recording directory), the session's experiment
+            configuration, or its hardware state file is absent.
         ValueError: If a sub-dataset cannot be assembled (for example, the ScanImage fallback alignment cannot
             recover the expected frame count, or a required hardware-state field is missing).
     """
@@ -95,7 +88,6 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         multi_recording_dataset_directory(animal_id=str(session.animal_id), dataset_name=dataset_name)
     )
 
-    # Ensures the output directory exists before any sub-dataset assembly runs.
     ensure_directory_exists(path=output_path)
 
     # Loads the experiment configuration once so the runtime assembly resolves its state and trial mappings without
@@ -137,19 +129,20 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
             reference_time=reference_time,
         ),
     }
-    results: dict[str, pl.DataFrame] = {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_name = {executor.submit(task): name for name, task in tasks.items()}
-        for future in as_completed(future_to_name):
-            results[future_to_name[future]] = future.result()
+        results: dict[str, pl.DataFrame] = {
+            future_to_name[future]: future.result() for future in as_completed(future_to_name)
+        }
 
-    # Concatenates the sub-datasets into the unified feather, masks non-run experiment columns, and writes it
-    # uncompressed so downstream consumers can memory-map it. The video sub-dataset joins only when it produced
-    # columns, so a session processed without camera data still forges.
+    # Stacks the sub-datasets into the unified feather, masks non-run experiment columns, and writes it uncompressed so
+    # downstream consumers can memory-map it. Stacking requires every sub-dataset to carry the reference clock's
+    # height, so one that drifts off that clock raises rather than being padded. The video sub-dataset joins only when
+    # it produced columns, so a session processed without camera data still forges.
     sub_datasets = [fluorescence_data, results["behavior"], results["runtime"]]
     if results["video"].width > 0:
         sub_datasets.append(results["video"])
-    result = pl.concat(items=sub_datasets, how="horizontal")
+    result = reduce(pl.DataFrame.hstack, sub_datasets)
     result = mask_non_run_experiment_data(experiment_data=result)
     result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
     result.write_ipc(file=output_path)

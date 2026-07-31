@@ -15,11 +15,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-_TRAINING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING})
-"""The session types routed to the training-session assembler. Mesoscope experiment sessions are routed to the
-experiment-session assembler, and every other type is rejected."""
-
-
 MESOSCOPE_ADMISSION_PIPELINES: dict[SessionTypes, frozenset[ProcessingPipelines]] = {
     SessionTypes.MESOSCOPE_EXPERIMENT: frozenset(
         {
@@ -55,10 +50,13 @@ Notes:
     every source the session recorded was processed. Admission therefore checks which pipelines completed rather than
     counting sources.
 
-    A training session records no imaging, so the two-photon pipeline is absent from its requirement and the
-    corresponding assembler reads two processed directories rather than three. A session type absent from this mapping
-    joins no dataset, which is the case for window checking.
+    A training session records no imaging, so the two-photon pipeline is absent from its requirement. A session type
+    absent from this mapping joins no dataset, which is the case for window checking.
 """
+
+
+_TRAINING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING})
+"""The session types routed to the training-session assembler."""
 
 
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
@@ -78,10 +76,10 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
             multi-recording output directory.
 
     Raises:
-        ValueError: If the session type is not a supported forging session type, or if a sub-dataset cannot be
-            assembled (propagated from the resolved assembler).
         FileNotFoundError: If a required processed-data directory or reference clock is missing (propagated from the
             resolved assembler).
+        ValueError: If the session type is not a supported forging session type, or if a sub-dataset cannot be
+            assembled (propagated from the resolved assembler).
     """
     session = SessionData.load(session_path=source_session_path)
     session_type = session.session_type
@@ -95,7 +93,9 @@ def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dat
         assemble_training_dataset(source_session_path=source_session_path, output_path=output_path)
         return
 
-    supported = ", ".join(member.value for member in (SessionTypes.MESOSCOPE_EXPERIMENT, *_TRAINING_SESSION_TYPES))
+    supported = ", ".join(
+        sorted(member.value for member in (SessionTypes.MESOSCOPE_EXPERIMENT, *_TRAINING_SESSION_TYPES))
+    )
     message = (
         f"Unable to assemble the data for session '{source_session_path.name}'. Its session type '{session_type}' is "
         f"not a supported forging session type. The supported session types are: {supported}."

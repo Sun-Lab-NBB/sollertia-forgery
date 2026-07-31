@@ -27,16 +27,53 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 
+_PRIMARY_EVENT_CODE: int = 51
+"""The axci event code carrying each module's primary data stream."""
+
+_SECONDARY_EVENT_CODE: int = 52
+"""The axci event code carrying each module's complementary data stream."""
+
+_TONE_ON_EVENT_CODE: int = 54
+"""The axci event code marking the reward tone onset."""
+
+_TONE_OFF_EVENT_CODE: int = 55
+"""The axci event code marking the reward tone offset."""
+
+_ENCODER_MODULE: tuple[int, int] = (2, 1)
+"""The ``(module_type, module_id)`` pair identifying the wheel-encoder module."""
+
+_MESOSCOPE_FRAME_MODULE: tuple[int, int] = (1, 1)
+"""The ``(module_type, module_id)`` pair identifying the mesoscope-frame TTL module."""
+
+_BRAKE_MODULE: tuple[int, int] = (3, 1)
+"""The ``(module_type, module_id)`` pair identifying the wheel brake module."""
+
+_VALVE_MODULE: tuple[int, int] = (5, 1)
+"""The ``(module_type, module_id)`` pair identifying the water valve module."""
+
+_GAS_PUFF_MODULE: tuple[int, int] = (5, 2)
+"""The ``(module_type, module_id)`` pair identifying the gas puff valve module."""
+
+_LICK_MODULE: tuple[int, int] = (4, 1)
+"""The ``(module_type, module_id)`` pair identifying the lick sensor module."""
+
+_TORQUE_MODULE: tuple[int, int] = (6, 1)
+"""The ``(module_type, module_id)`` pair identifying the torque sensor module."""
+
+_SCREEN_MODULE: tuple[int, int] = (7, 1)
+"""The ``(module_type, module_id)`` pair identifying the VR screen module."""
+
+
 @dataclass(frozen=True, slots=True)
 class _ModuleSpecification:
-    """Defines the processing specification for a single hardware module type."""
+    """Defines the processing specification for a single hardware module instance."""
 
     required_fields: tuple[str, ...]
-    """The MesoscopeHardwareState field names that must be configured (not None) for processing eligibility."""
+    """The ``MesoscopeHardwareState`` field names that must be configured (not None) for processing eligibility."""
     usage_flags: tuple[str, ...]
-    """The MesoscopeHardwareState boolean field names recording whether the module was used during acquisition. A flag
-    set to False marks the module as unused, unlike a recorded state value (such as screens_initially_on), which can be
-    False even on sessions where the module was active."""
+    """The ``MesoscopeHardwareState`` boolean field names recording whether the module was used during acquisition. A
+    flag set to False marks the module as unused. Required fields carry recorded state values such as
+    ``screens_initially_on``, which stay meaningful when False, so the two groups are checked separately."""
     event_codes: tuple[int, ...]
     """The axci event codes the module's parse function reads. The system-agnostic microcontroller pipeline builds the
     module's extraction filter from these codes, so a code absent here is never extracted from the log archive."""
@@ -45,10 +82,10 @@ class _ModuleSpecification:
         """Determines whether the hardware state marks this module as used and fully configured.
 
         Notes:
-            Per the MesoscopeHardwareState contract, a field set to None indicates that the corresponding module was
-            not used, so None is the sole absence test for required_fields. A recorded state value is therefore never
-            treated as an absence marker, even when it is False. Modules that additionally carry an explicit usage
-            flag are skipped when that flag is not set.
+            Per the ``MesoscopeHardwareState`` contract, a field set to None indicates that the corresponding module
+            was not used, so None is the sole absence test for ``required_fields``. A recorded state value is
+            therefore never treated as an absence marker, even when it is False. Modules that additionally carry an
+            explicit usage flag are skipped when that flag is not set.
 
         Args:
             hardware_state: The session hardware configuration to validate against.
@@ -62,13 +99,71 @@ class _ModuleSpecification:
         return all(getattr(hardware_state, flag_name, None) for flag_name in self.usage_flags)
 
 
-# Public parser entry points wired into the microcontroller parser registry ('registries.py'). Each shares the uniform
-# (event_partition, output_directory, session) signature, resolves the session hardware state, skips when the module
-# was not configured, and delegates to the matching private parser.
+_MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
+    _ENCODER_MODULE: _ModuleSpecification(
+        required_fields=("cm_per_pulse",),
+        usage_flags=(),
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+    _MESOSCOPE_FRAME_MODULE: _ModuleSpecification(
+        required_fields=(),
+        usage_flags=("recorded_mesoscope_ttl",),
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+    _BRAKE_MODULE: _ModuleSpecification(
+        required_fields=("maximum_brake_strength", "minimum_brake_strength"),
+        usage_flags=(),
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+    _VALVE_MODULE: _ModuleSpecification(
+        required_fields=("valve_scale_coefficient", "valve_nonlinearity_exponent"),
+        usage_flags=(),
+        # Code 53 (kCalibrated) is emitted only by the firmware's calibration command, never during a normal runtime.
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE, _TONE_ON_EVENT_CODE, _TONE_OFF_EVENT_CODE),
+    ),
+    _GAS_PUFF_MODULE: _ModuleSpecification(
+        required_fields=(),
+        usage_flags=("delivered_gas_puffs",),
+        # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
+        # gas-puff parser does not read them, so extracting them would be wasted work.
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+    _LICK_MODULE: _ModuleSpecification(
+        required_fields=("lick_threshold",),
+        usage_flags=(),
+        event_codes=(_PRIMARY_EVENT_CODE,),
+    ),
+    _TORQUE_MODULE: _ModuleSpecification(
+        required_fields=("torque_per_adc_unit",),
+        usage_flags=(),
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+    _SCREEN_MODULE: _ModuleSpecification(
+        required_fields=("screens_initially_on",),
+        usage_flags=(),
+        event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
+    ),
+}
+"""Maps ``(module_type, module_id)`` pairs to their processing specifications. Each specification defines the required
+hardware state fields, usage flags, and extracted event codes for a specific hardware module instance."""
+
+
+# Public parser entry points wired into the microcontroller parser registry ('registries.py'). The uniform
+# (event_partition, output_directory, session) signature is what the registry dispatches on.
 def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the wheel-encoder module (type 2, id 1) into the session's encoder behavior feather."""
+    """Parses the wheel-encoder module (type 2, id 1) into the session's encoder behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=2, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_ENCODER_MODULE, hardware_state=hardware_state):
         return
     _parse_encoder_data(
         event_partition=event_partition,
@@ -80,21 +175,42 @@ def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Pa
 def parse_mesoscope_frame(
     event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData
 ) -> None:
-    """Parses the mesoscope-frame TTL module (type 1, id 1) into the session's mesoscope-frame behavior feather."""
+    """Parses the mesoscope-frame TTL module (type 1, id 1) into the session's mesoscope-frame behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+        ValueError: If the extracted event data carries no rising or no falling TTL edge timestamps.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=1, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_MESOSCOPE_FRAME_MODULE, hardware_state=hardware_state):
         return
     _parse_ttl_data(
         event_partition=event_partition,
         output_file=output_directory / BehaviorDataFiles.MESOSCOPE_FRAME,
-        hardware_state=hardware_state,
+        session=session,
     )
 
 
 def parse_brake(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the brake module (type 3, id 1) into the session's brake behavior feather."""
+    """Parses the brake module (type 3, id 1) into the session's brake behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=3, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_BRAKE_MODULE, hardware_state=hardware_state):
         return
     _parse_brake_data(
         event_partition=event_partition,
@@ -104,9 +220,19 @@ def parse_brake(event_partition: dict[int, pl.DataFrame], output_directory: Path
 
 
 def parse_valve(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the water-valve module (type 5, id 1) into the session's valve behavior feather."""
+    """Parses the water-valve module (type 5, id 1) into the session's valve behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=5, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_VALVE_MODULE, hardware_state=hardware_state):
         return
     _parse_valve_data(
         event_partition=event_partition,
@@ -116,9 +242,19 @@ def parse_valve(event_partition: dict[int, pl.DataFrame], output_directory: Path
 
 
 def parse_gas_puff(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the gas-puff valve module (type 5, id 2) into the session's gas-puff behavior feather."""
+    """Parses the gas-puff valve module (type 5, id 2) into the session's gas-puff behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=5, module_id=2, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_GAS_PUFF_MODULE, hardware_state=hardware_state):
         return
     _parse_gas_puff_data(
         event_partition=event_partition,
@@ -128,9 +264,20 @@ def parse_gas_puff(event_partition: dict[int, pl.DataFrame], output_directory: P
 
 
 def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the lick-sensor module (type 4, id 1) into the session's lick behavior feather."""
+    """Parses the lick-sensor module (type 4, id 1) into the session's lick behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+        ValueError: If the hardware state carries no lick detection threshold.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=4, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_LICK_MODULE, hardware_state=hardware_state):
         return
     _parse_lick_data(
         event_partition=event_partition,
@@ -140,9 +287,19 @@ def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path,
 
 
 def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the torque-sensor module (type 6, id 1) into the session's torque behavior feather."""
+    """Parses the torque-sensor module (type 6, id 1) into the session's torque behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=6, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_TORQUE_MODULE, hardware_state=hardware_state):
         return
     _parse_torque_data(
         event_partition=event_partition,
@@ -152,39 +309,25 @@ def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Pat
 
 
 def parse_screen(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
-    """Parses the screen module (type 7, id 1) into the session's screen behavior feather."""
+    """Parses the screen module (type 7, id 1) into the session's screen behavior feather.
+
+    Args:
+        event_partition: The event-code-keyed partition dictionary holding the module's extracted event data.
+        output_directory: The path to the session's processed microcontroller-data directory where the feather is
+            written.
+        session: The loaded session whose hardware state determines module eligibility.
+
+    Raises:
+        FileNotFoundError: If the session's hardware state YAML file is absent.
+    """
     hardware_state = _resolve_hardware_state(session=session)
-    if not _is_module_eligible(module_type=7, module_id=1, hardware_state=hardware_state):
+    if not _is_module_eligible(module_key=_SCREEN_MODULE, hardware_state=hardware_state):
         return
     _parse_screen_data(
         event_partition=event_partition,
         output_file=output_directory / BehaviorDataFiles.SCREEN,
         hardware_state=hardware_state,
     )
-
-
-def _is_module_eligible(module_type: int, module_id: int, hardware_state: MesoscopeHardwareState) -> bool:
-    """Determines whether a module is eligible for processing based on the hardware state configuration.
-
-    Notes:
-        A module is eligible if all of its required hardware state fields are configured (not None) and every usage
-        flag it carries is set. Modules whose hardware parameters were not set during the acquisition session, and
-        modules a session explicitly records as unused, are skipped during processing.
-
-    Args:
-        module_type: The type code of the hardware module.
-        module_id: The instance ID of the hardware module.
-        hardware_state: The session hardware configuration to check against.
-
-    Returns:
-        True if the module is eligible for processing, False otherwise.
-    """
-    module_key = (module_type, module_id)
-    if module_key not in _MODULE_REGISTRY:
-        return False
-
-    specification = _MODULE_REGISTRY[module_key]
-    return specification.check_eligibility(hardware_state=hardware_state)
 
 
 def get_eligible_modules(session: SessionData) -> set[tuple[int, int]]:
@@ -207,7 +350,7 @@ def get_eligible_modules(session: SessionData) -> set[tuple[int, int]]:
     return {
         module_key
         for module_key in _MODULE_REGISTRY
-        if _is_module_eligible(module_type=module_key[0], module_id=module_key[1], hardware_state=hardware_state)
+        if _is_module_eligible(module_key=module_key, hardware_state=hardware_state)
     }
 
 
@@ -216,15 +359,36 @@ def get_module_event_codes() -> dict[tuple[int, int], tuple[int, ...]]:
 
     Notes:
         This is the Mesoscope-VR system's donation to the microcontroller event-code registry ('registries.py'). The
-        system-agnostic microcontroller pipeline builds each controller's extraction filter from this mapping, so the
-        codes returned here are exactly the codes the extraction stage pulls out of the raw log archives. The mapping
-        is rebuilt on every call, so callers may mutate the returned dictionary freely.
+        system-agnostic microcontroller pipeline builds each controller's extraction filter from this mapping,
+        narrowed to the modules the session marks eligible, so a code absent here is never extracted. The mapping is
+        rebuilt on every call, so callers may mutate the returned dictionary freely.
 
     Returns:
         A mapping from each ``(module_type, module_id)`` pair this system parses to the tuple of event codes its
         parser reads.
     """
     return {module_key: specification.event_codes for module_key, specification in _MODULE_REGISTRY.items()}
+
+
+def _is_module_eligible(module_key: tuple[int, int], hardware_state: MesoscopeHardwareState) -> bool:
+    """Determines whether a module is eligible for processing based on the hardware state configuration.
+
+    Notes:
+        A module is eligible if all of its required hardware state fields are configured (not None) and every usage
+        flag it carries is set. Modules whose hardware parameters were not set during the acquisition session, and
+        modules a session explicitly records as unused, are skipped during processing.
+
+    Args:
+        module_key: The ``(module_type, module_id)`` pair identifying the hardware module.
+        hardware_state: The session hardware configuration to check against.
+
+    Returns:
+        True if the module is eligible for processing, False otherwise.
+    """
+    specification = _MODULE_REGISTRY.get(module_key)
+    if specification is None:
+        return False
+    return specification.check_eligibility(hardware_state=hardware_state)
 
 
 def _resolve_hardware_state(session: SessionData) -> MesoscopeHardwareState:
@@ -261,29 +425,36 @@ def _parse_encoder_data(
     Args:
         event_partition: The event-code-keyed partition dictionary containing the encoder module event data.
         output_file: The path to the output .feather file.
-        hardware_state: The hardware configuration providing the cm_per_pulse conversion factor.
+        hardware_state: The hardware configuration providing the ``cm_per_pulse`` conversion factor.
     """
     cm_per_pulse = np.float64(hardware_state.cm_per_pulse)
 
     # Pre-declares the array types so mypy keeps the fallback-branch reassignments at the declared NDArray types
     # for the merge_event_streams() call.
-    ccw_timestamps: NDArray[np.uint64]
-    ccw_values: NDArray[np.float64]
-    cw_timestamps: NDArray[np.uint64]
-    cw_values: NDArray[np.float64]
+    counterclockwise_timestamps: NDArray[np.uint64]
+    counterclockwise_values: NDArray[np.float64]
+    clockwise_timestamps: NDArray[np.uint64]
+    clockwise_values: NDArray[np.float64]
 
-    ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
-    cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
+    counterclockwise_timestamps, counterclockwise_values = get_event_data(
+        partition=event_partition, event_code=_PRIMARY_EVENT_CODE, values_dtype=np.float64
+    )
+    clockwise_timestamps, clockwise_values = get_event_data(
+        partition=event_partition, event_code=_SECONDARY_EVENT_CODE, values_dtype=np.float64
+    )
 
-    if len(ccw_timestamps) == 0:
-        ccw_timestamps = np.array([cw_timestamps[0] + 1], dtype=np.uint64)
-        ccw_values = np.array([0.0], dtype=np.float64)
-    elif len(cw_timestamps) == 0:
-        cw_timestamps = np.array([ccw_timestamps[0] + 1], dtype=np.uint64)
-        cw_values = np.array([0.0], dtype=np.float64)
+    if counterclockwise_timestamps.size == 0:
+        counterclockwise_timestamps = np.array([clockwise_timestamps[0] + 1], dtype=np.uint64)
+        counterclockwise_values = np.array([0.0], dtype=np.float64)
+    elif clockwise_timestamps.size == 0:
+        clockwise_timestamps = np.array([counterclockwise_timestamps[0] + 1], dtype=np.uint64)
+        clockwise_values = np.array([0.0], dtype=np.float64)
 
     timestamps, displacements = merge_event_streams(
-        timestamps_a=ccw_timestamps, values_a=ccw_values, timestamps_b=cw_timestamps, values_b=-cw_values
+        timestamps_a=counterclockwise_timestamps,
+        values_a=counterclockwise_values,
+        timestamps_b=clockwise_timestamps,
+        values_b=-clockwise_values,
     )
 
     positions = np.cumsum(displacements * cm_per_pulse)
@@ -294,27 +465,37 @@ def _parse_encoder_data(
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
 
 
-def _parse_ttl_data(
-    event_partition: dict[int, pl.DataFrame],
-    output_file: Path,
-    hardware_state: MesoscopeHardwareState,  # noqa: ARG001
-) -> None:
+def _parse_ttl_data(event_partition: dict[int, pl.DataFrame], output_file: Path, session: SessionData) -> None:
     """Extracts and saves TTL module data as a .feather file.
 
     Notes:
         Processes TTL input signals by detecting ON (event 51) and OFF (event 52) transitions. Ensures the final
-        value is 0 to properly mark the end of the monitoring sequence.
+        value is 0 to properly mark the end of the monitoring sequence. Both edge polarities are required, since the
+        fluorescence assembly that consumes this feather pairs every rising edge with its falling edge.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw TTL module event data.
         output_file: The path to the output .feather file.
-        hardware_state: The hardware configuration (unused for TTL processing but required for uniform dispatch).
-    """
-    on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
-    off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
+        session: The loaded session whose TTL module data is parsed, named in the missing-edge error message.
 
-    if len(on_timestamps) == 0 or len(off_timestamps) == 0:
-        return
+    Raises:
+        ValueError: If the extracted event data carries no rising or no falling edge timestamps.
+    """
+    on_timestamps = get_event_timestamps(partition=event_partition, event_code=_PRIMARY_EVENT_CODE)
+    off_timestamps = get_event_timestamps(partition=event_partition, event_code=_SECONDARY_EVENT_CODE)
+
+    missing_edges = tuple(
+        polarity
+        for polarity, edge_timestamps in (("rising", on_timestamps), ("falling", off_timestamps))
+        if edge_timestamps.size == 0
+    )
+    if missing_edges:
+        message = (
+            f"Unable to parse the TTL module data for session '{session.session_name}'. The extracted event data "
+            f"carries no {' and no '.join(missing_edges)} edge timestamps, so the TTL pulse train recorded in "
+            f"'{output_file.name}' cannot be reconstructed."
+        )
+        console.error(message=message, error=ValueError)
 
     timestamps, triggers = merge_event_streams(
         timestamps_a=on_timestamps,
@@ -324,8 +505,8 @@ def _parse_ttl_data(
     )
 
     if triggers[-1] != 0:
-        timestamps = np.append(timestamps, timestamps[-1] + 1)
-        triggers = np.append(triggers, 0)
+        timestamps = np.append(timestamps, values=timestamps[-1] + 1)
+        triggers = np.append(triggers, values=0)
 
     result_dataframe = pl.DataFrame({"time_us": timestamps, "ttl_state": triggers})
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
@@ -348,14 +529,14 @@ def _parse_brake_data(
     maximum_brake_strength = np.float64(hardware_state.maximum_brake_strength)
     minimum_brake_strength = np.float64(hardware_state.minimum_brake_strength)
 
-    engaged_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
-    disengaged_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
+    engaged_timestamps = get_event_timestamps(partition=event_partition, event_code=_PRIMARY_EVENT_CODE)
+    disengaged_timestamps = get_event_timestamps(partition=event_partition, event_code=_SECONDARY_EVENT_CODE)
 
     timestamps, torques = merge_event_streams(
         timestamps_a=engaged_timestamps,
-        values_a=np.full(len(engaged_timestamps), maximum_brake_strength, dtype=np.float64),
+        values_a=np.full(len(engaged_timestamps), fill_value=maximum_brake_strength, dtype=np.float64),
         timestamps_b=disengaged_timestamps,
-        values_b=np.full(len(disengaged_timestamps), minimum_brake_strength, dtype=np.float64),
+        values_b=np.full(len(disengaged_timestamps), fill_value=minimum_brake_strength, dtype=np.float64),
     )
 
     result_dataframe = pl.DataFrame({"time_us": timestamps, "brake_torque_N_cm": torques})
@@ -370,7 +551,8 @@ def _parse_valve_data(
     Notes:
         Converts valve open/close timing into cumulative dispensed water volume using a calibrated power law
         equation. Also extracts tone buzzer state signals and temporally interpolates both data streams onto a
-        shared timestamp grid.
+        shared timestamp grid. A session that never opened the valve produces a single zero-volume, zero-tone row
+        stamped at the first close event, so the downstream assembly still finds the feather.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw valve module event data.
@@ -380,10 +562,10 @@ def _parse_valve_data(
     scale_coefficient = np.float64(hardware_state.valve_scale_coefficient)
     nonlinearity_exponent = np.float64(hardware_state.valve_nonlinearity_exponent)
 
-    open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
-    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
+    open_timestamps = get_event_timestamps(partition=event_partition, event_code=_PRIMARY_EVENT_CODE)
+    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=_SECONDARY_EVENT_CODE)
 
-    if len(open_timestamps) == 0:
+    if open_timestamps.size == 0:
         result_dataframe = pl.DataFrame(
             {
                 "time_us": np.array([closed_timestamps[0]], dtype=np.uint64),
@@ -411,11 +593,11 @@ def _parse_valve_data(
     volumes = np.cumsum(scale_coefficient * np.power(pulse_durations, nonlinearity_exponent))
     volumes = np.round(volumes, decimals=8)
 
-    reward_timestamps = np.insert(reward_timestamps, 0, timestamps[0])
-    volumes = np.insert(volumes, 0, 0.0)
+    reward_timestamps = np.insert(reward_timestamps, obj=0, values=timestamps[0])
+    volumes = np.insert(volumes, obj=0, values=0.0)
 
-    tone_on_timestamps = get_event_timestamps(partition=event_partition, event_code=54)
-    tone_off_timestamps = get_event_timestamps(partition=event_partition, event_code=55)
+    tone_on_timestamps = get_event_timestamps(partition=event_partition, event_code=_TONE_ON_EVENT_CODE)
+    tone_off_timestamps = get_event_timestamps(partition=event_partition, event_code=_TONE_OFF_EVENT_CODE)
 
     tone_timestamps, tone_states = merge_event_streams(
         timestamps_a=tone_on_timestamps,
@@ -425,26 +607,30 @@ def _parse_valve_data(
     )
 
     if tone_states[-1] != 0:
-        tone_timestamps = np.append(tone_timestamps, tone_timestamps[-1] + 1)
-        tone_states = np.append(tone_states, 0)
+        tone_timestamps = np.append(tone_timestamps, values=tone_timestamps[-1] + 1)
+        tone_states = np.append(tone_states, values=0)
 
-    shared_stamps = np.unique(np.concatenate([tone_timestamps, reward_timestamps]))
+    shared_timestamps = np.unique(np.concatenate([tone_timestamps, reward_timestamps]))
 
     interpolated_reward = interpolate_data(
         source_coordinates=reward_timestamps,
         source_values=volumes,
-        target_coordinates=shared_stamps,
+        target_coordinates=shared_timestamps,
         is_discrete=True,
     )
     interpolated_tones = interpolate_data(
         source_coordinates=tone_timestamps,
         source_values=tone_states,
-        target_coordinates=shared_stamps,
+        target_coordinates=shared_timestamps,
         is_discrete=True,
     )
 
     result_dataframe = pl.DataFrame(
-        {"time_us": shared_stamps, "dispensed_water_volume_uL": interpolated_reward, "tone_state": interpolated_tones}
+        {
+            "time_us": shared_timestamps,
+            "dispensed_water_volume_uL": interpolated_reward,
+            "tone_state": interpolated_tones,
+        }
     )
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
 
@@ -457,18 +643,18 @@ def _parse_gas_puff_data(
     """Extracts and saves gas puff valve module data as a .feather file.
 
     Notes:
-        Tracks valve open/closed states and computes cumulative puff count by counting falling edges
-        (open-to-closed transitions).
+        A session that never opened the valve produces a single closed-state, zero-count row stamped at the first
+        close event, so the downstream assembly still finds the feather.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw gas puff module event data.
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration (unused for gas puff processing but required for uniform dispatch).
     """
-    open_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
-    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
+    open_timestamps = get_event_timestamps(partition=event_partition, event_code=_PRIMARY_EVENT_CODE)
+    closed_timestamps = get_event_timestamps(partition=event_partition, event_code=_SECONDARY_EVENT_CODE)
 
-    if len(open_timestamps) == 0:
+    if open_timestamps.size == 0:
         result_dataframe = pl.DataFrame(
             {
                 "time_us": np.array([closed_timestamps[0]], dtype=np.uint64),
@@ -503,13 +689,17 @@ def _parse_lick_data(
 
     Notes:
         Preserves the raw 12-bit ADC voltage readings and applies threshold-based binary classification to detect
-        lick events. The contact duration between consecutive ON and OFF edges corresponds to the tongue contact
-        time with the lick tube.
+        lick events. The interval between consecutive rising and falling transitions of the derived ``lick_state``
+        corresponds to the tongue contact time with the lick tube.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw lick sensor module event data.
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration providing the lick detection threshold.
+
+    Raises:
+        ValueError: If the hardware state carries no lick detection threshold, which means the module eligibility
+            filter and the parser registry disagree.
     """
     if hardware_state.lick_threshold is None:
         message = (
@@ -521,7 +711,9 @@ def _parse_lick_data(
 
     lick_threshold = np.uint16(hardware_state.lick_threshold)
 
-    timestamps, voltages = get_event_data(partition=event_partition, event_code=51, values_dtype=np.uint16)
+    timestamps, voltages = get_event_data(
+        partition=event_partition, event_code=_PRIMARY_EVENT_CODE, values_dtype=np.uint16
+    )
 
     sort_indices = np.argsort(timestamps, kind="stable")
     timestamps = timestamps[sort_indices]
@@ -540,7 +732,8 @@ def _parse_torque_data(
 
     Notes:
         Converts raw ADC readings from CCW (event 51, positive) and CW (event 52, negative) torque events into
-        physical torque values in Newton centimeters.
+        physical torque values in Newton centimeters. Appends a trailing zero sample one microsecond after the last
+        event when the sequence does not already end at zero, so the torque returns to rest at the end of the record.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw torque sensor module event data.
@@ -550,33 +743,37 @@ def _parse_torque_data(
     torque_per_adc_unit = np.float64(hardware_state.torque_per_adc_unit)
 
     # Pre-declares the array types so mypy keeps the fallback-branch reassignments at the declared NDArray types.
-    ccw_timestamps: NDArray[np.uint64]
-    ccw_values: NDArray[np.float64]
-    cw_timestamps: NDArray[np.uint64]
-    cw_values: NDArray[np.float64]
+    counterclockwise_timestamps: NDArray[np.uint64]
+    counterclockwise_values: NDArray[np.float64]
+    clockwise_timestamps: NDArray[np.uint64]
+    clockwise_values: NDArray[np.float64]
 
-    ccw_timestamps, ccw_values = get_event_data(partition=event_partition, event_code=51, values_dtype=np.float64)
-    cw_timestamps, cw_values = get_event_data(partition=event_partition, event_code=52, values_dtype=np.float64)
+    counterclockwise_timestamps, counterclockwise_values = get_event_data(
+        partition=event_partition, event_code=_PRIMARY_EVENT_CODE, values_dtype=np.float64
+    )
+    clockwise_timestamps, clockwise_values = get_event_data(
+        partition=event_partition, event_code=_SECONDARY_EVENT_CODE, values_dtype=np.float64
+    )
 
-    if len(ccw_timestamps) == 0:
-        ccw_timestamps = np.array([cw_timestamps[0] + 1], dtype=np.uint64)
-        ccw_values = np.array([0.0], dtype=np.float64)
-    elif len(cw_timestamps) == 0:
-        cw_timestamps = np.array([ccw_timestamps[0] + 1], dtype=np.uint64)
-        cw_values = np.array([0.0], dtype=np.float64)
+    if counterclockwise_timestamps.size == 0:
+        counterclockwise_timestamps = np.array([clockwise_timestamps[0] + 1], dtype=np.uint64)
+        counterclockwise_values = np.array([0.0], dtype=np.float64)
+    elif clockwise_timestamps.size == 0:
+        clockwise_timestamps = np.array([counterclockwise_timestamps[0] + 1], dtype=np.uint64)
+        clockwise_values = np.array([0.0], dtype=np.float64)
 
     timestamps, torques = merge_event_streams(
-        timestamps_a=ccw_timestamps,
-        values_a=ccw_values * torque_per_adc_unit,
-        timestamps_b=cw_timestamps,
-        values_b=-cw_values * torque_per_adc_unit,
+        timestamps_a=counterclockwise_timestamps,
+        values_a=counterclockwise_values * torque_per_adc_unit,
+        timestamps_b=clockwise_timestamps,
+        values_b=-clockwise_values * torque_per_adc_unit,
     )
 
     torques = np.round(torques, decimals=8)
 
     if torques[-1] != 0:
-        timestamps = np.append(timestamps, timestamps[-1] + 1)
-        torques = np.append(torques, 0)
+        timestamps = np.append(timestamps, values=timestamps[-1] + 1)
+        torques = np.append(torques, values=0)
 
     torques[np.isclose(torques, -0.0) & np.signbit(torques)] = 0.0
 
@@ -590,8 +787,9 @@ def _parse_screen_data(
     """Extracts and saves screen module data as a .feather file.
 
     Notes:
-        Tracks the state of LED screens by detecting toggle pulse rising edges and tracking the screen state
-        from its initial configuration value through each toggle event.
+        Toggle pulses carry no absolute state, so the screen state is reconstructed by alternating from the initial
+        configuration value on each rising edge. A session with no toggle pulse produces a single row carrying the
+        initial screen state, stamped at the first off event.
 
     Args:
         event_partition: The event-code-keyed partition dictionary containing the raw screen module event data.
@@ -600,13 +798,13 @@ def _parse_screen_data(
     """
     # check_eligibility() guarantees screens_initially_on is not None before this function runs, but the type
     # stub still advertises it as bool | None. Coercing to a plain int narrows the type for the downstream
-    # screen_states arithmetic below and keeps the existing uint8 semantics (False/None -> 0, True -> 1).
+    # screen_states arithmetic and yields the uint8 encoding it expects, where False or None maps to 0 and True to 1.
     initially_on: int = 1 if hardware_state.screens_initially_on else 0
 
-    on_timestamps = get_event_timestamps(partition=event_partition, event_code=51)
-    off_timestamps = get_event_timestamps(partition=event_partition, event_code=52)
+    on_timestamps = get_event_timestamps(partition=event_partition, event_code=_PRIMARY_EVENT_CODE)
+    off_timestamps = get_event_timestamps(partition=event_partition, event_code=_SECONDARY_EVENT_CODE)
 
-    if len(on_timestamps) == 0:
+    if on_timestamps.size == 0:
         result_dataframe = pl.DataFrame(
             {
                 "time_us": np.array([off_timestamps[0]], dtype=np.uint64),
@@ -632,58 +830,7 @@ def _parse_screen_data(
     state_count = len(screen_timestamps)
     screen_states: NDArray[np.uint8] = np.empty(state_count, dtype=np.uint8)
     screen_states[0] = initially_on
-    if state_count > 1:
-        screen_states[1:] = (initially_on + np.arange(1, state_count)) % 2
+    screen_states[1:] = (initially_on + np.arange(1, state_count)) % 2
 
     result_dataframe = pl.DataFrame({"time_us": screen_timestamps, "screen_state": screen_states})
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
-
-
-_MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
-    (2, 1): _ModuleSpecification(
-        required_fields=("cm_per_pulse",),
-        usage_flags=(),
-        event_codes=(51, 52),
-    ),
-    (1, 1): _ModuleSpecification(
-        required_fields=(),
-        usage_flags=("recorded_mesoscope_ttl",),
-        event_codes=(51, 52),
-    ),
-    (3, 1): _ModuleSpecification(
-        required_fields=("maximum_brake_strength", "minimum_brake_strength"),
-        usage_flags=(),
-        event_codes=(51, 52),
-    ),
-    (5, 1): _ModuleSpecification(
-        required_fields=("valve_scale_coefficient", "valve_nonlinearity_exponent"),
-        usage_flags=(),
-        # Code 53 (kCalibrated) is emitted only by the firmware's calibration command, never during a normal runtime.
-        event_codes=(51, 52, 54, 55),
-    ),
-    (5, 2): _ModuleSpecification(
-        required_fields=(),
-        usage_flags=("delivered_gas_puffs",),
-        # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
-        # gas-puff parser does not read them, so extracting them would be wasted work.
-        event_codes=(51, 52),
-    ),
-    (4, 1): _ModuleSpecification(
-        required_fields=("lick_threshold",),
-        usage_flags=(),
-        event_codes=(51,),
-    ),
-    (6, 1): _ModuleSpecification(
-        required_fields=("torque_per_adc_unit",),
-        usage_flags=(),
-        event_codes=(51, 52),
-    ),
-    (7, 1): _ModuleSpecification(
-        required_fields=("screens_initially_on",),
-        usage_flags=(),
-        event_codes=(51, 52),
-    ),
-}
-"""Maps (module_type, module_id) pairs to their processing specifications. Each specification defines the parse
-function, output filename, required hardware state fields, usage flags, and extracted event codes for a specific
-hardware module."""

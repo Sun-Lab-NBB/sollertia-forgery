@@ -1,6 +1,5 @@
-"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records
-its jobs on. The manifest reporting layer and the orchestration dispatch table both consume these, and the manifest's
-package may not import orchestration, so the shared definitions live below both.
+"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records its
+jobs on.
 """
 
 from __future__ import annotations
@@ -18,11 +17,13 @@ if TYPE_CHECKING:
 
 
 class ProcessingPipelines(StrEnum):
-    """Enumerates the data processing and management pipelines an agent orchestrates over a project's sessions.
+    """Enumerates the data processing and management pipelines an agent orchestrates over a project, its sessions, and
+    its datasets.
 
     Notes:
-        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum
-        (one tracker per pipeline), but the values are short pipeline identifiers rather than tracker filenames.
+        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum,
+        which additionally carries ``CINDRA_MULTI_RECORDING`` for a stage cindra owns end to end. The values here are
+        short pipeline identifiers, so a caller resolves a tracker filename through that enum.
     """
 
     MANIFEST = "manifest"

@@ -26,10 +26,10 @@ if TYPE_CHECKING:
 
     from sollertia_shared_assets import SessionTypes
 
-
 DATASET_MARKER_FILENAME: str = "dataset.yaml"
-"""The marker filename identifying a top-level project directory as a forged dataset. This is the single source of
-that name, so discovery and every consumer that tests for a dataset agree on it."""
+"""The marker filename identifying a top-level project directory as a forged dataset. This mirrors the canonical
+marker name sollertia-shared-assets declares, so forging discovery and every consumer that tests for a dataset agree
+on it."""
 
 
 def resolve_dataset(
@@ -61,9 +61,9 @@ def resolve_dataset(
             already-defined dataset without changing its session set.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
-        required_session_type: The session type the dataset's sessions must have, supplied by the calling
-            acquisition system to restrict dataset creation to its forgeable session type. When None, any session
-            type is accepted (the cross-session consistency check still applies).
+        required_session_type: The session type the dataset's sessions must have, available to a caller that wants
+            dataset creation restricted to one forgeable session type. When None, any session type is accepted (the
+            cross-session consistency check still applies).
         force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
             provided session list.
         recreate_animals: The identifiers of animals already in the dataset to rebuild from the sessions the
@@ -76,8 +76,10 @@ def resolve_dataset(
         ValueError: If the arguments contradict each other or leave the dataset without a definition to build from.
             Also raised when an animal named for rebuilding is absent from the dataset or has no provided sessions.
             A provided session that would widen a frozen animal's session set raises too, as does one whose session
-            type or acquisition system differs from the dataset's.
-        FileNotFoundError: If a session name does not resolve to any directory under the project root.
+            type or acquisition system differs from the dataset's. A provided session whose type joins no dataset for
+            its acquisition system, or that has a required pipeline still outstanding, raises too.
+        FileNotFoundError: If a session name does not resolve to any directory under the project root, or if the
+            existing dataset directory holds no dataset marker.
         RuntimeError: If a session name resolves to more than one directory under the project root.
     """
     if force_recreate and recreate_animals:
@@ -148,6 +150,26 @@ def resolve_dataset(
     return dataset
 
 
+def discover_project_datasets(project_root: Path) -> list[DatasetData]:
+    """Loads every forged dataset stored under a project's root directory.
+
+    Notes:
+        A forged dataset is a top-level directory under the project root carrying a dataset marker, so the candidate
+        test costs one directory listing and one marker check per candidate.
+
+    Args:
+        project_root: The path to the project's root directory holding the animal and dataset directories.
+
+    Returns:
+        The loaded datasets, ordered by directory name.
+    """
+    return [
+        DatasetData.load(dataset_path=directory)
+        for directory in natsorted(project_root.iterdir(), key=lambda path: path.name)
+        if directory.is_dir() and directory.joinpath(DATASET_MARKER_FILENAME).is_file()
+    ]
+
+
 def _create_dataset(
     name: str,
     sessions: tuple[str, ...],
@@ -157,9 +179,10 @@ def _create_dataset(
 ) -> DatasetData:
     """Creates a fresh dataset hierarchy by resolving the provided session names under the project root.
 
-    Every included session must share the first session's session type and acquisition system, and when
-    ``required_session_type`` is provided, the first session's type must also match it. The dataset's acquisition
-    system determines the column descriptions baked into the created dataset.
+    Every included session must have completed the pipelines its acquisition system requires and must share the first
+    session's session type and acquisition system, and when ``required_session_type`` is provided, the first session's
+    type must also match it. The dataset's acquisition system determines the column descriptions baked into the
+    created dataset.
 
     Args:
         name: The unique name for the dataset.
@@ -174,8 +197,10 @@ def _create_dataset(
     Raises:
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
         RuntimeError: If a session name resolves to more than one directory under the project root.
-        ValueError: If required_session_type is provided and the first session's type differs from it, or if any
-            subsequent session's session type or acquisition system differs from the first session's.
+        ValueError: If ``required_session_type`` is provided and the first session's type differs from it, or if any
+            subsequent session's session type or acquisition system differs from the first session's. Also raised
+            when a session's type joins no dataset for its acquisition system, or when it has a pipeline it requires
+            still outstanding.
     """
     session_paths = _resolve_session_paths(sessions=sessions, project_root=project_root)
 
@@ -212,7 +237,7 @@ def _create_dataset(
             )
             console.error(message=message, error=ValueError)
 
-    column_descriptions = resolve_forging_column_descriptions(first_session_data.acquisition_system)
+    column_descriptions = resolve_forging_column_descriptions(system=first_session_data.acquisition_system)
 
     dataset_sessions = tuple(DatasetSession(animal=path.parent.name, session=path.name) for path in session_paths)
     dataset = DatasetData.create(
@@ -259,7 +284,8 @@ def _update_dataset(
     Raises:
         ValueError: If an animal named for rebuilding is absent from the dataset or has no provided sessions. Also
             raised when a provided session would widen a frozen animal's session set. An added session whose session
-            type or acquisition system differs from the dataset's raises too.
+            type or acquisition system differs from the dataset's raises too. An added session whose type joins no
+            dataset for its acquisition system, or that has a required pipeline still outstanding, raises too.
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
         RuntimeError: If a session name resolves to more than one directory under the project root.
     """
@@ -373,14 +399,16 @@ def _resolve_session_paths(sessions: tuple[str, ...], project_root: Path) -> lis
 
 
 def _verify_session_compatibility(dataset: DatasetData, session_paths: list[Path]) -> None:
-    """Verifies that every provided session matches the dataset's recorded session type and acquisition system.
+    """Verifies that every provided session has completed its required pipelines and matches the dataset's recorded
+    session type and acquisition system.
 
     Args:
         dataset: The dataset the sessions are added to.
         session_paths: The source session directories to verify.
 
     Raises:
-        ValueError: If a session's session type or acquisition system differs from the dataset's.
+        ValueError: If a session's type joins no dataset for its acquisition system, if any pipeline it requires has
+            not completed, or if its session type or acquisition system differs from the dataset's.
     """
     for session_path in session_paths:
         session_data = SessionData.load(session_path=session_path)
@@ -417,14 +445,17 @@ def _copy_animal_surgery_files(
         dataset_name: The name of the dataset, used for reporting.
         dataset: The DatasetData instance the animals belong to.
         source_session_paths: The resolved source session directory paths whose animals to cover.
+
+    Raises:
+        ValueError: If a covered animal is not part of the dataset.
+        FileNotFoundError: If a covered animal's latest source session carries no session marker.
     """
-    # The animal name is the parent directory name in the source project layout.
     sessions_by_animal: dict[str, list[Path]] = {}
     for source_path in source_session_paths:
         sessions_by_animal.setdefault(source_path.parent.name, []).append(source_path)
 
     for animal, animal_sessions in sessions_by_animal.items():
-        dataset_animal = dataset.get_animal(animal)
+        dataset_animal = dataset.get_animal(animal=animal)
 
         # Session names are timestamped, so the natural sort orders them chronologically.
         latest_session_name = natsorted([path.name for path in animal_sessions])[-1]
@@ -442,23 +473,3 @@ def _copy_animal_surgery_files(
             continue
 
         shutil.copy2(src=source_surgery_path, dst=dataset_animal.surgery_path)
-
-
-def discover_project_datasets(project_root: Path) -> list[DatasetData]:
-    """Loads every forged dataset stored under a project's root directory.
-
-    Notes:
-        A forged dataset is a top-level directory under the project root carrying a dataset marker, so discovery reads
-        one directory listing and one marker per candidate rather than walking the hierarchy.
-
-    Args:
-        project_root: The path to the project's root directory holding the animal and dataset directories.
-
-    Returns:
-        The loaded datasets, ordered by directory name.
-    """
-    return [
-        DatasetData.load(dataset_path=directory)
-        for directory in natsorted(project_root.iterdir(), key=lambda path: path.name)
-        if directory.is_dir() and directory.joinpath(DATASET_MARKER_FILENAME).is_file()
-    ]

@@ -22,11 +22,12 @@ class BehaviorDataFiles(StrEnum):
     ENCODER = "encoder_data.feather"
     """The encoder module feather holding the traveled-distance time series derived from the running-wheel encoder."""
     VALVE = "valve_data.feather"
-    """The water valve module feather holding water-dispensing events and cumulative dispensed volume."""
+    """The water valve module feather holding the cumulative dispensed water volume and the reward tone state."""
     GAS_PUFF = "gas_puff_data.feather"
     """The gas puff valve module feather holding aversive-stimulus dispensing events."""
     LICK = "lick_data.feather"
-    """The lick module feather holding thresholded lick events from the capacitive sensor."""
+    """The lick module feather holding the raw 12-bit ADC sensor voltage and the thresholded lick state derived from
+    it."""
     BRAKE = "brake_data.feather"
     """The brake module feather holding the instantaneous brake torque applied to the running wheel."""
     TORQUE = "torque_data.feather"
@@ -161,7 +162,10 @@ class DatasetColumn(StrEnum):
 _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     # Behavior-alignment column descriptions.
     DatasetColumn.TIME_US: "Microsecond-precision sample timestamps from the acquisition reference clock.",
-    DatasetColumn.ELAPSED_MINUTES: "Elapsed session time in minutes since the session's onset.",
+    DatasetColumn.ELAPSED_MINUTES: (
+        "Elapsed time in minutes since the first sample of the session's reference clock. The clock starts during "
+        "setup, so the clipped dataset's first row carries a value above zero."
+    ),
     DatasetColumn.BRAKE: "The running wheel brake engagement at each sample.",
     DatasetColumn.SCREENS: "The Virtual Reality display state at each sample.",
     DatasetColumn.TORQUE_N_CM: (
@@ -173,12 +177,13 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
     DatasetColumn.LICK: "Lick sensor engagement state at each sample.",
     DatasetColumn.WATER_UL: "The cumulative water reward volume delivered to the animal at each sample in microliters.",
     DatasetColumn.REWARD: (
-        "The reward-classification state at each sample, one of 'no' (no tone or reward), 'tone' (tone played, no "
-        "water delivered), or 'yes' (water reward delivered)."
+        "The reward-classification state at each sample, one of 'no' (no reward tone playing), 'tone' (reward tone "
+        "playing with no water delivered during the tone), or 'yes' (reward tone playing with water delivered during "
+        "the tone)."
     ),
     DatasetColumn.SYSTEM_STATE: "Acquisition system state at each sample (idle, rest, run).",
     # Runtime and experiment column descriptions.
-    DatasetColumn.TRIAL: "One-based trial identifier at each sample. 65535 marks samples outside any trial.",
+    DatasetColumn.TRIAL: "One-based trial identifier at each sample. 65535 marks samples outside the run state.",
     DatasetColumn.TRIAL_TYPE: (
         "Trial type label at each sample (e.g. 'ABC', 'ABCD'). 'undefined' marks non-run samples."
     ),
