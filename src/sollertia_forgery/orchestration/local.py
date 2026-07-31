@@ -21,7 +21,7 @@ from .graph import PendingJob, resolve_dispatch_priorities
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from concurrent.futures import Future
 
 
@@ -34,6 +34,20 @@ _WORKER_THREAD_CEILING: int = 1
 """The number of threads each pool worker pins its library thread pools to. Every job type either runs
 single-threaded, raises its own thread count once it starts, or fans out into a sub-pool whose children each cost the
 single core the allocation budgeted for them."""
+
+_IMPORT_LATCHED_THREAD_VARIABLES: tuple[str, ...] = ("POLARS_MAX_THREADS",)
+"""The threading-layer environment variables that have to be set before a pool worker starts, because the pools they
+size cannot be resized once the worker has imported the library that owns them.
+
+Notes:
+    polars builds its thread pool as it is imported, exposes no runtime setter, and is not one of the pools
+    ``threadpool_limits`` manages, so the only moment its width can be chosen is before the child process imports it.
+    Every job type that uses polars in the executor process itself declares a single core, so one thread is the width
+    that matches what those jobs were admitted at.
+
+    The BLAS and OpenMP variables are deliberately absent. Their pools are resized at runtime for the duration of each
+    job, which holds every job to its own core weight rather than to one width shared by every job a worker runs.
+"""
 
 _PINNED_THREAD_VARIABLES: tuple[str, ...] = (
     "OMP_NUM_THREADS",
@@ -225,9 +239,12 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
         state: The active job execution state containing the pending queue, active jobs, worker callable, and
             budgets. Mutated under ``state.lock`` as jobs move between queues.
     """
-    with ProcessPoolExecutor(
-        max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
-    ) as pool:
+    with (
+        _pinned_pool_imports(),
+        ProcessPoolExecutor(
+            max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
+        ) as pool,
+    ):
         with state.lock:
             # Weighs every job by the work waiting on it, so admission can favor the batch's critical path. The
             # dependency graph is fixed for the session, so this is resolved once rather than on every pass.
@@ -300,6 +317,34 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     for job in state.all_jobs.values():
         tracker_jobs.setdefault(job.tracker_path, []).append(job)
     return tracker_jobs
+
+
+@contextlib.contextmanager
+def _pinned_pool_imports() -> Iterator[None]:
+    """Pins the thread pools a spawned worker sizes while importing, then restores the environment.
+
+    Notes:
+        Scopes the creation of the shared pool. A spawned worker re-imports rather than inheriting the parent's
+        modules, so a library that sizes its pool at import does so before any code the worker runs, and the width it
+        picks comes from the environment the parent handed it. A worker that inherits the defaults reserves a thread
+        per core of the whole machine for a job that was admitted at one.
+
+        Scoping this to the pool's lifetime rather than setting it once keeps the parent's own threading untouched,
+        which matters because the parent has already imported the same libraries.
+
+    Yields:
+        None. The caps are in effect for the duration of the block.
+    """
+    previous = {variable: os.environ.get(variable) for variable in _IMPORT_LATCHED_THREAD_VARIABLES}
+    os.environ.update(dict.fromkeys(_IMPORT_LATCHED_THREAD_VARIABLES, str(_WORKER_THREAD_CEILING)))
+    try:
+        yield
+    finally:
+        for variable, value in previous.items():
+            if value is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = value
 
 
 def apply_decode_thread_ceiling(cores: int) -> None:

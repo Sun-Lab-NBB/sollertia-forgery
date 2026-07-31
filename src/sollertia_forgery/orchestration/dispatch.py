@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from functools import cache
 from dataclasses import dataclass
 
+from threadpoolctl import threadpool_limits
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData, SessionData
 
@@ -96,18 +97,22 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # A fixed handful of filesystem operations, independent of recording length.
     RENAME_JOB_NAME: 1,
     # Reads pose predictions written upstream and never runs inference. Its ellipse fit solves once per distinct
-    # occlusion pattern rather than once per sample, so its cost holds steady as a recording lengthens.
-    TRACKING_JOB_NAME: 1,
+    # occlusion pattern rather than once per sample, so its cost holds steady as a recording lengthens. The width
+    # covers the dataframe engine's own pool, which the stage leans on for the reshaping around that fit.
+    TRACKING_JOB_NAME: 2,
     # Decodes the recording in parallel chunks. Throughput is bound by how fast frames move through memory rather
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
     # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
     # and caps the decode threads it opens at a ceiling of its own, so this allocation is what that pool is sized from.
-    str(SingleRecordingJobNames.BINARIZE): 4,
+    # The stage is bound by how fast the batch reaches it rather than by the threads waiting on it.
+    str(SingleRecordingJobNames.BINARIZE): 3,
     # Removes motion from one plane and computes its registration-quality components. Its pass over the plane holds
-    # every thread busy, and its gain flattens once the batch it aligns stops covering the added cores.
-    str(SingleRecordingJobNames.REGISTER): 8,
+    # every thread busy, and its gain flattens once the batch it aligns stops covering the added cores. The width
+    # covers the compiled kernels and the linear-algebra pool the stage runs concurrently, which overlap rather than
+    # taking turns.
+    str(SingleRecordingJobNames.REGISTER): 12,
     # Discovers regions and extracts their fluorescence for one plane. Detection is bound by movie binning and a
     # serial loop, so the stage plateaus while cores remain and running more planes at once pays better.
     str(SingleRecordingJobNames.PROCESS): 10,
@@ -128,6 +133,10 @@ parallelizes, and every value is safe to retune. Preparing a processing unit tha
 map fails for that unit, since dispatching it would run it at a width nobody chose."""
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
+    # Hashes its session across readers that each stream a file, so the stage's rate is the storage's rate. Past a
+    # few jobs the readers compete for the same device and the array delivers less in total than it does to fewer of
+    # them, so a wider batch finishes the same work more slowly while holding cores that other work could use.
+    CHECKSUM_JOB_NAME: 3,
     # Decoder throughput across the host stops climbing once enough decoders are open, and this stage opens one
     # decoder per core it holds. Three jobs at its core allocation reach that ceiling, so this limit keeps the stage
     # at its best aggregate rate while leaving the cores it would otherwise idle to other work.
@@ -241,6 +250,12 @@ def run_batch_job(job: GenericPendingJob) -> None:
         decode width of its own. A reader that names one, as cindra does, sizes its threads from the cores the batch
         handed the job.
 
+        The native BLAS and OpenMP pools are held at the job's own width for as long as it runs. Those pools are built
+        when the worker imports numpy, scipy, and scikit-learn, and they size themselves from the machine's core count
+        because that import precedes anything the worker does for itself. The variables naming their width are read
+        only at that import, so a pool already built ignores them, and resizing the pools through their own runtime
+        interfaces is what actually holds a job to the cores it was admitted at.
+
     Args:
         job: The pending job carrying its pipeline, its target job identifier, and its planned cores.
 
@@ -255,7 +270,8 @@ def run_batch_job(job: GenericPendingJob) -> None:
             f"supported batch pipeline."
         )
         console.error(message=message, error=ValueError)
-    dispatch.worker(job=job)
+    with threadpool_limits(limits=job.core_weight):
+        dispatch.worker(job=job)
 
 
 def resolve_job_command(job: GenericPendingJob) -> tuple[str, ...]:

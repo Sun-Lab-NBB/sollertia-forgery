@@ -62,6 +62,9 @@ dependencies = [
     # System Introspection (reads the host's physical memory when sizing a processing batch)
     "psutil>=6,<8",
 
+    # Thread-Pool Control (holds the native BLAS and OpenMP pools at the cores each batch job was admitted at)
+    "threadpoolctl>=3,<4",
+
     # Data Processing
     "polars>=1,<2",
     "numpy>=2,<3",
