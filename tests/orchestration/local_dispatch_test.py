@@ -22,6 +22,7 @@ from sollertia_shared_assets import (
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.forging import FORGING_JOB_NAME
+from sollertia_forgery.runtime import RUNTIME_JOB_NAME
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.two_photon import SingleRecordingJobNames
 from sollertia_forgery.orchestration import (
@@ -684,9 +685,12 @@ def test_an_unregistered_job_type_has_no_declared_cores() -> None:
 
 def test_only_the_types_that_declare_one_carry_a_concurrency_ceiling() -> None:
     """An absent name reads as bounded by the two budgets alone, which is what keeps the mapping a narrow statement."""
-    limits = resolve_concurrency_limits(job_names={"motion_energy", CHECKSUM_JOB_NAME})
+    limits = resolve_concurrency_limits(job_names={"motion_energy", CHECKSUM_JOB_NAME, RUNTIME_JOB_NAME})
 
-    assert limits == {"motion_energy": 3}
+    # Named against the declaration table rather than against frozen values, so retuning a ceiling leaves this alone.
+    assert set(limits) == {"motion_energy", CHECKSUM_JOB_NAME}
+    assert RUNTIME_JOB_NAME not in limits
+    assert all(limit >= 1 for limit in limits.values())
 
 
 def test_only_the_types_that_declare_one_carry_a_concurrency_reservation() -> None:

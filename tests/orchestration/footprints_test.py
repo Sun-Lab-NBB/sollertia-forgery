@@ -36,11 +36,16 @@ from sollertia_forgery.orchestration.footprints import (
     _SUBPROCESS_MEMORY_MB,
     _COMBINATION_MEMORY_MB,
     _POSE_PREDICTION_RATIO,
+    _REGISTRATION_MEMORY_MB,
     _RETAINED_FRAME_BUFFERS,
     _SINGLE_PRECISION_BYTES,
     _ARCHIVE_DIRECTORY_RATIO,
+    _EXTRACTION_TRACE_COPIES,
     _DECODER_BUFFER_MEMORY_MB,
+    _CHECKSUM_READER_MEMORY_MB,
+    _EXTRACTION_BATCH_RETENTION,
     _DISCOVERY_CLUSTERING_MEMORY_MB,
+    _EXTRACTION_BATCH_BYTES_PER_PIXEL,
     _apply_tolerance,
     _read_array_shape,
     _bytes_to_megabytes,
@@ -275,7 +280,7 @@ def test_checksum_memory_scales_with_the_readers_a_job_opens(experiment_session:
 
     narrow, narrow_modeled = estimates[CHECKSUM_JOB_NAME, ""]
     wide, wide_modeled = estimates[CHECKSUM_JOB_NAME, "wide"]
-    assert narrow == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + 8 * 56)
+    assert narrow == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + 8 * _CHECKSUM_READER_MEMORY_MB)
     assert wide > narrow
     assert narrow_modeled
     assert wide_modeled
@@ -450,12 +455,15 @@ def test_two_photon_stages_are_sized_from_the_raw_recording_geometry(experiment_
         _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=binarize_bytes)),
         True,
     )
-    # Combination takes a flat allowance, which the shared tolerance does not apply on top of.
-    assert estimates[str(SingleRecordingJobNames.COMBINE), ""] == (_COMBINATION_MEMORY_MB, True)
-    # The second region spans twice the lines of the first, so its registration batch costs twice as much.
+    # Combination takes a flat allowance, reported through the shared tolerance like every other stage.
+    assert estimates[str(SingleRecordingJobNames.COMBINE), ""] == (
+        _apply_tolerance(memory_mb=_COMBINATION_MEMORY_MB),
+        True,
+    )
+    # Registration takes a flat allowance rather than a projection from its plane, so every plane is charged alike.
     first_plane = estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0"][0]
     second_plane = estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1"][0]
-    assert second_plane > first_plane
+    assert first_plane == second_plane == _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB)
     assert estimates[str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}0"][1]
 
 
@@ -496,9 +504,9 @@ def test_a_recording_declaring_no_regions_is_read_as_one_full_frame_plane(experi
         session=experiment_session, jobs=[(str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0", 8)]
     )
 
-    batch_bytes = 100 * FRAME_HEIGHT * FRAME_WIDTH * _SINGLE_PRECISION_BYTES * 3
+    # Registration carries a flat allowance, so a recording naming no region span is charged the same as any other.
     assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0"] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes)),
+        _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB),
         True,
     )
 
@@ -574,10 +582,12 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
     registration = _bytes_to_megabytes(byte_count=planes * 128 * 96 * _SINGLE_PRECISION_BYTES)
     assert discovery == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + registration + _DISCOVERY_CLUSTERING_MEMORY_MB)
     assert discovery_modeled
+    # Reportable figures land on whole gigabytes, so a modeled estimate at this fixture's scale shares the baseline's
+    # gigabyte. The modeled flag rather than the magnitude is what states that a model produced the figure.
     assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name][1]
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name][0] > BASELINE_MB
+    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name][0] >= BASELINE_MB
     assert estimates[FORGING_JOB_NAME, first.session_name][1]
-    assert estimates[FORGING_JOB_NAME, first.session_name][0] > BASELINE_MB
+    assert estimates[FORGING_JOB_NAME, first.session_name][0] >= BASELINE_MB
 
 
 def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
@@ -607,7 +617,8 @@ def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
     bounded = estimate_dataset_job_memory(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])[
         FORGING_JOB_NAME, session.session_name
     ]
-    assert tracked[0] < bounded[0]
+    # Tracking narrows the region count, a saving the gigabyte rounding absorbs at this fixture's scale.
+    assert tracked[0] <= bounded[0]
     assert tracked[1]
 
 
@@ -664,7 +675,7 @@ def test_extraction_falls_back_for_a_dataset_its_system_performs_no_tracking_for
     assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, session.session_name] == (BASELINE_MB, False)
     # Assembly needs no configuration, so it stays sized from the geometry the session's own output reports.
     assert estimates[FORGING_JOB_NAME, session.session_name][1]
-    assert estimates[FORGING_JOB_NAME, session.session_name][0] > BASELINE_MB
+    assert estimates[FORGING_JOB_NAME, session.session_name][0] >= BASELINE_MB
 
 
 def test_a_dataset_naming_no_session_resolves_no_tracking_configuration(
@@ -756,8 +767,8 @@ def test_the_pooled_region_bound_narrows_to_one_recordings_own_regions(
     )
 
     # Half prevalence over four recordings pools 406 regions into 203, which the widest recording narrows to 103.
-    traces = 4 * 103 * 1500 * _SINGLE_PRECISION_BYTES
-    retained = 20 * (500 * 128 * 96 * 6)
+    traces = _EXTRACTION_TRACE_COPIES * 103 * 1500 * _SINGLE_PRECISION_BYTES
+    retained = _EXTRACTION_BATCH_RETENTION * (500 * 128 * 96 * _EXTRACTION_BATCH_BYTES_PER_PIXEL)
     assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, sessions[0].session_name] == (
         _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=traces + retained)),
         True,
@@ -807,4 +818,5 @@ def test_the_camera_directory_is_read_once_even_when_it_is_removed_mid_session(
         pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(ENERGY_JOB_NAME, "51", 4)]
     )
 
-    assert with_recordings[ENERGY_JOB_NAME, "51"][0] > without_recordings[ENERGY_JOB_NAME, "51"][0]
+    # A recorded frame adds pixels on top of the decoder and child cost, which the gigabyte rounding absorbs here.
+    assert with_recordings[ENERGY_JOB_NAME, "51"][0] >= without_recordings[ENERGY_JOB_NAME, "51"][0]

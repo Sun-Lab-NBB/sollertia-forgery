@@ -41,6 +41,7 @@ from sollertia_forgery.orchestration.local import (
 )
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
 from sollertia_forgery.orchestration.footprints import (
+    _MEGABYTES_PER_GIGABYTE,
     _CHECKSUM_READER_MEMORY_MB,
     _MEMORY_ESTIMATE_TOLERANCE,
     _apply_tolerance,
@@ -284,9 +285,11 @@ def test_forward_progress_floor_admits_a_job_larger_than_the_budget() -> None:
 
 
 def test_estimates_carry_the_shared_tolerance() -> None:
-    """Verifies that the reported memory of an estimate exceeds its modeled value by the shared margin."""
-    assert _apply_tolerance(memory_mb=1000) == int(1000 * _MEMORY_ESTIMATE_TOLERANCE) + 1
-    assert _apply_tolerance(memory_mb=0) == 1
+    """Verifies that a reported estimate clears its modeled value by the shared margin and lands on a whole gigabyte."""
+    reportable = _apply_tolerance(memory_mb=1000)
+    assert reportable >= int(1000 * _MEMORY_ESTIMATE_TOLERANCE) + 1
+    assert reportable % _MEGABYTES_PER_GIGABYTE == 0
+    assert _apply_tolerance(memory_mb=0) == _MEGABYTES_PER_GIGABYTE
     assert _MEMORY_ESTIMATE_TOLERANCE > 1.0
 
 
@@ -343,9 +346,12 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     chunks, so the session's size does not enter the estimate and only the reader count does.
     """
     single = _estimate_checksum_memory(cores=1)
-    doubled = _estimate_checksum_memory(cores=2)
-    assert doubled - single == pytest.approx(_CHECKSUM_READER_MEMORY_MB * _MEMORY_ESTIMATE_TOLERANCE, rel=0.01)
+    # Reportable figures land on whole gigabytes, so the per-reader growth shows across a wide core spread rather
+    # than between two adjacent core counts, where the rounding absorbs it.
+    many = _estimate_checksum_memory(cores=16)
+    assert many - single >= 15 * _CHECKSUM_READER_MEMORY_MB
     assert _estimate_checksum_memory(cores=8) > single
+    assert _estimate_checksum_memory(cores=2) >= single
 
 
 def test_worker_initializer_leaves_the_numba_thread_variable_alone() -> None:
