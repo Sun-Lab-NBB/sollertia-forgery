@@ -5,6 +5,7 @@ cross-recording stages and the per-session assembly.
 from __future__ import annotations
 
 from types import SimpleNamespace
+import shutil
 from typing import TYPE_CHECKING, Any
 from dataclasses import dataclass
 
@@ -30,7 +31,6 @@ from sollertia_forgery.forging import (
     forging_tracker_path,
     run_forging_pipeline,
     discover_forging_jobs,
-    resolve_multiday_plan,
     build_forging_universe,
     define_forging_dataset,
     materialize_multiday_plan,
@@ -356,7 +356,6 @@ def test_define_forging_dataset_skips_an_animal_without_cross_recording_tracking
         dataset=dataset, project_root=training_project.project_root, display_progress=True
     )
     assert replanned == {}
-    assert resolve_multiday_plan(dataset=dataset, project_root=training_project.project_root) == {}
     assert load_multiday_plan(dataset=dataset) == {}
     assert build_forging_universe(dataset=dataset, multiday_plan={}) == [
         (FORGING_JOB_NAME, name) for name in training_project.names()
@@ -403,30 +402,17 @@ def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
     assert states[MULTIDAY_DISCOVERY_JOB_NAME, "321"] == ProcessingStatus.SUCCEEDED
 
 
-def test_resolve_multiday_plan_skips_an_animal_holding_no_sessions(tmp_path: Path) -> None:
+def test_load_multiday_plan_skips_an_animal_holding_no_sessions(tmp_path: Path) -> None:
     """Verifies that an animal the dataset lists without any session contributes no plan entry."""
+    animal_path = tmp_path.joinpath("305")
+    animal_path.mkdir()
+    animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).touch()
     dataset = SimpleNamespace(
-        acquisition_system="mesoscope",
-        animals=(SimpleNamespace(animal="305", animal_path=tmp_path.joinpath("305")),),
+        animals=(SimpleNamespace(animal="305", animal_path=animal_path),),
         get_sessions_for_animal=lambda animal: (),  # noqa: ARG005
     )
 
-    assert resolve_multiday_plan(dataset=dataset, project_root=tmp_path) == {}
-
-
-def test_resolve_multiday_plan_reports_each_animals_configuration_without_writing_it(
-    experiment_project: ForgingProject,
-) -> None:
-    """Verifies that planning names the configuration path of every tracked animal while writing nothing."""
-    dataset = define_whole_project(experiment_project=experiment_project)
-    for animal in dataset.animals:
-        animal.animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).unlink()
-
-    plan = resolve_multiday_plan(dataset=dataset, project_root=experiment_project.project_root)
-
-    assert set(plan) == {"305", "321"}
-    assert plan["321"][0] == dataset.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME)
-    assert not plan["321"][0].is_file()
+    assert load_multiday_plan(dataset=dataset) == {}
 
 
 def test_load_multiday_plan_skips_an_animal_without_a_written_configuration(
@@ -439,6 +425,40 @@ def test_load_multiday_plan_skips_an_animal_without_a_written_configuration(
     dataset.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).unlink()
 
     assert set(load_multiday_plan(dataset=dataset)) == {"305"}
+
+
+def test_define_forging_dataset_extends_a_dataset_whose_forged_animal_lost_its_sources(
+    experiment_project: ForgingProject,
+) -> None:
+    """Verifies that adding an animal succeeds while an animal the dataset already holds has no source data left."""
+    names = experiment_project.names()
+    define_forging_dataset(name=DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root)
+
+    # The forged animal's sessions move to long-term storage, leaving the dataset holding it with no source data.
+    shutil.rmtree(experiment_project.project_root.joinpath("305"))
+
+    extended = define_forging_dataset(
+        name=DATASET_NAME, session_names=(names[2],), project_root=experiment_project.project_root
+    )
+
+    assert {dataset_animal.animal for dataset_animal in extended.animals} == {"305", "321"}
+    assert len(extended.sessions) == 3
+    # The frozen animal keeps the configuration written when it was added, and the added animal receives its own.
+    assert extended.get_animal(animal="305").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).is_file()
+    assert extended.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).is_file()
+
+
+def test_discover_forging_jobs_reads_no_source_data(experiment_project: ForgingProject) -> None:
+    """Verifies that job discovery resolves the whole universe after every source session has moved away."""
+    dataset_path = define_whole_project(experiment_project=experiment_project).dataset_data_path.parent
+    for animal_id in ("305", "321"):
+        shutil.rmtree(experiment_project.project_root.joinpath(animal_id))
+
+    _, universe, possible = discover_forging_jobs(dataset_path=dataset_path)
+
+    assert universe == possible
+    assert (MULTIDAY_DISCOVERY_JOB_NAME, "305") in universe
+    assert (FORGING_JOB_NAME, experiment_project.names()[0]) in universe
 
 
 def test_discover_forging_jobs_reports_the_whole_universe_as_possible(experiment_project: ForgingProject) -> None:
