@@ -741,19 +741,25 @@ def _resolve_tracking_configuration(dataset: DatasetData, project_root: Path) ->
         Read from the system registry rather than from the file ``define_forging_dataset`` materializes, so the
         parameters are available for a dataset whose configurations have not been written yet.
 
+        Resolved from the first session still present under the project root, because a dataset outlives the source
+        data of the animals it has already forged. Estimating a newly added animal therefore does not depend on
+        sessions that have moved to long-term storage.
+
     Args:
         dataset: The resolved dataset whose acquisition system donates the configuration.
         project_root: The path to the project's root directory.
 
     Returns:
-        The resolved configuration, or None when the dataset holds no session, or when its sessions need no
-        multi-day processing.
+        The resolved configuration, or None when no session remains under the project root, or when the dataset's
+        sessions need no multi-day processing.
     """
-    if not dataset.sessions:
-        return None
-    entry = dataset.sessions[0]
     resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
-    return resolve_configuration(SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session)))
+    for entry in dataset.sessions:
+        session_path = project_root.joinpath(entry.animal, entry.session)
+        if not session_path.is_dir():
+            continue
+        return resolve_configuration(SessionData.load(session_path=session_path))
+    return None
 
 
 def _resolve_tracked_regions(
