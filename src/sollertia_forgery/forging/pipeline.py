@@ -22,12 +22,13 @@ from sollertia_shared_assets import (
 )
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
-from .dataset import resolve_dataset
+from .dataset import DATASET_MARKER_FILENAME, resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
 from ..shared_assets import tracked_job, pinned_worker_threads, multi_recording_dataset_directory
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Collection
 
     from sollertia_shared_assets import DatasetSession
 
@@ -84,6 +85,11 @@ def define_forging_dataset(
         session set makes every stage outstanding again. The tracked jobs of a session the animal no longer holds
         fall outside the resulting universe and are discarded when the next pipeline run aligns the tracker.
 
+        Only the animals this call adds or rebuilds have their multi-recording configuration materialized, because an
+        animal already in the dataset keeps the configuration written when it was added. Extending a dataset therefore
+        reads no source data for the animals it already holds, so an animal whose sessions have moved off this machine
+        does not block the growth of a dataset it was already forged into.
+
     Args:
         name: The unique name of the dataset.
         session_names: The session names the dataset must contain. A session the dataset does not hold is appended,
@@ -108,6 +114,13 @@ def define_forging_dataset(
     """
     console.echo(message=f"Defining the '{name}' dataset...", level=LogLevel.INFO)
 
+    # Captured before resolution, so the animals this call adds are the ones absent from this set afterwards.
+    existing_animals: frozenset[str] = frozenset()
+    dataset_directory = project_root.joinpath(name)
+    if not force_recreate and dataset_directory.joinpath(DATASET_MARKER_FILENAME).is_file():
+        existing = DatasetData.load(dataset_path=dataset_directory)
+        existing_animals = frozenset(dataset_animal.animal for dataset_animal in existing.animals)
+
     dataset = resolve_dataset(
         name=name,
         session_names=session_names,
@@ -115,7 +128,14 @@ def define_forging_dataset(
         force_recreate=force_recreate,
         recreate_animals=recreate_animals,
     )
-    materialize_multiday_plan(dataset=dataset, project_root=project_root, display_progress=display_progress)
+
+    resolved_animals = frozenset(dataset_animal.animal for dataset_animal in dataset.animals)
+    materialize_multiday_plan(
+        dataset=dataset,
+        project_root=project_root,
+        display_progress=display_progress,
+        animals=(resolved_animals - existing_animals) | frozenset(recreate_animals),
+    )
 
     if recreate_animals:
         tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
@@ -303,9 +323,11 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
     """Resolves the forging pipeline's job universe and possible subset for an already-defined dataset.
 
     Notes:
-        Reads the dataset marker and each animal's first session marker. Every job the universe names is possible,
-        because ``define_forging_dataset`` admits a session only once it carries the single-day outputs the forging
-        stages consume, so the possible subset equals the universe.
+        Reads the dataset marker and each animal's materialized configuration, loading no session marker. Discovery
+        therefore reads nothing outside the dataset hierarchy, so a dataset whose source sessions have moved off this
+        machine still resolves its jobs. Every job the universe names is possible, because ``define_forging_dataset``
+        admits a session only once it carries the single-day outputs the forging stages consume, so the possible
+        subset equals the universe.
 
         Every stage is specified by the animals and sessions the dataset hierarchy holds, so a batch is prepared
         against a dataset ``define_forging_dataset`` has already built. Preparing it afterwards names everything the
@@ -320,58 +342,15 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
 
     Raises:
         FileNotFoundError: If the dataset's own marker is not present under the provided path.
-        ValueError: If the dataset's acquisition system is unknown.
     """
     dataset = DatasetData.load(dataset_path=dataset_path)
-    multiday_plan = resolve_multiday_plan(dataset=dataset, project_root=dataset_path.parent)
+    multiday_plan = load_multiday_plan(dataset=dataset)
     universe = build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
     return dataset, universe, list(universe)
 
 
-def resolve_multiday_plan(dataset: DatasetData, project_root: Path) -> dict[str, tuple[Path, list[str]]]:
-    """Resolves which animals need multi-day processing without writing anything.
-
-    Notes:
-        The acquisition system's resolver decides whether the stage applies, so the job universe is known before any
-        configuration is materialized. Only each animal's first session is loaded, since the resolver decides per
-        animal.
-
-    Args:
-        dataset: The dataset whose animals are planned.
-        project_root: The path to the project's root directory that stores the animal and session data directories.
-
-    Returns:
-        A mapping of each tracked animal to a tuple of its configuration path and its session names, in the animal's
-        dataset order. Empty when no animal needs multi-day processing.
-
-    Raises:
-        ValueError: If the dataset's acquisition system is unknown.
-    """
-    resolve_multi_recording_configuration = resolve_multi_recording_configuration_resolver(
-        system=dataset.acquisition_system
-    )
-
-    plan: dict[str, tuple[Path, list[str]]] = {}
-    for dataset_animal in dataset.animals:
-        animal = dataset_animal.animal
-        animal_entries = dataset.get_sessions_for_animal(animal=animal)
-        if not animal_entries:
-            continue
-
-        first_session = SessionData.load(session_path=project_root.joinpath(animal, animal_entries[0].session))
-        if resolve_multi_recording_configuration(first_session) is None:
-            continue
-
-        plan[animal] = (
-            dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME),
-            [entry.session for entry in animal_entries],
-        )
-
-    return plan
-
-
 def materialize_multiday_plan(
-    dataset: DatasetData, project_root: Path, *, display_progress: bool
+    dataset: DatasetData, project_root: Path, *, display_progress: bool, animals: Collection[str] | None = None
 ) -> dict[str, tuple[Path, list[str]]]:
     """Resolves the per-animal cross-recording plan and materializes each tracked animal's configuration.
 
@@ -383,10 +362,16 @@ def materialize_multiday_plan(
         Writing a configuration truncates the file in place under no lock, so only ``define_forging_dataset`` calls
         this. Every other invocation reads the plan back through ``load_multiday_plan``.
 
+        Each materialized animal has every one of its sessions loaded from the project root, so restricting the call
+        to the animals that need one keeps a dataset's growth independent of the source data of the animals it already
+        holds.
+
     Args:
         dataset: The resolved dataset whose animals are planned.
         project_root: The path to the project's root directory that stores the animal and session data directories.
         display_progress: The progress-bar flag recorded in each materialized configuration.
+        animals: The identifiers of the animals to materialize a configuration for. Pass None to materialize every
+            animal the dataset holds, which is what a freshly created dataset needs.
 
     Returns:
         A mapping of each tracked animal to a tuple of its materialized configuration path and its session names, in
@@ -404,6 +389,9 @@ def materialize_multiday_plan(
     plan: dict[str, tuple[Path, list[str]]] = {}
     for dataset_animal in dataset.animals:
         animal = dataset_animal.animal
+        if animals is not None and animal not in animals:
+            continue
+
         animal_entries = dataset.get_sessions_for_animal(animal=animal)
         animal_sessions = [
             SessionData.load(session_path=project_root.joinpath(animal, entry.session)) for entry in animal_entries
@@ -452,7 +440,12 @@ def load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]
         configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
         if not configuration_path.is_file():
             continue
+
+        # An animal holding no session has nothing to register against, so it carries no cross-recording job.
         animal_entries = dataset.get_sessions_for_animal(animal=dataset_animal.animal)
+        if not animal_entries:
+            continue
+
         plan[dataset_animal.animal] = (configuration_path, [entry.session for entry in animal_entries])
 
     return plan
@@ -470,8 +463,7 @@ def build_forging_universe(
 
     Args:
         dataset: The resolved dataset whose sessions are assembled.
-        multiday_plan: The per-animal multi-day plan from ``resolve_multiday_plan``, ``materialize_multiday_plan``,
-            or ``load_multiday_plan``.
+        multiday_plan: The per-animal multi-day plan from ``materialize_multiday_plan`` or ``load_multiday_plan``.
 
     Returns:
         The list of ``(job_name, specifier)`` pairs the forging tracker aligns against.

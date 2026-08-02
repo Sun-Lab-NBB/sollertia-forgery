@@ -30,7 +30,6 @@ from .pipeline import (
     forging_tracker_path,
     run_forging_pipeline,
     discover_forging_jobs,
-    resolve_multiday_plan,
     build_forging_universe,
     define_forging_dataset,
     forging_job_prerequisites,
@@ -64,7 +63,6 @@ __all__ = [
     "load_multiday_plan",
     "materialize_multiday_plan",
     "resolve_dataset",
-    "resolve_multiday_plan",
     "run_forging_pipeline",
     "verify_session_admissibility",
 ]
