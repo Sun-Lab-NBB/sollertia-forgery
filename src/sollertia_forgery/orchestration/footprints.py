@@ -253,33 +253,33 @@ def estimate_session_job_memory(
     estimates: dict[tuple[str, str], tuple[int, bool]] = {}
     for job_name, specifier, cores in jobs:
         if pipeline is ProcessingPipelines.TWO_PHOTON:
-            modeled = (
-                _estimate_two_photon_memory(
+            if geometry is not None and configuration is not None:
+                memory_mb = _estimate_two_photon_memory(
                     job_name=job_name, specifier=specifier, geometry=geometry, configuration=configuration
                 )
-                if geometry is not None and configuration is not None
-                else _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
-            )
+                memory_modeled = True
+            else:
+                memory_mb, memory_modeled = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
         elif job_name == CHECKSUM_JOB_NAME:
-            modeled = _estimate_checksum_memory(cores=cores)
+            memory_mb, memory_modeled = _estimate_checksum_memory(cores=cores), True
         elif job_name in {RUNTIME_JOB_NAME, EXTRACTION_JOB_NAME, TIMESTAMP_JOB_NAME}:
             archive = behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
-            modeled = _estimate_archive_reader_memory(archive_path=archive, cores=cores)
+            memory_mb, memory_modeled = _estimate_archive_reader_memory(archive_path=archive, cores=cores)
         elif job_name == ENERGY_JOB_NAME:
-            modeled = _estimate_motion_energy_memory(frame_pixels=widest_frame_pixels, cores=cores)
+            memory_mb, memory_modeled = _estimate_motion_energy_memory(frame_pixels=widest_frame_pixels, cores=cores)
         elif job_name == TRACKING_JOB_NAME:
-            modeled = _estimate_widest_file_memory(
+            memory_mb, memory_modeled = _estimate_widest_file_memory(
                 directory=session.raw_data.camera_data_path,
                 pattern="*.h5",
                 expansion_ratio=_POSE_PREDICTION_RATIO,
             )
         elif job_name == PARSE_JOB_NAME:
-            modeled = _estimate_widest_file_memory(
+            memory_mb, memory_modeled = _estimate_widest_file_memory(
                 directory=behavior_directory, pattern=f"*{LOG_ARCHIVE_SUFFIX}", expansion_ratio=_MODULE_TABLE_RATIO
             )
         else:
-            modeled = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
-        estimates[job_name, specifier] = (modeled, modeled > _apply_tolerance(memory_mb=_WORKER_MEMORY_MB))
+            memory_mb, memory_modeled = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+        estimates[job_name, specifier] = (memory_mb, memory_modeled)
 
     return estimates
 
@@ -452,12 +452,12 @@ def _estimate_archive_reader_memory(archive_path: Path, cores: int) -> int:
         cores: The cores the job is allocated, which is how many readers it opens.
 
     Returns:
-        The reportable memory in megabytes.
+        The reportable memory in megabytes and a flag that is True when the archive was found and read.
     """
     if not archive_path.is_file():
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
+        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
     per_reader = _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * (per_reader + _SUBPROCESS_MEMORY_MB))
+    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * (per_reader + _SUBPROCESS_MEMORY_MB)), True
 
 
 def _estimate_checksum_memory(cores: int) -> int:
@@ -519,14 +519,15 @@ def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> int:
         cores: The cores the job is allocated, which bounds how many chunks it decodes at once.
 
     Returns:
-        The reportable memory in megabytes.
+        The reportable memory in megabytes and a flag that is always True, because the per-core decoder and child
+        cost is modeled whether or not a readable recording supplied a frame.
     """
     per_worker = (
         _bytes_to_megabytes(byte_count=frame_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
         + _DECODER_BUFFER_MEMORY_MB
         + _SUBPROCESS_MEMORY_MB
     )
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * per_worker)
+    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * per_worker), True
 
 
 def _estimate_binarization_memory(geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration) -> int:
@@ -661,17 +662,17 @@ def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio:
         expansion_ratio: The resident memory a job holds per byte of the file it reads.
 
     Returns:
-        The reportable memory in megabytes.
+        The reportable memory in megabytes and a flag that is True when a candidate file was found and measured.
     """
     if not directory.is_dir():
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
+        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
     candidates = sorted(directory.glob(pattern), key=lambda path: path.stat().st_size, reverse=True)
     if not candidates:
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
+        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
     widest = candidates[0]
     return _apply_tolerance(
         memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
-    )
+    ), True
 
 
 @cache
@@ -741,19 +742,25 @@ def _resolve_tracking_configuration(dataset: DatasetData, project_root: Path) ->
         Read from the system registry rather than from the file ``define_forging_dataset`` materializes, so the
         parameters are available for a dataset whose configurations have not been written yet.
 
+        Resolved from the first session still present under the project root, because a dataset outlives the source
+        data of the animals it has already forged. Estimating a newly added animal therefore does not depend on
+        sessions that have moved to long-term storage.
+
     Args:
         dataset: The resolved dataset whose acquisition system donates the configuration.
         project_root: The path to the project's root directory.
 
     Returns:
-        The resolved configuration, or None when the dataset holds no session, or when its sessions need no
-        multi-day processing.
+        The resolved configuration, or None when no session remains under the project root, or when the dataset's
+        sessions need no multi-day processing.
     """
-    if not dataset.sessions:
-        return None
-    entry = dataset.sessions[0]
     resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
-    return resolve_configuration(SessionData.load(session_path=project_root.joinpath(entry.animal, entry.session)))
+    for entry in dataset.sessions:
+        session_path = project_root.joinpath(entry.animal, entry.session)
+        if not session_path.is_dir():
+            continue
+        return resolve_configuration(SessionData.load(session_path=session_path))
+    return None
 
 
 def _resolve_tracked_regions(
