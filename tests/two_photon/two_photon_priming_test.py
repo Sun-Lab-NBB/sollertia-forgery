@@ -347,16 +347,16 @@ def test_priming_an_unprimed_recording_persists_both_halves(
     persisted: list[bool] = []
 
     def _record_configuration(
-        session: Any,  # noqa: ARG001
+        session: Any,
         *,
-        display_progress: bool,  # noqa: ARG001
+        display_progress: bool,
         persist: bool,
     ) -> tuple[None, Path]:
         """Records the persist flag the pipeline passed when building the configuration."""
         persisted.append(persist)
         return None, tmp_path.joinpath(_CONFIGURATION_FILENAME)
 
-    def _record_contexts(configuration: Any, *, persist: bool) -> list[Any]:  # noqa: ARG001
+    def _record_contexts(configuration: Any, *, persist: bool) -> list[Any]:
         """Records the persist flag the pipeline passed when resolving the recording contexts."""
         persisted.append(persist)
         return []

@@ -976,7 +976,7 @@ def test_a_submission_renders_as_the_fields_it_was_recorded_with() -> None:
 
 def test_the_configured_server_is_what_a_connection_opens(
     server_configuration: ServerConfiguration,
-    stub_ssh_transport: Any,  # noqa: ARG001
+    stub_ssh_transport: Any,
 ) -> None:
     """A caller never names the host, so the recorded configuration is what every remote operation runs against."""
     with connect_to_server() as server:

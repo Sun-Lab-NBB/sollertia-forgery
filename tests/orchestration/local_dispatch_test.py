@@ -632,7 +632,7 @@ def test_a_canceled_session_stops_admitting_and_records_the_remainder(tmp_path: 
 # Worker thread pinning
 
 
-def test_the_decode_ceiling_follows_the_cores_a_job_holds(pinned_thread_environment: None) -> None:  # noqa: ARG001
+def test_the_decode_ceiling_follows_the_cores_a_job_holds(pinned_thread_environment: None) -> None:
     """A decode stops shortening past the ceiling, so a wide job spends its remaining cores on the stage itself."""
     apply_decode_thread_ceiling(cores=2)
     assert os.environ["TIFFFILE_NUM_THREADS"] == "2"
@@ -644,7 +644,7 @@ def test_the_decode_ceiling_follows_the_cores_a_job_holds(pinned_thread_environm
     assert os.environ["TIFFFILE_NUM_THREADS"] == "1"
 
 
-def test_the_worker_initializer_pins_every_declared_threading_layer(pinned_thread_environment: None) -> None:  # noqa: ARG001
+def test_the_worker_initializer_pins_every_declared_threading_layer(pinned_thread_environment: None) -> None:
     """A worker holds one core, so every library pool it opens has to be pinned before the job starts."""
     _initialize_worker_threads(thread_ceiling=1)
 
@@ -655,7 +655,7 @@ def test_the_worker_initializer_pins_every_declared_threading_layer(pinned_threa
     assert numba.get_num_threads() == 1
 
 
-def test_the_worker_initializer_raises_a_non_positive_ceiling_to_one(pinned_thread_environment: None) -> None:  # noqa: ARG001
+def test_the_worker_initializer_raises_a_non_positive_ceiling_to_one(pinned_thread_environment: None) -> None:
     """A pool pinned to zero threads would open nothing at all, so the floor of one is applied first."""
     _initialize_worker_threads(thread_ceiling=0)
 
@@ -728,7 +728,7 @@ def test_rendering_a_command_for_an_unsupported_pipeline_is_rejected() -> None:
         resolve_job_command(job=job)
 
 
-def test_running_a_job_of_an_unsupported_pipeline_is_rejected(pinned_thread_environment: None) -> None:  # noqa: ARG001
+def test_running_a_job_of_an_unsupported_pipeline_is_rejected(pinned_thread_environment: None) -> None:
     """The shared worker routes on the pipeline the job carries, so an unroutable job stops rather than running."""
     job = build_pending_job(job=descriptor(pipeline="not_a_pipeline"))
 
@@ -783,7 +783,7 @@ def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
     unit_path: str,
     expected: dict[str, Any],
     recorded_pipeline_calls: dict[str, dict[str, Any]],
-    pinned_thread_environment: None,  # noqa: ARG001
+    pinned_thread_environment: None,
 ) -> None:
     """The pipeline a job names is what selects the stage it runs and the width that stage runs at."""
     job = build_pending_job(job=descriptor(job_name=job_name, pipeline=pipeline, unit_path=unit_path))
@@ -796,7 +796,7 @@ def test_each_pipeline_worker_forwards_the_job_to_its_own_entry_point(
 
 def test_the_checksum_worker_takes_its_mode_from_the_options_the_job_carries(
     recorded_pipeline_calls: dict[str, dict[str, Any]],
-    pinned_thread_environment: None,  # noqa: ARG001
+    pinned_thread_environment: None,
 ) -> None:
     """Re-baselining is a deliberate correction, so a batch runs it only when it was prepared with that mode."""
     job = build_pending_job(

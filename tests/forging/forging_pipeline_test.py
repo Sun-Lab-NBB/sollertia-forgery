@@ -77,7 +77,7 @@ def assemble_described_session(source_session_path: Path, output_path: Path, dat
     pl.DataFrame({DESCRIBED_COLUMN: [0, 1, 2]}).write_ipc(file=output_path, compression="uncompressed")
 
 
-def assemble_undescribed_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:  # noqa: ARG001
+def assemble_undescribed_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
     """Writes one session's assembled feather holding a column no dataset describes.
 
     Args:
@@ -91,7 +91,7 @@ def assemble_undescribed_session(source_session_path: Path, output_path: Path, d
     )
 
 
-def assemble_failing_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:  # noqa: ARG001
+def assemble_failing_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
     """Fails the assembly of every session it is handed.
 
     Args:
@@ -377,7 +377,7 @@ def test_define_forging_dataset_records_the_progress_preference(experiment_proje
 
 def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that rebuilding an animal returns its recorded stages to the scheduled state, so the next run redoes
@@ -533,7 +533,7 @@ def test_run_forging_pipeline_completes_every_stage_across_a_worker_pool(
 
 def test_run_forging_pipeline_assembles_sequentially_with_one_worker(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that a single-worker run assembles in the parent process and forwards the dataset name to the worker."""
@@ -605,7 +605,7 @@ def test_run_forging_pipeline_skips_the_stages_already_recorded_as_succeeded(
 
 def test_run_forging_pipeline_reports_a_fully_assembled_dataset(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -629,7 +629,7 @@ def test_run_forging_pipeline_reports_a_fully_assembled_dataset(
 
 def test_run_forging_pipeline_rejects_a_session_missing_a_required_asset(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that a session whose required VR snapshot is absent fails before the worker is invoked."""
@@ -649,7 +649,7 @@ def test_run_forging_pipeline_rejects_a_session_missing_a_required_asset(
 
 def test_run_forging_pipeline_rejects_an_undescribed_column(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that a feather carrying a column the dataset does not describe fails its own session's assembly."""
@@ -667,7 +667,7 @@ def test_run_forging_pipeline_rejects_an_undescribed_column(
 
 def test_run_forging_pipeline_records_every_parallel_failure_before_re_raising(
     experiment_project: ForgingProject,
-    recorded_multiday_jobs: list[MultidayCall],  # noqa: ARG001 - requested so the cross-recording stages succeed.
+    recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that a failing parallel assembly is recorded against every dispatched job and then re-raised."""

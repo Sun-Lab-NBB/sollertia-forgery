@@ -100,7 +100,7 @@ def test_naming_no_identifier_returns_the_whole_unit_to_a_clean_slate(
 
 def test_only_the_named_identifiers_are_reset(
     experiment_session: SessionData,
-    video_tracker: ProcessingTracker,  # noqa: ARG001 - requested so the tracker exists on disk.
+    video_tracker: ProcessingTracker,  # Requested so the tracker exists on disk.
 ) -> None:
     """Naming one job leaves every other record the unit holds exactly as the run left it."""
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
@@ -116,7 +116,7 @@ def test_only_the_named_identifiers_are_reset(
 
 def test_an_identifier_the_unit_does_not_track_is_dropped(
     experiment_session: SessionData,
-    video_tracker: ProcessingTracker,  # noqa: ARG001 - requested so the tracker exists on disk.
+    video_tracker: ProcessingTracker,  # Requested so the tracker exists on disk.
 ) -> None:
     """One call carries a whole batch's identifiers, so a unit resets its own share and ignores the rest."""
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)
@@ -137,7 +137,7 @@ def test_a_unit_holding_no_tracker_is_skipped(experiment_session: SessionData) -
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
     tmp_path: Path,
     experiment_session: SessionData,
-    video_tracker: ProcessingTracker,  # noqa: ARG001 - requested so the healthy unit carries records to clear.
+    video_tracker: ProcessingTracker,  # Requested so the healthy unit carries records to clear.
 ) -> None:
     """One unresolvable unit is reported and skipped rather than abandoning the reset of the others."""
     unresolvable = tmp_path.joinpath("not_a_session")
@@ -155,7 +155,7 @@ def test_a_pipeline_outside_the_dispatch_table_removes_nothing(experiment_sessio
 
 def test_a_pipeline_that_owns_a_directory_removes_it_alongside_its_tracker(
     experiment_session: SessionData,
-    video_tracker: ProcessingTracker,  # noqa: ARG001 - requested so the tracker exists on disk.
+    video_tracker: ProcessingTracker,  # Requested so the tracker exists on disk.
 ) -> None:
     """A later preparation must rediscover every job from the acquired data, so the whole owned tree goes."""
     output_directory = experiment_session.processed_data.video_data_path
@@ -193,7 +193,7 @@ def test_a_unit_with_nothing_recorded_removes_nothing(experiment_session: Sessio
 def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
     tmp_path: Path,
     experiment_session: SessionData,
-    video_tracker: ProcessingTracker,  # noqa: ARG001 - requested so the healthy unit carries output to remove.
+    video_tracker: ProcessingTracker,  # Requested so the healthy unit carries output to remove.
 ) -> None:
     """One unresolvable unit is reported and skipped rather than abandoning the cleanup of the others."""
     unresolvable = tmp_path.joinpath("not_a_session")

@@ -487,7 +487,7 @@ def test_rename_job_copies_when_hardlinking_is_unavailable(
     _write_manifest(experiment_session.raw_data.behavior_data_path, {_FACE_SOURCE_ID: _FACE_CAMERA})
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
-    def _refuse(self: Path, target: Path) -> None:  # noqa: ARG001
+    def _refuse(self: Path, target: Path) -> None:
         message = "Hardlinks are not supported on this filesystem."
         raise OSError(message)
 

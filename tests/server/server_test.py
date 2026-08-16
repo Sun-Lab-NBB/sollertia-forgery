@@ -85,7 +85,7 @@ def instant_retry_timer(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 @pytest.fixture
 def unreachable_transport(
     monkeypatch: pytest.MonkeyPatch,
-    instant_retry_timer: list[int],  # noqa: ARG001 - requested so the retry sequence runs without waiting.
+    instant_retry_timer: list[int],  # Requested so the retry sequence runs without waiting.
 ) -> SimpleNamespace:
     """Replaces the paramiko binding with a stack whose handshake always raises the configured failure.
 

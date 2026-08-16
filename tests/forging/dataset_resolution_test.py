@@ -130,7 +130,7 @@ def _install_project(
                 _mark_processed(session_path=session_path)
             session_paths.append(session_path)
 
-    def _discover_sessions(root_path: Path) -> list[Path]:  # noqa: ARG001
+    def _discover_sessions(root_path: Path) -> list[Path]:
         """Returns the sessions the project was seeded with, standing in for marker-based discovery."""
         return list(session_paths)
 

@@ -83,7 +83,7 @@ def test_discover_project_sessions_returns_nothing_for_an_empty_project(
 
 def test_discover_project_data_connects_reports_and_closes(
     stub_ssh_transport: StubSSHTransport,
-    server_configuration: ServerConfiguration,  # noqa: ARG001 - requested so the credentials resolve from disk.
+    server_configuration: ServerConfiguration,  # Requested so the credentials resolve from disk.
 ) -> None:
     """Verifies that the entry point opens its own connection, discovers the sessions, and closes the connection."""
     _build_remote_project(transport=stub_ssh_transport)
