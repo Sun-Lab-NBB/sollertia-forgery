@@ -9,9 +9,10 @@ from typing import TYPE_CHECKING
 from contextlib import nullcontext
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 
-from cindra import MultiRecordingJobNames, execute_multi_recording_job
+from cindra import MultiRecordingJobNames, prime_dataset, execute_multi_recording_job
 import polars as pl
 from natsort import natsorted
+from cindra.layout import MULTI_RECORDING_CONFIGURATION_FILENAME
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import (
     DatasetData,
@@ -20,11 +21,16 @@ from sollertia_shared_assets import (
     RawDataFiles,
     ProcessingTrackers,
 )
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import (
+    ProcessingStatus,
+    ProcessingTracker,
+    limit_worker_threads,
+    initialize_worker_threads,
+)
 
 from .dataset import DATASET_MARKER_FILENAME, resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
-from ..shared_assets import tracked_job, pinned_worker_threads, multi_recording_dataset_directory
+from ..shared_assets import multi_recording_dataset_directory
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -62,10 +68,6 @@ Notes:
     This mapping is the single source for both the local assembly pool and the shared batch layer, which merges it
     into its own concurrency table.
 """
-
-_MULTI_RECORDING_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
-"""The filename under which the per-animal multi-recording configuration is materialized in the animal's forged
-dataset directory before the cross-recording stages run."""
 
 
 def define_forging_dataset(
@@ -193,9 +195,14 @@ def run_forging_pipeline(
         display_progress: Determines whether to display progress bars during the multi-day and assembly stages.
 
     Raises:
-        ValueError: If the dataset is not defined, if its acquisition system is unknown, or if the provided job_id
-            does not match any job.
-        FileNotFoundError: If the dataset carries no ``data_descriptions.feather`` companion file.
+        ValueError: If the dataset is not defined, if its acquisition system is unknown, if the provided job_id
+            does not match any job, or if a discovery job's multi-recording configuration names fewer than two
+            recording directories or no dataset name.
+        FileNotFoundError: If the dataset carries no ``data_descriptions.feather`` companion file, or if a discovery
+            job's multi-recording configuration is missing, is not a .yaml file, is not a valid multi-recording
+            configuration, or names a recording that holds no combined metadata archive.
+        RuntimeError: If a discovery job's multi-recording configuration names a recording directory holding several
+            combined metadata archives, or names recording paths that carry no unique identifying component.
     """
     console.echo(message=f"Initializing the forging pipeline for dataset '{name}'...", level=LogLevel.INFO)
 
@@ -216,9 +223,11 @@ def run_forging_pipeline(
     tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
 
     # Requesting only the outstanding jobs while declaring the full universe preserves the recorded state of every
-    # job this invocation skips.
+    # job this invocation skips. An invocation with nothing outstanding has every job of the universe already
+    # registered as succeeded, so its registry needs no alignment and the tracker rejects an empty request anyway.
     runnable = _resolve_runnable_jobs(tracker=tracker, universe=universe)
-    tracker.align_jobs(jobs=runnable, universe=universe)
+    if runnable:
+        tracker.align_jobs(jobs=runnable, universe=universe)
     runnable_jobs = set(runnable)
 
     console.echo(message=f"Prepared {len(runnable)} outstanding forging job(s) out of {len(universe)} total.")
@@ -240,8 +249,8 @@ def run_forging_pipeline(
         console.echo(message="Forging job completed successfully.", level=LogLevel.SUCCESS)
         return
 
-    # cindra persists the shared bootstrap to disk, so an outstanding extraction runs correctly even when its
-    # animal's discovery job is skipped.
+    # The discovery step primes the shared cindra bootstrap on disk, so an outstanding extraction runs correctly even
+    # when its animal's discovery job is skipped by this invocation.
     for animal, (configuration_path, sessions) in multiday_plan.items():
         if (MULTIDAY_DISCOVERY_JOB_NAME, animal) in runnable_jobs:
             discovery_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal)
@@ -412,7 +421,7 @@ def materialize_multiday_plan(
         )
         configuration.runtime.display_progress_bars = display_progress
 
-        configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
+        configuration_path = dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME)
         configuration.save(file_path=configuration_path)
 
         plan[animal] = (configuration_path, [entry.session for entry in animal_entries])
@@ -437,7 +446,7 @@ def load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]
     """
     plan: dict[str, tuple[Path, list[str]]] = {}
     for dataset_animal in dataset.animals:
-        configuration_path = dataset_animal.animal_path.joinpath(_MULTI_RECORDING_CONFIGURATION_FILENAME)
+        configuration_path = dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME)
         if not configuration_path.is_file():
             continue
 
@@ -485,7 +494,7 @@ def forging_job_prerequisites(
         Each animal's discovery job roots that animal's chain. A dataset needing no multi-day processing carries
         assembly jobs that depend on nothing.
 
-        cindra's cross-recording discovery writes the shared bootstrap its animal's extractions read, so each
+        The cross-recording discovery step primes the shared bootstrap its animal's extractions read, so each
         extraction requires its own animal's discovery. An assembly job reads the aligned fluorescence its session's
         extraction wrote.
 
@@ -580,8 +589,11 @@ def _run_discovery_job(
     """Runs the cross-recording cell-discovery stage for one animal as a tracked forging job.
 
     Notes:
-        cindra records this job's state directly on the forging tracker under job_id. The job runs ahead of its
-        animal's extraction jobs, so it is the one that persists the shared multi-recording bootstrap those jobs read.
+        cindra records this job's state directly on the forging tracker under job_id. Every cindra stage reads the
+        shared multi-recording bootstrap rather than writing it, so this call primes the bootstrap first. Priming is
+        single-threaded by contract, and the discovery job runs ahead of every one of its animal's extraction jobs, so
+        this is the only point at which no peer stage of the same animal can be running. The priming precedes the
+        tracked job, so a bootstrap that cannot be written leaves the job unstarted rather than recorded as failed.
 
     Args:
         configuration_path: The path to the animal's materialized multi-recording configuration.
@@ -589,18 +601,25 @@ def _run_discovery_job(
         tracker: The forging processing tracker this job is recorded on.
         job_id: The unique hexadecimal identifier for this discovery job.
         workers: The workers this stage runs under.
+
+    Raises:
+        FileNotFoundError: If the configuration file is missing, is not a .yaml file, is not a valid multi-recording
+            configuration, or names a recording that holds no combined metadata archive.
+        ValueError: If the configuration names fewer than two recording directories or no dataset name.
+        RuntimeError: If the configuration names a recording directory holding several combined metadata archives, or
+            names recording paths that carry no unique identifying component.
     """
     console.echo(
         message=f"Running '{MULTIDAY_DISCOVERY_JOB_NAME}' job with specifier '{animal}' (ID: {job_id})...",
         level=LogLevel.INFO,
     )
+    prime_dataset(configuration_path=configuration_path)
     execute_multi_recording_job(
         configuration_path=configuration_path,
         job_name=MultiRecordingJobNames.DISCOVER,
         specifier="",
         job_id=job_id,
         tracker=tracker,
-        persist_bootstrap=True,
         workers=workers,
     )
 
@@ -613,7 +632,7 @@ def _run_extraction_job(
     Notes:
         cindra identifies each recording by the unique component of its recording directory path, which for the
         forging layout is the session name. cindra records this job's state directly on the forging tracker under
-        job_id, and reads the shared bootstrap the animal's discovery job wrote.
+        job_id, and reads the shared bootstrap the animal's discovery step primed.
 
     Args:
         configuration_path: The path to the owning animal's materialized multi-recording configuration.
@@ -792,8 +811,13 @@ def _execute_jobs_parallel(
     first_exception: Exception | None = None
 
     # Each assembly child re-imports and sizes its library thread pools before any of this code runs inside it, so the
-    # caps are placed around the pool's construction rather than inside its workers.
-    with pinned_worker_threads(), ProcessPoolExecutor(max_workers=workers) as executor:
+    # caps are placed around the pool's construction rather than inside its workers. numba is the exception: it
+    # latches its ceiling while it is imported and refuses a later disagreement, so the environment never reaches it
+    # and each child pins it through its own runtime setter in the pool initializer instead.
+    with (
+        limit_worker_threads(),
+        ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,
+    ):
         future_to_job_id: dict[Future[None], str] = {}
         for session_name in sessions:
             job_id = job_ids[session_name]
@@ -858,7 +882,7 @@ def _execute_job(
         described_columns: The column names the dataset describes, which every assembled session is held to.
     """
     console.echo(message=f"Running '{FORGING_JOB_NAME}' job with specifier '{session_name}' (ID: {job_id})...")
-    with tracked_job(tracker=tracker, job_id=job_id):
+    with tracker.run_job(job_id=job_id):
         session_metadata = session_lookup[session_name]
         source_session_path = project_root.joinpath(session_metadata.animal, session_name)
         _forge_session(

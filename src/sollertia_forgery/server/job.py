@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import shlex
 from typing import TYPE_CHECKING
-import datetime
+
+from ataraxis_time import TimeUnits, to_timedelta
 
 if TYPE_CHECKING:
     from pathlib import Path
+    import datetime
     from collections.abc import Sequence
 
 _SECONDS_PER_DAY: int = 86400
@@ -80,7 +82,7 @@ class Job:
             output=str(output_log),
             error=str(error_log),
             memory=f"{ram}G",
-            time=datetime.timedelta(minutes=time),
+            time=to_timedelta(time=time, from_units=TimeUnits.MINUTE),
             dependencies=tuple(dependencies),
             cleanup_path=self.remote_script_path,
         )

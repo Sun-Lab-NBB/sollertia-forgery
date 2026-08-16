@@ -8,8 +8,12 @@ import numpy as np
 import polars as pl
 import pytest
 from sollertia_shared_assets import SessionTypes
-from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
-from ataraxis_data_structures.data_structures.processing_tracker import ProcessingStatus
+from ataraxis_data_structures import (
+    LOG_ARCHIVE_SUFFIX,
+    LogArchiveReader,
+    ProcessingStatus,
+    ProcessingTracker,
+)
 
 from sollertia_forgery.runtime import (
     RUNTIME_JOB_NAME,
@@ -17,7 +21,6 @@ from sollertia_forgery.runtime import (
     runtime_job_prerequisites,
     run_runtime_processing_pipeline,
 )
-from sollertia_forgery.shared_assets import LOG_ARCHIVE_SUFFIX
 from sollertia_forgery.runtime.pipeline import _decode_batch, _decode_archive
 from sollertia_forgery.mesoscope_vr.runtime import RUNTIME_SOURCE_ID
 from sollertia_forgery.mesoscope_vr.metadata import BehaviorDataFiles

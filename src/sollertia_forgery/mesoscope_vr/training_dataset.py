@@ -73,7 +73,7 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     # an empty directory behind when no camera clock is available.
     reference_time = resolve_slowest_camera_clock(video_data_path=video_data_path)
 
-    ensure_directory_exists(path=output_path)
+    ensure_directory_exists(path=output_path, is_file=True)
 
     # Assembles the behavior sub-dataset with its own time columns, since it supplies the unified feather's time axis.
     # The video sub-dataset aligns to the same reference clock and is empty when the session carries no camera feathers.

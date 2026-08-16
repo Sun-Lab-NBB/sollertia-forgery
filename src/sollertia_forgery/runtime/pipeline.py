@@ -13,10 +13,15 @@ import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
-from ataraxis_data_structures import LogArchiveReader, ProcessingTracker
+from ataraxis_data_structures import (
+    LOG_ARCHIVE_SUFFIX,
+    LogArchiveReader,
+    ProcessingTracker,
+    limit_worker_threads,
+    initialize_worker_threads,
+)
 
 from ..registries import resolve_runtime_binding
-from ..shared_assets import LOG_ARCHIVE_SUFFIX, tracked_job, pinned_worker_threads
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,7 +96,7 @@ def run_runtime_processing_pipeline(
     tracker.align_jobs(jobs=possible, universe=universe)
 
     console.echo(message=f"Running '{RUNTIME_JOB_NAME}' job with specifier '{source_id}' (ID: {job_identifier})...")
-    with tracked_job(tracker=tracker, job_id=job_identifier):
+    with tracker.run_job(job_id=job_identifier):
         decoded_messages = _decode_archive(
             archive_path=archive_path, workers=workers, display_progress=display_progress
         )
@@ -222,8 +227,13 @@ def _decode_batches(
     payload_chunks: list[list[bytes]] = [[] for _ in batches]
 
     # Each decode child re-imports and sizes its library thread pools before any of this code runs inside it, so the
-    # caps are placed around the pool's construction rather than inside its workers.
-    with pinned_worker_threads(), ProcessPoolExecutor(max_workers=workers) as executor:
+    # caps are placed around the pool's construction rather than inside its workers. numba latches its own ceiling
+    # while it is imported and rejects an environment variable that disagrees afterwards, so it is pinned instead by
+    # the initializer every child runs through its runtime setter.
+    with (
+        limit_worker_threads(),
+        ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,
+    ):
         future_to_index: dict[Future[tuple[NDArray[np.uint64], list[bytes]]], int] = {
             executor.submit(_decode_batch, archive_path=archive_path, onset_us=onset_us, keys=batch): index
             for index, batch in enumerate(batches)

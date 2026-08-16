@@ -32,9 +32,10 @@ from sollertia_shared_assets import (
     MesoscopeWaterRewardTrial,
     MesoscopeExperimentConfiguration,
     set_working_directory,
+    set_task_templates_directory,
 )
 from ataraxis_data_structures import ProcessingTracker
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
+from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY, SESSION_TYPES_USING_VR_TASK
 
 from sollertia_forgery.server import Server
 from sollertia_forgery.managing import project_manifest_path, generate_project_manifest
@@ -239,21 +240,24 @@ def task_template() -> TaskTemplate:
 @pytest.fixture
 def session_factory(
     project: ProjectData,
+    isolated_working_directory: Path,
     hardware_state: MesoscopeHardwareState,
     experiment_configuration: MesoscopeExperimentConfiguration,
     task_template: TaskTemplate,
 ) -> Callable[..., SessionData]:
     """Returns a builder that creates one acquired session through the shared hierarchy's own creator.
 
-    The builder creates the session, writes the descriptor its type registers alongside the hardware state snapshot,
-    and returns the session reloaded from disk so both its raw and processed paths resolve absolutely. Naming an
-    experiment additionally writes the experiment configuration and VR task template snapshots into raw data.
+    The builder stages the experiment configuration and the VR task template where the creator sources them from,
+    creates the session, writes the descriptor its type registers alongside the hardware state snapshot, and returns
+    the session reloaded from disk so both its raw and processed paths resolve absolutely.
 
     Args:
         project: The created project the session is placed under.
+        isolated_working_directory: The isolated platform state, requested so the task templates directory the
+            builder registers is written under this test's own temporary directory rather than onto the host.
         hardware_state: The hardware state snapshot written into the session's raw data.
-        experiment_configuration: The experiment configuration written when the builder is given an experiment name.
-        task_template: The VR task template written when the builder is given an experiment name.
+        experiment_configuration: The experiment configuration staged for the creator to copy into the session.
+        task_template: The VR task template staged for the creator to copy into the session.
 
     Returns:
         A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and an
@@ -268,12 +272,37 @@ def session_factory(
         incomplete: bool = False,
         experiment_name: str | None = None,
     ) -> SessionData:
+        # A corridor-task session type is rejected at creation unless it names an experiment, since the shared
+        # hierarchy resolves the VR task template from it. The builder therefore names one for those types whatever
+        # the caller asked for, while the caller's own argument still decides whether the experiment configuration and
+        # task template snapshots are written below. That keeps a test that exercises a session missing those
+        # snapshots able to build one.
+        declared_experiment = experiment_name
+        if declared_experiment is None and SessionTypes(session_type) in SESSION_TYPES_USING_VR_TASK:
+            declared_experiment = "unconfigured_experiment"
+
+        # The shared hierarchy now sources both snapshots itself, copying the experiment configuration out of the
+        # project's configuration directory and the task template out of the host's templates directory, so both have
+        # to be staged before the session is created rather than written into raw data afterwards.
+        if declared_experiment is not None:
+            project.create()
+            experiment_configuration.to_yaml(
+                file_path=project.configuration_directory.joinpath(f"{declared_experiment}.yaml")
+            )
+            templates_directory = project.root.joinpath("task_templates")
+            templates_directory.mkdir(parents=True, exist_ok=True)
+            set_task_templates_directory(path=templates_directory)
+            task_template.to_yaml(
+                file_path=templates_directory.joinpath(f"{experiment_configuration.unity_scene_name}.yaml")
+            )
+
         created = SessionData.create(
             animal=project.animal(animal_id),
             session_type=session_type,
             python_version=PYTHON_VERSION,
             sollertia_experiment_version=EXPERIMENT_VERSION,
             acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
+            experiment_name=declared_experiment,
         )
 
         descriptor_class = DESCRIPTOR_REGISTRY[SessionTypes(session_type)]
@@ -292,11 +321,12 @@ def session_factory(
 
         hardware_state.to_yaml(file_path=created.raw_data.hardware_state_path)
 
-        if experiment_name is not None:
-            created.experiment_name = experiment_name
-            created.save()
-            experiment_configuration.to_yaml(file_path=created.raw_data.experiment_configuration_path)
-            task_template.to_yaml(file_path=created.raw_data.vr_configuration_path)
+        # A caller that named no experiment wants a session carrying no experiment snapshots, which the creator now
+        # always writes for a corridor-task type. Removing them here restores that shape, so a test can still build a
+        # session whose experiment configuration or VR task template is absent.
+        if experiment_name is None:
+            created.raw_data.experiment_configuration_path.unlink(missing_ok=True)
+            created.raw_data.vr_configuration_path.unlink(missing_ok=True)
 
         return SessionData.load(session_path=project.animal(animal_id).session_path(created.session_name))
 
@@ -360,7 +390,12 @@ def write_tracker() -> Callable[..., ProcessingTracker]:
         path.parent.mkdir(parents=True, exist_ok=True)
         universe = list(jobs)
         tracker = ProcessingTracker(file_path=path)
-        tracker.align_jobs(jobs=universe, universe=universe)
+        # An empty universe writes a tracker holding no jobs, which is how a caller builds the empty-registry case.
+        # The tracker rejects an empty alignment request, so the file is created without one.
+        if universe:
+            tracker.align_jobs(jobs=universe, universe=universe)
+        else:
+            tracker.reset()
 
         for job in succeeded:
             job_id = ProcessingTracker.generate_job_id(job_name=job[0], specifier=job[1])

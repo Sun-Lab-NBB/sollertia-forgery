@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
+from ataraxis_data_structures import direct_write
 
 from ..server import (
     ServerConfiguration,
@@ -62,14 +63,17 @@ def write_server_configuration_tool(
             )
         )
 
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Writes the payload to a temporary sibling file and validates by round-tripping through ServerConfiguration.
-    # Keeps the temp file ending in .yaml because YamlConfig.from_yaml rejects non-.yaml paths.
+    # Keeps the temp file ending in .yaml because YamlConfig.from_yaml rejects non-.yaml paths. The scratch file
+    # exists to give from_yaml a path to read rather than to publish anything, so it is written with direct_write,
+    # which also creates the configuration directory. atomic_write is wrong here: nothing ever reads this path, and
+    # its flush and rename would only pay to publish a file the next statement deletes. The durable half of the
+    # operation is instance.to_yaml() below, which writes through atomic_write itself.
     temp_path = file_path.with_name(f".{file_path.stem}.{uuid.uuid4().hex[:8]}.tmp.yaml")
 
     try:
-        temp_path.write_text(yaml.safe_dump(data=configuration_payload, sort_keys=False))
+        with direct_write(file_path=temp_path) as temp_file:
+            yaml.safe_dump(data=configuration_payload, stream=temp_file, sort_keys=False)
         instance = ServerConfiguration.from_yaml(file_path=temp_path)
     except Exception as exception:
         return error_response(message=f"Unable to validate the supplied server configuration payload. {exception}")

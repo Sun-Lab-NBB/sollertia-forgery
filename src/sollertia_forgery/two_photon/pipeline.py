@@ -6,17 +6,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from cindra import SingleRecordingJobNames, execute_single_recording_job
-from natsort import natsorted
-from cindra.io import PARAMETERS_FILENAME, resolve_single_recording_contexts
-from cindra.allocation import (
+from cindra import (
+    PARAMETERS_FILENAME,
+    SingleRecordingJobNames,
+    prime_recording,
     resolve_plane_specifier,
+    execute_single_recording_job,
     resolve_single_recording_jobs,
+    resolve_single_recording_contexts,
+    resolve_single_recording_job_universe,
     resolve_single_recording_prerequisites,
 )
+from cindra.layout import SINGLE_RECORDING_CONFIGURATION_FILENAME
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingTracker, discover_marker_files
 
 from ..registries import resolve_two_photon_data_locator, resolve_single_recording_configuration_resolver
 
@@ -31,11 +35,6 @@ layer names a positive count instead, which overrides the default with the width
 
 _ALL_PLANES: int = -1
 """The target-plane value that runs the per-plane stages for every virtual imaging plane the recording holds."""
-
-_CINDRA_CONFIGURATION_FILENAME: str = "configuration.yaml"
-"""The filename the session's single-recording configuration is materialized under, inside the session's cindra
-directory (``session.processed_data.cindra_data_path``). A run driven by an external scheduler reads the copy its
-preparation step wrote under this same name, so concurrently dispatched jobs share one file."""
 
 
 def run_two_photon_processing_pipeline(
@@ -61,9 +60,12 @@ def run_two_photon_processing_pipeline(
     Notes:
         The pipeline runs the single binarization job, one registration job and one processing job per virtual imaging
         plane, and the single combination job, all sharing one tracker. The virtual-plane count is a property of the
-        recording's acquisition parameters on disk, recovered by resolving the session's cindra runtime contexts, which
-        also persists the shared bootstrap in local mode so the per-job stages can read it. The full four-stage
-        universe defines tracker alignment, so a partial invocation keeps every sibling job in the shared tracker.
+        recording's acquisition parameters on disk. In local mode this invocation primes the recording, which writes
+        the shared bootstrap every per-job stage reads and reports the plane count back. In remote mode it only loads
+        the bootstrap the preparation step primed and fails when that bootstrap is absent, because a job that primed
+        alongside its peers would overwrite each peer plane's runtime data with its own stale snapshot. The full
+        four-stage universe defines tracker alignment, so a partial invocation keeps every sibling job in the shared
+        tracker.
 
         cindra records each dispatched job's start, completion, and failure directly on this tracker, which lives in
         the session's cindra output directory (``session.processed_data.two_photon_tracker_path``). Two runtimes
@@ -99,6 +101,8 @@ def run_two_photon_processing_pipeline(
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the
             acquisition system's resolver cannot resolve a configuration for the session, or if job_id does not match
             any available job.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
+            the acquisition parameters file is searched for.
     """
     session = SessionData.load(session_path=session_path)
 
@@ -109,14 +113,19 @@ def run_two_photon_processing_pipeline(
         level=LogLevel.INFO,
     )
 
+    data_path = _resolve_data_path(session=session)
     configuration, materialized_configuration_path = _resolve_configuration(
-        session=session, display_progress=display_progress, persist=job_id is None
+        session=session, data_path=data_path, display_progress=display_progress, persist=job_id is None
     )
 
-    # A local run primes the recording single-threaded, while a remote run reads the copy its prepare step primed, so
-    # the scheduler's concurrent per-plane jobs share one primed bootstrap.
-    contexts = resolve_single_recording_contexts(configuration=configuration, persist=job_id is None)
-    plane_count = len(contexts)
+    # A local run primes the recording single-threaded, while a remote run only loads the bootstrap its prepare step
+    # primed, so the scheduler's concurrent per-plane jobs share one primed bootstrap. Loading it with persistence
+    # disabled also raises when no preparation pass ever primed the recording, which is the failure a remotely
+    # dispatched job must report rather than run through.
+    if job_id is None:
+        plane_count = prime_recording(configuration_path=materialized_configuration_path).plane_count
+    else:
+        plane_count = len(resolve_single_recording_contexts(configuration=configuration, persist=False))
 
     universe = resolve_single_recording_jobs(plane_count=plane_count)
 
@@ -125,18 +134,7 @@ def run_two_photon_processing_pipeline(
     if job_id is not None:
         # Registers the requested job alone while detecting foreign entries against the full universe, which keeps the
         # sibling jobs this single-job invocation does not run.
-        id_to_job = {
-            ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
-            for job_name, specifier in universe
-        }
-        if job_id not in id_to_job:
-            message = (
-                f"Unable to execute the requested job with ID '{job_id}'. The identifier does not match any two-photon "
-                f"processing job available for this session. Valid job IDs: {natsorted(id_to_job.keys())}."
-            )
-            console.error(message=message, error=ValueError)
-
-        job_name, specifier = id_to_job[job_id]
+        job_name, specifier = tracker.resolve_job(job_id=job_id, universe=universe)
         tracker.align_jobs(jobs=[(job_name, specifier)], universe=universe)
 
         execute_single_recording_job(
@@ -176,7 +174,9 @@ def run_two_photon_processing_pipeline(
     if combine:
         jobs.append((str(SingleRecordingJobNames.COMBINE), ""))
 
-    tracker.align_jobs(jobs=jobs, universe=universe)
+    # A request that names a stage no plane supports resolves no job at all, and the tracker refuses an empty request.
+    if jobs:
+        tracker.align_jobs(jobs=jobs, universe=universe)
 
     console.echo(message=f"Running {len(jobs)} two-photon processing job(s).")
 
@@ -202,11 +202,12 @@ def prime_two_photon_recording(session_path: Path) -> None:
 
     Notes:
         cindra requires the shared configuration and every plane's runtime data to be written by one single-threaded
-        step before any job reads them, because concurrently dispatched jobs would otherwise race on the same files.
-        This is that step, and it is what a preparation pass calls before the pipeline's jobs are resolved.
+        step before any job reads them, because every per-job stage loads that bootstrap rather than writing it. This
+        is that step, and it is what a preparation pass calls before the pipeline's jobs are resolved.
 
-        Writing happens only when the bootstrap is absent or incomplete, so priming a session that already carries one
-        reads it and leaves it untouched. That keeps repeated preparation of the same session free of writes.
+        Priming is idempotent, so a session that already carries a complete bootstrap is read rather than rewritten and
+        this call returns without touching what its jobs recorded there. That keeps repeated preparation of the same
+        session free of writes.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -216,13 +217,17 @@ def prime_two_photon_recording(session_path: Path) -> None:
             is not present.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
+            the acquisition parameters file is searched for.
     """
     session = SessionData.load(session_path=session_path)
     if _resolve_primed_plane_count(session=session) is not None:
         return
 
-    configuration, _ = _resolve_configuration(session=session, display_progress=False, persist=True)
-    resolve_single_recording_contexts(configuration=configuration, persist=True)
+    _, configuration_path = _resolve_configuration(
+        session=session, data_path=_resolve_data_path(session=session), display_progress=False, persist=True
+    )
+    prime_recording(configuration_path=configuration_path)
 
 
 def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str, str]], list[tuple[str, str]]]:
@@ -231,39 +236,46 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
     Notes:
         cindra owns this pipeline's job model, so the universe is the single binarization job, one registration job and
         one processing job per virtual imaging plane, and the single combination job. The virtual-plane count is a
-        property of the recording's acquisition parameters on disk (ROI x physical plane for MROI data), recovered by
-        reading the bootstrap ``prime_two_photon_recording`` wrote. Every stage is possible once that bootstrap exists,
-        so the possible subset equals the universe.
+        property of the recording's acquisition parameters (ROI x physical plane for MROI data), read from the copy the
+        bootstrap wrote and falling back to the raw parameters file when the session has yet to be primed.
 
-        Reads the bootstrap, so resolving a session's jobs costs the same no matter how often it is requested. A
-        session that has never been primed carries no bootstrap to read, which is why preparation primes it first.
+        Possibility here states what this session can run rather than what it has already produced, so every stage the
+        recording declares is possible and the possible subset equals the universe. A freshly acquired session
+        therefore reports its whole four-stage universe, and the tracker and the prerequisite graph decide when each
+        stage's turn comes rather than the output tree's current contents.
+
+        Every resolver reads the acquisition parameters and stats the output tree, so resolving a session's jobs costs
+        the same no matter how often it is requested.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
 
     Returns:
         A tuple of the loaded session, the job universe as a list of ``(job_name, specifier)`` pairs, and the possible
-        subset, which equals the universe. Registration and processing specifiers come from cindra's
-        ``resolve_plane_specifier`` and the binarization and combination specifiers are empty.
+        subset, which equals the universe. Registration and processing specifiers come from cindra's plane specifiers
+        and the binarization and combination specifiers are empty.
 
     Raises:
-        FileNotFoundError: If the session carries no cindra bootstrap, or if its raw two-photon imaging directory or
-            cindra acquisition parameters file is not present.
-        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
-            acquisition system's resolver cannot resolve a configuration for the session.
+        FileNotFoundError: If neither the session's cindra output directory nor its raw two-photon imaging directory
+            carries the acquisition parameters the recording's imaging planes follow from.
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member.
     """
     session = SessionData.load(session_path=session_path)
-    plane_count = _resolve_primed_plane_count(session=session)
-    if plane_count is None:
+    data_path = _resolve_data_path(session=session)
+    jobs = resolve_single_recording_job_universe(output_root=session.processed_data_path, data_path=data_path)
+
+    # A session that acquired no two-photon data carries neither parameters source, so this also screens those out.
+    if not jobs.resolved:
         message = (
-            f"Unable to resolve two-photon processing jobs for session '{session.session_name}'. The session carries "
-            f"no cindra bootstrap, so its virtual imaging planes are not yet known. Prime the recording before "
-            f"resolving its jobs, which is what a preparation pass does."
+            f"Unable to resolve two-photon processing jobs for session '{session.session_name}'. Neither the "
+            f"session's cindra output directory nor its raw two-photon imaging directory '{data_path}' carries the "
+            f"acquisition parameters the recording's virtual imaging planes follow from, so the session holds no "
+            f"calcium-imaging data to process."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    universe = resolve_single_recording_jobs(plane_count=plane_count)
-    return session, universe, list(universe)
+    # Every declared stage is possible, so cindra's disk-state subset is deliberately not consulted here.
+    return session, list(jobs.universe), list(jobs.universe)
 
 
 def two_photon_job_prerequisites(
@@ -296,9 +308,26 @@ def _configuration_path(session: SessionData) -> Path:
         session: The loaded session whose configuration path to locate.
 
     Returns:
-        The path to the session's ``configuration.yaml`` inside its cindra directory.
+        The path to the session's single-recording configuration file inside its cindra directory, which is the same
+        location cindra's own priming step writes that file to.
     """
-    return session.processed_data.cindra_data_path.joinpath(_CINDRA_CONFIGURATION_FILENAME)
+    return session.processed_data.cindra_data_path.joinpath(SINGLE_RECORDING_CONFIGURATION_FILENAME)
+
+
+def _resolve_data_path(session: SessionData) -> Path:
+    """Resolves where the session's raw two-photon imaging data lives.
+
+    Args:
+        session: The loaded session whose raw imaging directory to locate.
+
+    Returns:
+        The path to the session's raw two-photon imaging directory, which is cindra's input.
+
+    Raises:
+        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member.
+    """
+    locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
+    return locate_two_photon_data(session=session)
 
 
 def _resolve_primed_plane_count(session: SessionData) -> int | None:
@@ -323,11 +352,15 @@ def _resolve_primed_plane_count(session: SessionData) -> int | None:
             is not present.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
+            the acquisition parameters file is searched for.
     """
     if not _configuration_path(session=session).is_file():
         return None
 
-    configuration, _ = _resolve_configuration(session=session, display_progress=False, persist=False)
+    configuration, _ = _resolve_configuration(
+        session=session, data_path=_resolve_data_path(session=session), display_progress=False, persist=False
+    )
     try:
         return len(resolve_single_recording_contexts(configuration=configuration, persist=False))
     except FileNotFoundError:
@@ -348,9 +381,9 @@ def _resolve_stage_request(workers: int) -> int | None:
 
 
 def _resolve_configuration(
-    session: SessionData, *, display_progress: bool, persist: bool
+    session: SessionData, data_path: Path, *, display_progress: bool, persist: bool
 ) -> tuple[SingleRecordingConfiguration, Path]:
-    """Resolves the session's cindra input and output locations and materializes its single-recording configuration.
+    """Resolves the session's cindra output location and materializes its single-recording configuration.
 
     Notes:
         The output root is the session's processed-data root, under which cindra creates its ``cindra`` subdirectory.
@@ -362,23 +395,23 @@ def _resolve_configuration(
 
     Args:
         session: The loaded session whose two-photon data is being resolved.
+        data_path: The path to the session's raw two-photon imaging directory, which cindra reads as its input.
         display_progress: Determines whether cindra displays progress bars during processing. Recorded in the
             configuration's runtime section.
         persist: Determines whether the resolved configuration is written to disk. Only the invocation that owns the
             session's configuration writes it, so a job dispatched alongside its siblings reads a stable file.
 
     Returns:
-        A tuple of the resolved single-recording configuration and the session's shared ``configuration.yaml`` path,
-        which this call writes in local mode and requires to already exist in remote mode.
+        A tuple of the resolved single-recording configuration and the path to the session's shared cindra
+        configuration file, which this call writes in local mode and requires to already exist in remote mode.
 
     Raises:
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
             is not present, or, in remote mode, if the session carries no materialized cindra configuration.
-        ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
-            acquisition system's resolver cannot resolve a configuration for the session.
+        ValueError: If the acquisition system's resolver cannot resolve a configuration for the session.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while the
+            acquisition parameters file is searched for.
     """
-    locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
-    data_path = locate_two_photon_data(session=session)
     output_path = session.processed_data_path
     cindra_directory = session.processed_data.cindra_data_path
 
@@ -390,8 +423,10 @@ def _resolve_configuration(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # The raw parameters file is the canonical source of the recording's acquisition metadata.
-    if not any(data_path.rglob(PARAMETERS_FILENAME)):
+    # The raw parameters file is the canonical source of the recording's acquisition metadata. The search reports a
+    # subdirectory it cannot read rather than passing over it, so a permission failure surfaces as itself instead of
+    # as a session that appears to carry no parameters file.
+    if not discover_marker_files(directory=data_path, marker_name=PARAMETERS_FILENAME):
         message = (
             f"Unable to process two-photon data for session '{session.session_name}'. No cindra acquisition "
             f"parameters file ('{PARAMETERS_FILENAME}') was found under the raw two-photon imaging directory "
@@ -411,9 +446,9 @@ def _resolve_configuration(
 
     cindra_directory.mkdir(parents=True, exist_ok=True)
 
-    # cindra reads this file once per job and never writes it, so one copy per session serves every job the session
-    # dispatches. Confining the write to the owning invocation keeps it outside the window in which jobs run
-    # concurrently.
+    # cindra reads this file once per job, and only its priming step writes it back, so one copy per session serves
+    # every job the session dispatches. Confining the write to the owning invocation keeps it outside the window in
+    # which jobs run concurrently.
     materialized_configuration_path = _configuration_path(session=session)
     if persist:
         configuration.save(file_path=materialized_configuration_path)

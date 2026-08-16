@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from ataraxis_base_utilities import LogLevel, console
-from sollertia_shared_assets import DatasetSession
+from sollertia_shared_assets import RAW_DATA_DIRECTORY, RawDataFiles, DatasetSession
+from sollertia_shared_assets.data_hierarchy import DATASET_MARKER_FILENAME
 
 from .server import Server
 from ..shared_assets import delay_terminal
@@ -36,13 +37,15 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
         if not server.is_directory(remote_path=animal_path):
             continue
 
-        if server.exists(remote_path=animal_path.joinpath("dataset.yaml")):
+        if server.exists(remote_path=animal_path.joinpath(DATASET_MARKER_FILENAME)):
             continue
 
         discovered_sessions.extend(
             DatasetSession(session=session_directory, animal=animal_directory)
             for session_directory in server.list_directory(remote_path=animal_path)
-            if server.exists(remote_path=animal_path.joinpath(session_directory, "raw_data", "session_data.yaml"))
+            if server.exists(
+                remote_path=animal_path.joinpath(session_directory, RAW_DATA_DIRECTORY, RawDataFiles.SESSION_DATA)
+            )
         )
 
     return tuple(discovered_sessions)

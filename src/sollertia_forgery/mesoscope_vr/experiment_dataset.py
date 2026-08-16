@@ -88,7 +88,7 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         multi_recording_dataset_directory(animal_id=str(session.animal_id), dataset_name=dataset_name)
     )
 
-    ensure_directory_exists(path=output_path)
+    ensure_directory_exists(path=output_path, is_file=True)
 
     # Loads the experiment configuration once so the runtime assembly resolves its state and trial mappings without
     # re-reading the same YAML.

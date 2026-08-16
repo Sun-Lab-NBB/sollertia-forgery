@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+from ataraxis_video_system import ExtractedDataColumns
 from ataraxis_base_utilities import console
 from ataraxis_data_structures import interpolate_data
 
@@ -31,10 +32,6 @@ _MICROSECONDS_PER_SECOND: float = 1_000_000.0
 _MINIMUM_CLOCK_FRAMES: int = 2
 """The fewest frames a camera timestamp feather must hold to define a reference clock, since a mean frame rate needs at
 least two timestamps spanning a positive duration."""
-
-_FRAME_TIME_COLUMN: str = "frame_time_us"
-"""The single column of each camera timestamp feather, holding one acquisition timestamp per recorded frame in
-microseconds since the UTC epoch. It is the source clock each camera's values are interpolated from."""
 
 _MOTION_ENERGY_COLUMN: str = "motion_energy"
 """The motion-energy column read from each camera's energy feather."""
@@ -117,7 +114,7 @@ def assemble_video_dataset(video_data_path: Path, reference_time: NDArray[np.uin
 
         # The timestamp feather is the camera's source clock. Every other feather for this camera holds one row per
         # recorded frame in the same acquisition order, so its values align to this clock by row position.
-        frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[_FRAME_TIME_COLUMN].to_numpy()
+        frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[ExtractedDataColumns.FRAME_TIME].to_numpy()
 
         energy_path = video_data_path.joinpath(camera.energy_file)
         if energy_path.is_file():
@@ -188,7 +185,9 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
             if not timestamps_path.is_file():
                 continue
 
-            frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[_FRAME_TIME_COLUMN].to_numpy()
+            frame_time = pl.read_ipc(source=timestamps_path, memory_map=True)[
+                ExtractedDataColumns.FRAME_TIME
+            ].to_numpy()
 
             # A mean frame rate needs at least two frames spanning a positive duration. Casts the endpoints to float
             # first, since the timestamps are unsigned and their difference would wrap on an out-of-order feather.

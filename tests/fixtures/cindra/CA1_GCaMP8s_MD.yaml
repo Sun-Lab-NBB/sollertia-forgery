@@ -17,6 +17,7 @@ roi_selection:
 diffeomorphic_registration:
   image_type: enhanced_mean
   grid_sampling_factor: 1
+  final_grid_sampling: 16.0
   scale_sampling: 30
   speed_factor: 3
   repeat_registration: false

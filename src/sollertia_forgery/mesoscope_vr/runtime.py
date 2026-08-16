@@ -146,7 +146,7 @@ def _export_runtime_data(
             traveled_distance = np.float64(distance_bytes.view(dtype="<f8")[0])
             distance_snapshots.append(traveled_distance)
 
-    ensure_directory_exists(path=output_directory)
+    ensure_directory_exists(path=output_directory, is_file=False)
 
     system_dataframe = pl.DataFrame({"time_us": system_timestamps, "system_state": system_states})
     system_dataframe.write_ipc(file=output_directory / BehaviorDataFiles.SYSTEM_STATE, compression="uncompressed")

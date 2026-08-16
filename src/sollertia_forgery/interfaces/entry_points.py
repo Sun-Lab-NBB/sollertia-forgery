@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import click
+from ataraxis_base_utilities import LogLevel, console
 
 from .plan import plan_cli
 from .forge import forge_command
@@ -31,11 +34,37 @@ def slf_cli() -> None:
 
 
 @slf_cli.command("mcp")
-def run_mcp_server_command() -> None:
-    """Starts the agentic Model Context Protocol server using the stdio transport."""
-    from .mcp_server import run_mcp_server  # noqa: PLC0415
+@click.option(
+    "-t",
+    "--transport",
+    type=click.Choice(["stdio", "sse", "streamable-http"], case_sensitive=False),
+    default="stdio",
+    show_default=True,
+    help="The transport protocol the MCP server uses to communicate with the connected client.",
+)
+def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]) -> None:
+    """Starts the agentic Model Context Protocol server using the requested transport.
 
-    run_mcp_server()
+    The 'stdio' transport exchanges messages over the standard input and output streams of this process, which is the
+    transport local agent clients are expected to use. The 'sse' and 'streamable-http' transports instead serve the
+    same tools over the network, which is how remote agent clients reach a server running on the processing host.
+    """
+    from .mcp_server import run_server  # noqa: PLC0415
+
+    # The stdio transport sends the JSON-RPC messages over stdout, which is also the stream the console writes all
+    # messages up to the WARNING level to. Since the MCP tools drive the processing pipelines, which echo status
+    # updates as they work, the console has to be silenced: any echoed line lands inside a JSON-RPC message and makes
+    # it unparsable for the connected client. The network transports leave stdout unused, so the console stays on and
+    # reports that the server has started.
+    if transport == "stdio":
+        console.disable()
+    else:
+        console.echo(
+            message=f"Starting the sollertia-forgery MCP server with the {transport} transport.",
+            level=LogLevel.INFO,
+        )
+
+    run_server(transport=transport)
 
 
 def _register_subcommands() -> None:

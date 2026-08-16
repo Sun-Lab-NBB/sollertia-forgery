@@ -10,31 +10,33 @@ from contextlib import ExitStack, nullcontext
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import polars as pl
-from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
-from ataraxis_data_structures import ProcessingTracker
-from ataraxis_communication_interface.microcontroller import (
-    EXTRACTION_JOB_NAME,
+from ataraxis_data_structures import (
+    LOG_ARCHIVE_SUFFIX,
+    ProcessingTracker,
+    limit_worker_threads,
+    discover_log_archives,
+    initialize_worker_threads,
+)
+from ataraxis_communication_interface import (
+    CONTROLLER_EXTRACTION_JOB_NAME,
+    EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
+    ExtractionConfig,
     ModuleExtractionConfig,
     MicroControllerManifest,
     ControllerExtractionConfig,
     execute_job,
+    partition_events,
+    resolve_module_path,
 )
+from ataraxis_communication_interface.orchestration import generate_job_ids
 
 from ..registries import (
     resolve_microcontroller_parsers,
     resolve_microcontroller_event_codes,
     resolve_eligible_microcontroller_modules,
-)
-from ..shared_assets import (
-    LOG_ARCHIVE_SUFFIX,
-    tracked_job,
-    partition_events,
-    find_module_feathers,
-    pinned_worker_threads,
-    parse_module_feather_name,
 )
 
 if TYPE_CHECKING:
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
 
 PARSE_JOB_NAME: str = "module_parsing"
 """The job name identifying per-module parsing (Stage 2) jobs in the microcontroller processing tracker. Stage 1
-extraction jobs use the acquisition library's own ``EXTRACTION_JOB_NAME`` instead."""
+extraction jobs use the acquisition library's own ``CONTROLLER_EXTRACTION_JOB_NAME`` instead."""
 
 
 def run_microcontroller_processing_pipeline(
@@ -71,6 +73,11 @@ def run_microcontroller_processing_pipeline(
         so a remote extraction fans intra-archive decoding across the pool while a remote parse runs single-core. The
         processing tracker is co-located with the extracted and parsed output in ``microcontroller_data``.
 
+        The extraction configuration is materialized into ``microcontroller_data`` on every invocation, before any
+        job is dispatched. The acquisition binding reads each controller's extraction targets from that file rather
+        than from an in-memory object, and a scheduler may dispatch a single extraction job into a fresh process, so
+        writing the file unconditionally is what lets a remote job read the same configuration the local run used.
+
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
         job_id: The hexadecimal identifier of the single job to execute (remote mode). If not provided, the whole
@@ -82,9 +89,9 @@ def run_microcontroller_processing_pipeline(
     Raises:
         FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
             extraction job's log archive is not present.
-        ValueError: If the session's acquisition system is unknown, if no manifest controller declares a module the
-            session's acquisition system extracts, if no processable controllers are discovered, or if the provided
-            job_id does not match any available job.
+        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
+            no manifest controller declares a module the session's acquisition system extracts, if no processable
+            controllers are discovered, or if the provided job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -105,7 +112,7 @@ def run_microcontroller_processing_pipeline(
     parse_output = session.processed_data.microcontroller_data_path
 
     universe, requested, extraction_archives, parse_specifiers = _discover_jobs(
-        controllers=controllers, parsers=parsers, log_directory=log_directory, extraction_job_name=EXTRACTION_JOB_NAME
+        controllers=controllers, parsers=parsers, log_directory=log_directory
     )
 
     if not requested:
@@ -130,17 +137,21 @@ def run_microcontroller_processing_pipeline(
     tracker = ProcessingTracker(file_path=tracker_directory.joinpath(ProcessingTrackers.MICROCONTROLLER))
     tracker.align_jobs(jobs=requested, universe=universe)
 
+    # Writes the configuration before any job is dispatched, in both modes, since the extraction binding reads each
+    # controller's targets from the file rather than from memory and a remotely dispatched job may be the only work
+    # this process does.
+    config_path = _materialize_extraction_config(controllers=controllers, output_directory=extraction_output)
+
     if job_id is not None:
         _execute_remote_job(
             job_id=job_id,
             universe=universe,
-            extraction_job_name=EXTRACTION_JOB_NAME,
-            controllers=controllers,
             parsers=parsers,
             session=session,
             log_directory=log_directory,
             extraction_output=extraction_output,
             parse_output=parse_output,
+            config_path=config_path,
             tracker=tracker,
             workers=workers,
             display_progress=display_progress,
@@ -150,20 +161,23 @@ def run_microcontroller_processing_pipeline(
         # strictly in sequence, so one pool serves the extraction stage (intra-archive batch decoding) and then the
         # parse stage (one future per module) with a single worker spawn. The caps cover the pool's whole life,
         # since it starts its children on demand and each child sizes its library thread pools while importing,
-        # before any code of this pipeline runs inside it.
+        # before any code of this pipeline runs inside it. numba latches its own ceiling while it is imported and
+        # rejects an environment variable that disagrees afterwards, so it is pinned instead by the initializer every
+        # child runs through its runtime setter.
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        with pinned_worker_threads(), ExitStack() as pool_scope:
+        with limit_worker_threads(), ExitStack() as pool_scope:
             shared_executor = (
-                pool_scope.enter_context(ProcessPoolExecutor(max_workers=resolved_workers))
+                pool_scope.enter_context(
+                    ProcessPoolExecutor(max_workers=resolved_workers, initializer=initialize_worker_threads)
+                )
                 if resolved_workers > 1
                 else None
             )
             _run_extraction_stage(
                 extraction_archives=extraction_archives,
-                controllers=controllers,
                 extraction_output=extraction_output,
+                config_path=config_path,
                 tracker=tracker,
-                extraction_job_name=EXTRACTION_JOB_NAME,
                 workers=resolved_workers,
                 executor=shared_executor,
                 display_progress=display_progress,
@@ -204,18 +218,15 @@ def discover_microcontroller_jobs(
 
     Raises:
         FileNotFoundError: If the session's microcontroller manifest is not present.
-        ValueError: If the session's acquisition system is unknown, or if no manifest controller declares a module the
-            acquisition system extracts.
+        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, or
+            if no manifest controller declares a module the acquisition system extracts.
     """
     session = SessionData.load(session_path=session_path)
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
     event_codes = _resolve_eligible_event_codes(session=session)
     controllers = _resolve_controllers(session=session, event_codes=event_codes)
     universe, requested, _, _ = _discover_jobs(
-        controllers=controllers,
-        parsers=parsers,
-        log_directory=session.raw_data.behavior_data_path,
-        extraction_job_name=EXTRACTION_JOB_NAME,
+        controllers=controllers, parsers=parsers, log_directory=session.raw_data.behavior_data_path
     )
     return session, universe, requested
 
@@ -229,8 +240,8 @@ def microcontroller_job_prerequisites(
     Notes:
         Each parse job reads the raw per-module feather its controller's extraction job writes, so every parse job
         requires that extraction job to have succeeded. Extraction jobs read the raw archive directly and have no
-        upstream dependency. Extraction jobs use the acquisition library's ``EXTRACTION_JOB_NAME`` and each parse
-        specifier encodes its controller as the leading ``"{controller_id}-..."`` segment.
+        upstream dependency. Extraction jobs use the acquisition library's ``CONTROLLER_EXTRACTION_JOB_NAME`` and each
+        parse specifier encodes its controller as the leading ``"{controller_id}-..."`` segment.
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
@@ -241,7 +252,9 @@ def microcontroller_job_prerequisites(
         and extraction jobs map to an empty tuple.
     """
     return {
-        (job_name, specifier): ((EXTRACTION_JOB_NAME, specifier.split("-")[0]),) if job_name == PARSE_JOB_NAME else ()
+        (job_name, specifier): ((CONTROLLER_EXTRACTION_JOB_NAME, specifier.split("-")[0]),)
+        if job_name == PARSE_JOB_NAME
+        else ()
         for job_name, specifier in universe
     }
 
@@ -293,7 +306,8 @@ def _resolve_controllers(
     Raises:
         FileNotFoundError: If the microcontroller manifest is not present at the session's canonical raw behavior
             data location.
-        ValueError: If no manifest controller declares a module the session's acquisition system extracts.
+        ValueError: If the manifest does not store its controller entries as a list, or if no manifest controller
+            declares a module the session's acquisition system extracts.
     """
     log_directory = session.raw_data.behavior_data_path
 
@@ -306,7 +320,7 @@ def _resolve_controllers(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    manifest = MicroControllerManifest.load(file_path=manifest_path)
+    manifest = MicroControllerManifest.from_yaml(file_path=manifest_path)
 
     controllers: dict[str, ControllerExtractionConfig] = {}
     for controller in manifest.controllers:
@@ -336,31 +350,70 @@ def _resolve_controllers(
     return controllers
 
 
-def _find_controller_archive(log_directory: Path, controller_id: str) -> Path | None:
-    """Locates the raw log archive for a controller, if it is present under the log directory.
+def _materialize_extraction_config(
+    controllers: Mapping[str, ControllerExtractionConfig], output_directory: Path
+) -> Path:
+    """Writes the session's derived extraction configuration into the microcontroller data directory.
 
     Notes:
-        Takes the first match when several archives exist. An absent archive yields None, so an unstaged controller
-        is skipped and the session continues.
+        The acquisition binding reads each controller's extraction targets from a configuration file rather than from
+        an in-memory object, so the configuration slf derives from the manifest and its own event code registry has
+        to reach disk before any extraction job runs. The file is written under the acquisition library's own
+        configuration filename, next to the extracted output and the processing tracker.
+
+        The write is unconditional. A scheduler may dispatch a single extraction job into a fresh process, so the
+        invocation that runs one job has to produce the same configuration a whole-pipeline run would have written.
 
     Args:
-        log_directory: The session's raw behavior data directory holding the controller log archives.
-        controller_id: The controller ID whose archive to locate.
+        controllers: The per-controller extraction configurations, keyed by controller ID.
+        output_directory: The session's microcontroller data directory, which receives the configuration alongside
+            the extracted feathers.
 
     Returns:
-        The path to the controller's log archive, or None if no matching archive exists.
+        The path to the written extraction configuration file.
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    config_path = output_directory.joinpath(EXTRACTION_CONFIGURATION_FILENAME)
+    ExtractionConfig(controllers=list(controllers.values())).to_yaml(file_path=config_path)
+    return config_path
+
+
+def _discover_controller_archives(log_directory: Path) -> dict[str, Path]:
+    """Discovers the log archive every source wrote into the session's raw behavior data directory.
+
+    Notes:
+        One directory scan resolves every archive, so a session running many controllers pays the same walk as a
+        session running one. A controller with no archive is simply absent from the mapping, so an unstaged
+        controller is skipped and the session continues. A session whose behavior data directory does not exist yet
+        yields an empty mapping for the same reason.
+
+        Only the directory's own entries are read. The DataLogger assembles the archives of one logger side by side
+        in that logger's output directory, which for an acquisition session is the raw behavior data directory
+        itself, and every other archive consumer in this library addresses an archive by that flat name. An archive
+        filed in a subdirectory therefore does not participate, which keeps a nested copy of a session's data from
+        being processed as though it belonged to the session holding it.
+
+        The mapping also carries the archives of the sources that are not microcontrollers (the cameras and the
+        runtime logger), since every source of a session logs into the same directory. Callers look up the
+        controller IDs they resolved from the manifest, so those entries are never read.
+
+    Args:
+        log_directory: The session's raw behavior data directory holding the log archives.
+
+    Returns:
+        The path to every log archive stored directly in the directory, keyed by the identifier of the source that
+        produced it.
     """
     if not log_directory.is_dir():
-        return None
-    matches = natsorted(log_directory.rglob(f"{controller_id}{LOG_ARCHIVE_SUFFIX}"))
-    return matches[0] if matches else None
+        return {}
+    return discover_log_archives(log_directory=log_directory)
 
 
 def _extract_controller(
     archive_path: Path,
     output_directory: Path,
     controller_id: str,
-    controller_config: ControllerExtractionConfig,
+    config_path: Path,
     job_id: str,
     tracker: ProcessingTracker,
     *,
@@ -372,19 +425,20 @@ def _extract_controller(
     ataraxis-communication-interface.
 
     Notes:
-        Delegates to the acquisition library's ``execute_job`` binding, which reads the archive once and filters
-        messages by the configured per-module event codes. The binding writes a
-        ``controller_{id}_module_{type}_{id}.feather`` file per module that produced data and manages this job's
-        state on the passed-in tracker (start, complete, or fail). When kernel extraction is configured it may also
-        write a ``controller_{id}_kernel.feather``, which this pipeline does not consume. The output directory is
-        created if it does not exist.
+        Delegates to the acquisition library's ``execute_job`` binding, which reads this controller's entry from the
+        materialized extraction configuration, then reads the archive once and filters messages by the configured
+        per-module event codes. The binding writes a ``controller_{id}_module_{type}_{id}.feather`` file per module
+        that produced data and manages this job's state on the passed-in tracker (start, complete, or fail). When
+        kernel extraction is configured it may also write a ``controller_{id}_kernel.feather``, which this pipeline
+        does not consume. The output directory is created if it does not exist.
 
     Args:
         archive_path: The path to the controller's ``{controller_id}_log.npz`` archive.
         output_directory: The directory where the raw per-module feather files are written (the session's
             microcontroller data directory).
         controller_id: The controller ID whose archive is being extracted.
-        controller_config: The controller's extraction configuration (its modules and per-module event codes).
+        config_path: The path to the materialized extraction configuration declaring every controller's modules and
+            per-module event codes.
         job_id: The hexadecimal identifier of this extraction job in the shared processing tracker.
         tracker: The shared processing tracker the extraction job records its state against.
         workers: The number of worker processes the extraction may use to parallelize message decoding within the
@@ -401,7 +455,7 @@ def _extract_controller(
         job_id=job_id,
         workers=workers,
         tracker=tracker,
-        controller_config=controller_config,
+        config_path=config_path,
         display_progress=display_progress,
         executor=executor,
     )
@@ -411,7 +465,6 @@ def _discover_jobs(
     controllers: dict[str, ControllerExtractionConfig],
     parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     log_directory: Path,
-    extraction_job_name: str,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], dict[str, Path], dict[str, tuple[str, int, int]]]:
     """Builds the job universe and the requested-job set for the session.
 
@@ -427,7 +480,6 @@ def _discover_jobs(
         controllers: The per-controller extraction configurations, keyed by controller ID.
         parsers: The eligible module parsers for the session, keyed by ``(module_type, module_id)``.
         log_directory: The raw behavior data directory holding the controller log archives.
-        extraction_job_name: The acquisition library's extraction job name used for Stage 1 tracker entries.
 
     Returns:
         A tuple of (universe, requested, extraction_archives, parse_specifiers). ``universe`` and ``requested`` are
@@ -440,6 +492,9 @@ def _discover_jobs(
     extraction_archives: dict[str, Path] = {}
     parse_specifiers: dict[str, tuple[str, int, int]] = {}
 
+    # Resolves every controller's archive with a single directory scan, rather than one scan per controller.
+    archives = _discover_controller_archives(log_directory=log_directory)
+
     for controller_id, controller_config in controllers.items():
         eligible = [
             (module.module_type, module.module_id)
@@ -449,16 +504,16 @@ def _discover_jobs(
         if not eligible:
             continue
 
-        universe.append((extraction_job_name, controller_id))
+        universe.append((CONTROLLER_EXTRACTION_JOB_NAME, controller_id))
         for module_type, module_id in eligible:
             universe.append((PARSE_JOB_NAME, f"{controller_id}-{module_type}-{module_id}"))
 
-        archive_path = _find_controller_archive(log_directory=log_directory, controller_id=controller_id)
+        archive_path = archives.get(controller_id)
         if archive_path is None:
             continue
 
         extraction_archives[controller_id] = archive_path
-        requested.append((extraction_job_name, controller_id))
+        requested.append((CONTROLLER_EXTRACTION_JOB_NAME, controller_id))
         for module_type, module_id in eligible:
             specifier = f"{controller_id}-{module_type}-{module_id}"
             requested.append((PARSE_JOB_NAME, specifier))
@@ -469,10 +524,9 @@ def _discover_jobs(
 
 def _run_extraction_stage(
     extraction_archives: dict[str, Path],
-    controllers: dict[str, ControllerExtractionConfig],
     extraction_output: Path,
+    config_path: Path,
     tracker: ProcessingTracker,
-    extraction_job_name: str,
     *,
     workers: int,
     executor: ProcessPoolExecutor | None,
@@ -489,10 +543,9 @@ def _run_extraction_stage(
 
     Args:
         extraction_archives: The present controllers' archive paths, keyed by controller ID.
-        controllers: The per-controller extraction configurations, keyed by controller ID.
         extraction_output: The directory where raw per-module feathers are written.
+        config_path: The path to the materialized extraction configuration each job reads its targets from.
         tracker: The shared processing tracker.
-        extraction_job_name: The acquisition library's extraction job name used to derive each job identifier.
         workers: The resolved worker-process count, passed through to size each archive's decode batches.
         executor: The shared process pool spanning both pipeline stages, or None for sequential processing.
         display_progress: Determines whether to display a per-controller progress bar.
@@ -500,13 +553,13 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
-    extraction_job_ids = {
-        controller_id: ProcessingTracker.generate_job_id(job_name=extraction_job_name, specifier=controller_id)
-        for controller_id in extraction_archives
-    }
+    extraction_job_ids = generate_job_ids(source_ids=tuple(extraction_archives))
     for controller_id, extraction_job_id in extraction_job_ids.items():
         console.echo(
-            message=f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {extraction_job_id})..."
+            message=(
+                f"Running '{CONTROLLER_EXTRACTION_JOB_NAME}' job for controller '{controller_id}' "
+                f"(ID: {extraction_job_id})..."
+            )
         )
 
     progress_context = (
@@ -529,7 +582,7 @@ def _run_extraction_stage(
                     archive_path=archive_path,
                     output_directory=extraction_output,
                     controller_id=controller_id,
-                    controller_config=controllers[controller_id],
+                    config_path=config_path,
                     job_id=extraction_job_ids[controller_id],
                     tracker=tracker,
                     workers=workers,
@@ -557,11 +610,12 @@ def _run_parse_stage(
     """Runs Stage 2: parses each eligible module's raw feather into its domain-specific feather.
 
     Notes:
-        The extraction outputs are indexed once up front, so each parse job resolves its input feather with a single
-        O(1) dict lookup. The acquisition binding writes a raw feather only for modules that produced at least one
-        message, so a configured, eligible module can legitimately have no feather. Such a parse job is completed
-        with no output. Modules with a feather are dispatched to the shared process pool when one is available and
-        more than one module is runnable, with the parent owning all tracker state transitions.
+        Each parse job derives the path of its input feather from the module's own identity through the acquisition
+        library's naming convention, so no directory listing is involved. The acquisition binding writes a raw
+        feather only for modules that produced at least one message, so a configured, eligible module can
+        legitimately have no feather. Such a parse job is completed with no output. Modules with a feather are
+        dispatched to the shared process pool when one is available and more than one module is runnable, with the
+        parent owning all tracker state transitions.
 
     Args:
         parse_specifiers: The requested parse specifiers mapped to their ``(controller_id, type, id)`` triples.
@@ -578,14 +632,12 @@ def _run_parse_stage(
     if not parse_specifiers:
         return
 
-    # Indexes every extracted module feather once, keyed by (controller_id, module_type, module_id), so each parse
-    # job resolves its input with a single dict lookup.
-    feather_index = _index_module_feathers(extraction_output=extraction_output)
-
     runnable: dict[str, tuple[Path, MicrocontrollerParser]] = {}
     for specifier, (controller_id, module_type, module_id) in parse_specifiers.items():
-        feather_path = feather_index.get((controller_id, module_type, module_id))
-        if feather_path is None:
+        feather_path = resolve_module_path(
+            output_directory=extraction_output, source_id=controller_id, module_type=module_type, module_id=module_id
+        )
+        if not feather_path.is_file():
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(
                 message=(
@@ -647,7 +699,7 @@ def _execute_parse_jobs_sequential(
         for specifier, (feather_path, module_parser) in runnable.items():
             job_id = ProcessingTracker.generate_job_id(job_name=PARSE_JOB_NAME, specifier=specifier)
             console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
-            with tracked_job(tracker=tracker, job_id=job_id):
+            with tracker.run_job(job_id=job_id):
                 _run_parse(
                     feather_path=feather_path,
                     module_parser=module_parser,
@@ -729,13 +781,12 @@ def _execute_parse_jobs_parallel(
 def _execute_remote_job(
     job_id: str,
     universe: list[tuple[str, str]],
-    extraction_job_name: str,
-    controllers: dict[str, ControllerExtractionConfig],
     parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     session: SessionData,
     log_directory: Path,
     extraction_output: Path,
     parse_output: Path,
+    config_path: Path,
     tracker: ProcessingTracker,
     *,
     workers: int,
@@ -746,14 +797,13 @@ def _execute_remote_job(
     Args:
         job_id: The hexadecimal identifier of the job to execute.
         universe: Every ``(job_name, specifier)`` tuple the configuration could produce, used to resolve the job.
-        extraction_job_name: The acquisition library's extraction job name distinguishing Stage 1 from Stage 2 jobs.
-        controllers: The per-controller extraction configurations, keyed by controller ID.
         parsers: The registered module parsers for the session's acquisition system, keyed by
             ``(module_type, module_id)``.
         session: The loaded session, passed through to the parser for a remote parse job.
         log_directory: The raw behavior data directory holding the controller log archives.
         extraction_output: The directory holding (or receiving) the raw per-module feathers.
         parse_output: The directory a parser writes its domain-specific feather into.
+        config_path: The path to the materialized extraction configuration a remote extraction job reads.
         tracker: The shared processing tracker.
         workers: The requested worker-process count.
         display_progress: Determines whether to display a progress bar.
@@ -762,35 +812,26 @@ def _execute_remote_job(
         ValueError: If the job_id does not match any job available for this session.
         FileNotFoundError: If a requested extraction job's log archive is not present.
     """
-    id_to_job = {
-        ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier): (job_name, specifier)
-        for job_name, specifier in universe
-    }
-    if job_id not in id_to_job:
-        message = (
-            f"Unable to execute the requested job with ID '{job_id}'. The identifier does not match any job "
-            f"available for this session. Valid job IDs: {natsorted(id_to_job.keys())}."
-        )
-        console.error(message=message, error=ValueError)
+    job_name, specifier = tracker.resolve_job(job_id=job_id, universe=universe)
 
-    job_name, specifier = id_to_job[job_id]
-
-    if job_name == extraction_job_name:
+    if job_name == CONTROLLER_EXTRACTION_JOB_NAME:
         controller_id = specifier
-        archive_path = _find_controller_archive(log_directory=log_directory, controller_id=controller_id)
+        archive_path = _discover_controller_archives(log_directory=log_directory).get(controller_id)
         if archive_path is None:
             message = (
                 f"Unable to run the extraction job for controller '{controller_id}'. No log archive "
-                f"'{controller_id}_log.npz' was found under '{log_directory}'."
+                f"'{controller_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'."
             )
             console.error(message=message, error=FileNotFoundError)
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        console.echo(message=f"Running '{extraction_job_name}' job for controller '{controller_id}' (ID: {job_id})...")
+        console.echo(
+            message=f"Running '{CONTROLLER_EXTRACTION_JOB_NAME}' job for controller '{controller_id}' (ID: {job_id})..."
+        )
         _extract_controller(
             archive_path=archive_path,
             output_directory=extraction_output,
             controller_id=controller_id,
-            controller_config=controllers[controller_id],
+            config_path=config_path,
             job_id=job_id,
             tracker=tracker,
             workers=resolved_workers,
@@ -802,13 +843,13 @@ def _execute_remote_job(
     controller_id, module_type_text, module_id_text = specifier.split("-")
     module_type, module_id = int(module_type_text), int(module_id_text)
     module_parser = parsers[(module_type, module_id)]
-    feather_path = _index_module_feathers(extraction_output=extraction_output).get(
-        (controller_id, module_type, module_id)
+    feather_path = resolve_module_path(
+        output_directory=extraction_output, source_id=controller_id, module_type=module_type, module_id=module_id
     )
 
     console.echo(message=f"Running '{PARSE_JOB_NAME}' job with specifier '{specifier}' (ID: {job_id})...")
     tracker.start_job(job_id=job_id)
-    if feather_path is None:
+    if not feather_path.is_file():
         console.echo(
             message=(
                 f"No extracted data was found for module '{specifier}'. Completing its parse job with no output. "
@@ -850,20 +891,3 @@ def _run_parse(
     event_partition = partition_events(module_dataframe=module_dataframe)
     output_directory.mkdir(parents=True, exist_ok=True)
     module_parser(event_partition=event_partition, output_directory=output_directory, session=session)
-
-
-def _index_module_feathers(extraction_output: Path) -> dict[tuple[str, int, int], Path]:
-    """Indexes the raw module feathers in the extraction output directory by their module identity.
-
-    Args:
-        extraction_output: The directory holding the raw per-module feathers.
-
-    Returns:
-        A mapping from each ``(controller_id, module_type, module_id)`` triple to its raw feather path. The
-        controller ID is stored as a string to match the specifier form used throughout the pipeline.
-    """
-    index: dict[tuple[str, int, int], Path] = {}
-    for feather_path in find_module_feathers(data_directory=extraction_output):
-        feather_controller, feather_type, feather_id = parse_module_feather_name(feather_path=feather_path)
-        index[(str(feather_controller), feather_type, feather_id)] = feather_path
-    return index

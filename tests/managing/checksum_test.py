@@ -14,6 +14,7 @@ from sollertia_forgery.managing import (
     checksum_job_prerequisites,
     run_checksum_processing_pipeline,
 )
+import sollertia_forgery.managing.checksum as checksum_module
 from sollertia_forgery.managing.checksum import _CHECKSUM_EXCLUDED_FILES, _has_checksummable_data
 
 if TYPE_CHECKING:
@@ -155,6 +156,22 @@ def test_every_checksum_job_declares_no_prerequisite(training_session: SessionDa
     assert checksum_job_prerequisites(session=session, universe=universe) == {
         (CHECKSUM_JOB_NAME, training_session.session_name): ()
     }
+
+
+def test_a_session_with_nothing_to_checksum_leaves_its_job_unregistered(
+    training_session: SessionData, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session whose raw data never arrived makes no job possible, so the tracker is left unaligned and the run
+    stops on the job it was never given.
+    """
+    monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
+
+    with pytest.raises(ValueError, match="instance is not configured to track it"):
+        run_checksum_processing_pipeline(
+            session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
+        )
+
+    assert ProcessingTracker(file_path=training_session.raw_data.checksum_tracker_path).snapshot() == {}
 
 
 def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_path: Path) -> None:

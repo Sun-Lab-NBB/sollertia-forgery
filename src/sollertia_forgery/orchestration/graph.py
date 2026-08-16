@@ -6,12 +6,10 @@ from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from dataclasses import field, dataclass
 
+from ataraxis_data_structures import ProcessingStatus
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
-
-
-SUCCEEDED_STATUS: str = "SUCCEEDED"
-"""The value a job's recorded status carries once it has completed successfully, as the state tables write it."""
 
 
 @dataclass(slots=True)
@@ -32,9 +30,12 @@ class PendingJob:
     """The path to the processing unit this job operates on, which is the session root for a session job and the
     dataset root for a dataset job. This is what scopes a job identifier to one unit."""
     job_name: str = ""
-    """The pipeline job type name registered in the ``ProcessingTracker``, which keys this job's core allocation."""
+    """The pipeline job type name registered in the ``ProcessingTracker``, which is what groups this job with the
+    others of its type for the concurrency terms admission enforces."""
     core_weight: int = 1
-    """The cores this job occupies while it runs, assigned from its type's allocation before dispatch."""
+    """The cores this job occupies while it runs, carried over from the plan artifact's per-job cores figure. Sizing
+    is per job rather than per type, so two jobs of one type legitimately differ here, and dispatch only caps this
+    width at what the executing host can supply."""
     memory_mb: int = 0
     """The memory this job occupies while it runs, estimated from the data it will process."""
     prerequisite_ids: tuple[str, ...] = ()
@@ -166,7 +167,9 @@ def build_batch_document(
             units.append(_unresolved_unit(unit_path=unit_path, reason=_no_state_reason(pipeline=pipeline)))
             continue
 
-        succeeded = {job_id for job_id, row in unit_state.items() if row["status"] == SUCCEEDED_STATUS}
+        # A state table records each job's status by the name of its ``ProcessingStatus`` member, so the comparison
+        # reads that name rather than a literal restating it.
+        succeeded = {job_id for job_id, row in unit_state.items() if row["status"] == ProcessingStatus.SUCCEEDED.name}
         unplanned = sorted(job_id for job_id in unit_state if job_id not in unit_plan and job_id not in succeeded)
         if unplanned:
             units.append(_unresolved_unit(unit_path=unit_path, reason=_unplanned_reason(job_ids=unplanned)))

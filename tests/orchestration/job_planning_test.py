@@ -38,6 +38,7 @@ from sollertia_forgery.orchestration import (
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS, PipelineDispatch
+from sollertia_forgery.orchestration.footprints import JobFootprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,6 +48,25 @@ _CHECKSUM_JOBS: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, "")]
 
 _RUNTIME_JOBS: list[tuple[str, str]] = [(RUNTIME_JOB_NAME, "51")]
 """A single-job universe standing in for the runtime pipeline."""
+
+
+def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+    """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
+
+    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
+    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
+
+    Args:
+        _frame: The frame the writer was called on, which this stand-in never serializes.
+        file: The open file object the artifact is written to.
+        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
+    """
+    file.write(b"partial")
+    message = "the artifact writer died mid-write"
+    raise RuntimeError(message)
 
 
 def make_session(root: Path) -> SimpleNamespace:
@@ -81,9 +101,12 @@ def make_dispatch(
             raise FileNotFoundError(message)
         return unit, universe, universe
 
-    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], tuple[int, bool]]:
-        """Returns the fixed memory figure for every job it is handed."""
-        return {(job_name, specifier): (memory_mb, True) for job_name, specifier, _cores in jobs}
+    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+        """Returns the fixed memory figure for every job it is handed, at the width the caller declared for it."""
+        return {
+            (job_name, specifier): JobFootprint(cores=cores, memory_mb=memory_mb, memory_modeled=True)
+            for job_name, specifier, cores in jobs
+        }
 
     return PipelineDispatch[Any](
         pipeline=pipeline,
@@ -154,9 +177,33 @@ def test_a_plan_records_every_resolved_job_and_persists_it(tmp_path: Path) -> No
         ("checksum", CHECKSUM_JOB_NAME, ""),
         ("runtime", RUNTIME_JOB_NAME, "51"),
     }
-    # Cores come from the real allocation table, which is what makes this assertion independent of the stand-in.
+    # The declared allocation reaches the sizing pass and comes back unchanged for a stage that holds one width, so
+    # the recorded figure is the real allocation table's rather than the stand-in's.
     assert plan.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].cores == _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME]
     assert JobPlan.from_yaml(file_path=session_plan_path(session=session)).entry_map() == plan.entry_map()
+
+
+def test_a_plan_records_the_width_the_sizing_pass_resolved(tmp_path: Path) -> None:
+    """Verifies that a stage whose library picks a width per job records that width rather than the declared one.
+
+    The declared allocation reaches the sizing pass as the width to fall back on, so a pass that answers with one of
+    its own is what the plan entry, and therefore the scheduler, carries.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
+    # Stands in for a library that read its job's input and picked a narrower width than the job type declares.
+    dispatch = replace(
+        dispatch,
+        estimate_memory=lambda _unit, jobs: {
+            (job_name, specifier): JobFootprint(cores=1, memory_mb=2048, memory_modeled=True)
+            for job_name, specifier, _cores in jobs
+        },
+    )
+
+    plan = plan_session(unit=session, dispatches=[dispatch])
+
+    assert _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME] != 1
+    assert plan.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].cores == 1
 
 
 def test_recorded_figures_are_frozen_across_replanning(tmp_path: Path) -> None:
@@ -329,6 +376,52 @@ def test_an_unplanned_unit_contributes_no_rows(tmp_path: Path, monkeypatch: pyte
 
     assert frame.height == 0
     assert dict(frame.schema) == PROJECT_PLAN_SCHEMA
+
+
+def test_a_failed_projection_leaves_the_previously_published_one_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a writer dying mid-write leaves the published projection whole rather than truncated.
+
+    A scheduler memory-maps the projection without taking the writer's lock, so only publishing by rename keeps it
+    off a file that is being rewritten.
+    """
+    project = tmp_path.joinpath("Project")
+    session = make_session(root=project.joinpath("305", "2026-01-02-03-04-05-000006"))
+
+    plan_session(
+        unit=session,
+        dispatches=[
+            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200)
+        ],
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="iterate_sessions",
+        value=lambda root_path: [session],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="discover_project_datasets",
+        value=lambda project_root: [],  # noqa: ARG005
+    )
+    published = generate_project_plan(project_directory=project)
+
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+
+    with pytest.raises(RuntimeError, match="died mid-write"):
+        generate_project_plan(project_directory=project)
+
+    assert pl.read_ipc(source=published, memory_map=True).get_column("memory_mb").to_list() == [3200]
+    assert [entry.name for entry in project.iterdir() if entry.name.endswith(".tmp")] == []
+
+
+def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
+    """A missing project holds neither a unit to read nor a location to write to, so it is named here rather than
+    surfacing as a walk failure partway through the projection.
+    """
+    with pytest.raises(FileNotFoundError, match="does not name an existing directory"):
+        generate_project_plan(project_directory=tmp_path.joinpath("NeverCreated"))
 
 
 def test_the_dataset_cache_lands_at_the_dataset_root(tmp_path: Path) -> None:

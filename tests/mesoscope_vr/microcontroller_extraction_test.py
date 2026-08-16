@@ -1,4 +1,4 @@
-"""Tests for the microcontroller feather primitives and the Mesoscope-VR module parsers that consume them."""
+"""Tests for the shared event-stream merge primitive and the Mesoscope-VR module parsers that consume it."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import numpy as np
 import polars as pl
 import pytest
 from sollertia_shared_assets import MesoscopeHardwareState
+from ataraxis_communication_interface import partition_events
 
 from sollertia_forgery.mesoscope_vr.metadata import BehaviorDataFiles
 from sollertia_forgery.mesoscope_vr.microcontrollers import (
@@ -24,14 +25,7 @@ from sollertia_forgery.mesoscope_vr.microcontrollers import (
     parse_mesoscope_frame,
     get_module_event_codes,
 )
-from sollertia_forgery.shared_assets.microcontroller import (
-    get_event_data,
-    partition_events,
-    merge_event_streams,
-    find_module_feathers,
-    get_event_timestamps,
-    parse_module_feather_name,
-)
+from sollertia_forgery.shared_assets.microcontroller import merge_event_streams
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -184,95 +178,7 @@ def output_directory(experiment_session: SessionData) -> Path:
     return path
 
 
-# Feather discovery and naming primitives
-
-
-def test_find_module_feathers_returns_sorted_matches(tmp_path: Path) -> None:
-    for name in (
-        "controller_101_module_6_1.feather",
-        "controller_101_module_2_1.feather",
-        "controller_101_kernel.feather",
-        "encoder_data.feather",
-    ):
-        (tmp_path / name).touch()
-
-    assert find_module_feathers(data_directory=tmp_path) == [
-        tmp_path / "controller_101_module_2_1.feather",
-        tmp_path / "controller_101_module_6_1.feather",
-    ]
-
-
-def test_find_module_feathers_returns_empty_for_absent_directory(tmp_path: Path) -> None:
-    assert find_module_feathers(data_directory=tmp_path / "never_extracted") == []
-
-
-def test_parse_module_feather_name_extracts_module_identity(tmp_path: Path) -> None:
-    assert parse_module_feather_name(feather_path=tmp_path / "controller_101_module_5_2.feather") == (101, 5, 2)
-
-
-@pytest.mark.parametrize(
-    "filename",
-    [
-        "controller_101_module_5.feather",
-        "source_101_module_5_2.feather",
-        "controller_101_kernel_5_2.feather",
-    ],
-)
-def test_parse_module_feather_name_rejects_foreign_filename(tmp_path: Path, filename: str) -> None:
-    with pytest.raises(ValueError, match=r"does not follow the\s+expected"):
-        parse_module_feather_name(feather_path=tmp_path / filename)
-
-
-# Event partition primitives
-
-
-def test_partition_events_groups_rows_by_event_code() -> None:
-    partition = _partition(
-        _state_rows(_PRIMARY_EVENT_CODE, [10, 30]),
-        _state_rows(_SECONDARY_EVENT_CODE, [20]),
-    )
-
-    assert set(partition) == {_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE}
-    assert partition[_PRIMARY_EVENT_CODE]["timestamp_us"].to_list() == [10, 30]
-    assert partition[_SECONDARY_EVENT_CODE]["timestamp_us"].to_list() == [20]
-
-
-def test_get_event_timestamps_returns_recorded_timestamps() -> None:
-    partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10, 20, 30]))
-
-    timestamps = get_event_timestamps(partition=partition, event_code=_PRIMARY_EVENT_CODE)
-
-    assert timestamps.dtype == np.uint64
-    assert timestamps.tolist() == [10, 20, 30]
-
-
-def test_get_event_timestamps_returns_empty_for_absent_event_code() -> None:
-    partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
-
-    timestamps = get_event_timestamps(partition=partition, event_code=_SECONDARY_EVENT_CODE)
-
-    assert timestamps.dtype == np.uint64
-    assert timestamps.size == 0
-
-
-def test_get_event_data_reconstructs_payload_values() -> None:
-    partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10, 20], [700, 650], "uint16"))
-
-    timestamps, values = get_event_data(partition=partition, event_code=_PRIMARY_EVENT_CODE, values_dtype=np.float64)
-
-    assert timestamps.tolist() == [10, 20]
-    assert values.dtype == np.float64
-    assert values.tolist() == [700.0, 650.0]
-
-
-def test_get_event_data_returns_empty_pair_for_absent_event_code() -> None:
-    partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10], [1], "uint16"))
-
-    timestamps, values = get_event_data(partition=partition, event_code=_SECONDARY_EVENT_CODE, values_dtype=np.uint16)
-
-    assert timestamps.size == 0
-    assert values.size == 0
-    assert values.dtype == np.uint16
+# Event stream merging
 
 
 def test_merge_event_streams_orders_values_chronologically() -> None:

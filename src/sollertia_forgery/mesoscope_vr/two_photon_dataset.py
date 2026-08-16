@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from itertools import permutations
 
 import numpy as np
+from cindra import COMBINED_METADATA_FILENAME, RecordingArrays, resolve_array_path
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import MesoscopeDirectories
@@ -107,13 +108,15 @@ def assemble_cindra_dataset(
     """
     # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the
     # authoritative target the pulse alignment below is reconciled against.
-    _, frame_count = np.load(file=cindra_data_path.joinpath("cell_fluorescence.npy"), mmap_mode="r").shape
+    _, frame_count = np.load(
+        file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_FLUORESCENCE), mmap_mode="r"
+    ).shape
 
     # Loads the combined cindra metadata archive and extracts the per-plane sampling rate in Hz. NPZ archives do not
     # support memory mapping, so the context manager is used to keep the archive open only long enough to pull the
     # scalar out. The scanning rate is used to derive the expected scan pulse duration window in milliseconds for
     # filtering logged scan pulses.
-    with np.load(file=cindra_data_path.joinpath("combined_metadata.npz")) as metadata:
+    with np.load(file=cindra_data_path.joinpath(COMBINED_METADATA_FILENAME)) as metadata:
         scanning_frequency = float(metadata["sampling_rate"][0])
     expected_duration_ms = _MILLISECONDS_PER_SECOND / scanning_frequency
     min_duration = expected_duration_ms - _SCAN_PULSE_TOLERANCE_MS
@@ -205,30 +208,45 @@ def assemble_cindra_dataset(
     # Uses the single-recording cell classification data to create a filtering mask that excludes non-cell ROIs from
     # the forged dataset. cindra stores classification results as a (num_rois, 2) float32 array where column 0 holds
     # the is_cell label (1.0 or 0.0) and column 1 holds the classifier probability.
-    classification = np.load(file=cindra_data_path.joinpath("cell_classification.npy"), mmap_mode="r")
+    classification = np.load(
+        file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_CLASSIFICATION), mmap_mode="r"
+    )
     is_cell_mask: NDArray[np.bool_] = classification[:, 0] == 1
 
     # Streams fluorescence Series into the DataFrame one file at a time, so peak memory holds a single fluorescence
     # array.
-    fluorescence_sources: tuple[tuple[Path, str, str, NDArray[np.bool_] | None], ...] = (
-        (cindra_data_path, "cell_fluorescence.npy", DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE, is_cell_mask),
-        (cindra_data_path, "neuropil_fluorescence.npy", DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE, is_cell_mask),
+    fluorescence_sources: tuple[tuple[Path, RecordingArrays, str, NDArray[np.bool_] | None], ...] = (
+        (cindra_data_path, RecordingArrays.CELL_FLUORESCENCE, DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE, is_cell_mask),
         (
             cindra_data_path,
-            "subtracted_fluorescence.npy",
+            RecordingArrays.NEUROPIL_FLUORESCENCE,
+            DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE,
+            is_cell_mask,
+        ),
+        (
+            cindra_data_path,
+            RecordingArrays.SUBTRACTED_FLUORESCENCE,
             DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE,
             is_cell_mask,
         ),
-        (cindra_data_path, "spikes.npy", DatasetColumn.SINGLE_DAY_SPIKES, is_cell_mask),
-        (multiday_data_path, "cell_fluorescence.npy", DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE, None),
-        (multiday_data_path, "neuropil_fluorescence.npy", DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE, None),
-        (multiday_data_path, "subtracted_fluorescence.npy", DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE, None),
-        (multiday_data_path, "spikes.npy", DatasetColumn.MULTI_DAY_SPIKES, None),
+        (cindra_data_path, RecordingArrays.SPIKES, DatasetColumn.SINGLE_DAY_SPIKES, is_cell_mask),
+        (multiday_data_path, RecordingArrays.CELL_FLUORESCENCE, DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE, None),
+        (
+            multiday_data_path,
+            RecordingArrays.NEUROPIL_FLUORESCENCE,
+            DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE,
+            None,
+        ),
+        (
+            multiday_data_path,
+            RecordingArrays.SUBTRACTED_FLUORESCENCE,
+            DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE,
+            None,
+        ),
+        (multiday_data_path, RecordingArrays.SPIKES, DatasetColumn.MULTI_DAY_SPIKES, None),
     )
-    for source_path, filename, column_name, mask in fluorescence_sources:
-        series = _load_cindra_fluorescence(
-            data_path=source_path, filename=filename, column_name=column_name, cell_mask=mask
-        )
+    for source_path, array, column_name, mask in fluorescence_sources:
+        series = _load_cindra_fluorescence(data_path=source_path, array=array, column_name=column_name, cell_mask=mask)
         frame_aligned_data = frame_aligned_data.with_columns(series)
         del series
 
@@ -568,7 +586,7 @@ def _nearest_target_index(values: NDArray[np.int64], sorted_targets: NDArray[np.
 
 def _load_cindra_fluorescence(
     data_path: Path,
-    filename: str,
+    array: RecordingArrays,
     column_name: str,
     *,
     cell_mask: NDArray[np.bool_] | None = None,
@@ -577,7 +595,7 @@ def _load_cindra_fluorescence(
 
     Args:
         data_path: The path to the directory that stores the fluorescence data to be loaded.
-        filename: The name of the .npy file that stores the data to be loaded.
+        array: The cindra result array to load, which names the .npy file inside the data directory.
         column_name: The name to assign to the returned Series.
         cell_mask: The mask that filters out non-cell ROIs, matching the ROI axis of the loaded fluorescence array.
             Defaults to None, which keeps every ROI.
@@ -586,7 +604,7 @@ def _load_cindra_fluorescence(
         The fluorescence traces of the retained ROIs, transposed to (frames, rois).
     """
     # Memory-maps the cindra fluorescence array to defer reading the pixel data until the selection is applied.
-    fluorescence = np.load(file=data_path.joinpath(filename), mmap_mode="r")
+    fluorescence = np.load(file=resolve_array_path(root_path=data_path, array=array), mmap_mode="r")
 
     # Drops the masked intermediate before returning, so peak memory holds a single fluorescence array.
     if cell_mask is not None:

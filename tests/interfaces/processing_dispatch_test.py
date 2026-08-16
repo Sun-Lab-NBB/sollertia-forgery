@@ -1,0 +1,203 @@
+"""Tests the resource narrowing the generic processing tools apply to a local batch before they dispatch it."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+from pathlib import Path
+
+import pytest
+
+from sollertia_forgery.video import CAMERA_EXTRACTION_JOB_NAME
+from sollertia_forgery.interfaces import processing_tools
+from sollertia_forgery.orchestration import GenericPendingJob
+from sollertia_forgery.interfaces.processing_tools import _execute_local_batch
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+MEMORY_BUDGET_MB: int = 16_384
+"""The memory budget every staged batch runs against, kept far above what its jobs ask for so the core terms alone
+decide the outcome."""
+
+
+# Helpers
+
+
+class IdleThread:
+    """Stands in for the manager thread, so a batch is reconciled, sized, and staged without any job running.
+
+    Attributes:
+        args: The positional arguments the batch would have handed the manager.
+    """
+
+    def __init__(self, target: object, args: tuple[Any, ...], daemon: bool) -> None:  # noqa: ARG002, FBT001
+        self.args = args
+
+    def start(self) -> None:
+        """Stands in for starting the manager, which a staged batch never does."""
+
+    def is_alive(self) -> bool:
+        """Reports the staged manager as finished, so a later batch is never rejected as already running."""
+        return False
+
+
+class RecordingHost:
+    """Stands in for the host holding the trackers, recording the reset each staged batch applies through it.
+
+    Attributes:
+        reset_calls: One entry per reset, carrying the pipeline, the unit paths, and the job identifiers it cleared.
+    """
+
+    def __init__(self) -> None:
+        self.reset_calls: list[tuple[str, list[str], list[str]]] = []
+
+    def reset_jobs(self, pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str]) -> None:
+        """Records one reset rather than rewriting any tracker.
+
+        Args:
+            pipeline: The pipeline whose jobs are cleared.
+            unit_paths: The units whose trackers hold them.
+            job_ids: The identifiers of the cleared jobs.
+        """
+        self.reset_calls.append((pipeline, [str(path) for path in unit_paths], list(job_ids)))
+
+
+def make_job(job_id: str, cores: int, job_name: str = CAMERA_EXTRACTION_JOB_NAME) -> GenericPendingJob:
+    """Builds one dispatchable job carrying the width its own sizing pass gave it.
+
+    Args:
+        job_id: The identifier the tracker records the job under.
+        cores: The cores the sizing pass chose for this particular job.
+        job_name: The job type name, which is what groups this job with the others of its type.
+
+    Returns:
+        The pending job.
+    """
+    return GenericPendingJob(
+        tracker_path=Path("/nonexistent/tracker.yaml"),
+        job_id=job_id,
+        unit_path=Path("/nonexistent/session"),
+        job_name=job_name,
+        core_weight=cores,
+        memory_mb=512,
+        pipeline="video",
+    )
+
+
+def stage_batch(jobs: list[GenericPendingJob], core_budget: int) -> dict[str, Any]:
+    """Runs one batch through the local dispatch path up to the point the manager would start.
+
+    Args:
+        jobs: The batch's jobs, whose widths are narrowed in place.
+        core_budget: The cores the batch may commit across all concurrently running jobs.
+
+    Returns:
+        The response dict the execute tool would return.
+    """
+    return _execute_local_batch(
+        host=RecordingHost(),  # type: ignore[arg-type]
+        pending=jobs,
+        batch_ids=["batch"],
+        core_budget_override=core_budget,
+        memory_budget_mb=MEMORY_BUDGET_MB,
+    )
+
+
+@pytest.fixture
+def staged_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Holds the manager thread and the host's own core count out of the dispatch path.
+
+    The requested budget is honored exactly, so a test states the host it means rather than inheriting whatever the
+    machine running it happens to hold. Recording the module's execution state has it restored afterwards, which
+    keeps a staged batch from being mistaken for a live one.
+
+    Args:
+        monkeypatch: The fixture used to replace each dependency the dispatch path reaches for.
+    """
+
+    def _honor_request(requested_workers: int, reserved_cores: int) -> int:
+        """Answers with the budget the caller asked for, whatever the host running the test holds."""
+        return requested_workers
+
+    monkeypatch.setattr(processing_tools, "Thread", IdleThread)
+    monkeypatch.setattr(processing_tools, "resolve_worker_count", _honor_request)
+    monkeypatch.setattr(processing_tools, "_EXECUTION_STATE", None)
+
+
+# Per-job core widths
+
+
+def test_a_batch_keeps_the_width_each_job_was_sized_at(staged_batch: None) -> None:
+    """The archive-backed extraction stages resolve a width per job, so one type holds jobs of several widths and
+    dispatch has to carry each of them through rather than flattening the type onto a single figure.
+    """
+    narrow = make_job(job_id="narrow", cores=1)
+    wide = make_job(job_id="wide", cores=8)
+
+    # The per-archive sizing is the whole reason these two jobs differ, so a run where they match would let the
+    # assertions below pass without the narrowing ever being exercised.
+    assert narrow.core_weight != wide.core_weight
+
+    response = stage_batch(jobs=[narrow, wide], core_budget=32)
+
+    assert response["success"] is True
+    assert narrow.core_weight == 1
+    assert wide.core_weight == 8
+    # The type's reported allocation is the widest of its jobs, since that figure is what divides the budget into the
+    # concurrency the response reports for the type.
+    assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["cores_per_job"] == 8
+    assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["maximum_parallel"] == 4
+
+
+def test_the_type_width_does_not_depend_on_the_order_its_jobs_arrive_in(staged_batch: None) -> None:
+    """Every job of a type is a candidate representative, so the widest is picked rather than whichever the batch
+    happens to hold last.
+    """
+    wide = make_job(job_id="wide", cores=8)
+    narrow = make_job(job_id="narrow", cores=1)
+
+    assert wide.core_weight != narrow.core_weight
+
+    response = stage_batch(jobs=[wide, narrow], core_budget=32)
+
+    assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["cores_per_job"] == 8
+    assert wide.core_weight == 8
+    assert narrow.core_weight == 1
+
+
+def test_a_job_wider_than_the_host_is_capped_while_a_narrow_one_is_left_alone(staged_batch: None) -> None:
+    """A descriptor planned against a wider host would otherwise tell its pipeline to fan out past what this host
+    supplies, and capping it never widens the job that already fits.
+    """
+    narrow = make_job(job_id="narrow", cores=1)
+    wide = make_job(job_id="wide", cores=8)
+
+    assert narrow.core_weight != wide.core_weight
+
+    response = stage_batch(jobs=[narrow, wide], core_budget=4)
+
+    assert wide.core_weight == 4
+    assert narrow.core_weight == 1
+    assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["cores_per_job"] == 4
+    # The pool is sized off the narrowest job, so the one-core job's capacity is not spent on workers it cannot use.
+    assert response["pool_size"] == 2
+
+
+def test_a_zero_width_job_is_floored_at_one_core_rather_than_widened_to_its_type(staged_batch: None) -> None:
+    """A width the plan artifact records as non-positive would leave admission with no core term at all, so the
+    dispatch floor of one core stands whatever the descriptor carries. The floor is the job's own and not its type's,
+    which is what a zero-width job sharing a type with a wide one shows.
+    """
+    empty = make_job(job_id="empty", cores=0)
+    wide = make_job(job_id="wide", cores=8)
+
+    response = stage_batch(jobs=[empty, wide], core_budget=8)
+
+    assert empty.core_weight == 1
+    assert wide.core_weight == 8
+    # The type is still represented by its widest job, so the floor applied to the zero-width one leaves the reported
+    # allocation alone.
+    assert response["job_allocations"][CAMERA_EXTRACTION_JOB_NAME]["cores_per_job"] == 8
+    # The pool follows the narrowest job the batch ended up with, which is the floored one rather than the type's
+    # reported width. A run that widened the zero-width job onto its type would spawn a single worker here.
+    assert response["pool_size"] == 2

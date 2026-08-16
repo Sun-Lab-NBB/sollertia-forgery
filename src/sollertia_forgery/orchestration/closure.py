@@ -7,8 +7,9 @@ from pathlib import Path
 from dataclasses import field, asdict, dataclass
 
 from ataraxis_base_utilities import LogLevel, console
+from ataraxis_data_structures import ProcessingStatus
 
-from .graph import SUCCEEDED_STATUS, index_rows_by_unit
+from .graph import index_rows_by_unit
 from .hosts import state_artifact_paths
 from .ledger import forget_batches, batch_is_settled, current_timestamp
 from .batches import batch_directory, read_prepared_batch, record_batch_outcome
@@ -23,9 +24,6 @@ if TYPE_CHECKING:
     from .hosts import ExecutionHost
     from .ledger import SubmissionBatch
     from ..server import JobStatus
-
-_FAILED_STATUS: str = "FAILED"
-"""The value a job's recorded status carries once it has failed, as the state tables write it."""
 
 _OUTCOME_FIELD_LIMIT: int = 50
 """The failed and blocked jobs one outcome enumerates. The counts always cover the whole batch, so a larger batch
@@ -218,13 +216,15 @@ def _resolve_outcome(
         verified_at=current_timestamp(),
     )
 
+    # A state table records each job's status by the name of its ``ProcessingStatus`` member, so the comparisons below
+    # read those names rather than literals restating them.
     for job in document.jobs:
         unit_state = recorded.get(job["unit_name"], {})
         status = (unit_state.get(job["job_id"]) or {}).get("status")
-        if status == SUCCEEDED_STATUS:
+        if status == ProcessingStatus.SUCCEEDED.name:
             outcome.succeeded += 1
             continue
-        if status == _FAILED_STATUS:
+        if status == ProcessingStatus.FAILED.name:
             outcome.failed += 1
             if len(outcome.failed_jobs) < _OUTCOME_FIELD_LIMIT:
                 outcome.failed_jobs.append(_failed_entry(job=job, state_row=unit_state.get(job["job_id"]) or {}))
@@ -233,7 +233,7 @@ def _resolve_outcome(
         unsatisfied = [
             prerequisite
             for prerequisite in job.get("prerequisite_ids", ())
-            if (unit_state.get(prerequisite) or {}).get("status") == _FAILED_STATUS
+            if (unit_state.get(prerequisite) or {}).get("status") == ProcessingStatus.FAILED.name
         ]
         if unsatisfied:
             outcome.blocked += 1

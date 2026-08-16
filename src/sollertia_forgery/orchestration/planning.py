@@ -12,10 +12,11 @@ from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import iterate_sessions
-from ataraxis_data_structures import YamlConfig, ProcessingTracker
+from ataraxis_data_structures import YamlConfig, ProcessingTracker, atomic_write
 
 from ..forging import discover_project_datasets
 from .dispatch import resolve_dispatch, resolve_job_cores
+from .footprints import JobFootprint
 from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines
 
 if TYPE_CHECKING:
@@ -74,7 +75,8 @@ class JobPlanEntry:
     specifier: str = ""
     """The specifier that differentiates this job from others of its stage within the same unit."""
     cores: int = 1
-    """The cores this job occupies, from its type's declared allocation."""
+    """The cores this job occupies, as its own sizing pass resolved them. A stage a dependency owns answers with the
+    width that dependency picked for this job's input, and every other stage takes its type's declared allocation."""
     memory_mb: int = 0
     """The memory this job occupies, estimated from the data it will process."""
     memory_modeled: bool = False
@@ -239,8 +241,19 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
         The path the projection was written to.
 
     Raises:
+        FileNotFoundError: If the project directory does not exist, since a projection has nowhere to be written and
+            no unit to read.
         Timeout: If the projection file's lock cannot be acquired within the timeout period.
     """
+    # Session discovery walks the tree and reports a root it cannot read, so a missing project is named here rather
+    # than surfacing as a walk failure partway through the projection.
+    if not project_directory.is_dir():
+        message = (
+            f"Unable to project the job plans of '{project_directory}'. The path does not name an existing "
+            f"directory, so the project holds neither a unit to read nor a location to write the projection to."
+        )
+        console.error(message=message, error=FileNotFoundError)
+
     rows: list[dict[str, Any]] = []
     planned_units = 0
     unplanned_units = 0
@@ -269,9 +282,13 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     plan_path = project_plan_path(project_directory=project_directory)
     lock = FileLock(str(plan_path.with_suffix(plan_path.suffix + ".lock")))
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
-        pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False).sort(
+        frame = pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False).sort(
             by=["unit_kind", "animal", "session", "dataset", "pipeline", "job_name", "specifier"], nulls_last=True
-        ).write_ipc(file=plan_path, compression="uncompressed")
+        )
+        # Published through a temporary file renamed over the destination. The lock serializes the writers, while
+        # the readers memory-map the projection without taking it, so only the rename keeps them off a torn file.
+        with atomic_write(file_path=plan_path, binary=True) as file:
+            frame.write_ipc(file=file, compression="uncompressed")
 
     if display_progress:
         console.echo(
@@ -303,7 +320,9 @@ def _resolve_unit_plan(
         Each pipeline's processing tracker is aligned with the jobs the unit can actually run, so a unit that has
         never been processed still carries a job registry once it is planned. That registry is what the project job
         artifact is built from, which is how a scheduler on another host learns which jobs exist. A job the unit
-        cannot run never reaches the tracker, so its absence there is the statement that it is not possible.
+        cannot run never reaches the tracker, so its absence there is the statement that it is not possible. A
+        pipeline that resolves a universe but no runnable job therefore writes no tracker rather than failing the
+        plan, since its figures still belong in the cache the plan records.
 
         The recorded figures cover the whole universe while the tracker holds the possible subset, so a plan describes
         every job the pipeline defines and the job artifact states which of them this unit supports.
@@ -359,17 +378,22 @@ def _resolve_unit_plan(
     )
 
     for dispatch, unit, universe, possible in resolved:
-        # Registers the jobs this unit can run, so the job artifact built from this tracker enumerates them.
-        tracker_path = dispatch.tracker_path(unit)
-        tracker_path.parent.mkdir(parents=True, exist_ok=True)
-        ProcessingTracker(file_path=tracker_path).align_jobs(jobs=possible, universe=universe)
+        # Registers the jobs this unit can run, so the job artifact built from this tracker enumerates them. A
+        # pipeline that resolves no possible job contributes no registry at all, since a tracker states which jobs a
+        # unit supports and an empty registry states nothing.
+        if possible:
+            tracker_path = dispatch.tracker_path(unit)
+            tracker_path.parent.mkdir(parents=True, exist_ok=True)
+            ProcessingTracker(file_path=tracker_path).align_jobs(jobs=possible, universe=universe)
 
         # Ordering resolves over the whole universe, so every recorded edge is the pipeline's own, independent of what
         # this unit happened to carry when it was planned. A consumer drops the edges whose upstream job carries no
         # recorded state, which is how a stage stops waiting on a job the unit can never produce.
         ordering = dispatch.prerequisites(unit, universe)
 
-        cores = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
+        # The declared allocation reaches the sizing pass as the width to fall back on, and comes back unchanged for
+        # every stage that holds one width whatever data it reads.
+        declared = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
         outstanding = [
             (job_name, specifier)
             for job_name, specifier in universe
@@ -378,18 +402,20 @@ def _resolve_unit_plan(
         if not outstanding:
             continue
 
-        estimates = dispatch.estimate_memory(
-            unit, [(job_name, specifier, cores[job_name]) for job_name, specifier in outstanding]
+        footprints = dispatch.estimate_memory(
+            unit, [(job_name, specifier, declared[job_name]) for job_name, specifier in outstanding]
         )
         for job_name, specifier in outstanding:
-            memory_mb, memory_modeled = estimates.get((job_name, specifier), (0, False))
+            footprint = footprints.get(
+                (job_name, specifier), JobFootprint(cores=declared[job_name], memory_mb=0, memory_modeled=False)
+            )
             entry = JobPlanEntry(
                 pipeline=dispatch.pipeline.value,
                 job_name=job_name,
                 specifier=specifier,
-                cores=cores[job_name],
-                memory_mb=memory_mb,
-                memory_modeled=memory_modeled,
+                cores=footprint.cores,
+                memory_mb=footprint.memory_mb,
+                memory_modeled=footprint.memory_modeled,
                 prerequisite_ids=[
                     ProcessingTracker.generate_job_id(job_name=upstream_name, specifier=upstream_specifier)
                     for upstream_name, upstream_specifier in ordering.get((job_name, specifier), ())

@@ -42,25 +42,25 @@ classifiers = [
 # Runtime project dependencies.
 dependencies = [
     # Sollertia Libraries
-    "ataraxis-time>=6,<7",
-    "ataraxis-base-utilities>=6.0.2,<7",
-    "ataraxis-data-structures>=6.2.0rc1,<7",
-    "sollertia-shared-assets>=9.1.0rc4,<10",
+    "ataraxis-time>=7,<8",
+    "ataraxis-base-utilities>=7,<8",
+    "ataraxis-data-structures>=7.1,<8",  # 7.1 first exports the log-archive, marker, and worker-thread helpers
+    "sollertia-shared-assets>=10.0.0rc1,<11",
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
-    "ataraxis-video-system>=4,<5",
-    "ataraxis-communication-interface>=6,<7",
-    "cindra>=2.0.0rc3,<3",
+    "ataraxis-video-system>=5.0.1rc2,<6",
+    "ataraxis-communication-interface>=7.0.1rc2,<8",
+    "cindra>=2.0.0rc4,<3",
 
     # Machine Vision (GenICam runtime for ataraxis-video-system, resolved from the TestPyPI index that tox.ini adds)
     "genicam==1.6.0",
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
-    "opencv-python>=4.13,<5",
+    "opencv-python>=5,<6",
 
     # System Introspection (reads the host's physical memory when sizing a processing batch)
-    "psutil>=6,<8",
+    "psutil>=7,<8",
 
     # Thread-Pool Control (holds the native BLAS and OpenMP pools at the cores each batch job was admitted at)
     "threadpoolctl>=3,<4",
@@ -78,7 +78,7 @@ dependencies = [
     "paramiko>=5,<6",
 
     # Model Context Protocol
-    "mcp[cli]>=1,<2",
+    "mcp>=2,<3",
 
     # Utilities
     "filelock>=3,<4",

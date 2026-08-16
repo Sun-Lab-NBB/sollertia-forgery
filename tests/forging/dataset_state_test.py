@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 import pytest
@@ -34,6 +34,25 @@ _SECOND_SESSION: str = "2026-01-03-03-04-05-000006"
 """The session of the second animal, which carries an assembly job alone."""
 
 
+def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+    """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
+
+    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
+    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
+
+    Args:
+        _frame: The frame the writer was called on, which this stand-in never serializes.
+        file: The open file object the artifact is written to.
+        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
+    """
+    file.write(b"partial")
+    message = "the artifact writer died mid-write"
+    raise RuntimeError(message)
+
+
 @pytest.fixture
 def dataset(tmp_path: Path) -> SimpleNamespace:
     """Builds a stand-in dataset whose root and session list drive the state artifact."""
@@ -50,9 +69,16 @@ def dataset(tmp_path: Path) -> SimpleNamespace:
 
 
 def _align_tracker(dataset: SimpleNamespace, jobs: list[tuple[str, str]]) -> ProcessingTracker:
-    """Creates the dataset's forging tracker holding the provided job universe."""
+    """Creates the dataset's forging tracker holding the provided job universe.
+
+    Aligning against an empty request is rejected by the tracker, since it would classify every recorded job as
+    foreign, so an empty universe is written through the reset that clears the registry instead.
+    """
     tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
-    tracker.align_jobs(jobs=jobs, universe=jobs)
+    if jobs:
+        tracker.align_jobs(jobs=jobs, universe=jobs)
+    else:
+        tracker.reset()
     return tracker
 
 
@@ -88,6 +114,26 @@ def test_an_empty_dataset_writes_an_artifact_carrying_the_declared_schema(datase
 
     assert frame.height == 0
     assert dict(frame.schema) == DATASET_STATE_SCHEMA
+
+
+def test_a_failed_write_leaves_the_previously_published_state_readable(
+    dataset: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a writer dying mid-write leaves the published artifact whole rather than truncated.
+
+    The remote backend reads this artifact from a server path without taking the writer's lock, so only publishing
+    by rename keeps it off a file that is being rewritten.
+    """
+    _align_tracker(dataset=dataset, jobs=[(FORGING_JOB_NAME, _FIRST_SESSION)])
+    published = generate_dataset_state(dataset=dataset)
+
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+
+    with pytest.raises(RuntimeError, match="died mid-write"):
+        generate_dataset_state(dataset=dataset)
+
+    assert pl.read_ipc(source=published, memory_map=True).get_column("job_name").to_list() == [FORGING_JOB_NAME]
+    assert [entry.name for entry in published.parent.iterdir() if entry.name.endswith(".tmp")] == []
 
 
 @pytest.fixture

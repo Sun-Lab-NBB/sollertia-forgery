@@ -1,25 +1,36 @@
-"""Provides the memory estimators that size each job's working set from the raw acquisition data it will process."""
+"""Provides the sizing pass that resolves each job's cores and working set from the data it will process."""
 
 from __future__ import annotations
 
-import json
 import math
 from typing import TYPE_CHECKING
 from functools import cache
 from dataclasses import dataclass
 
 import cv2
-import numpy as np
-from cindra import SingleRecordingJobNames
+from cindra import (
+    WORKER_MEMORY_MB,
+    SPAWNED_CHILD_MEMORY_MB,
+    MEMORY_ESTIMATE_TOLERANCE,
+    COMBINED_METADATA_FILENAME,
+    MULTI_RECORDING_DIRECTORY_NAME,
+    RecordingArrays,
+    MultiRecordingJobNames,
+    SingleRecordingJobNames,
+    resolve_array_path,
+    resolve_recording_geometry,
+    estimate_multi_recording_job_memory_mb,
+    estimate_single_recording_job_memory_mb,
+)
 import psutil
 from natsort import natsorted
-from tifffile import TiffFile
-from cindra.io import TIFF_EXTENSIONS, PARAMETERS_FILENAME
 from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
-from cindra.allocation import PLANE_SPECIFIER_PREFIX
+from ataraxis_video_system import size_archive_job as size_camera_extraction_job
 from sollertia_shared_assets import SessionData
+from ataraxis_data_structures import LOG_ARCHIVE_SUFFIX
+from ataraxis_communication_interface import size_archive_job as size_controller_extraction_job
 
-from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
+from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, CAMERA_EXTRACTION_JOB_NAME
 from ..forging import MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
 from ..managing import CHECKSUM_JOB_NAME
@@ -28,31 +39,14 @@ from ..registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from ..shared_assets import (
-    LOG_ARCHIVE_SUFFIX,
-    ProcessingPipelines,
-    multi_recording_dataset_directory,
-)
-from ..microcontrollers import PARSE_JOB_NAME, EXTRACTION_JOB_NAME
+from ..shared_assets import ProcessingPipelines, multi_recording_dataset_directory
+from ..microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
+    from cindra import RecordingGeometry, MultiRecordingConfiguration, SingleRecordingConfiguration
     from sollertia_shared_assets import DatasetData
-
-_MEMORY_ESTIMATE_TOLERANCE: float = 1.15
-"""The margin applied to every estimate before it is reported. It covers the working sets a model does not enumerate
-and the variation between recordings of the same shape. The penalty for understating is asymmetric, since a local
-batch overcommits its host and a scheduled job is killed outright, so estimates round up."""
-
-_WORKER_MEMORY_MB: int = 384
-"""The resident memory a worker occupies before it runs any job, covering the interpreter and the package's import
-graph. This term is charged once per job, while the per-child allowance is charged for every core the job holds."""
-
-_SUBPROCESS_MEMORY_MB: int = 200
-"""The resident memory each child of a job's own worker pool occupies before it touches data. Processes are spawned
-rather than forked, so every child re-imports the module its target function lives in."""
 
 _MEGABYTES_PER_GIGABYTE: int = 1024
 """The megabytes one gigabyte holds, which every reportable estimate is rounded up to a multiple of."""
@@ -63,11 +57,8 @@ _BYTES_PER_MEGABYTE: int = 1024 * 1024
 _SINGLE_PRECISION_BYTES: int = 4
 """The width of one single-precision element, the type every modeled working array holds."""
 
-_RAW_SAMPLE_BYTES: int = 2
-"""The width of one raw imaging sample as it is read from and written to the converted binary."""
-
 _ARCHIVE_DIRECTORY_RATIO: float = 4.0
-"""The resident memory a log-archive reader holds per byte of archive on disk. Reading an archive builds one
+"""The resident memory the runtime log reader holds per byte of archive on disk. Reading an archive builds one
 directory entry per logged message, which dominates the decoded payload itself."""
 
 _MODULE_TABLE_RATIO: float = 3.4
@@ -87,56 +78,21 @@ _RETAINED_FRAME_BUFFERS: int = 2
 """The number of full-resolution single-precision frame buffers a decode worker keeps live. Binning produces a
 strided view that retains its full-frame base, and the current and previous binned frames are live at once."""
 
-_DETECTION_ARRAY_MULTIPLIER: int = 4
-"""The number of copies of the binned movie live at the two-photon detection peak. Computing the temporal standard
-deviation holds the frames, their difference, and the squared difference at once, alongside the working copy the
-reduction accumulates into."""
-
-_BINARIZATION_BATCH_COPIES: int = 2
-"""The number of copies of a raw frame batch binarization holds. Indexing each plane out of the batch allocates a
-second full batch alongside the one that was read."""
-
 _CHECKSUM_READER_MEMORY_MB: int = 285
 """The resident memory one checksum worker holds, covering its fixed read chunk and the interpreter and import graph
 the worker starts with. The figure holds steady across sessions of any size, because a worker streams its file in
 fixed chunks and never holds more than one at a time."""
 
-_FLUORESCENCE_FILENAME: str = "cell_fluorescence.npy"
-"""The cindra array whose header reports a recording's region and sample counts. Only the header is parsed, so a
-recording of any length costs one small read and no part of it is mapped."""
-
-_COMBINED_METADATA_FILENAME: str = "combined_metadata.npz"
-"""The cindra archive reporting the combined field extent every multi-day stage works at."""
-
-_MULTI_RECORDING_DIRECTORY: str = "multi_recording"
-"""The processed-output subdirectory holding an animal's multi-day results, one directory per tracked dataset."""
-
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
 
-_DISCOVERY_PLANES_PER_RECORDING: int = 12
-"""The single-precision planes a discovery job holds per recording beyond its pairwise cache. The planes cover that
-recording's accumulated and cached deformation fields, its scale-space pyramid, its transformed reference images, and
-the per-thread warp transients live alongside them."""
-
-_DISCOVERY_CLUSTERING_MEMORY_MB: int = 5632
-"""The memory the cross-recording clustering stage is charged. The stage builds a pairwise matrix over the regions
-falling inside one spatial bin, so its size follows local region crowding, which no reading of the processed data
-predicts. The allowance covers the crowding this corpus produces."""
-
-_EXTRACTION_TRACE_COPIES: int = 2
-"""The copies of a recording's traces the extraction stage holds at once. The stage returns the cell, neuropil,
-subtracted, and spike arrays together, and the stages deriving the later three release their working arrays as they
-go, so the arrays live in turn rather than all at their peak together."""
-
-_EXTRACTION_BATCH_BYTES_PER_PIXEL: int = 6
-"""The memory one extraction batch holds per combined pixel, covering the batch at its stored width and the
-single-precision copy the kernel consumes."""
-
-_EXTRACTION_BATCH_RETENTION: int = 2
-"""The batch working sets an extraction job holds at its peak. The stage reads its recording in batches and releases
-each one, and the allocator carries a share of the released memory into the next iteration, so the peak settles
-somewhat above the working set of any single batch."""
+_DISCOVERY_FLOOR_MEMORY_MB: int = 5632
+"""The memory a cross-recording discovery job is charged above the worker baseline when cindra refuses to size it. The
+value is the allowance this package measured for the stage's clustering pass over this corpus, which is the term that
+survives when nothing on disk predicts the job's shape. cindra's own model adds a registration term following the
+combined frame and a clustering term quadratic in the regions the dataset spans, and neither is readable from a dataset
+whose recordings carry no combined output yet. The stage declares no concurrency ceiling of its own and runs at a
+narrow allocation, so this floor is what bounds how many of its jobs one batch admits at once."""
 
 _ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
 """The fluorescence columns an experiment assembly retains at once. Every column is attached under its own name and
@@ -153,45 +109,6 @@ emits one array per column and the interpolation that aligns them holds double-p
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
 
-_COMBINATION_MEMORY_MB: int = 8192
-"""The memory the combination job is charged. The stage concatenates every plane's traces into dense arrays, so its
-size follows the region count that only detection resolves, which no reading of the raw data predicts. It therefore
-takes a flat allowance rather than a projection, covering the trace volume a recording of any attainable length
-produces."""
-
-_REGISTRATION_MEMORY_MB: int = 14848
-"""The memory one plane-registration job is charged.
-
-Notes:
-    Charged flat rather than projected from the plane. The stage streams the plane in batches whose size its
-    configuration fixes, yet its footprint neither follows that batch nor the plane's own extent, and across planes
-    it moves opposite to the extent rather than with it. What the footprint does follow has not been established, so
-    a projection built on any of those terms would be a shape the stage does not have.
-
-    The allowance therefore covers the widest footprint the stage has been observed to reach. Narrowing it wants the
-    driver identified first, since a plane far outside the observed shapes is the case a flat allowance cannot
-    reason about."""
-
-
-@dataclass(frozen=True, slots=True)
-class _RawImagingGeometry:
-    """Describes the shape of a two-photon recording as its raw acquisition data reports it.
-
-    Notes:
-        Every field is read from the raw imaging directory, so the geometry is available before any stage of the
-        pipeline has run. The heights follow each region's own line span, matching how the conversion stage slices a
-        multi-region frame into planes.
-    """
-
-    sample_count: int
-    """The samples one plane holds, as the floor across the interleave positions the conversion stage fills."""
-    sampling_rate: float
-    """The rate at which the recording sampled each plane."""
-    raw_frame_pixels: int
-    """The pixels one unsliced acquisition frame holds, which the conversion stage reads a batch of at a time."""
-    plane_extents: tuple[tuple[int, int], ...]
-    """The height and width of every plane, ordered by plane index."""
-
 
 @dataclass(frozen=True, slots=True)
 class _RecordingGeometry:
@@ -201,8 +118,18 @@ class _RecordingGeometry:
     """The regions the single-recording pipeline detected."""
     samples: int
     """The samples each region's trace holds."""
-    pixels: int
-    """The pixels one combined multi-plane frame holds, which every multi-day stage works at."""
+
+
+@dataclass(frozen=True, slots=True)
+class JobFootprint:
+    """Describes the resources one job occupies while it runs, as this module's sizing pass resolved them."""
+
+    cores: int
+    """The cores the job is dispatched at."""
+    memory_mb: int
+    """The reportable memory the job holds at its peak, in megabytes."""
+    memory_modeled: bool
+    """Determines whether the memory figure follows from the job's own input rather than from the worker baseline."""
 
 
 def resolve_host_memory_mb() -> int:
@@ -216,55 +143,88 @@ def resolve_host_memory_mb() -> int:
 
 def estimate_session_job_memory(
     pipeline: ProcessingPipelines, session: SessionData, jobs: list[tuple[str, str, int]]
-) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the memory every possible job of one session occupies at its allocated core count.
+) -> dict[tuple[str, str], JobFootprint]:
+    """Sizes every possible job of one session, reporting the cores it is dispatched at and the memory it holds there.
 
     Notes:
-        Reads on-disk metadata alone, so estimating a session never decodes a frame or opens a log archive. Every
-        estimate scales with the input it describes, which keeps it correct on recordings longer, wider, or denser
-        than any previously seen.
+        Reads on-disk metadata alone, so sizing a session never decodes a frame. The two extraction stages read their
+        archive's central directory, which decodes no message and loads no payload. Every estimate scales with the
+        input it describes, which keeps it correct on recordings longer, wider, or denser than any previously seen.
 
-        Every term is read from the session's raw acquisition data, so an estimate is available before any stage has
+        Every term is read from the session's raw acquisition data, so a footprint is available before any stage has
         run. Estimates cover anonymous memory, the term that forces a host to swap and a scheduler to kill a job, so
-        the reclaimable pages a memory-mapped stage leaves resident are excluded. Each estimate carries a flag
-        stating whether the input it scales with was found. A job whose input is absent falls back to the worker
-        baseline, which the flag marks as a floor to plan around.
+        the reclaimable pages a memory-mapped stage leaves resident are excluded. Each footprint carries a flag
+        stating whether the input its memory scales with was found. A job whose input is absent falls back to the
+        worker baseline, which the flag marks as a floor to plan around.
+
+        The stages a dependency owns are sized by that dependency's own sizing pass, which reads the job's input once
+        and answers both halves of its model from that read. It picks the width the stage actually runs at, which is
+        one core for an input below its parallel threshold and its declared allocation above it, and it estimates the
+        memory at that width. Taking both figures whole is what keeps a retune of either half reaching slf without a
+        change here, and it is what stops this package from reserving a width the library would never open. Those
+        models reject an unreadable input rather than answering with a floor, so each delegated call is guarded and
+        its refusal falls back to the declared allocation on this module's own baseline memory.
+
+        Every other stage is this package's own, so it runs at the declared allocation the caller supplied and that
+        allocation passes straight through into the footprint.
 
     Args:
         pipeline: The pipeline the jobs belong to.
         session: The loaded session the jobs operate on.
-        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
-        is True when the estimate follows from the job's own input rather than from the worker baseline alone.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at, its estimated
+        memory in megabytes, and a flag that is True when the memory follows from the job's own input rather than
+        from the worker baseline alone.
     """
     behavior_directory = session.raw_data.behavior_data_path
-    geometry: _RawImagingGeometry | None = None
+    output_root = session.processed_data_path
+    geometry: RecordingGeometry | None = None
     configuration: SingleRecordingConfiguration | None = None
+    data_path: Path | None = None
     widest_frame_pixels = 0
     if pipeline is ProcessingPipelines.TWO_PHOTON:
         resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
         configuration = resolve_configuration(session)
-        geometry = _resolve_raw_imaging_geometry(session=session, configuration=configuration)
+        locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
+        data_path = locate_two_photon_data(session)
+        geometry = _resolve_two_photon_geometry(
+            output_root=output_root, data_path=data_path, configuration=configuration
+        )
     elif pipeline is ProcessingPipelines.VIDEO:
         widest_frame_pixels = _resolve_widest_camera_frame_pixels(camera_directory=session.raw_data.camera_data_path)
 
-    estimates: dict[tuple[str, str], tuple[int, bool]] = {}
+    footprints: dict[tuple[str, str], JobFootprint] = {}
     for job_name, specifier, cores in jobs:
+        # The two extraction stages record the whole footprint their own library resolved, while every other stage
+        # models its memory alone and is planned at the declared allocation the closing statement attaches.
         if pipeline is ProcessingPipelines.TWO_PHOTON:
-            if geometry is not None and configuration is not None:
-                memory_mb = _estimate_two_photon_memory(
-                    job_name=job_name, specifier=specifier, geometry=geometry, configuration=configuration
-                )
-                memory_modeled = True
+            if geometry is None or configuration is None:
+                memory_mb, memory_modeled = _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
             else:
-                memory_mb, memory_modeled = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+                memory_mb, memory_modeled = _estimate_two_photon_memory(
+                    job_name=job_name,
+                    specifier=specifier,
+                    output_root=output_root,
+                    configuration=configuration,
+                    data_path=data_path,
+                )
         elif job_name == CHECKSUM_JOB_NAME:
             memory_mb, memory_modeled = _estimate_checksum_memory(cores=cores), True
-        elif job_name in {RUNTIME_JOB_NAME, EXTRACTION_JOB_NAME, TIMESTAMP_JOB_NAME}:
+        elif job_name == CAMERA_EXTRACTION_JOB_NAME:
+            footprints[job_name, specifier] = _size_camera_extraction_job(
+                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), declared_cores=cores
+            )
+            continue
+        elif job_name == CONTROLLER_EXTRACTION_JOB_NAME:
+            footprints[job_name, specifier] = _size_controller_extraction_job(
+                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), declared_cores=cores
+            )
+            continue
+        elif job_name == RUNTIME_JOB_NAME:
             archive = behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
-            memory_mb, memory_modeled = _estimate_archive_reader_memory(archive_path=archive, cores=cores)
+            memory_mb, memory_modeled = _estimate_runtime_reader_memory(archive_path=archive, cores=cores)
         elif job_name == ENERGY_JOB_NAME:
             memory_mb, memory_modeled = _estimate_motion_energy_memory(frame_pixels=widest_frame_pixels, cores=cores)
         elif job_name == TRACKING_JOB_NAME:
@@ -278,43 +238,69 @@ def estimate_session_job_memory(
                 directory=behavior_directory, pattern=f"*{LOG_ARCHIVE_SUFFIX}", expansion_ratio=_MODULE_TABLE_RATIO
             )
         else:
-            memory_mb, memory_modeled = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
-        estimates[job_name, specifier] = (memory_mb, memory_modeled)
+            memory_mb, memory_modeled = _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
+        footprints[job_name, specifier] = JobFootprint(cores=cores, memory_mb=memory_mb, memory_modeled=memory_modeled)
 
-    return estimates
+    return footprints
 
 
 def estimate_dataset_job_memory(
     dataset: DatasetData, jobs: list[tuple[str, str, int]]
-) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the memory every possible forging job occupies, from the processed data it will read.
+) -> dict[tuple[str, str], JobFootprint]:
+    """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
     Notes:
-        Reads array headers and the recording metadata alone, so estimating a dataset decodes no fluorescence and
-        opens no binary. Each two-photon stage scales with the processed data the single-recording pipeline wrote for
-        the sessions that carry two-photon data.
+        Reads array headers and the presence of the recording metadata alone, so sizing a dataset decodes no
+        fluorescence and opens no binary. Each cross-recording stage scales with the processed data the
+        single-recording pipeline wrote for the sessions that carry two-photon data.
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
         per job. A job whose processed input is absent falls back to the worker baseline, which the flag marks as a
-        floor to plan around.
+        floor to plan around. The two cross-recording stages belong to cindra, so they are sized by cindra's own
+        model, which refuses a dataset any recording leaves short rather than sizing it from the recordings that
+        happen to be complete. That refusal becomes the fallback here, and the discovery stage carries an allowance
+        above the baseline on it, because nothing else bounds how many of its jobs one batch admits at once.
+
+        Every stage a dataset runs holds one width whatever data it reads, cindra's two among them, so the declared
+        allocation the caller supplied is the width each of these jobs is dispatched at.
+
+        The per-session assembly stage is this package's own, so no dependency models it and its projection stays
+        here.
 
     Args:
         dataset: The resolved dataset the jobs operate on.
-        jobs: The possible jobs as ``(job_name, specifier, cores)`` triples.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to its estimated memory in megabytes and a flag that
-        is True when the estimate follows from the job's own input rather than from a flat allowance.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at, its estimated
+        memory in megabytes, and a flag that is True when the memory follows from the job's own input rather than
+        from a flat allowance.
     """
     project_root = dataset.dataset_data_path.parent.parent
     animals = {entry.session: entry.animal for entry in dataset.sessions}
     configuration = _resolve_tracking_configuration(dataset=dataset, project_root=project_root)
 
-    estimates: dict[tuple[str, str], tuple[int, bool]] = {}
-    for job_name, specifier, _cores in jobs:
+    footprints: dict[tuple[str, str], JobFootprint] = {}
+    for job_name, specifier, cores in jobs:
         if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
-            estimates[job_name, specifier] = _estimate_discovery_memory(
-                dataset=dataset, animal=specifier, project_root=project_root
+            # The discovery stage runs over one animal, so its specifier names that animal rather than a session.
+            memory_mb, memory_modeled = _estimate_multi_recording_memory(
+                job_name=MultiRecordingJobNames.DISCOVER,
+                specifier=specifier,
+                recording_directories=_animal_recording_directories(
+                    dataset=dataset, animal=specifier, project_root=project_root
+                ),
+                configuration=configuration,
+                unmodeled_allowance_mb=_DISCOVERY_FLOOR_MEMORY_MB,
+            )
+        elif job_name == MULTIDAY_EXTRACTION_JOB_NAME:
+            memory_mb, memory_modeled = _estimate_multi_recording_memory(
+                job_name=MultiRecordingJobNames.EXTRACT,
+                specifier=specifier,
+                recording_directories=_animal_recording_directories(
+                    dataset=dataset, animal=animals.get(specifier, ""), project_root=project_root
+                ),
+                configuration=configuration,
             )
         else:
             animal = animals.get(specifier, "")
@@ -326,88 +312,10 @@ def estimate_dataset_job_memory(
                 project_root=project_root,
                 configuration=configuration,
             )
-            if job_name == MULTIDAY_EXTRACTION_JOB_NAME:
-                estimates[job_name, specifier] = _estimate_extraction_memory(
-                    geometry=geometry, regions=regions, configuration=configuration
-                )
-            else:
-                estimates[job_name, specifier] = _estimate_assembly_memory(geometry=geometry, regions=regions)
+            memory_mb, memory_modeled = _estimate_assembly_memory(geometry=geometry, regions=regions)
+        footprints[job_name, specifier] = JobFootprint(cores=cores, memory_mb=memory_mb, memory_modeled=memory_modeled)
 
-    return estimates
-
-
-def _resolve_raw_imaging_geometry(
-    session: SessionData, configuration: SingleRecordingConfiguration
-) -> _RawImagingGeometry | None:
-    """Reads a two-photon recording's shape from its raw acquisition data.
-
-    Notes:
-        Reads the acquisition parameters and the headers of the first and last image files, so the cost stays flat
-        as a recording grows and no pixel data is decoded. The sample count follows from the pages those two files
-        report, since a recording's files hold an equal share apart from the last. Dividing those pages by the
-        interleave stride gives the floor across the interleave positions, and every position below the remainder
-        holds one sample more.
-
-        Region line spans give each plane's height and the first image's header gives the shared width, which is how
-        the conversion stage sizes a plane. That stage requires every image it discovers to carry the same frame
-        shape.
-
-        The image set and its order match the ones the conversion stage builds. Both skip the names the
-        configuration excludes and order numbered files naturally, so both agree on which file holds the recording's
-        final samples.
-
-    Args:
-        session: The loaded session whose raw imaging directory is read.
-        configuration: The recording's resolved processing configuration, consulted for the image names the
-            conversion stage excludes.
-
-    Returns:
-        The recording's geometry, or None when the session holds no readable raw imaging data.
-    """
-    locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
-    data_path = locate_two_photon_data(session)
-    if not data_path.is_dir():
-        return None
-
-    parameter_files = natsorted(data_path.rglob(PARAMETERS_FILENAME))
-    if not parameter_files:
-        return None
-    parameters = json.loads(parameter_files[0].read_text())
-
-    # Collects into a set first, since a case-insensitive filesystem returns one file under several of the extension
-    # spellings and counting it twice would inflate the sample count.
-    ignored_names = tuple(configuration.file_io.ignored_file_names)
-    discovered = {
-        path.resolve()
-        for extension in TIFF_EXTENSIONS
-        for path in data_path.glob(f"*.{extension}")
-        if path.stem not in ignored_names
-    }
-    images = natsorted(discovered)
-    if not images:
-        return None
-
-    with TiffFile(images[0]) as first_image:
-        leading_pages = len(first_image.pages)
-        frame_shape = first_image.pages[0].shape
-    with TiffFile(images[-1]) as final_image:
-        trailing_pages = len(final_image.pages)
-
-    volumes = max(1, int(parameters.get("plane_number", 1)) * int(parameters.get("channel_number", 1)))
-    total_pages = (len(images) - 1) * leading_pages + trailing_pages
-    base_height, base_width = int(frame_shape[-2]), int(frame_shape[-1])
-
-    region_lines = parameters.get("roi_lines") or []
-    extents = tuple((int(lines[-1]) - int(lines[0]) + 1, base_width) for lines in region_lines if lines) or (
-        (base_height, base_width),
-    )
-
-    return _RawImagingGeometry(
-        sample_count=max(1, total_pages // volumes),
-        sampling_rate=float(parameters.get("frame_rate", 1.0)),
-        raw_frame_pixels=base_height * base_width,
-        plane_extents=extents,
-    )
+    return footprints
 
 
 def _bytes_to_megabytes(byte_count: float) -> int:
@@ -422,13 +330,33 @@ def _bytes_to_megabytes(byte_count: float) -> int:
     return max(0, int(byte_count / _BYTES_PER_MEGABYTE) + 1) if byte_count > 0 else 0
 
 
-def _apply_tolerance(memory_mb: int) -> int:
-    """Applies the shared estimate tolerance to a modeled memory figure and rounds it to a whole gigabyte.
+def _round_to_gigabyte(memory_mb: int) -> int:
+    """Rounds a memory figure up to a whole gigabyte, which is the quantum every estimate is reported at.
 
     Notes:
         A scheduler reserves memory in whole gigabytes, so an estimate landing mid-gigabyte is rounded there by
         whatever consumes it. Rounding here instead keeps the figure a plan records identical to the figure a
         submission requests, which is what lets a planned batch and a submitted one be compared directly.
+
+        A figure a dependency already sized is rounded here as well. Those models report at their own quantum, which
+        is finer than a gigabyte, so this is the boundary where every figure reaches one scale whichever model
+        produced it.
+
+    Args:
+        memory_mb: The memory to round, in megabytes.
+
+    Returns:
+        The memory in megabytes, rounded up to a whole gigabyte.
+    """
+    return math.ceil(memory_mb / _MEGABYTES_PER_GIGABYTE) * _MEGABYTES_PER_GIGABYTE
+
+
+def _apply_tolerance(memory_mb: int) -> int:
+    """Applies the shared estimate tolerance to a modeled memory figure and rounds it to a whole gigabyte.
+
+    Notes:
+        The tolerance is cindra's, which the sibling acquisition libraries carry at the same value, so every stage of
+        a mixed batch is weighed on one scale.
 
     Args:
         memory_mb: The modeled memory in megabytes, before any margin.
@@ -436,16 +364,78 @@ def _apply_tolerance(memory_mb: int) -> int:
     Returns:
         The reportable memory in megabytes, carrying the tolerance and rounded up to a whole gigabyte.
     """
-    reportable = int(memory_mb * _MEMORY_ESTIMATE_TOLERANCE) + 1
-    return math.ceil(reportable / _MEGABYTES_PER_GIGABYTE) * _MEGABYTES_PER_GIGABYTE
+    return _round_to_gigabyte(memory_mb=int(memory_mb * MEMORY_ESTIMATE_TOLERANCE) + 1)
 
 
-def _estimate_archive_reader_memory(archive_path: Path, cores: int) -> int:
-    """Estimates the memory a runtime, microcontroller-extraction, or camera-timestamp job holds.
+def _size_camera_extraction_job(archive_path: Path, declared_cores: int) -> JobFootprint:
+    """Sizes one camera timestamp extraction job through the video library's own sizing pass.
 
     Notes:
-        Each of those stages splits one log archive across a worker pool, and every worker opens the archive itself,
-        so the archive's directory is held once per allocated core.
+        The library reads the archive once and answers both halves of its model from that read, picking a single core
+        for an archive below its parallel-extraction threshold and its declared allocation above it, then estimating
+        the memory at the width it picked. Both figures are taken whole, so this package neither repeats the width
+        rule nor reserves cores for a pool the stage would not open.
+
+        Reading the archive reads its central directory alone, and the library refuses an archive it cannot read
+        because the job reading it could not run either. That refusal is the same condition this module reports as an
+        unmodeled floor, so the job falls back to the allocation its type declares.
+
+    Args:
+        archive_path: The path to the log archive the job reads.
+        declared_cores: The cores the job's type declares, which stand in when the archive cannot be read.
+
+    Returns:
+        The job's footprint, whose modeled flag is True when the archive was found and read.
+    """
+    try:
+        sizing = size_camera_extraction_job(archive_path=archive_path)
+    except FileNotFoundError:
+        return JobFootprint(
+            cores=declared_cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB), memory_modeled=False
+        )
+    return JobFootprint(
+        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
+    )
+
+
+def _size_controller_extraction_job(archive_path: Path, declared_cores: int) -> JobFootprint:
+    """Sizes one microcontroller data extraction job through the communication library's own sizing pass.
+
+    Notes:
+        The library reads the archive once and answers both halves of its model from that read, picking a single core
+        for an archive below its parallel-extraction threshold and its declared allocation above it, then estimating
+        the memory at the width it picked. Both figures are taken whole, so this package neither repeats the width
+        rule nor reserves cores for a pool the stage would not open.
+
+        Reading the archive reads its central directory alone, and the library refuses an archive it cannot read
+        because the job reading it could not run either. That refusal is the same condition this module reports as an
+        unmodeled floor, so the job falls back to the allocation its type declares.
+
+    Args:
+        archive_path: The path to the log archive the job reads.
+        declared_cores: The cores the job's type declares, which stand in when the archive cannot be read.
+
+    Returns:
+        The job's footprint, whose modeled flag is True when the archive was found and read.
+    """
+    try:
+        sizing = size_controller_extraction_job(archive_path=archive_path)
+    except FileNotFoundError:
+        return JobFootprint(
+            cores=declared_cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB), memory_modeled=False
+        )
+    return JobFootprint(
+        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
+    )
+
+
+def _estimate_runtime_reader_memory(archive_path: Path, cores: int) -> tuple[int, bool]:
+    """Estimates the memory one runtime log job holds.
+
+    Notes:
+        The stage splits one log archive across a worker pool, and every worker opens the archive itself, so the
+        archive's directory is held once per allocated core. The runtime pipeline is this package's own, so no
+        dependency models it.
 
     Args:
         archive_path: The path to the log archive the job reads.
@@ -455,9 +445,9 @@ def _estimate_archive_reader_memory(archive_path: Path, cores: int) -> int:
         The reportable memory in megabytes and a flag that is True when the archive was found and read.
     """
     if not archive_path.is_file():
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
     per_reader = _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * (per_reader + _SUBPROCESS_MEMORY_MB)), True
+    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * (per_reader + SPAWNED_CHILD_MEMORY_MB)), True
 
 
 def _estimate_checksum_memory(cores: int) -> int:
@@ -474,7 +464,7 @@ def _estimate_checksum_memory(cores: int) -> int:
     Returns:
         The reportable memory in megabytes.
     """
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * _CHECKSUM_READER_MEMORY_MB)
+    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * _CHECKSUM_READER_MEMORY_MB)
 
 
 def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:
@@ -505,7 +495,7 @@ def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:
     return widest
 
 
-def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> int:
+def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> tuple[int, bool]:
     """Estimates the memory one video motion-energy job holds, from the frame it decodes.
 
     Notes:
@@ -525,130 +515,127 @@ def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> int:
     per_worker = (
         _bytes_to_megabytes(byte_count=frame_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
         + _DECODER_BUFFER_MEMORY_MB
-        + _SUBPROCESS_MEMORY_MB
+        + SPAWNED_CHILD_MEMORY_MB
     )
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + cores * per_worker), True
+    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * per_worker), True
 
 
-def _estimate_binarization_memory(geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration) -> int:
-    """Estimates the memory the two-photon conversion stage holds, from the raw frame it reads a batch of at a time.
-
-    Args:
-        geometry: The recording's raw geometry.
-        configuration: The recording's resolved processing configuration.
-
-    Returns:
-        The reportable memory in megabytes.
-    """
-    batch_bytes = (
-        configuration.registration.batch_size
-        * geometry.raw_frame_pixels
-        * _RAW_SAMPLE_BYTES
-        * _BINARIZATION_BATCH_COPIES
-    )
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=batch_bytes))
-
-
-def _estimate_plane_registration_memory() -> int:
-    """Reports the memory one two-photon plane-registration job is charged.
+def _resolve_two_photon_geometry(
+    output_root: Path, data_path: Path, configuration: SingleRecordingConfiguration
+) -> RecordingGeometry | None:
+    """Reads a two-photon recording's shape through cindra's own geometry resolver.
 
     Notes:
-        Takes a flat allowance rather than a projection from the plane, for the reasons ``_REGISTRATION_MEMORY_MB``
-        records. Kept as a function so the stage is routed like every other, and so a projection can replace the
-        allowance here once what the footprint follows is known.
+        Resolved once per session rather than once per job, because the resolution reads the acquisition metadata and
+        one source file header while every job of the recording answers to the same shape.
 
-    Returns:
-        The reportable memory in megabytes.
-    """
-    return _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB)
-
-
-def _estimate_plane_processing_memory(
-    extent: tuple[int, int], geometry: _RawImagingGeometry, configuration: SingleRecordingConfiguration
-) -> int:
-    """Estimates the memory one two-photon plane-processing job holds, from that plane's shape and sample count.
-
-    Notes:
-        Detection sets the peak. The movie is binned down to at most the configured binned sample count, and the
-        temporal standard deviation then holds the binned frames, their difference, and the squared difference at
-        once. Registration narrows a plane to the region that stayed in frame before this stage reads it, so the raw
-        extent used here is the wider bound.
+        The result gates the session's two-photon estimates rather than sizing them, since cindra sizes each of its
+        stages from the recording itself. A session whose geometry resolves to None carries no readable raw imaging
+        data, so every one of its jobs falls back to the worker baseline.
 
     Args:
-        extent: The plane's height and width in pixels.
-        geometry: The recording's raw geometry.
-        configuration: The recording's resolved processing configuration.
+        output_root: The output root the recording's cindra configuration was given.
+        data_path: The raw imaging directory holding the recording's source files.
+        configuration: The recording's resolved processing configuration, consulted for the image names the
+            conversion stage excludes.
 
     Returns:
-        The reportable memory in megabytes.
+        The recording's geometry, or None when the session holds no readable raw imaging data.
     """
-    height, width = extent
-    detection = configuration.roi_detection
-
-    # Mirrors cindra's own bin sizing, which takes the coarsest of a single sample, the ratio that caps the binned
-    # sample count, and the transient decay window.
-    decay_samples = round(configuration.main.tau * geometry.sampling_rate)
-    bin_size = max(1, geometry.sample_count // max(1, detection.maximum_binned_frames), decay_samples)
-    binned_samples = max(1, geometry.sample_count // bin_size)
-
-    peak_bytes = _DETECTION_ARRAY_MULTIPLIER * binned_samples * height * width * _SINGLE_PRECISION_BYTES
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=peak_bytes))
+    try:
+        geometry = resolve_recording_geometry(
+            output_root=output_root,
+            data_path=data_path,
+            ignored_file_names=tuple(configuration.file_io.ignored_file_names),
+        )
+    except OSError, ValueError, RuntimeError:
+        return None
+    return geometry if geometry.planes else None
 
 
 def _estimate_two_photon_memory(
     job_name: str,
     specifier: str,
-    geometry: _RawImagingGeometry,
+    output_root: Path,
     configuration: SingleRecordingConfiguration,
-) -> int:
-    """Routes a two-photon job to the estimator matching its stage.
+    data_path: Path | None,
+) -> tuple[int, bool]:
+    """Estimates the memory one two-photon job holds, through cindra's own per-stage model.
+
+    Notes:
+        cindra rejects a stage it cannot size, either because the recording carries no readable raw imaging data or
+        because a per-plane specifier names a plane the recording does not hold. Both are the condition this module
+        reports as an unmodeled floor, so the refusal is translated rather than propagated.
 
     Args:
         job_name: The tracker job name identifying the stage.
         specifier: The plane specifier for a registration or processing job, empty for the binarization and
             combination stages.
-        geometry: The recording's raw geometry.
+        output_root: The output root the recording's cindra configuration was given.
         configuration: The recording's resolved processing configuration.
+        data_path: The raw imaging directory, consulted when the recording carries no output yet.
 
     Returns:
-        The reportable memory in megabytes.
+        The reportable memory in megabytes and a flag that is True when cindra sized the stage.
     """
-    if job_name == str(SingleRecordingJobNames.BINARIZE):
-        return _estimate_binarization_memory(geometry=geometry, configuration=configuration)
-    if job_name == str(SingleRecordingJobNames.COMBINE):
-        return _apply_tolerance(memory_mb=_COMBINATION_MEMORY_MB)
-
-    if job_name == str(SingleRecordingJobNames.REGISTER):
-        estimates = [_estimate_plane_registration_memory() for _ in geometry.plane_extents]
-    else:
-        estimates = [
-            _estimate_plane_processing_memory(extent=extent, geometry=geometry, configuration=configuration)
-            for extent in geometry.plane_extents
-        ]
-    plane_index = _resolve_plane_index(specifier=specifier)
-    if plane_index is not None and 0 <= plane_index < len(estimates):
-        return estimates[plane_index]
-    # Charges the largest per-plane estimate when the specifier does not resolve, so an unmatched job never
-    # underestimates.
-    return max(estimates)
+    try:
+        memory_mb = estimate_single_recording_job_memory_mb(
+            job_name=SingleRecordingJobNames(job_name),
+            specifier=specifier,
+            output_root=output_root,
+            configuration=configuration,
+            data_path=data_path,
+        )
+    except FileNotFoundError, ValueError:
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
+    return _round_to_gigabyte(memory_mb=memory_mb), True
 
 
-def _resolve_plane_index(specifier: str) -> int | None:
-    """Reads the plane index a per-plane job's specifier carries.
+def _estimate_multi_recording_memory(
+    job_name: MultiRecordingJobNames,
+    specifier: str,
+    recording_directories: tuple[Path, ...],
+    configuration: MultiRecordingConfiguration | None,
+    unmodeled_allowance_mb: int = 0,
+) -> tuple[int, bool]:
+    """Estimates the memory one cross-recording job holds, through cindra's own per-stage model.
+
+    Notes:
+        Both cross-recording stages read every recording of the animal they run over, so the whole recording set is
+        handed to the model whichever stage is being sized. cindra refuses a set any recording leaves short, which is
+        the condition this module reports as an unmodeled floor.
+
+        A stage whose refusal would otherwise report the bare worker baseline carries an allowance above it instead,
+        which stands in for the terms cindra's model would have read. That floor is what bounds how many of the
+        stage's jobs a batch admits at once, since a narrow allocation alone lets a core budget admit a great many.
 
     Args:
-        specifier: The job specifier, which names a plane by its index behind cindra's plane specifier prefix.
+        job_name: The cindra stage the job runs.
+        specifier: The job's tracker specifier, which names a session for the extraction stage and an animal for the
+            discovery stage.
+        recording_directories: The cindra output directory of every recording the job spans.
+        configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system
+            donates none.
+        unmodeled_allowance_mb: The memory charged above the worker baseline when cindra refuses to size the stage.
 
     Returns:
-        The plane index, or None when the specifier does not name one.
+        The reportable memory in megabytes and a flag that is True when cindra sized the stage.
     """
-    if not specifier.startswith(PLANE_SPECIFIER_PREFIX):
-        return None
-    digits = specifier.removeprefix(PLANE_SPECIFIER_PREFIX)
-    return int(digits) if digits.isdigit() else None
+    if configuration is None or not recording_directories:
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + unmodeled_allowance_mb), False
+    try:
+        memory_mb = estimate_multi_recording_job_memory_mb(
+            job_name=job_name,
+            specifier=specifier,
+            recording_directories=recording_directories,
+            configuration=configuration,
+        )
+    except FileNotFoundError, ValueError, RuntimeError:
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + unmodeled_allowance_mb), False
+    return _round_to_gigabyte(memory_mb=memory_mb), True
 
 
-def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio: float) -> int:
+def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio: float) -> tuple[int, bool]:
     """Estimates memory from the largest file in a directory matching a pattern, for a stage whose input is one of
     several files it may read.
 
@@ -665,13 +652,13 @@ def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio:
         The reportable memory in megabytes and a flag that is True when a candidate file was found and measured.
     """
     if not directory.is_dir():
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
     candidates = sorted(directory.glob(pattern), key=lambda path: path.stat().st_size, reverse=True)
     if not candidates:
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
     widest = candidates[0]
     return _apply_tolerance(
-        memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
+        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
     ), True
 
 
@@ -694,8 +681,39 @@ def _two_photon_output_directory(project_root: Path, animal: str, session: str) 
     return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.cindra_data_path
 
 
+def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:
+    """Resolves the cindra output directory of every recording one animal contributes to a dataset.
+
+    Notes:
+        This is the recording set the animal's materialized multi-recording configuration names, resolved from the
+        project root rather than read back from that file, so a dataset whose configurations have not been written
+        yet is still sizable. A session that has moved to long-term storage contributes no directory.
+
+    Args:
+        dataset: The resolved dataset the animal belongs to.
+        animal: The animal whose recordings are resolved.
+        project_root: The path to the project's root directory.
+
+    Returns:
+        The cindra output directory of every recording still present under the project root.
+    """
+    directories: list[Path] = []
+    for entry in dataset.get_sessions_for_animal(animal=animal):
+        if not project_root.joinpath(animal, entry.session).is_dir():
+            continue
+        directories.append(
+            _two_photon_output_directory(project_root=project_root, animal=animal, session=entry.session)
+        )
+    return tuple(directories)
+
+
 def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -> _RecordingGeometry | None:
     """Reads a processed recording's shape from the arrays the single-recording pipeline wrote.
+
+    Notes:
+        The combined metadata archive gates the result alongside the trace array, because both are written by the
+        combination stage and a recording that has not reached the end of it carries no output the forging stages can
+        read. Neither file's contents are loaded, so the resolution reads array headers and directory entries alone.
 
     Args:
         project_root: The path to the project's root directory.
@@ -706,14 +724,12 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
         The recording's geometry, or None when the session holds no processed imaging output.
     """
     directory = _two_photon_output_directory(project_root=project_root, animal=animal, session=session)
-    traces = _read_array_shape(array_path=directory.joinpath(_FLUORESCENCE_FILENAME))
-    metadata_path = directory.joinpath(_COMBINED_METADATA_FILENAME)
-    if traces is None or not metadata_path.is_file():
+    traces = _read_array_shape(
+        array_path=resolve_array_path(root_path=directory, array=RecordingArrays.CELL_FLUORESCENCE)
+    )
+    if traces is None or not directory.joinpath(COMBINED_METADATA_FILENAME).is_file():
         return None
-
-    with np.load(file=metadata_path) as metadata:
-        pixels = int(metadata["combined_height"][0]) * int(metadata["combined_width"][0])
-    return _RecordingGeometry(regions=traces[0], samples=traces[1], pixels=pixels)
+    return _RecordingGeometry(regions=traces[0], samples=traces[1])
 
 
 def _read_array_shape(array_path: Path) -> tuple[int, int] | None:
@@ -799,10 +815,12 @@ def _resolve_tracked_regions(
         return 1
 
     tracked = _read_array_shape(
-        array_path=_two_photon_output_directory(project_root=project_root, animal=animal, session=session).joinpath(
-            _MULTI_RECORDING_DIRECTORY,
-            multi_recording_dataset_directory(animal_id=animal, dataset_name=dataset.name),
-            _FLUORESCENCE_FILENAME,
+        array_path=resolve_array_path(
+            root_path=_two_photon_output_directory(project_root=project_root, animal=animal, session=session).joinpath(
+                MULTI_RECORDING_DIRECTORY_NAME,
+                multi_recording_dataset_directory(animal_id=animal, dataset_name=dataset.name),
+            ),
+            array=RecordingArrays.CELL_FLUORESCENCE,
         )
     )
     if tracked is not None:
@@ -814,60 +832,6 @@ def _resolve_tracked_regions(
     # A template is one cluster of regions drawn from several recordings, so the count settles at the scale of a
     # single recording's own regions rather than the pooled total the prevalence term alone allows.
     return max(1, min(pooled, max(geometry.regions for geometry in geometries)))
-
-
-def _estimate_discovery_memory(dataset: DatasetData, animal: str, project_root: Path) -> tuple[int, bool]:
-    """Estimates the memory one cross-recording discovery job holds for a whole animal.
-
-    Notes:
-        Registration caches one deformation per unordered recording pair and never evicts it, so the plane count
-        grows with the square of the animal's recording count. The clustering stage that follows sizes itself from
-        local region crowding, which nothing on disk predicts, so it contributes a flat allowance.
-
-    Args:
-        dataset: The resolved dataset the animal belongs to.
-        animal: The animal whose recordings are registered against each other.
-        project_root: The path to the project's root directory.
-
-    Returns:
-        The reportable memory in megabytes and a flag stating whether the recording geometry was found.
-    """
-    geometries = [
-        geometry
-        for entry in dataset.get_sessions_for_animal(animal=animal)
-        if (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
-        is not None
-    ]
-    if not geometries:
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _DISCOVERY_CLUSTERING_MEMORY_MB), False
-
-    recordings = len(geometries)
-    widest = max(geometry.pixels for geometry in geometries)
-    planes = recordings * (recordings - 1) + _DISCOVERY_PLANES_PER_RECORDING * recordings
-    registration = _bytes_to_megabytes(byte_count=planes * widest * _SINGLE_PRECISION_BYTES)
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + registration + _DISCOVERY_CLUSTERING_MEMORY_MB), True
-
-
-def _estimate_extraction_memory(
-    geometry: _RecordingGeometry | None, regions: int, configuration: MultiRecordingConfiguration | None
-) -> tuple[int, bool]:
-    """Estimates the memory one aligned-fluorescence extraction job holds for a single recording.
-
-    Args:
-        geometry: The recording's processed geometry.
-        regions: The tracked regions the job extracts.
-        configuration: The resolved multi-recording configuration, which reports the batch the job reads in.
-
-    Returns:
-        The reportable memory in megabytes and a flag stating whether the recording geometry was found.
-    """
-    if geometry is None or configuration is None:
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
-
-    traces = _EXTRACTION_TRACE_COPIES * regions * geometry.samples * _SINGLE_PRECISION_BYTES
-    batch = configuration.signal_extraction.batch_size * geometry.pixels * _EXTRACTION_BATCH_BYTES_PER_PIXEL
-    retained = _EXTRACTION_BATCH_RETENTION * batch
-    return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=traces + retained)), True
 
 
 def _estimate_assembly_memory(geometry: _RecordingGeometry | None, regions: int) -> tuple[int, bool]:
@@ -886,13 +850,13 @@ def _estimate_assembly_memory(geometry: _RecordingGeometry | None, regions: int)
         The reportable memory in megabytes and a flag stating whether the fluorescence geometry was found.
     """
     if geometry is None:
-        return _apply_tolerance(memory_mb=_WORKER_MEMORY_MB), False
+        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
 
     columns = (
         _ASSEMBLY_FLUORESCENCE_COLUMNS * _ASSEMBLY_WRITE_COPIES * geometry.samples * regions * _SINGLE_PRECISION_BYTES
     )
     sub_datasets = geometry.samples * _SUB_DATASET_BYTES_PER_SAMPLE
     return (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
+        _apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
         True,
     )

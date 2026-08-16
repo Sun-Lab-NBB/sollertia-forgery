@@ -1,4 +1,4 @@
-"""Tests the memory estimators that size each job's working set from the acquisition and processed data it reads."""
+"""Tests the sizing pass that resolves each job's cores and working set from the data it reads."""
 
 from __future__ import annotations
 
@@ -7,11 +7,21 @@ import shutil
 from typing import TYPE_CHECKING
 
 import numpy as np
-from cindra import SingleRecordingJobNames
-import pytest
+from cindra import (
+    WORKER_MEMORY_MB,
+    PARAMETERS_FILENAME,
+    PLANE_SPECIFIER_PREFIX,
+    SPAWNED_CHILD_MEMORY_MB,
+    MultiRecordingJobNames,
+    SingleRecordingJobNames,
+    estimate_multi_recording_job_memory_mb,
+    estimate_single_recording_job_memory_mb,
+)
 import tifffile
-from cindra.io import PARAMETERS_FILENAME
-from cindra.allocation import PLANE_SPECIFIER_PREFIX
+from ataraxis_video_system import (
+    CAMERA_EXTRACTION_JOB_CORES,
+    size_archive_job as size_camera_extraction_job,
+)
 from sollertia_shared_assets import (
     DatasetData,
     SessionData,
@@ -19,9 +29,18 @@ from sollertia_shared_assets import (
     SessionTypes,
     DatasetSession,
 )
+from ataraxis_communication_interface import (
+    CONTROLLER_EXTRACTION_JOB_CORES,
+    size_archive_job as size_controller_extraction_job,
+)
 from sollertia_shared_assets.data_classes.surgery_data import SubjectData, ProcedureData
 
-from sollertia_forgery.video import ENERGY_JOB_NAME, RENAME_JOB_NAME, TRACKING_JOB_NAME, TIMESTAMP_JOB_NAME
+from sollertia_forgery.video import (
+    ENERGY_JOB_NAME,
+    RENAME_JOB_NAME,
+    TRACKING_JOB_NAME,
+    CAMERA_EXTRACTION_JOB_NAME,
+)
 from sollertia_forgery.forging import (
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
@@ -29,27 +48,29 @@ from sollertia_forgery.forging import (
 )
 from sollertia_forgery.runtime import RUNTIME_JOB_NAME
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
+from sollertia_forgery.registries import (
+    resolve_two_photon_data_locator,
+    resolve_multi_recording_configuration_resolver,
+    resolve_single_recording_configuration_resolver,
+)
 from sollertia_forgery.shared_assets import ProcessingPipelines, multi_recording_dataset_directory
-from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, EXTRACTION_JOB_NAME
+from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 from sollertia_forgery.orchestration.footprints import (
-    _WORKER_MEMORY_MB,
-    _SUBPROCESS_MEMORY_MB,
-    _COMBINATION_MEMORY_MB,
+    _ASSEMBLY_WRITE_COPIES,
     _POSE_PREDICTION_RATIO,
-    _REGISTRATION_MEMORY_MB,
     _RETAINED_FRAME_BUFFERS,
     _SINGLE_PRECISION_BYTES,
     _ARCHIVE_DIRECTORY_RATIO,
-    _EXTRACTION_TRACE_COPIES,
     _DECODER_BUFFER_MEMORY_MB,
     _CHECKSUM_READER_MEMORY_MB,
-    _EXTRACTION_BATCH_RETENTION,
-    _DISCOVERY_CLUSTERING_MEMORY_MB,
-    _EXTRACTION_BATCH_BYTES_PER_PIXEL,
+    _DISCOVERY_FLOOR_MEMORY_MB,
+    _SUB_DATASET_BYTES_PER_SAMPLE,
+    _ASSEMBLY_FLUORESCENCE_COLUMNS,
+    JobFootprint,
     _apply_tolerance,
     _read_array_shape,
+    _round_to_gigabyte,
     _bytes_to_megabytes,
-    _resolve_plane_index,
     estimate_dataset_job_memory,
     estimate_session_job_memory,
 )
@@ -60,8 +81,12 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-BASELINE_MB: int = _apply_tolerance(memory_mb=_WORKER_MEMORY_MB)
+BASELINE_MB: int = _apply_tolerance(memory_mb=WORKER_MEMORY_MB)
 """The figure every estimate falls back to when the input it would scale with is absent."""
+
+PARALLEL_ARCHIVE_MESSAGES: int = 35_000
+"""The messages a synthetic log archive holds to earn the parallel extraction path from both acquisition libraries.
+The video library carries the higher of the two message thresholds, so an archive this size clears both."""
 
 FRAME_HEIGHT: int = 300
 """The line count of one unsliced acquisition frame the synthetic imaging stacks carry."""
@@ -252,19 +277,124 @@ def build_dataset(
     )
 
 
-def two_photon_estimates(
-    session: SessionData, jobs: list[tuple[str, str, int]]
-) -> dict[tuple[str, str], tuple[int, bool]]:
-    """Estimates the named two-photon jobs of one session.
+def two_photon_estimates(session: SessionData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+    """Sizes the named two-photon jobs of one session.
 
     Args:
         session: The session the jobs operate on.
-        jobs: The jobs as name, specifier, and core triples.
+        jobs: The jobs as name, specifier, and declared core triples.
 
     Returns:
-        The estimate and modeled flag of every named job.
+        The footprint of every named job.
     """
     return estimate_session_job_memory(pipeline=ProcessingPipelines.TWO_PHOTON, session=session, jobs=jobs)
+
+
+def baseline_footprint(cores: int) -> JobFootprint:
+    """Reports the footprint a job takes when the input its memory would scale with is absent.
+
+    Args:
+        cores: The declared allocation the job falls back to.
+
+    Returns:
+        The unmodeled footprint the job is planned at.
+    """
+    return JobFootprint(cores=cores, memory_mb=BASELINE_MB, memory_modeled=False)
+
+
+def camera_library_footprint(archive: Path) -> JobFootprint:
+    """Reports the footprint the video library's own sizing pass gives one archive, at the scale slf reports it on.
+
+    Args:
+        archive: The log archive the extraction job reads.
+
+    Returns:
+        The library's cores and its memory, rounded up to the whole gigabyte every estimate lands on.
+    """
+    sizing = size_camera_extraction_job(archive_path=archive)
+    return JobFootprint(
+        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
+    )
+
+
+def controller_library_footprint(archive: Path) -> JobFootprint:
+    """Reports the footprint the communication library's own sizing pass gives one archive, at slf's scale.
+
+    Args:
+        archive: The log archive the extraction job reads.
+
+    Returns:
+        The library's cores and its memory, rounded up to the whole gigabyte every estimate lands on.
+    """
+    sizing = size_controller_extraction_job(archive_path=archive)
+    return JobFootprint(
+        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
+    )
+
+
+def cindra_single_recording_memory(session: SessionData, job_name: SingleRecordingJobNames, specifier: str) -> int:
+    """Reports the figure cindra's own model gives one single-recording stage, at the scale slf reports it on.
+
+    Args:
+        session: The session the job operates on.
+        job_name: The cindra stage the job runs.
+        specifier: The job's tracker specifier, which names a plane for the per-plane stages.
+
+    Returns:
+        The reportable memory in megabytes, rounded up to the whole gigabyte every estimate lands on.
+    """
+    resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
+    locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
+    return _round_to_gigabyte(
+        memory_mb=estimate_single_recording_job_memory_mb(
+            job_name=job_name,
+            specifier=specifier,
+            output_root=session.processed_data_path,
+            configuration=resolve_configuration(session),
+            data_path=locate_two_photon_data(session),
+        )
+    )
+
+
+def cindra_multi_recording_memory(
+    dataset: DatasetData, sessions: Sequence[SessionData], job_name: MultiRecordingJobNames, specifier: str
+) -> int:
+    """Reports the figure cindra's own model gives one cross-recording stage, at the scale slf reports it on.
+
+    Args:
+        dataset: The dataset whose acquisition system donates the multi-recording configuration.
+        sessions: The sessions whose cindra output directories the stage spans.
+        job_name: The cindra stage the job runs.
+        specifier: The job's tracker specifier, naming a session for extraction and an animal for discovery.
+
+    Returns:
+        The reportable memory in megabytes, rounded up to the whole gigabyte every estimate lands on.
+    """
+    resolve_configuration = resolve_multi_recording_configuration_resolver(system=dataset.acquisition_system)
+    return _round_to_gigabyte(
+        memory_mb=estimate_multi_recording_job_memory_mb(
+            job_name=job_name,
+            specifier=specifier,
+            recording_directories=[session.processed_data.cindra_data_path for session in sessions],
+            configuration=resolve_configuration(sessions[0]),
+        )
+    )
+
+
+def assembly_memory(samples: int, regions: int) -> int:
+    """Reports the figure the per-session assembly model gives a recording of the named shape.
+
+    Args:
+        samples: The samples each retained fluorescence column holds.
+        regions: The regions each retained fluorescence column spans.
+
+    Returns:
+        The reportable memory in megabytes.
+    """
+    columns = _ASSEMBLY_FLUORESCENCE_COLUMNS * _ASSEMBLY_WRITE_COPIES * samples * regions * _SINGLE_PRECISION_BYTES
+    return _apply_tolerance(
+        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + samples * _SUB_DATASET_BYTES_PER_SAMPLE)
+    )
 
 
 # Session estimates
@@ -278,12 +408,14 @@ def test_checksum_memory_scales_with_the_readers_a_job_opens(experiment_session:
         jobs=[(CHECKSUM_JOB_NAME, "", 8), (CHECKSUM_JOB_NAME, "wide", 16)],
     )
 
-    narrow, narrow_modeled = estimates[CHECKSUM_JOB_NAME, ""]
-    wide, wide_modeled = estimates[CHECKSUM_JOB_NAME, "wide"]
-    assert narrow == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + 8 * _CHECKSUM_READER_MEMORY_MB)
-    assert wide > narrow
-    assert narrow_modeled
-    assert wide_modeled
+    narrow = estimates[CHECKSUM_JOB_NAME, ""]
+    wide = estimates[CHECKSUM_JOB_NAME, "wide"]
+    assert narrow.memory_mb == _apply_tolerance(memory_mb=WORKER_MEMORY_MB + 8 * _CHECKSUM_READER_MEMORY_MB)
+    assert wide.memory_mb > narrow.memory_mb
+    assert narrow.memory_modeled
+    assert wide.memory_modeled
+    # The checksum stage is this package's own, so each job is planned at the allocation it was handed.
+    assert (narrow.cores, wide.cores) == (8, 16)
 
 
 def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
@@ -296,16 +428,92 @@ def test_an_archive_reader_estimate_scales_with_the_archive_on_disk(
     estimates = estimate_session_job_memory(
         pipeline=ProcessingPipelines.RUNTIME,
         session=experiment_session,
-        jobs=[(RUNTIME_JOB_NAME, "51", 4), (EXTRACTION_JOB_NAME, "51", 8), (TIMESTAMP_JOB_NAME, "77", 8)],
+        jobs=[
+            (RUNTIME_JOB_NAME, "51", 4),
+            (CONTROLLER_EXTRACTION_JOB_NAME, "51", 8),
+            (CAMERA_EXTRACTION_JOB_NAME, "77", 8),
+        ],
     )
 
-    assert estimates[RUNTIME_JOB_NAME, "51"] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + 4 * (per_reader + _SUBPROCESS_MEMORY_MB)),
-        True,
+    assert estimates[RUNTIME_JOB_NAME, "51"] == JobFootprint(
+        cores=4,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + 4 * (per_reader + SPAWNED_CHILD_MEMORY_MB)),
+        memory_modeled=True,
     )
-    assert estimates[EXTRACTION_JOB_NAME, "51"][0] > estimates[RUNTIME_JOB_NAME, "51"][0]
-    # The camera archive of source 77 was never written, so its estimate falls back to the worker baseline.
-    assert estimates[TIMESTAMP_JOB_NAME, "77"] == (BASELINE_MB, False)
+    # The extraction stage belongs to the communication library, so both halves of its figure are that library's own
+    # sizing pass, with the memory rounded to the gigabyte every reportable estimate lands on.
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "51"] == controller_library_footprint(archive=archive)
+    # The camera archive of source 77 was never written, so its estimate falls back to the declared allocation on the
+    # worker baseline.
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == baseline_footprint(cores=8)
+
+
+def test_a_camera_extraction_estimate_follows_the_video_library_model(
+    experiment_session: SessionData, write_log_archive: Callable[..., Path]
+) -> None:
+    """The camera timestamp stage belongs to the video library, so slf reports that library's figures unchanged."""
+    archive = write_log_archive(experiment_session.raw_data.behavior_data_path.joinpath("77_log.npz"), 77, [(5, b"ab")])
+
+    estimates = estimate_session_job_memory(
+        pipeline=ProcessingPipelines.VIDEO,
+        session=experiment_session,
+        jobs=[(CAMERA_EXTRACTION_JOB_NAME, "77", 8), (CONTROLLER_EXTRACTION_JOB_NAME, "99", 8)],
+    )
+
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == camera_library_footprint(archive=archive)
+    # The controller archive of source 99 was never written, so the communication library refuses it as well, which
+    # leaves that job on the allocation its type declares.
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "99"] == baseline_footprint(cores=8)
+
+
+def test_an_extraction_job_is_sized_at_the_width_its_own_archive_earns(
+    experiment_session: SessionData, write_log_archive: Callable[..., Path]
+) -> None:
+    """Each library picks a width from the archive its job reads, so a small archive runs sequentially whatever
+    allocation this package declared for the stage.
+    """
+    archive = write_log_archive(
+        experiment_session.raw_data.behavior_data_path.joinpath("77_log.npz"),
+        77,
+        [(index, bytes(400)) for index in range(64)],
+    )
+
+    estimates = estimate_session_job_memory(
+        pipeline=ProcessingPipelines.VIDEO,
+        session=experiment_session,
+        jobs=[(CAMERA_EXTRACTION_JOB_NAME, "77", 16), (CONTROLLER_EXTRACTION_JOB_NAME, "77", 16)],
+    )
+
+    # Sixty-four messages sit well below either library's parallel-extraction threshold, so neither job opens a pool
+    # and neither holds the sixteen cores this call declared for it.
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == camera_library_footprint(archive=archive)
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"].cores == 1
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"] == controller_library_footprint(archive=archive)
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"].cores == 1
+
+
+def test_an_archive_above_the_parallel_threshold_earns_each_librarys_declared_width(
+    experiment_session: SessionData, write_log_archive: Callable[..., Path]
+) -> None:
+    """An archive dense enough to repay a pool earns the allocation the library that owns the stage declares, and the
+    memory that comes back is the memory of that width rather than of the width this package asked for.
+    """
+    archive = write_log_archive(
+        experiment_session.raw_data.behavior_data_path.joinpath("77_log.npz"),
+        77,
+        [(index, b"ab") for index in range(PARALLEL_ARCHIVE_MESSAGES)],
+    )
+
+    estimates = estimate_session_job_memory(
+        pipeline=ProcessingPipelines.VIDEO,
+        session=experiment_session,
+        jobs=[(CAMERA_EXTRACTION_JOB_NAME, "77", 1), (CONTROLLER_EXTRACTION_JOB_NAME, "77", 1)],
+    )
+
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == camera_library_footprint(archive=archive)
+    assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"].cores == CAMERA_EXTRACTION_JOB_CORES
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"] == controller_library_footprint(archive=archive)
+    assert estimates[CONTROLLER_EXTRACTION_JOB_NAME, "77"].cores == CONTROLLER_EXTRACTION_JOB_CORES
 
 
 def test_a_parse_estimate_follows_the_widest_archive_in_the_behavior_directory(
@@ -323,9 +531,11 @@ def test_a_parse_estimate_follows_the_widest_archive_in_the_behavior_directory(
     )
 
     assert widest.stat().st_size > behavior.joinpath("51_log.npz").stat().st_size
-    modeled, is_modeled = estimates[PARSE_JOB_NAME, "52_1_1"]
-    assert modeled == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(widest.stat().st_size * 3.4))
-    assert is_modeled
+    assert estimates[PARSE_JOB_NAME, "52_1_1"] == JobFootprint(
+        cores=1,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(widest.stat().st_size * 3.4)),
+        memory_modeled=True,
+    )
 
 
 def test_a_parse_estimate_falls_back_when_the_behavior_directory_holds_no_archive(
@@ -340,7 +550,7 @@ def test_a_parse_estimate_falls_back_when_the_behavior_directory_holds_no_archiv
         jobs=[(PARSE_JOB_NAME, "52_1_1", 1)],
     )
 
-    assert estimates[PARSE_JOB_NAME, "52_1_1"] == (BASELINE_MB, False)
+    assert estimates[PARSE_JOB_NAME, "52_1_1"] == baseline_footprint(cores=1)
 
 
 def test_a_parse_estimate_falls_back_when_the_behavior_directory_is_absent(
@@ -355,7 +565,7 @@ def test_a_parse_estimate_falls_back_when_the_behavior_directory_is_absent(
         jobs=[(PARSE_JOB_NAME, "52_1_1", 1)],
     )
 
-    assert estimates[PARSE_JOB_NAME, "52_1_1"] == (BASELINE_MB, False)
+    assert estimates[PARSE_JOB_NAME, "52_1_1"] == baseline_footprint(cores=1)
 
 
 def test_a_video_estimate_charges_every_job_the_widest_recorded_frame(
@@ -386,18 +596,21 @@ def test_a_video_estimate_charges_every_job_the_widest_recorded_frame(
     per_worker = (
         _bytes_to_megabytes(byte_count=widest_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
         + _DECODER_BUFFER_MEMORY_MB
-        + _SUBPROCESS_MEMORY_MB
+        + SPAWNED_CHILD_MEMORY_MB
     )
-    assert estimates[ENERGY_JOB_NAME, "51"] == (_apply_tolerance(memory_mb=_WORKER_MEMORY_MB + 16 * per_worker), True)
-    assert estimates[TRACKING_JOB_NAME, "51"] == (
-        _apply_tolerance(
-            memory_mb=_WORKER_MEMORY_MB
+    assert estimates[ENERGY_JOB_NAME, "51"] == JobFootprint(
+        cores=16, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + 16 * per_worker), memory_modeled=True
+    )
+    assert estimates[TRACKING_JOB_NAME, "51"] == JobFootprint(
+        cores=1,
+        memory_mb=_apply_tolerance(
+            memory_mb=WORKER_MEMORY_MB
             + _bytes_to_megabytes(byte_count=predictions.stat().st_size * _POSE_PREDICTION_RATIO)
         ),
-        True,
+        memory_modeled=True,
     )
     # Renaming performs a fixed handful of filesystem operations, so it models nothing and takes the floor.
-    assert estimates[RENAME_JOB_NAME, "51"] == (BASELINE_MB, False)
+    assert estimates[RENAME_JOB_NAME, "51"] == baseline_footprint(cores=1)
 
 
 def test_a_video_estimate_falls_back_when_the_session_recorded_no_camera(experiment_session: SessionData) -> None:
@@ -408,13 +621,13 @@ def test_a_video_estimate_falls_back_when_the_session_recorded_no_camera(experim
         jobs=[(ENERGY_JOB_NAME, "51", 16), (TRACKING_JOB_NAME, "51", 1)],
     )
 
-    energy, energy_modeled = estimates[ENERGY_JOB_NAME, "51"]
+    energy = estimates[ENERGY_JOB_NAME, "51"]
     # No frame contributes no pixels, so the estimate covers the decoder buffers and the children alone.
-    assert energy == _apply_tolerance(
-        memory_mb=_WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + _SUBPROCESS_MEMORY_MB)
+    assert energy.memory_mb == _apply_tolerance(
+        memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
     )
-    assert energy_modeled
-    assert estimates[TRACKING_JOB_NAME, "51"] == (BASELINE_MB, False)
+    assert energy.memory_modeled
+    assert estimates[TRACKING_JOB_NAME, "51"] == baseline_footprint(cores=1)
 
 
 def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_session: SessionData) -> None:
@@ -425,8 +638,8 @@ def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_ses
         pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(ENERGY_JOB_NAME, "51", 4)]
     )
 
-    assert estimates[ENERGY_JOB_NAME, "51"][0] == _apply_tolerance(
-        memory_mb=_WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + _SUBPROCESS_MEMORY_MB)
+    assert estimates[ENERGY_JOB_NAME, "51"].memory_mb == _apply_tolerance(
+        memory_mb=WORKER_MEMORY_MB + 4 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
     )
 
 
@@ -449,28 +662,30 @@ def test_two_photon_stages_are_sized_from_the_raw_recording_geometry(experiment_
         ],
     )
 
-    # Conversion reads one batch of the unsliced frame at a time, which the configured batch size and the frame set.
-    binarize_bytes = 100 * FRAME_HEIGHT * FRAME_WIDTH * 2 * 2
-    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=binarize_bytes)),
-        True,
-    )
-    # Combination takes a flat allowance, reported through the shared tolerance like every other stage.
-    assert estimates[str(SingleRecordingJobNames.COMBINE), ""] == (
-        _apply_tolerance(memory_mb=_COMBINATION_MEMORY_MB),
-        True,
-    )
-    # Registration takes a flat allowance rather than a projection from its plane, so every plane is charged alike.
-    first_plane = estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0"][0]
-    second_plane = estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1"][0]
-    assert first_plane == second_plane == _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB)
-    assert estimates[str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}0"][1]
+    # Every two-photon stage belongs to cindra, so each figure is cindra's own model rounded to the reportable
+    # gigabyte rather than a projection this package repeats.
+    for job_name, specifier, cores in (
+        (SingleRecordingJobNames.BINARIZE, "", 4),
+        (SingleRecordingJobNames.COMBINE, "", 1),
+        (SingleRecordingJobNames.REGISTER, f"{PLANE_SPECIFIER_PREFIX}0", 8),
+        (SingleRecordingJobNames.REGISTER, f"{PLANE_SPECIFIER_PREFIX}1", 8),
+        (SingleRecordingJobNames.PROCESS, f"{PLANE_SPECIFIER_PREFIX}0", 10),
+    ):
+        # cindra runs each of its stages at one measured width whatever the recording holds, so every job keeps the
+        # allocation it was handed while its memory follows the recording.
+        assert estimates[str(job_name), specifier] == JobFootprint(
+            cores=cores,
+            memory_mb=cindra_single_recording_memory(
+                session=experiment_session, job_name=job_name, specifier=specifier
+            ),
+            memory_modeled=True,
+        )
 
 
-def test_a_plane_job_whose_specifier_does_not_resolve_takes_the_widest_plane(
+def test_a_plane_job_whose_specifier_names_no_plane_takes_the_widest_plane(
     experiment_session: SessionData,
 ) -> None:
-    """An unmatched specifier is charged the largest per-plane figure, so it never understates its demand."""
+    """A specifier naming no index at all is charged the largest per-plane figure, so it never understates."""
     write_surgery_metadata(session=experiment_session)
     write_raw_imaging(session=experiment_session)
 
@@ -478,20 +693,48 @@ def test_a_plane_job_whose_specifier_does_not_resolve_takes_the_widest_plane(
         session=experiment_session,
         jobs=[
             (str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1", 8),
-            (str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}9", 8),
             (str(SingleRecordingJobNames.REGISTER), "an_unstructured_specifier", 8),
             (str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}x", 10),
             (str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}1", 10),
         ],
     )
 
-    widest_registration = estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1"][0]
-    # An index past the last plane and a specifier naming no index both resolve to the widest plane's figure.
-    assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}9"][0] == widest_registration
-    assert estimates[str(SingleRecordingJobNames.REGISTER), "an_unstructured_specifier"][0] == widest_registration
-    assert (
-        estimates[str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}x"][0]
-        == estimates[str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}1"][0]
+    widest_registration = cindra_single_recording_memory(
+        session=experiment_session, job_name=SingleRecordingJobNames.REGISTER, specifier=""
+    )
+    widest_processing = cindra_single_recording_memory(
+        session=experiment_session, job_name=SingleRecordingJobNames.PROCESS, specifier=""
+    )
+    assert estimates[str(SingleRecordingJobNames.REGISTER), "an_unstructured_specifier"] == JobFootprint(
+        cores=8, memory_mb=widest_registration, memory_modeled=True
+    )
+    # A specifier that does name a plane the recording holds is charged that plane alone, not the widest one.
+    assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}1"] == JobFootprint(
+        cores=8,
+        memory_mb=cindra_single_recording_memory(
+            session=experiment_session,
+            job_name=SingleRecordingJobNames.REGISTER,
+            specifier=f"{PLANE_SPECIFIER_PREFIX}1",
+        ),
+        memory_modeled=True,
+    )
+    # A prefix carrying no readable index names no plane either, so it is charged the same widest figure.
+    assert estimates[str(SingleRecordingJobNames.PROCESS), f"{PLANE_SPECIFIER_PREFIX}x"] == JobFootprint(
+        cores=10, memory_mb=widest_processing, memory_modeled=True
+    )
+
+
+def test_a_plane_job_naming_a_plane_the_recording_does_not_hold_falls_back(experiment_session: SessionData) -> None:
+    """cindra refuses to size a plane the recording never held, which leaves the job on the worker baseline."""
+    write_surgery_metadata(session=experiment_session)
+    write_raw_imaging(session=experiment_session)
+
+    estimates = two_photon_estimates(
+        session=experiment_session, jobs=[(str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}99", 8)]
+    )
+
+    assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}99"] == baseline_footprint(
+        cores=8
     )
 
 
@@ -504,10 +747,14 @@ def test_a_recording_declaring_no_regions_is_read_as_one_full_frame_plane(experi
         session=experiment_session, jobs=[(str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0", 8)]
     )
 
-    # Registration carries a flat allowance, so a recording naming no region span is charged the same as any other.
-    assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0"] == (
-        _apply_tolerance(memory_mb=_REGISTRATION_MEMORY_MB),
-        True,
+    assert estimates[str(SingleRecordingJobNames.REGISTER), f"{PLANE_SPECIFIER_PREFIX}0"] == JobFootprint(
+        cores=8,
+        memory_mb=cindra_single_recording_memory(
+            session=experiment_session,
+            job_name=SingleRecordingJobNames.REGISTER,
+            specifier=f"{PLANE_SPECIFIER_PREFIX}0",
+        ),
+        memory_modeled=True,
     )
 
 
@@ -520,8 +767,8 @@ def test_two_photon_jobs_fall_back_when_the_session_holds_no_raw_imaging(experim
         jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4), (str(SingleRecordingJobNames.COMBINE), "", 1)],
     )
 
-    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == (BASELINE_MB, False)
-    assert estimates[str(SingleRecordingJobNames.COMBINE), ""] == (BASELINE_MB, False)
+    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == baseline_footprint(cores=4)
+    assert estimates[str(SingleRecordingJobNames.COMBINE), ""] == baseline_footprint(cores=1)
 
 
 def test_two_photon_jobs_fall_back_when_the_imaging_directory_holds_no_parameters(
@@ -533,7 +780,7 @@ def test_two_photon_jobs_fall_back_when_the_imaging_directory_holds_no_parameter
 
     estimates = two_photon_estimates(session=experiment_session, jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4)])
 
-    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == (BASELINE_MB, False)
+    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == baseline_footprint(cores=4)
 
 
 def test_two_photon_jobs_fall_back_when_every_image_is_excluded(experiment_session: SessionData) -> None:
@@ -545,7 +792,23 @@ def test_two_photon_jobs_fall_back_when_every_image_is_excluded(experiment_sessi
 
     estimates = two_photon_estimates(session=experiment_session, jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4)])
 
-    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == (BASELINE_MB, False)
+    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == baseline_footprint(cores=4)
+
+
+def test_two_photon_jobs_fall_back_when_the_acquisition_parameters_cannot_be_read(
+    experiment_session: SessionData,
+) -> None:
+    """A parameters file the reader rejects names no geometry, so the refusal is reported as the floor rather than
+    propagated to the caller sizing the batch.
+    """
+    write_surgery_metadata(session=experiment_session)
+    directory = experiment_session.raw_data_path.joinpath("mesoscope_data")
+    write_raw_imaging(session=experiment_session)
+    directory.joinpath(PARAMETERS_FILENAME).write_text("{not valid json")
+
+    estimates = two_photon_estimates(session=experiment_session, jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4)])
+
+    assert estimates[str(SingleRecordingJobNames.BINARIZE), ""] == baseline_footprint(cores=4)
 
 
 # Dataset estimates
@@ -576,18 +839,33 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
         ],
     )
 
-    discovery, discovery_modeled = estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"]
-    # Two recordings hold one pairwise deformation plus the per-recording planes, over the combined field extent.
-    planes = 2 * (2 - 1) + 12 * 2
-    registration = _bytes_to_megabytes(byte_count=planes * 128 * 96 * _SINGLE_PRECISION_BYTES)
-    assert discovery == _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + registration + _DISCOVERY_CLUSTERING_MEMORY_MB)
-    assert discovery_modeled
-    # Reportable figures land on whole gigabytes, so a modeled estimate at this fixture's scale shares the baseline's
-    # gigabyte. The modeled flag rather than the magnitude is what states that a model produced the figure.
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name][1]
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name][0] >= BASELINE_MB
-    assert estimates[FORGING_JOB_NAME, first.session_name][1]
-    assert estimates[FORGING_JOB_NAME, first.session_name][0] >= BASELINE_MB
+    # Both cross-recording stages belong to cindra, so each figure is cindra's own model over the animal's whole
+    # recording set, rounded to the reportable gigabyte.
+    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == JobFootprint(
+        cores=30,
+        memory_mb=cindra_multi_recording_memory(
+            dataset=dataset,
+            sessions=[first, second],
+            job_name=MultiRecordingJobNames.DISCOVER,
+            specifier="305",
+        ),
+        memory_modeled=True,
+    )
+    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, first.session_name] == JobFootprint(
+        cores=16,
+        memory_mb=cindra_multi_recording_memory(
+            dataset=dataset,
+            sessions=[first, second],
+            job_name=MultiRecordingJobNames.EXTRACT,
+            specifier=first.session_name,
+        ),
+        memory_modeled=True,
+    )
+    # The per-session assembly is this package's own stage, so its projection stays here. Tracking bounds the regions
+    # it retains to the widest single recording the animal holds.
+    assert estimates[FORGING_JOB_NAME, first.session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=4000, regions=200), memory_modeled=True
+    )
 
 
 def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
@@ -618,8 +896,8 @@ def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
         FORGING_JOB_NAME, session.session_name
     ]
     # Tracking narrows the region count, a saving the gigabyte rounding absorbs at this fixture's scale.
-    assert tracked[0] <= bounded[0]
-    assert tracked[1]
+    assert tracked.memory_mb <= bounded.memory_mb
+    assert tracked.memory_modeled
 
 
 def test_dataset_stages_fall_back_for_a_session_carrying_no_processed_output(
@@ -644,12 +922,15 @@ def test_dataset_stages_fall_back_for_a_session_carrying_no_processed_output(
         ],
     )
 
-    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _DISCOVERY_CLUSTERING_MEMORY_MB),
-        False,
+    # cindra refuses a recording set carrying no processed output rather than sizing it from a guess, and discovery
+    # carries its own measured allowance above the worker baseline once that refusal lands.
+    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == JobFootprint(
+        cores=30,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _DISCOVERY_FLOOR_MEMORY_MB),
+        memory_modeled=False,
     )
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, session.session_name] == (BASELINE_MB, False)
-    assert estimates[FORGING_JOB_NAME, session.session_name] == (BASELINE_MB, False)
+    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, session.session_name] == baseline_footprint(cores=16)
+    assert estimates[FORGING_JOB_NAME, session.session_name] == baseline_footprint(cores=1)
 
 
 def test_extraction_falls_back_for_a_dataset_its_system_performs_no_tracking_for(
@@ -672,10 +953,11 @@ def test_extraction_falls_back_for_a_dataset_its_system_performs_no_tracking_for
     )
 
     # Extraction reads its batch width from the configuration, so no configuration leaves it on the floor.
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, session.session_name] == (BASELINE_MB, False)
+    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, session.session_name] == baseline_footprint(cores=16)
     # Assembly needs no configuration, so it stays sized from the geometry the session's own output reports.
-    assert estimates[FORGING_JOB_NAME, session.session_name][1]
-    assert estimates[FORGING_JOB_NAME, session.session_name][0] >= BASELINE_MB
+    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=1000, regions=64), memory_modeled=True
+    )
 
 
 def test_a_dataset_naming_no_session_resolves_no_tracking_configuration(
@@ -694,9 +976,42 @@ def test_a_dataset_naming_no_session_resolves_no_tracking_configuration(
 
     estimates = estimate_dataset_job_memory(dataset=emptied, jobs=[(MULTIDAY_DISCOVERY_JOB_NAME, "305", 30)])
 
-    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _DISCOVERY_CLUSTERING_MEMORY_MB),
-        False,
+    # No session leaves no recording directory to hand cindra, so the stage takes its own measured floor.
+    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == JobFootprint(
+        cores=30,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _DISCOVERY_FLOOR_MEMORY_MB),
+        memory_modeled=False,
+    )
+
+
+def test_a_session_that_left_the_project_root_contributes_no_recording(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """A dataset outlives the source data of the animals it has forged, so a session moved to long-term storage is
+    skipped rather than resolved.
+    """
+    first = session_factory(animal_id="305", experiment_name="test_experiment")
+    second = session_factory(animal_id="305", experiment_name="test_experiment")
+    for session in (first, second):
+        write_surgery_metadata(session=session)
+        write_processed_recording(session=session, regions=120, samples=900)
+    dataset = build_dataset(
+        project_root=project_root,
+        name="ds_relocated",
+        sessions=[first, second],
+        session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+    )
+    shutil.rmtree(project_root.joinpath("305", first.session_name))
+
+    estimates = estimate_dataset_job_memory(dataset=dataset, jobs=[(MULTIDAY_DISCOVERY_JOB_NAME, "305", 30)])
+
+    # The surviving recording is the whole set the stage is sized from, and the configuration is resolved from it too.
+    assert estimates[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == JobFootprint(
+        cores=30,
+        memory_mb=cindra_multi_recording_memory(
+            dataset=dataset, sessions=[second], job_name=MultiRecordingJobNames.DISCOVER, specifier="305"
+        ),
+        memory_modeled=True,
     )
 
 
@@ -716,7 +1031,7 @@ def test_a_recording_whose_metadata_is_absent_reports_no_geometry(
 
     estimates = estimate_dataset_job_memory(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
-    assert estimates[FORGING_JOB_NAME, session.session_name] == (BASELINE_MB, False)
+    assert estimates[FORGING_JOB_NAME, session.session_name] == baseline_footprint(cores=1)
 
 
 def test_a_trace_array_of_another_rank_reports_no_geometry(
@@ -734,7 +1049,7 @@ def test_a_trace_array_of_another_rank_reports_no_geometry(
 
     estimates = estimate_dataset_job_memory(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
 
-    assert estimates[FORGING_JOB_NAME, session.session_name] == (BASELINE_MB, False)
+    assert estimates[FORGING_JOB_NAME, session.session_name] == baseline_footprint(cores=1)
 
 
 def test_a_second_format_version_header_is_parsed_the_same_way(tmp_path: Path) -> None:
@@ -762,16 +1077,11 @@ def test_the_pooled_region_bound_narrows_to_one_recordings_own_regions(
         session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
     )
 
-    estimates = estimate_dataset_job_memory(
-        dataset=dataset, jobs=[(MULTIDAY_EXTRACTION_JOB_NAME, sessions[0].session_name, 16)]
-    )
+    estimates = estimate_dataset_job_memory(dataset=dataset, jobs=[(FORGING_JOB_NAME, sessions[0].session_name, 1)])
 
     # Half prevalence over four recordings pools 406 regions into 203, which the widest recording narrows to 103.
-    traces = _EXTRACTION_TRACE_COPIES * 103 * 1500 * _SINGLE_PRECISION_BYTES
-    retained = _EXTRACTION_BATCH_RETENTION * (500 * 128 * 96 * _EXTRACTION_BATCH_BYTES_PER_PIXEL)
-    assert estimates[MULTIDAY_EXTRACTION_JOB_NAME, sessions[0].session_name] == (
-        _apply_tolerance(memory_mb=_WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=traces + retained)),
-        True,
+    assert estimates[FORGING_JOB_NAME, sessions[0].session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=1500, regions=103), memory_modeled=True
     )
 
 
@@ -783,21 +1093,6 @@ def test_byte_conversion_rounds_up_and_reports_nothing_for_nothing() -> None:
     assert _bytes_to_megabytes(byte_count=0) == 0
     assert _bytes_to_megabytes(byte_count=1) == 1
     assert _bytes_to_megabytes(byte_count=1024 * 1024) == 2
-
-
-@pytest.mark.parametrize(
-    ("specifier", "expected"),
-    [
-        (f"{PLANE_SPECIFIER_PREFIX}0", 0),
-        (f"{PLANE_SPECIFIER_PREFIX}12", 12),
-        (f"{PLANE_SPECIFIER_PREFIX}x", None),
-        ("", None),
-        ("registration", None),
-    ],
-)
-def test_a_plane_specifier_reports_the_index_it_names(specifier: str, expected: int | None) -> None:
-    """A per-plane job names its plane behind the shared prefix, and anything else names no plane."""
-    assert _resolve_plane_index(specifier=specifier) == expected
 
 
 def test_the_camera_directory_is_read_once_even_when_it_is_removed_mid_session(
@@ -819,4 +1114,4 @@ def test_the_camera_directory_is_read_once_even_when_it_is_removed_mid_session(
     )
 
     # A recorded frame adds pixels on top of the decoder and child cost, which the gigabyte rounding absorbs here.
-    assert with_recordings[ENERGY_JOB_NAME, "51"][0] >= without_recordings[ENERGY_JOB_NAME, "51"][0]
+    assert with_recordings[ENERGY_JOB_NAME, "51"].memory_mb >= without_recordings[ENERGY_JOB_NAME, "51"].memory_mb

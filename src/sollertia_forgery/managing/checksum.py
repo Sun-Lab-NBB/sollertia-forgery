@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
-from ..shared_assets import pinned_worker_threads
-
-if TYPE_CHECKING:
-    from pathlib import Path
-
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
 
-_CHECKSUM_TRACKER_LOCK_FILENAME: str = ProcessingTrackers.CHECKSUM + ".lock"
-"""The lock filename associated with the checksum processing tracker."""
+_CHECKSUM_TRACKER_LOCK_FILENAME: str = Path(
+    ProcessingTracker(file_path=Path(ProcessingTrackers.CHECKSUM)).lock_path
+).name
+"""The lock filename associated with the checksum processing tracker, taken from the tracker's own derivation so the
+excluded set cannot disagree with the file the tracker actually locks."""
 
 _CHECKSUM_EXCLUDED_FILES: set[str] = {
     str(RawDataFiles.CHECKSUM),
@@ -50,6 +48,9 @@ def run_checksum_processing_pipeline(
         only under processed_data. A checksum job therefore runs safely alongside any other pipeline's job for the
         same session.
 
+        The digest covers the whole raw_data tree or the job fails. A subdirectory the host cannot read therefore
+        records a job failure carrying the underlying error, rather than a digest computed over the readable subset.
+
     Args:
         session_path: The path to the root data directory of the session to be processed.
         regenerate_checksum: Determines whether to overwrite the stored ax_checksum.txt value with the freshly
@@ -63,14 +64,19 @@ def run_checksum_processing_pipeline(
             requested for a session that stores no checksum value.
         ValueError: If the session's raw_data directory holds no file the checksum covers, which leaves the
             pipeline's job unregistered on the tracker.
+        OSError: If any directory or file under the session's raw_data directory cannot be read, which the pipeline
+            records as a job failure before re-raising.
     """
     session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
     # universe discards foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
+    # An unchecksummable session leaves nothing to align, and the tracker rejects an empty request, so the alignment
+    # is skipped and the job stays unregistered for start_job below to reject.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
-    tracker.align_jobs(jobs=possible, universe=universe)
+    if possible:
+        tracker.align_jobs(jobs=possible, universe=universe)
 
     checksum_path = session.raw_data.checksum_path
 
@@ -94,17 +100,15 @@ def run_checksum_processing_pipeline(
 
         # If the 'regenerate_checksum' flag is True (forwarded as save_checksum), this guarantees that the check
         # below succeeds as the function replaces the checksum in the ax_checksum.txt file with the newly calculated
-        # value. Hashing fans one file per worker across a pool of its own, and each of those workers sizes its
-        # library thread pools while importing, so the caps are placed here rather than inside them.
+        # value.
         resolved_workers = resolve_worker_count(requested_workers=workers)
-        with pinned_worker_threads():
-            calculated_checksum = calculate_directory_checksum(
-                directory=session.raw_data_path,
-                num_processes=resolved_workers,
-                progress=display_progress,
-                save_checksum=regenerate_checksum,
-                excluded_files=_CHECKSUM_EXCLUDED_FILES,
-            )
+        calculated_checksum = calculate_directory_checksum(
+            directory=session.raw_data_path,
+            num_processes=resolved_workers,
+            progress=display_progress,
+            save_checksum=regenerate_checksum,
+            excluded_files=_CHECKSUM_EXCLUDED_FILES,
+        )
 
         with checksum_path.open() as file:
             stored_checksum = file.read().strip()

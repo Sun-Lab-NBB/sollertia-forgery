@@ -15,10 +15,9 @@ import polars as pl
 import pytest
 from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest, CameraSourceData
 from sollertia_shared_assets import ProcessingTrackers
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, limit_worker_threads
 
 from sollertia_forgery.video import ENERGY_JOB_NAME, MotionEnergyColumn, run_video_processing_pipeline
-from sollertia_forgery.shared_assets import pinned_worker_threads
 import sollertia_forgery.video.pipeline as pipeline_module
 from sollertia_forgery.video.motion_energy import (
     _SPATIAL_BIN_SIZE,
@@ -31,7 +30,6 @@ from sollertia_forgery.video.motion_energy import (
     resolve_camera_video,
     compute_camera_motion_energy,
 )
-from sollertia_forgery.shared_assets.utilities import _WORKER_THREAD_VARIABLES
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -50,6 +48,20 @@ _CHUNK_FRAMES: int = 10
 
 _ENERGY_TOLERANCE: float = 1e-4
 """The absolute tolerance the value assertions allow, covering float32 accumulation in the block-mean reduction."""
+
+_THREAD_LIMIT_VARIABLES: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "POLARS_MAX_THREADS",
+    "OPENCV_FFMPEG_THREADS",
+    "TIFFFILE_NUM_THREADS",
+)
+"""The threading-layer environment variables the motion-energy decode pool relies on being capped for it. Naming them
+here rather than reading the library's own tuple keeps a rename loud, since a variable that silently stops being
+capped leaves each decode worker opening a pool sized to the whole machine."""
 
 
 def _write_video(path: Path, frames: NDArray[np.uint8], fps: int = 30) -> Path:
@@ -404,7 +416,7 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
         assert tracker.get_job_status(job_id=job_id) is not None
 
 
-def test_pinned_worker_threads_caps_and_restores_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
 
     The caps must not leak past the pool they were set for. The analysis package deliberately runs multi-threaded
@@ -413,17 +425,17 @@ def test_pinned_worker_threads_caps_and_restores_the_environment(monkeypatch: py
     sentinel = "OMP_NUM_THREADS"
     monkeypatch.setenv(name=sentinel, value="13")
 
-    with pinned_worker_threads():
-        assert all(os.environ[variable] == "1" for variable in _WORKER_THREAD_VARIABLES)
+    with limit_worker_threads():
+        assert all(os.environ[variable] == "1" for variable in _THREAD_LIMIT_VARIABLES)
     assert os.environ[sentinel] == "13"
 
 
-def test_pinned_worker_threads_removes_variables_it_introduced(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_limited_worker_threads_remove_variables_they_introduced(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a variable absent before the block is absent again after it, rather than left set to one."""
-    sentinel = _WORKER_THREAD_VARIABLES[0]
+    sentinel = _THREAD_LIMIT_VARIABLES[0]
     monkeypatch.delenv(name=sentinel, raising=False)
 
-    with pinned_worker_threads():
+    with limit_worker_threads():
         assert os.environ[sentinel] == "1"
     assert sentinel not in os.environ
 
