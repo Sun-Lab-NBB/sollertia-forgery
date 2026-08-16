@@ -98,7 +98,7 @@ def test_create_server_configuration_file(isolated_working_directory: Path) -> N
 
 
 def test_get_server_configuration_returns_the_written_credentials(
-    isolated_working_directory: Path,  # noqa: ARG001 - requested for working directory isolation.
+    isolated_working_directory: Path,  # Requested for working directory isolation.
 ) -> None:
     """Verifies that get_server_configuration loads the YAML created by create_server_configuration_file."""
     create_server_configuration_file(
@@ -116,7 +116,7 @@ def test_get_server_configuration_returns_the_written_credentials(
 
 
 def test_get_server_configuration_raises_error_if_missing(
-    isolated_working_directory: Path,  # noqa: ARG001 - requested for working directory isolation.
+    isolated_working_directory: Path,  # Requested for working directory isolation.
 ) -> None:
     """Verifies that get_server_configuration raises FileNotFoundError when no configuration is present."""
     with pytest.raises(FileNotFoundError, match=r"Unable to locate the 'server_configuration\.yaml' file"):

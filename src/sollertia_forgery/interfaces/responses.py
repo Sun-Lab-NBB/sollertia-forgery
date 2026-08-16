@@ -191,7 +191,7 @@ def project_item(item: dict[str, Any], fields: Sequence[str], *, drop_empty: boo
     return narrowed
 
 
-def ok_response(**payload: Any) -> dict[str, Any]:  # noqa: ANN401
+def ok_response(**payload: Any) -> dict[str, Any]:
     """Constructs a successful response dict with a ``success`` flag set to True.
 
     Args:

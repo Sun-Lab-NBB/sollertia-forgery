@@ -121,7 +121,7 @@ def test_the_recorded_date_is_the_session_name_read_as_utc(project_root: Path, t
     assert recorded == datetime(*components, tzinfo=UTC)
 
 
-def test_generation_marks_its_own_job_as_succeeded(project_root: Path, training_session: SessionData) -> None:  # noqa: ARG001
+def test_generation_marks_its_own_job_as_succeeded(project_root: Path, training_session: SessionData) -> None:
     """The manifest run is itself a tracked job, recorded against the project rather than a session."""
     generate_project_manifest(project_directory=project_root)
 
@@ -152,7 +152,7 @@ def test_generation_writes_the_job_artifact_beside_the_manifest(
 
 def test_generation_announces_its_start_and_its_completion(
     project_root: Path,
-    training_session: SessionData,  # noqa: ARG001
+    training_session: SessionData,
     reported_messages: list[str],
 ) -> None:
     """Requesting progress brackets the run with a preamble and a completion message naming the project."""
@@ -194,7 +194,7 @@ def test_a_session_missing_its_descriptor_fails_the_manifest_job(
 
 def test_a_session_type_without_a_descriptor_names_the_supported_types(
     project_root: Path,
-    training_session: SessionData,  # noqa: ARG001
+    training_session: SessionData,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A session type the descriptor registry does not cover cannot be snapshotted, so the run names what is."""

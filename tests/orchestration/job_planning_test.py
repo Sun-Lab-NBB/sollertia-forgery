@@ -516,7 +516,7 @@ def test_a_recorded_batch_is_read_back_whole(isolated_working_directory: Path, d
     assert deterministic_batch_ids.issued == ["batch00"]
 
 
-def test_an_unheld_batch_identifier_resolves_to_nothing(isolated_working_directory: Path) -> None:  # noqa: ARG001
+def test_an_unheld_batch_identifier_resolves_to_nothing(isolated_working_directory: Path) -> None:
     """Verifies that a host that never recorded a batch answers for it, so a caller reports it as missing."""
     assert read_prepared_batch(batch_id="never_recorded") is None
     assert read_batch_outcome(batch_id="never_recorded") is None
@@ -525,8 +525,8 @@ def test_an_unheld_batch_identifier_resolves_to_nothing(isolated_working_directo
 
 
 def test_reading_several_batches_reports_the_identifiers_this_host_lacks(
-    isolated_working_directory: Path,  # noqa: ARG001
-    deterministic_batch_ids: Any,  # noqa: ARG001
+    isolated_working_directory: Path,
+    deterministic_batch_ids: Any,
 ) -> None:
     """Verifies that a batch prepared elsewhere is named back to the caller, sorted, rather than dropped."""
     document = make_document()
@@ -539,8 +539,8 @@ def test_reading_several_batches_reports_the_identifiers_this_host_lacks(
 
 
 def test_a_finished_batch_answers_with_what_its_jobs_recorded(
-    isolated_working_directory: Path,  # noqa: ARG001
-    deterministic_batch_ids: Any,  # noqa: ARG001
+    isolated_working_directory: Path,
+    deterministic_batch_ids: Any,
 ) -> None:
     """Verifies that closure writes the outcome onto the batch's own file, which makes a finished batch answerable."""
     batch_id = record_prepared_batch(document=make_document())
@@ -553,8 +553,8 @@ def test_a_finished_batch_answers_with_what_its_jobs_recorded(
 
 
 def test_forgetting_a_batch_removes_its_record_and_its_lock(
-    isolated_working_directory: Path,  # noqa: ARG001
-    deterministic_batch_ids: Any,  # noqa: ARG001
+    isolated_working_directory: Path,
+    deterministic_batch_ids: Any,
 ) -> None:
     """Verifies that retiring a batch takes its whole footprint, leaving the outstanding records alone."""
     first = record_prepared_batch(document=make_document())
@@ -568,14 +568,14 @@ def test_forgetting_a_batch_removes_its_record_and_its_lock(
     assert read_prepared_batch(batch_id=second) is None
 
 
-def test_batches_prepared_against_one_host_resolve_to_that_host(isolated_working_directory: Path) -> None:  # noqa: ARG001
+def test_batches_prepared_against_one_host_resolve_to_that_host(isolated_working_directory: Path) -> None:
     """Verifies that a batch runs where it was prepared, since its jobs read the data that host holds."""
     documents = [make_document(host="workstation"), make_document(host="workstation", pipeline="runtime")]
 
     assert resolve_batch_host(documents=documents) == "workstation"
 
 
-def test_batches_prepared_against_different_hosts_are_rejected(isolated_working_directory: Path) -> None:  # noqa: ARG001
+def test_batches_prepared_against_different_hosts_are_rejected(isolated_working_directory: Path) -> None:
     """Verifies that dispatching two hosts' batches together is refused rather than resolved to one of them."""
     documents = [make_document(host="workstation"), make_document(host="server")]
 
@@ -583,7 +583,7 @@ def test_batches_prepared_against_different_hosts_are_rejected(isolated_working_
         resolve_batch_host(documents=documents)
 
 
-def test_an_empty_set_of_batches_names_no_host(isolated_working_directory: Path) -> None:  # noqa: ARG001
+def test_an_empty_set_of_batches_names_no_host(isolated_working_directory: Path) -> None:
     """Verifies that executing nothing names no host, which stops the run rather than guessing one."""
     with pytest.raises(ValueError, match="empty set of prepared batches"):
         resolve_batch_host(documents=[])

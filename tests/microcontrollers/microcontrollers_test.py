@@ -58,28 +58,28 @@ _ONE_UINT32_PROTOTYPE: int = 17
 """The axci payload prototype code of a message carrying a single unsigned 32-bit value."""
 
 
-def _stub_parse_2_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+def _stub_parse_2_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:
     """Writes the module 2_1 domain feather recording the event codes the partition carried."""
     pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
         file=output_directory / "module_2_1.feather", compression="uncompressed"
     )
 
 
-def _stub_parse_4_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+def _stub_parse_4_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:
     """Writes the module 4_1 domain feather recording the event codes the partition carried."""
     pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
         file=output_directory / "module_4_1.feather", compression="uncompressed"
     )
 
 
-def _stub_parse_6_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+def _stub_parse_6_1(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:
     """Writes the module 6_1 domain feather recording the event codes the partition carried."""
     pl.DataFrame({"event_code": sorted(event_partition.keys())}).write_ipc(
         file=output_directory / "module_6_1.feather", compression="uncompressed"
     )
 
 
-def _stub_parse_failing(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:  # noqa: ARG001
+def _stub_parse_failing(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: object) -> None:
     """Raises inside the parse call, standing in for a module parser that fails on its partition."""
     message = "Synthetic parse failure raised inside a worker process."
     raise RuntimeError(message)
@@ -248,16 +248,16 @@ def _fake_extract_factory(skip: set[tuple[int, int]] | None = None) -> Callable[
     skipped = set(skip or set())
 
     def fake_extract(
-        archive_path: Path,  # noqa: ARG001
+        archive_path: Path,
         output_directory: Path,
         controller_id: str,
         controller_config: ControllerExtractionConfig,
         job_id: str,
         tracker: ProcessingTracker,
         *,
-        workers: int,  # noqa: ARG001
-        display_progress: bool,  # noqa: ARG001
-        executor: ProcessPoolExecutor | None = None,  # noqa: ARG001
+        workers: int,
+        display_progress: bool,
+        executor: ProcessPoolExecutor | None = None,
     ) -> None:
         """Writes a raw module feather for each configured module and records the job on the tracker."""
         tracker.start_job(job_id=job_id)
@@ -275,7 +275,7 @@ def _fake_extract_factory(skip: set[tuple[int, int]] | None = None) -> Callable[
     return fake_extract
 
 
-def _fail_if_called(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+def _fail_if_called(*args: object, **kwargs: object) -> None:
     """Fails the calling test, standing in for the extraction stage a remote parse job leaves untouched."""
     message = "_extract_controller must not be called for a remote parse job."
     raise AssertionError(message)

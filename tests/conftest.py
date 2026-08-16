@@ -410,7 +410,7 @@ def mark_session_processed(write_tracker: Callable[..., ProcessingTracker]) -> C
 def project_manifest(
     project_root: Path,
     experiment_session: SessionData,
-    training_session: SessionData,  # noqa: ARG001 - requested so the generated manifest holds a second session.
+    training_session: SessionData,  # Requested so the generated manifest holds a second session.
     mark_session_processed: Callable[[SessionData], None],
 ) -> Path:
     """Generates the project's manifest and job artifacts through the project's own writer.
@@ -847,7 +847,7 @@ def stub_ssh_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StubS
 
 @pytest.fixture
 def connected_server(
-    stub_ssh_transport: StubSSHTransport,  # noqa: ARG001
+    stub_ssh_transport: StubSSHTransport,
     server_configuration: ServerConfiguration,
 ) -> Iterator[Server]:
     """Opens a real Server over the stubbed transport, so server-side behavior runs without a network.
