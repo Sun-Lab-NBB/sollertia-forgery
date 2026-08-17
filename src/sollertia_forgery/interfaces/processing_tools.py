@@ -122,9 +122,9 @@ _RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "co
 path is left off a semi-detail row because the unit entry already names it, and detail adds it back for a caller
 reading one job closely."""
 
-_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled", "prerequisite_ids", "unit_path", "options")
-"""The job fields detail adds, stating whether the memory figure was modeled, which jobs it waits for, and the
-parameters it would run with."""
+_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "options")
+"""The job fields detail adds, naming the unit the job reads, which jobs it waits for, and the parameters it would run
+with."""
 
 _STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
 """The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the
@@ -230,8 +230,8 @@ def inspect_job_resources_tool(
     A bare call reports the figures a batch is planned against alongside a ``breakdown`` naming every job type and how
     many of each the named sessions still have to run. A job the units already recorded as succeeded, and a job this
     run could not unblock, are both absent, so this reports what a batch would dispatch rather than the whole universe.
-    Naming a filter adds a page of jobs carrying their figures, and opting into detail adds whether each memory figure
-    was modeled from the job's own input.
+    Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit each job reads,
+    the jobs it waits for, and the parameters it would run with.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a short
     one. The figures already carry the shared tolerance, so they are the values to plan a local batch against or to
@@ -250,12 +250,13 @@ def inspect_job_resources_tool(
             every match.
         start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report whether their memory figure was modeled.
+        detailed: Determines whether the listed jobs report the unit they read, the jobs they wait for, and the
+            parameters they would run with.
 
     Returns:
         A response dict with the host's ``total_memory_mb`` and the batch-available ``total_cores`` left after the
-        reserved system cores. Carries a ``totals`` summary giving ``jobs``, ``jobs_without_a_modeled_estimate``,
-        ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``. Carries a ``breakdown`` per job type
+        reserved system cores. Carries a ``totals`` summary giving ``jobs``, ``widest_job_cores``,
+        ``largest_job_memory_mb``, and ``summed_memory_mb``. Carries a ``breakdown`` per job type
         and a ``units`` list naming each session and how many jobs it resolved. Carries a ``jobs`` list with ``rows``,
         ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
     """
@@ -275,7 +276,6 @@ def inspect_job_resources_tool(
         total_memory_mb=resolve_host_memory_mb(),
         totals={
             "jobs": len(jobs),
-            "jobs_without_a_modeled_estimate": sum(1 for job in jobs if not job.get("memory_modeled", False)),
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
             "largest_job_memory_mb": max((int(job["memory_mb"]) for job in jobs), default=0),
             "summed_memory_mb": sum(int(job["memory_mb"]) for job in jobs),

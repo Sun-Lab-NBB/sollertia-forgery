@@ -178,11 +178,12 @@ def _write_inputs(
         (behavior / "101_log.npz").touch()
 
 
-def _write_manifest(session: SimpleNamespace, controllers: dict[int, tuple[tuple[int, int], ...]]) -> None:
+def _write_manifest(directory: Path, controllers: dict[int, tuple[tuple[int, int], ...]]) -> None:
     """Writes an acquisition-time microcontroller manifest declaring several controllers.
 
     Args:
-        session: The session stand-in whose raw behavior directory receives the manifest.
+        directory: The log directory that receives the manifest. The acquisition library resolves every controller
+            and its archive from the manifest it finds there, so a test staging archives has to stage this too.
         controllers: The declared ``(module_type, module_id)`` pairs, keyed by controller identifier.
     """
     manifest = MicroControllerManifest(
@@ -200,7 +201,7 @@ def _write_manifest(session: SimpleNamespace, controllers: dict[int, tuple[tuple
             for controller_id, modules in controllers.items()
         ]
     )
-    manifest.to_yaml(file_path=session.raw_data.behavior_data_path / MICROCONTROLLER_MANIFEST_FILENAME)
+    manifest.to_yaml(file_path=directory / MICROCONTROLLER_MANIFEST_FILENAME)
 
 
 def _module_state_payload(module_type: int, module_id: int, event_code: int) -> bytes:
@@ -444,6 +445,9 @@ def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
     """Verifies that _discover_jobs requests only parseable modules whose controller archive is present."""
+    # The acquisition library resolves the registered controllers and their archives from the manifest, so the
+    # manifest has to name every controller the eligibility filter is expected to see.
+    _write_manifest(directory=tmp_path, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
     (tmp_path / "101_log.npz").touch()  # Controller 101's archive is present and controller 102's is absent.
     controllers = {
         "101": ControllerExtractionConfig(
@@ -477,6 +481,36 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
     assert set(requested) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
     assert set(archives) == {"101"}
     assert parse_specifiers == {"101-2-1": ("101", 2, 1)}
+
+
+def test_discover_jobs_leaves_an_ambiguously_named_archive_unresolved(tmp_path: Path) -> None:
+    """Verifies that a controller matching several archives in the tree contributes no requested job.
+
+    One DataLogger writes every archive of a session side by side, so a second archive carrying the same controller
+    name belongs to another logger and makes that controller's data ambiguous rather than redundant.
+    """
+    _write_manifest(directory=tmp_path, controllers={101: ((2, 1),)})
+    (tmp_path / "101_log.npz").touch()
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "101_log.npz").touch()
+    controllers = {
+        "101": ControllerExtractionConfig(
+            controller_id=101,
+            modules=(ModuleExtractionConfig(module_type=2, module_id=1, event_codes=(51,)),),
+            kernel=None,
+        )
+    }
+
+    universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
+        controllers=controllers, parsers={(2, 1): _stub_parse_2_1}, log_directory=tmp_path
+    )
+
+    # The controller still declares its jobs, but none of them can run until exactly one archive carries its name.
+    assert set(universe) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert requested == []
+    assert archives == {}
+    assert parse_specifiers == {}
 
 
 # End-to-end pipeline.
@@ -624,7 +658,7 @@ def test_discover_microcontroller_jobs_reports_universe_and_possible_subset(
     """Verifies that discovery reports every declared job and requests only the ones a staged archive supports."""
     session = _make_session(tmp_path)
     # Controller 101 staged its archive, controller 102 did not, so only 101 contributes possible jobs.
-    _write_manifest(session=session, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
     (session.raw_data.behavior_data_path / "101_log.npz").touch()
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1), (6, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
@@ -648,6 +682,31 @@ def test_discover_microcontroller_jobs_reports_universe_and_possible_subset(
     assert not session.processed_data.microcontroller_data_path.exists()
 
 
+def test_a_manifest_controller_the_system_does_not_extract_contributes_no_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a registered controller left out of the eligibility filter contributes neither job.
+
+    The acquisition library locates every controller the manifest registers, while the eligibility rule that decides
+    which of them are worth extracting is this package's own. A controller declaring only modules the acquisition
+    system does not parse therefore reaches discovery without a configuration behind it, and it must drop out
+    silently rather than being requested, even though its archive is staged beside the eligible one's.
+    """
+    session = _make_session(tmp_path)
+    # Module (9, 9) is registered for no acquisition system, so controller 102 declares nothing slf extracts.
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1),), 102: ((9, 9),)})
+    (session.raw_data.behavior_data_path / "101_log.npz").touch()
+    (session.raw_data.behavior_data_path / "102_log.npz").touch()
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1)})
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+
+    _loaded, universe, requested = discover_microcontroller_jobs(session_path=tmp_path)
+
+    # Controller 102 is absent from both sets, so nothing extracts an archive whose modules nothing would parse.
+    assert set(universe) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert set(requested) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+
+
 def test_microcontroller_job_prerequisites_orders_parses_after_their_extraction() -> None:
     """Verifies that each parse job declares its controller's extraction job as its only prerequisite."""
     universe = [
@@ -665,25 +724,6 @@ def test_microcontroller_job_prerequisites_orders_parses_after_their_extraction(
         (CONTROLLER_EXTRACTION_JOB_NAME, "102"): (),
         (PARSE_JOB_NAME, "102-6-1"): ((CONTROLLER_EXTRACTION_JOB_NAME, "102"),),
     }
-
-
-def test_controller_archive_discovery_is_empty_for_an_absent_log_directory(tmp_path: Path) -> None:
-    """Verifies that the archive lookup reports no archives when the log directory does not exist."""
-    assert pipeline_module._discover_controller_archives(log_directory=tmp_path / "never_acquired") == {}
-
-
-def test_controller_archive_discovery_reads_the_log_directory_alone(tmp_path: Path) -> None:
-    """Verifies that the archive lookup resolves each source from the log directory's own entries.
-
-    One DataLogger writes every archive of a session side by side, so an archive nested under the log directory
-    belongs to a different logger and must not be mistaken for this session's.
-    """
-    nested = tmp_path / "nested"
-    nested.mkdir()
-    (nested / "102_log.npz").touch()
-    (tmp_path / "101_log.npz").touch()
-
-    assert pipeline_module._discover_controller_archives(log_directory=tmp_path) == {"101": tmp_path / "101_log.npz"}
 
 
 # Stage helpers with nothing to run.
@@ -866,7 +906,7 @@ def test_remote_extraction_requires_the_controller_archive(tmp_path: Path, monke
     """Verifies that a remote extraction job rejects a controller whose log archive is absent."""
     session = _make_session(tmp_path)
     # Controller 102 is registered in the manifest but never staged its archive.
-    _write_manifest(session=session, controllers={101: ((2, 1),), 102: ((4, 1),)})
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1),), 102: ((4, 1),)})
     (session.raw_data.behavior_data_path / "101_log.npz").touch()
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005

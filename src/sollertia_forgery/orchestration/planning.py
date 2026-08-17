@@ -4,7 +4,7 @@ ships them.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 from dataclasses import field, dataclass
 
 import polars as pl
@@ -16,7 +16,6 @@ from ataraxis_data_structures import YamlConfig, ProcessingTracker, atomic_write
 
 from ..forging import discover_project_datasets
 from .dispatch import resolve_dispatch, resolve_job_cores
-from .footprints import JobFootprint
 from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines
 
 if TYPE_CHECKING:
@@ -25,6 +24,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import DatasetData, SessionData
 
     from .dispatch import PipelineDispatch
+    from .footprints import JobFootprint
 
 _PLAN_FILENAME: str = "job_plan.yaml"
 """The filename of a unit's job plan cache, written beside the outputs the unit's jobs produce."""
@@ -49,7 +49,6 @@ PROJECT_PLAN_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType]
     "specifier": pl.String,
     "cores": pl.UInt16,
     "memory_mb": pl.UInt32,
-    "memory_modeled": pl.Boolean,
     "prerequisite_ids": pl.List(pl.String),
 }
 """The column layout of the project plan projection, one row per planned job.
@@ -78,9 +77,7 @@ class JobPlanEntry:
     """The cores this job occupies, as its own sizing pass resolved them. A stage a dependency owns answers with the
     width that dependency picked for this job's input, and every other stage takes its type's declared allocation."""
     memory_mb: int = 0
-    """The memory this job occupies, estimated from the data it will process."""
-    memory_modeled: bool = False
-    """Determines whether the memory figure follows from this job's own input rather than from a flat allowance."""
+    """The memory this job occupies, as its own sizing pass modeled it from the data the job will read."""
     prerequisite_ids: list[str] = field(default_factory=list)
     """The identifiers of the jobs that must succeed before this job may run, from its pipeline's own ordering."""
 
@@ -317,12 +314,19 @@ def _resolve_unit_plan(
         reason its resolver gave, so a pipeline absent because its input is malformed is distinguishable from one
         absent because the unit never carried that data.
 
-        Each pipeline's processing tracker is aligned with the jobs the unit can actually run, so a unit that has
-        never been processed still carries a job registry once it is planned. That registry is what the project job
-        artifact is built from, which is how a scheduler on another host learns which jobs exist. A job the unit
-        cannot run never reaches the tracker, so its absence there is the statement that it is not possible. A
-        pipeline that resolves a universe but no runnable job therefore writes no tracker rather than failing the
-        plan, since its figures still belong in the cache the plan records.
+        Sizing takes the same path. Every job is modeled from the data it will read, so a job whose input cannot be
+        read is refused rather than planned at a figure nothing measured. That refusal names the input, and it drops
+        the whole pipeline it belongs to out of this unit's plan, because a pipeline that cannot size one of its
+        stages cannot state what the unit costs to run. The reason lands in the same skip report a rejected resolver
+        writes into, so a caller reads one account of everything this unit did not plan and why.
+
+        Sizing therefore runs before a pipeline's tracker is aligned, which is what keeps a dropped pipeline from
+        registering jobs the plan does not cover. Each surviving pipeline's processing tracker is aligned with the
+        jobs the unit can actually run, so a unit that has never been processed still carries a job registry once it
+        is planned. That registry is what the project job artifact is built from, which is how a scheduler on another
+        host learns which jobs exist. A job the unit cannot run never reaches the tracker, so its absence there is the
+        statement that it is not possible. A pipeline that resolves a universe but no runnable job therefore writes no
+        tracker rather than failing the plan, since its figures still belong in the cache the plan records.
 
         The recorded figures cover the whole universe while the tracker holds the possible subset, so a plan describes
         every job the pipeline defines and the job artifact states which of them this unit supports.
@@ -332,14 +336,14 @@ def _resolve_unit_plan(
         unit_path: The path to the unit to plan.
         unit_kind: Whether the unit is a session or a dataset.
         regenerate_plan: Determines whether to re-estimate the jobs the cache already holds.
-        display_progress: Determines whether to report the pipelines that resolved no jobs and why.
+        display_progress: Determines whether to report the pipelines that planned no jobs and why.
 
     Returns:
         The unit's plan as it now stands on disk.
 
     Raises:
-        ValueError: If no pipeline resolves any job for this unit, since a unit with no plannable job names no path
-            to a plan file, or if a pipeline requests a job outside its own declared universe.
+        ValueError: If no pipeline plans any job for this unit, since a unit with no plannable job names no path to a
+            plan file, or if a pipeline requests a job outside its own declared universe.
         TimeoutError: If a pipeline's processing tracker lock cannot be acquired within the timeout period.
     """
     # Resolves every pipeline's job set first, so the recorded plan seeds the entry set before any pipeline's
@@ -360,16 +364,7 @@ def _resolve_unit_plan(
         resolved.append((dispatch, unit, universe, possible))
 
     if located is None:
-        message = (
-            f"Unable to plan the jobs of '{unit_path}'. No pipeline resolved any job for it, so the unit carries "
-            f"none of the data the pipelines that operate on a {unit_kind} consume. Each pipeline reported: "
-            f"{skipped}."
-        )
-        console.error(message=message, error=ValueError)
-
-    if display_progress and skipped:
-        for pipeline, reason in skipped.items():
-            console.echo(message=f"Pipeline '{pipeline}': Resolved no job for '{unit_path}'. {reason}")
+        _reject_unit(unit_path=unit_path, unit_kind=unit_kind, skipped=skipped)
 
     plan_path, unit_name = located
     recorded = _load_plan(plan_path=plan_path)
@@ -377,7 +372,24 @@ def _resolve_unit_plan(
         {} if recorded is None or regenerate_plan else dict(recorded.entry_map())
     )
 
+    planned_pipelines = 0
     for dispatch, unit, universe, possible in resolved:
+        # The declared allocation reaches the sizing pass as the width a stage holding one width whatever data it
+        # reads answers with, and a stage a dependency sizes overrides it with the width that dependency picked.
+        declared = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
+        outstanding = [
+            (job_name, specifier)
+            for job_name, specifier in universe
+            if (dispatch.pipeline.value, job_name, specifier) not in entries
+        ]
+
+        # Sizing precedes every write this pipeline makes, so a pipeline whose input cannot be read leaves neither a
+        # tracker nor a plan entry behind and is reported alongside the pipelines whose resolvers rejected the unit.
+        footprints = _size_unit(dispatch=dispatch, unit=unit, jobs=outstanding, declared=declared, skipped=skipped)
+        if footprints is None:
+            continue
+        planned_pipelines += 1
+
         # Registers the jobs this unit can run, so the job artifact built from this tracker enumerates them. A
         # pipeline that resolves no possible job contributes no registry at all, since a tracker states which jobs a
         # unit supports and an empty registry states nothing.
@@ -391,37 +403,27 @@ def _resolve_unit_plan(
         # recorded state, which is how a stage stops waiting on a job the unit can never produce.
         ordering = dispatch.prerequisites(unit, universe)
 
-        # The declared allocation reaches the sizing pass as the width to fall back on, and comes back unchanged for
-        # every stage that holds one width whatever data it reads.
-        declared = {job_name: resolve_job_cores(job_name=job_name) for job_name, _ in universe}
-        outstanding = [
-            (job_name, specifier)
-            for job_name, specifier in universe
-            if (dispatch.pipeline.value, job_name, specifier) not in entries
-        ]
-        if not outstanding:
-            continue
-
-        footprints = dispatch.estimate_memory(
-            unit, [(job_name, specifier, declared[job_name]) for job_name, specifier in outstanding]
-        )
         for job_name, specifier in outstanding:
-            footprint = footprints.get(
-                (job_name, specifier), JobFootprint(cores=declared[job_name], memory_mb=0, memory_modeled=False)
-            )
+            footprint = footprints[job_name, specifier]
             entry = JobPlanEntry(
                 pipeline=dispatch.pipeline.value,
                 job_name=job_name,
                 specifier=specifier,
                 cores=footprint.cores,
                 memory_mb=footprint.memory_mb,
-                memory_modeled=footprint.memory_modeled,
                 prerequisite_ids=[
                     ProcessingTracker.generate_job_id(job_name=upstream_name, specifier=upstream_specifier)
                     for upstream_name, upstream_specifier in ordering.get((job_name, specifier), ())
                 ],
             )
             entries[entry.key] = entry
+
+    if not planned_pipelines:
+        _reject_unit(unit_path=unit_path, unit_kind=unit_kind, skipped=skipped)
+
+    if display_progress and skipped:
+        for pipeline, reason in skipped.items():
+            console.echo(message=f"Pipeline '{pipeline}': Planned no job for '{unit_path}'. {reason}")
 
     plan = JobPlan(unit_name=unit_name, unit_kind=unit_kind, entries=[entries[key] for key in natsorted(entries)])
     _save_plan(plan=plan, plan_path=plan_path)
@@ -457,6 +459,63 @@ def _discover_unit(
         skipped[dispatch.pipeline.value] = str(exception)
         return None
     return unit, universe, possible
+
+
+def _size_unit(
+    dispatch: PipelineDispatch[Any],
+    unit: Any,
+    jobs: list[tuple[str, str]],
+    declared: dict[str, int],
+    skipped: dict[str, str],
+) -> dict[tuple[str, str], JobFootprint] | None:
+    """Sizes the jobs of one pipeline, recording the reason when an input the sizing pass reads cannot be read.
+
+    Notes:
+        Every job is modeled from the data it will process, so the sizing pass refuses a job whose input is absent,
+        ambiguous, or unparsable rather than answering with a flat allowance. That refusal is the statement that the
+        pipeline cannot say what this unit costs, so the whole pipeline drops out of the plan and its reason joins the
+        reasons the resolvers gave. Reporting through the same map is what keeps a dropped pipeline visible to a
+        caller instead of silently absent.
+
+    Args:
+        dispatch: The pipeline's dispatch entry.
+        unit: The loaded unit the jobs operate on.
+        jobs: The jobs to size, as ``(job_name, specifier)`` pairs.
+        declared: The cores each job type declares, which a stage holding one width whatever data it reads answers
+            with.
+        skipped: The mapping this call records its pipeline's reason into when sizing does not succeed.
+
+    Returns:
+        The footprint of every job this call was handed, or None when the pipeline cannot size one of them.
+    """
+    # A pipeline whose jobs are already recorded reads nothing, so it keeps its tracker and its recorded figures
+    # without paying for a pass that would answer about jobs the plan does not need.
+    if not jobs:
+        return {}
+    try:
+        return dispatch.size_jobs(unit, [(job_name, specifier, declared[job_name]) for job_name, specifier in jobs])
+    except Exception as exception:
+        skipped[dispatch.pipeline.value] = str(exception)
+        return None
+
+
+def _reject_unit(unit_path: Path, unit_kind: str, skipped: dict[str, str]) -> NoReturn:
+    """Reports a unit no pipeline plans, naming what each pipeline reported.
+
+    Args:
+        unit_path: The path to the unit that was planned.
+        unit_kind: Whether the unit is a session or a dataset.
+        skipped: Each pipeline's reason for contributing nothing.
+
+    Raises:
+        ValueError: Always, since a unit with no plannable job names no path to a plan file.
+    """
+    message = (
+        f"Unable to plan the jobs of '{unit_path}'. No pipeline planned any job for it, so the unit either carries "
+        f"none of the data the pipelines that operate on a {unit_kind} consume, or carries it in a state none of "
+        f"them can read. Each pipeline reported: {skipped}."
+    )
+    console.error(message=message, error=ValueError)
 
 
 def _load_plan(plan_path: Path) -> JobPlan | None:
@@ -514,6 +573,5 @@ def _projection_row(
         "specifier": entry.specifier,
         "cores": entry.cores,
         "memory_mb": entry.memory_mb,
-        "memory_modeled": entry.memory_modeled,
         "prerequisite_ids": list(entry.prerequisite_ids),
     }

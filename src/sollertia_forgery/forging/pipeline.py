@@ -7,9 +7,16 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING
 from contextlib import nullcontext
+from dataclasses import dataclass
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 
-from cindra import MultiRecordingJobNames, prime_dataset, execute_multi_recording_job
+from cindra import (
+    MultiRecordingJobNames,
+    prime_dataset,
+    execute_multi_recording_job,
+    resolve_multi_recording_jobs,
+    resolve_multi_recording_prerequisites,
+)
 import polars as pl
 from natsort import natsorted
 from cindra.layout import MULTI_RECORDING_CONFIGURATION_FILENAME
@@ -68,6 +75,34 @@ Notes:
     This mapping is the single source for both the local assembly pool and the shared batch layer, which merges it
     into its own concurrency table.
 """
+
+_MULTIDAY_JOB_NAMES: dict[MultiRecordingJobNames, str] = {
+    MultiRecordingJobNames.DISCOVER: MULTIDAY_DISCOVERY_JOB_NAME,
+    MultiRecordingJobNames.EXTRACT: MULTIDAY_EXTRACTION_JOB_NAME,
+}
+"""The forging tracker job name each cindra cross-recording stage is recorded under, keyed by the cindra job name.
+
+Notes:
+    cindra owns the cross-recording pipeline, while the forging tracker interleaves those stages with the per-session
+    assembly stage this library owns and records all of them under its own names. This table is the only place the two
+    vocabularies meet, so composing another cindra stage into the forging graph is a matter of naming it here.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _MultidayStage:
+    """Bundles one cindra cross-recording stage with everything the forging pipeline needs to dispatch it."""
+
+    configuration_path: Path
+    """The path to the materialized multi-recording configuration of the animal the stage belongs to."""
+    job_name: MultiRecordingJobNames
+    """The cindra job the stage executes."""
+    specifier: str
+    """The cindra specifier the stage executes under, which is the recording identifier for a per-recording stage and
+    an empty string for a stage spanning the whole animal.
+    """
+    prime: bool
+    """Determines whether the stage writes the shared multi-recording bootstrap before it runs."""
 
 
 def define_forging_dataset(
@@ -214,10 +249,8 @@ def run_forging_pipeline(
     session_lookup: dict[str, DatasetSession] = {entry.session: entry for entry in dataset.sessions}
 
     multiday_plan = load_multiday_plan(dataset=dataset)
+    multiday_stages = _resolve_multiday_stages(multiday_plan=multiday_plan)
     universe = build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
-    session_to_configuration = {
-        session: configuration_path for configuration_path, sessions in multiday_plan.values() for session in sessions
-    }
 
     dataset_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
@@ -238,8 +271,7 @@ def run_forging_pipeline(
             universe=universe,
             dataset=dataset,
             session_lookup=session_lookup,
-            session_to_configuration=session_to_configuration,
-            multiday_plan=multiday_plan,
+            multiday_stages=multiday_stages,
             project_root=project_root,
             tracker=tracker,
             worker=worker,
@@ -249,29 +281,19 @@ def run_forging_pipeline(
         console.echo(message="Forging job completed successfully.", level=LogLevel.SUCCESS)
         return
 
-    # The discovery step primes the shared cindra bootstrap on disk, so an outstanding extraction runs correctly even
-    # when its animal's discovery job is skipped by this invocation.
-    for animal, (configuration_path, sessions) in multiday_plan.items():
-        if (MULTIDAY_DISCOVERY_JOB_NAME, animal) in runnable_jobs:
-            discovery_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier=animal)
-            _run_discovery_job(
-                configuration_path=configuration_path,
-                animal=animal,
-                tracker=tracker,
-                job_id=discovery_id,
-                workers=workers,
-            )
-        for session in sessions:
-            if (MULTIDAY_EXTRACTION_JOB_NAME, session) not in runnable_jobs:
-                continue
-            extraction_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_EXTRACTION_JOB_NAME, specifier=session)
-            _run_extraction_job(
-                configuration_path=configuration_path,
-                session=session,
-                tracker=tracker,
-                job_id=extraction_id,
-                workers=workers,
-            )
+    # The stages are resolved in the order cindra executes them, animal by animal, and the priming step each animal's
+    # first stage performs writes the shared bootstrap on disk. An outstanding later stage therefore runs correctly
+    # even when the stage that primed the bootstrap is skipped by this invocation.
+    for job, stage in multiday_stages.items():
+        if job not in runnable_jobs:
+            continue
+        _run_multiday_job(
+            stage=stage,
+            job=job,
+            tracker=tracker,
+            job_id=ProcessingTracker.generate_job_id(job_name=job[0], specifier=job[1]),
+            workers=workers,
+        )
 
     dataset_session_names = [
         entry.session for entry in dataset.sessions if (FORGING_JOB_NAME, entry.session) in runnable_jobs
@@ -466,9 +488,10 @@ def build_forging_universe(
     """Builds the full forging job universe for the dataset's tracker.
 
     Notes:
-        The universe holds one discovery job per tracked animal, one extraction job per that animal's session, and
-        one assembly job per session in the dataset. Datasets whose animals need no multi-day processing carry
-        assembly jobs alone.
+        cindra declares which cross-recording stages an animal runs and the order they run in, so the universe takes
+        that stretch of the graph from it and appends the per-session assembly stage this library owns. The result
+        holds one discovery job per tracked animal, one extraction job per that animal's session, and one assembly job
+        per session in the dataset. Datasets whose animals need no multi-day processing carry assembly jobs alone.
 
     Args:
         dataset: The resolved dataset whose sessions are assembled.
@@ -477,10 +500,7 @@ def build_forging_universe(
     Returns:
         The list of ``(job_name, specifier)`` pairs the forging tracker aligns against.
     """
-    universe: list[tuple[str, str]] = []
-    for animal, (_, sessions) in multiday_plan.items():
-        universe.append((MULTIDAY_DISCOVERY_JOB_NAME, animal))
-        universe.extend((MULTIDAY_EXTRACTION_JOB_NAME, session) for session in sessions)
+    universe: list[tuple[str, str]] = list(_resolve_multiday_stages(multiday_plan=multiday_plan))
     universe.extend((FORGING_JOB_NAME, entry.session) for entry in dataset.sessions)
     return universe
 
@@ -491,15 +511,18 @@ def forging_job_prerequisites(
     """Returns the intra-pipeline job ordering for the forging pipeline.
 
     Notes:
-        Each animal's discovery job roots that animal's chain. A dataset needing no multi-day processing carries
+        cindra owns the ordering of the cross-recording stretch, so the prerequisites of every discovery and
+        extraction job come from its resolver rather than from a chain spelled out here. cindra orders one animal's
+        recordings at a time while the universe interleaves every animal, so the cross-recording jobs are regrouped
+        under the animal that owns them before the resolver runs over each group.
+
+        This library owns the assembly stage, which reads the aligned fluorescence its session's extraction wrote, so
+        that edge is added on top of the ordering cindra supplies. A dataset needing no multi-day processing carries
         assembly jobs that depend on nothing.
 
-        The cross-recording discovery step primes the shared bootstrap its animal's extractions read, so each
-        extraction requires its own animal's discovery. An assembly job reads the aligned fluorescence its session's
-        extraction wrote.
-
         The dataset supplies the animal each session belongs to, which the universe pairs do not carry, since an
-        extraction is specified by its session while its discovery is specified by its animal.
+        extraction is specified by its session while its discovery is specified by its animal. A job whose animal the
+        dataset no longer holds keeps an empty prerequisite tuple, so every job in the universe is answered for.
 
     Args:
         dataset: The resolved dataset the universe was built from.
@@ -509,19 +532,89 @@ def forging_job_prerequisites(
         A mapping of each job to its tuple of prerequisite jobs, following the discovery to extraction to assembly
         chain.
     """
-    discovery_of_session = {entry.session: (MULTIDAY_DISCOVERY_JOB_NAME, entry.animal) for entry in dataset.sessions}
-    extractions = {specifier for job_name, specifier in universe if job_name == MULTIDAY_EXTRACTION_JOB_NAME}
+    animal_of_session = {entry.session: entry.animal for entry in dataset.sessions}
+    tracked = set(universe)
 
-    ordering: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
-    for job in universe:
-        job_name, specifier = job
-        if job_name == MULTIDAY_EXTRACTION_JOB_NAME and specifier in discovery_of_session:
-            ordering[job] = (discovery_of_session[specifier],)
-        elif job_name == FORGING_JOB_NAME and specifier in extractions:
-            ordering[job] = ((MULTIDAY_EXTRACTION_JOB_NAME, specifier),)
-        else:
-            ordering[job] = ()
+    sessions_by_animal: dict[str, list[str]] = {}
+    for job_name, specifier in universe:
+        if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
+            sessions_by_animal.setdefault(specifier, [])
+        elif job_name == MULTIDAY_EXTRACTION_JOB_NAME and specifier in animal_of_session:
+            sessions_by_animal.setdefault(animal_of_session[specifier], []).append(specifier)
+
+    ordering: dict[tuple[str, str], tuple[tuple[str, str], ...]] = dict.fromkeys(universe, ())
+    for animal, sessions in sessions_by_animal.items():
+        # Narrowed to the stages the universe actually tracks, so a job the universe omits is not resolved into a
+        # prerequisite of the jobs that follow it.
+        jobs = [
+            job
+            for job in resolve_multi_recording_jobs(recording_ids=sessions)
+            if _forging_job(animal=animal, job=job) in tracked
+        ]
+        for job, prerequisites in resolve_multi_recording_prerequisites(jobs=jobs).items():
+            ordering[_forging_job(animal=animal, job=job)] = tuple(
+                _forging_job(animal=animal, job=prerequisite) for prerequisite in prerequisites
+            )
+
+    extractions = {specifier for job_name, specifier in universe if job_name == MULTIDAY_EXTRACTION_JOB_NAME}
+    for job_name, specifier in universe:
+        if job_name == FORGING_JOB_NAME and specifier in extractions:
+            ordering[job_name, specifier] = ((MULTIDAY_EXTRACTION_JOB_NAME, specifier),)
     return ordering
+
+
+def _forging_job(animal: str, job: tuple[str, str]) -> tuple[str, str]:
+    """Renames one cindra cross-recording job into the forging job the tracker records it under.
+
+    Notes:
+        cindra specifies a stage spanning the whole animal with an empty string, since it knows the dataset it
+        registers rather than the animal that dataset belongs to. The forging tracker interleaves several animals, so
+        it records such a stage under the animal instead. Every other stage is specified by its recording, which the
+        forging layout names by its session.
+
+    Args:
+        animal: The identifier of the animal whose cross-recording pipeline the job belongs to.
+        job: The cindra ``(job_name, specifier)`` pair to rename.
+
+    Returns:
+        The ``(job_name, specifier)`` pair the forging tracker records the job under.
+    """
+    job_name, specifier = job
+    return _MULTIDAY_JOB_NAMES[MultiRecordingJobNames(job_name)], specifier or animal
+
+
+def _resolve_multiday_stages(multiday_plan: dict[str, tuple[Path, list[str]]]) -> dict[tuple[str, str], _MultidayStage]:
+    """Resolves every cross-recording stage the multi-day plan implies, keyed by the forging job that tracks it.
+
+    Notes:
+        Which stages an animal runs, the order they run in, and the stage that has nothing before it are all cindra's
+        to declare, so they come from its resolvers and this call only renames the result into the forging tracker's
+        vocabulary. The returned mapping preserves that order, animal by animal, so iterating it dispatches an
+        animal's stages in the order cindra executes them.
+
+        Every cindra stage reads the shared multi-recording bootstrap rather than writing it, so the animal's first
+        stage is the one marked to prime it. Priming is single-threaded by contract, and that stage precedes every
+        other stage of its animal, so it is the only point at which no peer stage of the same animal can be running.
+
+    Args:
+        multiday_plan: The per-animal multi-day plan from ``materialize_multiday_plan`` or ``load_multiday_plan``.
+
+    Returns:
+        A mapping of each cross-recording forging job to the cindra stage it dispatches. Empty when no animal needs
+        multi-day processing.
+    """
+    stages: dict[tuple[str, str], _MultidayStage] = {}
+    for animal, (configuration_path, sessions) in multiday_plan.items():
+        jobs = resolve_multi_recording_jobs(recording_ids=sessions)
+        prerequisites = resolve_multi_recording_prerequisites(jobs=jobs)
+        for job_name, specifier in jobs:
+            stages[_forging_job(animal=animal, job=(job_name, specifier))] = _MultidayStage(
+                configuration_path=configuration_path,
+                job_name=MultiRecordingJobNames(job_name),
+                specifier=specifier,
+                prime=not prerequisites[job_name, specifier],
+            )
+    return stages
 
 
 def _resolve_runnable_jobs(tracker: ProcessingTracker, universe: list[tuple[str, str]]) -> list[tuple[str, str]]:
@@ -583,23 +676,23 @@ def _reset_animal_jobs(tracker: ProcessingTracker, dataset: DatasetData, animals
         )
 
 
-def _run_discovery_job(
-    configuration_path: Path, animal: str, tracker: ProcessingTracker, job_id: str, workers: int
+def _run_multiday_job(
+    stage: _MultidayStage, job: tuple[str, str], tracker: ProcessingTracker, job_id: str, workers: int
 ) -> None:
-    """Runs the cross-recording cell-discovery stage for one animal as a tracked forging job.
+    """Runs one cindra cross-recording stage as a tracked forging job.
 
     Notes:
-        cindra records this job's state directly on the forging tracker under job_id. Every cindra stage reads the
-        shared multi-recording bootstrap rather than writing it, so this call primes the bootstrap first. Priming is
-        single-threaded by contract, and the discovery job runs ahead of every one of its animal's extraction jobs, so
-        this is the only point at which no peer stage of the same animal can be running. The priming precedes the
-        tracked job, so a bootstrap that cannot be written leaves the job unstarted rather than recorded as failed.
+        cindra records this job's state directly on the forging tracker under job_id, and identifies each recording by
+        the unique component of its recording directory path, which for the forging layout is the session name.
+
+        A stage that primes writes the shared multi-recording bootstrap every cindra stage reads. The priming precedes
+        the tracked job, so a bootstrap that cannot be written leaves the job unstarted rather than recorded as failed.
 
     Args:
-        configuration_path: The path to the animal's materialized multi-recording configuration.
-        animal: The animal identifier, used for logging.
+        stage: The cindra stage to execute, resolved by ``_resolve_multiday_stages``.
+        job: The forging ``(job_name, specifier)`` pair the stage is tracked under, used for logging.
         tracker: The forging processing tracker this job is recorded on.
-        job_id: The unique hexadecimal identifier for this discovery job.
+        job_id: The unique hexadecimal identifier for this job.
         workers: The workers this stage runs under.
 
     Raises:
@@ -609,46 +702,17 @@ def _run_discovery_job(
         RuntimeError: If the configuration names a recording directory holding several combined metadata archives, or
             names recording paths that carry no unique identifying component.
     """
+    job_name, specifier = job
     console.echo(
-        message=f"Running '{MULTIDAY_DISCOVERY_JOB_NAME}' job with specifier '{animal}' (ID: {job_id})...",
+        message=f"Running '{job_name}' job with specifier '{specifier}' (ID: {job_id})...",
         level=LogLevel.INFO,
     )
-    prime_dataset(configuration_path=configuration_path)
+    if stage.prime:
+        prime_dataset(configuration_path=stage.configuration_path)
     execute_multi_recording_job(
-        configuration_path=configuration_path,
-        job_name=MultiRecordingJobNames.DISCOVER,
-        specifier="",
-        job_id=job_id,
-        tracker=tracker,
-        workers=workers,
-    )
-
-
-def _run_extraction_job(
-    configuration_path: Path, session: str, tracker: ProcessingTracker, job_id: str, workers: int
-) -> None:
-    """Runs the aligned-fluorescence extraction stage for one recording as a tracked forging job.
-
-    Notes:
-        cindra identifies each recording by the unique component of its recording directory path, which for the
-        forging layout is the session name. cindra records this job's state directly on the forging tracker under
-        job_id, and reads the shared bootstrap the animal's discovery step primed.
-
-    Args:
-        configuration_path: The path to the owning animal's materialized multi-recording configuration.
-        session: The session name, which is also the cindra recording identifier for the extraction.
-        tracker: The forging processing tracker this job is recorded on.
-        job_id: The unique hexadecimal identifier for this extraction job.
-        workers: The workers this stage runs under.
-    """
-    console.echo(
-        message=f"Running '{MULTIDAY_EXTRACTION_JOB_NAME}' job with specifier '{session}' (ID: {job_id})...",
-        level=LogLevel.INFO,
-    )
-    execute_multi_recording_job(
-        configuration_path=configuration_path,
-        job_name=MultiRecordingJobNames.EXTRACT,
-        specifier=session,
+        configuration_path=stage.configuration_path,
+        job_name=stage.job_name,
+        specifier=stage.specifier,
         job_id=job_id,
         tracker=tracker,
         workers=workers,
@@ -660,8 +724,7 @@ def _execute_remote_forging_job(
     universe: list[tuple[str, str]],
     dataset: DatasetData,
     session_lookup: dict[str, DatasetSession],
-    session_to_configuration: dict[str, Path],
-    multiday_plan: dict[str, tuple[Path, list[str]]],
+    multiday_stages: dict[tuple[str, str], _MultidayStage],
     project_root: Path,
     tracker: ProcessingTracker,
     worker: ForgingAssembler,
@@ -670,13 +733,17 @@ def _execute_remote_forging_job(
 ) -> None:
     """Executes the single forging job matching the provided identifier (remote mode).
 
+    Notes:
+        The resolved cross-recording stages carry everything cindra needs to run any one of them on its own, so a job
+        they name is dispatched through them and every other job is an assembly job this library runs itself.
+
     Args:
         job_id: The hexadecimal identifier of the job to execute.
         universe: Every ``(job_name, specifier)`` pair the dataset could produce, used to resolve the job.
         dataset: The resolved dataset being forged.
         session_lookup: The mapping from session name to its DatasetSession metadata, used by assembly jobs.
-        session_to_configuration: The mapping from each multi-day session to its animal's configuration path.
-        multiday_plan: The per-animal multi-day plan, used to resolve a discovery job's configuration.
+        multiday_stages: The cross-recording stages from ``_resolve_multiday_stages``, keyed by the forging job each
+            one is tracked under.
         project_root: The path to the project's root directory.
         tracker: The forging processing tracker.
         worker: The registered per-session assembly worker.
@@ -697,26 +764,13 @@ def _execute_remote_forging_job(
         )
         console.error(message=message, error=ValueError)
 
-    job_name, specifier = id_to_job[job_id]
-    if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
-        _run_discovery_job(
-            configuration_path=multiday_plan[specifier][0],
-            animal=specifier,
-            tracker=tracker,
-            job_id=job_id,
-            workers=workers,
-        )
-    elif job_name == MULTIDAY_EXTRACTION_JOB_NAME:
-        _run_extraction_job(
-            configuration_path=session_to_configuration[specifier],
-            session=specifier,
-            tracker=tracker,
-            job_id=job_id,
-            workers=workers,
-        )
+    job = id_to_job[job_id]
+    stage = multiday_stages.get(job)
+    if stage is not None:
+        _run_multiday_job(stage=stage, job=job, tracker=tracker, job_id=job_id, workers=workers)
     else:
         _execute_job(
-            session_name=specifier,
+            session_name=job[1],
             session_lookup=session_lookup,
             dataset_name=dataset.name,
             project_root=project_root,

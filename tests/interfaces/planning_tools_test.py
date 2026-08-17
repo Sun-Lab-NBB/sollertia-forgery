@@ -21,11 +21,12 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "session": "2026-01-02-03-04-05-000006",
         "dataset": None,
         "pipeline": "video",
+        "job_id": "motion_energy-51",
         "job_name": "motion_energy",
         "specifier": "51",
         "cores": 16,
         "memory_mb": 4000,
-        "memory_modeled": True,
+        "prerequisite_ids": ["camera_timestamp_rename-"],
     },
     {
         "unit_kind": SESSION_UNIT,
@@ -33,11 +34,11 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "session": "2026-01-02-03-04-05-000006",
         "dataset": None,
         "pipeline": "video",
+        "job_id": "camera_timestamp_rename-",
         "job_name": "camera_timestamp_rename",
         "specifier": "",
         "cores": 1,
         "memory_mb": 400,
-        "memory_modeled": False,
     },
     {
         "unit_kind": SESSION_UNIT,
@@ -45,11 +46,11 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "session": "2026-01-03-03-04-05-000006",
         "dataset": None,
         "pipeline": "checksum",
+        "job_id": "checksum_resolution-",
         "job_name": "checksum_resolution",
         "specifier": "",
         "cores": 8,
         "memory_mb": 900,
-        "memory_modeled": True,
     },
     {
         "unit_kind": DATASET_UNIT,
@@ -57,14 +58,14 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
         "session": None,
         "dataset": "ds_a",
         "pipeline": "forging",
+        "job_id": "session_data_assembly-2026-01-02-03-04-05-000006",
         "job_name": "session_data_assembly",
         "specifier": "2026-01-02-03-04-05-000006",
         "cores": 1,
         "memory_mb": 6000,
-        "memory_modeled": True,
     },
 ]
-"""A projection holding both unit kinds, two pipelines for one session, and one job carrying no modeled estimate."""
+"""A projection holding both unit kinds, two pipelines for one session, and one job waiting on another."""
 
 
 def install_projection(project_root: Path) -> None:
@@ -99,7 +100,9 @@ def test_reading_a_projection_reports_the_figures_a_submission_is_sized_against(
     assert response["summed_memory_mb"] == 11300
     assert response["largest_job_memory_mb"] == 6000
     assert response["widest_job_cores"] == 16
-    assert response["jobs_without_a_modeled_estimate"] == 1
+    # Every planned job is modeled from its own input or its target is dropped, so the projection reports no count of
+    # jobs carrying an unmodeled figure.
+    assert "jobs_without_a_modeled_estimate" not in response
 
 
 def test_a_bare_call_reports_the_axes_a_caller_can_filter_on(projected_project: Path) -> None:
@@ -141,15 +144,16 @@ def test_a_page_reports_where_the_next_one_begins(projected_project: Path) -> No
 
 
 def test_opting_into_detail_adds_the_expensive_fields(projected_project: Path) -> None:
-    """Verifies that semi-detail carries the job's figures and that detail adds whether the figure was modeled."""
+    """Verifies that semi-detail carries the job's figures and that detail adds its identity and its ordering."""
     arguments = {"project_path": str(projected_project), "include_items": True}
 
     semi = read_project_plan_tool(**arguments)["jobs"][0]
     full = read_project_plan_tool(**arguments, detailed=True)["jobs"][0]
 
-    assert "memory_modeled" not in semi
+    assert "prerequisite_ids" not in semi
     assert "cores" in semi
-    assert "memory_modeled" in full
+    assert full["job_id"] == "motion_energy-51"
+    assert full["prerequisite_ids"] == ["camera_timestamp_rename-"]
 
 
 def test_an_unknown_pipeline_filter_names_what_is_available(projected_project: Path) -> None:

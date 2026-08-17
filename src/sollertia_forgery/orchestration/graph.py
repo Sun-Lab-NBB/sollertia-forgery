@@ -243,7 +243,6 @@ def build_job_descriptor(
         "tracker_path": tracker_path,
         "cores": int(plan_row["cores"]),
         "memory_mb": int(plan_row["memory_mb"]),
-        "memory_modeled": bool(plan_row["memory_modeled"]),
         "prerequisite_ids": [
             prerequisite for prerequisite in (plan_row["prerequisite_ids"] or []) if prerequisite in trackable_ids
         ],

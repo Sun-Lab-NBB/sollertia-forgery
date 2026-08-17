@@ -47,7 +47,7 @@ from sollertia_forgery.orchestration.footprints import (
     _MEGABYTES_PER_GIGABYTE,
     _CHECKSUM_READER_MEMORY_MB,
     _apply_tolerance,
-    _estimate_checksum_memory,
+    _size_checksum_job,
 )
 
 if TYPE_CHECKING:
@@ -362,13 +362,15 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     Every other estimator scales a per-byte ratio off an input file. A checksum worker streams its file in fixed
     chunks, so the session's size does not enter the estimate and only the reader count does.
     """
-    single = _estimate_checksum_memory(cores=1)
+    single = _size_checksum_job(cores=1).memory_mb
     # Reportable figures land on whole gigabytes, so the per-reader growth shows across a wide core spread rather
     # than between two adjacent core counts, where the rounding absorbs it.
-    many = _estimate_checksum_memory(cores=16)
+    many = _size_checksum_job(cores=16).memory_mb
     assert many - single >= 15 * _CHECKSUM_READER_MEMORY_MB
-    assert _estimate_checksum_memory(cores=8) > single
-    assert _estimate_checksum_memory(cores=2) >= single
+    assert _size_checksum_job(cores=8).memory_mb > single
+    assert _size_checksum_job(cores=2).memory_mb >= single
+    # The sizing pass answers both halves, so the width the job is dispatched at comes back beside its memory.
+    assert _size_checksum_job(cores=16).cores == 16
 
 
 def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -412,7 +414,7 @@ def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str)
         "tracker_path",
         "output_path",
         "unit_name",
-        "estimate_memory",
+        "size_jobs",
     ):
         assert callable(getattr(dispatch, field_name)), f"{pipeline} declares no {field_name}"
 
@@ -474,7 +476,6 @@ def plan_row(
         "specifier": specifier,
         "cores": cores,
         "memory_mb": memory_mb,
-        "memory_modeled": True,
         "prerequisite_ids": [identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites],
     }
 
@@ -551,7 +552,6 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
         "cores": 8,
         "memory_mb": 4096,
-        "memory_modeled": True,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
     }

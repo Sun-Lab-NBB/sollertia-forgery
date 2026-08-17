@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, NoReturn
 from pathlib import Path
 from dataclasses import field, dataclass
 
@@ -15,6 +15,7 @@ from .dispatch import (
     resolve_dispatch as resolve_dispatch,
     resolve_job_cores as resolve_job_cores,
 )
+from .footprints import JobFootprint as JobFootprint
 from ..shared_assets import (
     SESSION_PIPELINES as SESSION_PIPELINES,
     ProcessingPipelines as ProcessingPipelines,
@@ -33,7 +34,6 @@ class JobPlanEntry:
     specifier: str = ...
     cores: int = ...
     memory_mb: int = ...
-    memory_modeled: bool = ...
     prerequisite_ids: list[str] = field(default_factory=list)
     @property
     def key(self) -> tuple[str, str, str]: ...
@@ -68,6 +68,14 @@ def _resolve_unit_plan(
 def _discover_unit(
     dispatch: PipelineDispatch[Any], unit_path: Path, skipped: dict[str, str]
 ) -> tuple[Any, list[tuple[str, str]], list[tuple[str, str]]] | None: ...
+def _size_unit(
+    dispatch: PipelineDispatch[Any],
+    unit: Any,
+    jobs: list[tuple[str, str]],
+    declared: dict[str, int],
+    skipped: dict[str, str],
+) -> dict[tuple[str, str], JobFootprint] | None: ...
+def _reject_unit(unit_path: Path, unit_kind: str, skipped: dict[str, str]) -> NoReturn: ...
 def _load_plan(plan_path: Path) -> JobPlan | None: ...
 def _save_plan(plan: JobPlan, plan_path: Path) -> None: ...
 def _projection_row(

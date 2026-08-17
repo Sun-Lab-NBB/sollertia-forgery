@@ -18,20 +18,20 @@ from cindra import (
     MultiRecordingJobNames,
     SingleRecordingJobNames,
     resolve_array_path,
-    resolve_recording_geometry,
-    estimate_multi_recording_job_memory_mb,
-    estimate_single_recording_job_memory_mb,
+    size_multi_recording_job,
+    size_single_recording_job,
 )
 import psutil
 from natsort import natsorted
 from numpy.lib.format import read_magic, read_array_header_1_0, read_array_header_2_0
 from ataraxis_video_system import size_archive_job as size_camera_extraction_job
+from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import LOG_ARCHIVE_SUFFIX
 from ataraxis_communication_interface import size_archive_job as size_controller_extraction_job
 
-from ..video import ENERGY_JOB_NAME, TRACKING_JOB_NAME, CAMERA_EXTRACTION_JOB_NAME
-from ..forging import MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
+from ..video import ENERGY_JOB_NAME, RENAME_JOB_NAME, TRACKING_JOB_NAME, CAMERA_EXTRACTION_JOB_NAME
+from ..forging import FORGING_JOB_NAME, MULTIDAY_DISCOVERY_JOB_NAME, MULTIDAY_EXTRACTION_JOB_NAME
 from ..runtime import RUNTIME_JOB_NAME
 from ..managing import CHECKSUM_JOB_NAME
 from ..registries import (
@@ -45,7 +45,7 @@ from ..microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from cindra import RecordingGeometry, MultiRecordingConfiguration, SingleRecordingConfiguration
+    from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
     from sollertia_shared_assets import DatasetData
 
 _MEGABYTES_PER_GIGABYTE: int = 1024
@@ -86,14 +86,6 @@ fixed chunks and never holds more than one at a time."""
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
 
-_DISCOVERY_FLOOR_MEMORY_MB: int = 5632
-"""The memory a cross-recording discovery job is charged above the worker baseline when cindra refuses to size it. The
-value is the allowance this package measured for the stage's clustering pass over this corpus, which is the term that
-survives when nothing on disk predicts the job's shape. cindra's own model adds a registration term following the
-combined frame and a clustering term quadratic in the regions the dataset spans, and neither is readable from a dataset
-whose recordings carry no combined output yet. The stage declares no concurrency ceiling of its own and runs at a
-narrow allocation, so this floor is what bounds how many of its jobs one batch admits at once."""
-
 _ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
 """The fluorescence columns an experiment assembly retains at once. Every column is attached under its own name and
 none replaces another, so each stays live in the assembled frame for the rest of the job."""
@@ -122,14 +114,18 @@ class _RecordingGeometry:
 
 @dataclass(frozen=True, slots=True)
 class JobFootprint:
-    """Describes the resources one job occupies while it runs, as this module's sizing pass resolved them."""
+    """Describes the resources one job occupies while it runs, as this module's sizing pass resolved them.
+
+    Notes:
+        Carries the two fields every dependency's own sizing record carries, so a stage a library owns and a stage
+        this package owns describe themselves the same way. Both halves follow from the job's input, and a job whose
+        input cannot be read raises rather than reporting a footprint nothing measured.
+    """
 
     cores: int
     """The cores the job is dispatched at."""
     memory_mb: int
     """The reportable memory the job holds at its peak, in megabytes."""
-    memory_modeled: bool
-    """Determines whether the memory figure follows from the job's own input rather than from the worker baseline."""
 
 
 def resolve_host_memory_mb() -> int:
@@ -141,7 +137,7 @@ def resolve_host_memory_mb() -> int:
     return int(psutil.virtual_memory().total / _BYTES_PER_MEGABYTE)
 
 
-def estimate_session_job_memory(
+def size_session_jobs(
     pipeline: ProcessingPipelines, session: SessionData, jobs: list[tuple[str, str, int]]
 ) -> dict[tuple[str, str], JobFootprint]:
     """Sizes every possible job of one session, reporting the cores it is dispatched at and the memory it holds there.
@@ -153,20 +149,22 @@ def estimate_session_job_memory(
 
         Every term is read from the session's raw acquisition data, so a footprint is available before any stage has
         run. Estimates cover anonymous memory, the term that forces a host to swap and a scheduler to kill a job, so
-        the reclaimable pages a memory-mapped stage leaves resident are excluded. Each footprint carries a flag
-        stating whether the input its memory scales with was found. A job whose input is absent falls back to the
-        worker baseline, which the flag marks as a floor to plan around.
+        the reclaimable pages a memory-mapped stage leaves resident are excluded.
 
         The stages a dependency owns are sized by that dependency's own sizing pass, which reads the job's input once
-        and answers both halves of its model from that read. It picks the width the stage actually runs at, which is
-        one core for an input below its parallel threshold and its declared allocation above it, and it estimates the
-        memory at that width. Taking both figures whole is what keeps a retune of either half reaching slf without a
-        change here, and it is what stops this package from reserving a width the library would never open. Those
-        models reject an unreadable input rather than answering with a floor, so each delegated call is guarded and
-        its refusal falls back to the declared allocation on this module's own baseline memory.
+        and answers both halves of its model from that read. It picks the width the stage actually runs at, which for
+        the extraction stages is one core for an archive below their parallel threshold and their declared allocation
+        above it, and it estimates the memory at that width. Taking both figures whole is what keeps a retune of
+        either half reaching slf without a change here, and it is what stops this package from reserving a width the
+        library would never open.
 
-        Every other stage is this package's own, so it runs at the declared allocation the caller supplied and that
-        allocation passes straight through into the footprint.
+        Every other stage is this package's own, so it is modeled here in the same shape, where one call answers both
+        halves from the job's input. A stage whose cost holds one width whatever data it reads reports the allocation
+        its type declared, which reaches this pass alongside the job.
+
+        No stage answers with a floor. A job whose input cannot be read is a job that cannot run, so the refusal the
+        read raises propagates to the caller, which drops the target it belongs to rather than planning it at a
+        figure nothing measured.
 
     Args:
         pipeline: The pipeline the jobs belong to.
@@ -174,79 +172,76 @@ def estimate_session_job_memory(
         jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at, its estimated
-        memory in megabytes, and a flag that is True when the memory follows from the job's own input rather than
-        from the worker baseline alone.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at and the memory
+        it holds there, in megabytes.
+
+    Raises:
+        FileNotFoundError: If a job's input cannot be read, in which case the job that reads it cannot run either.
+        ValueError: If a two-photon job's specifier names an imaging plane the recording does not hold, if the
+            recording's acquisition metadata cannot be parsed, or if a job name routes to no sizing model.
     """
-    behavior_directory = session.raw_data.behavior_data_path
-    output_root = session.processed_data_path
-    geometry: RecordingGeometry | None = None
-    configuration: SingleRecordingConfiguration | None = None
-    data_path: Path | None = None
-    widest_frame_pixels = 0
+    # Every job of the two-photon pipeline runs a cindra stage, so the whole pipeline is sized by cindra's own pass
+    # and the recording's configuration and raw imaging location are resolved once for the session that carries them.
     if pipeline is ProcessingPipelines.TWO_PHOTON:
         resolve_configuration = resolve_single_recording_configuration_resolver(system=session.acquisition_system)
-        configuration = resolve_configuration(session)
         locate_two_photon_data = resolve_two_photon_data_locator(system=session.acquisition_system)
+        configuration = resolve_configuration(session)
         data_path = locate_two_photon_data(session)
-        geometry = _resolve_two_photon_geometry(
-            output_root=output_root, data_path=data_path, configuration=configuration
-        )
-    elif pipeline is ProcessingPipelines.VIDEO:
-        widest_frame_pixels = _resolve_widest_camera_frame_pixels(camera_directory=session.raw_data.camera_data_path)
+        return {
+            (job_name, specifier): _size_two_photon_job(
+                job_name=job_name,
+                specifier=specifier,
+                output_root=session.processed_data_path,
+                configuration=configuration,
+                data_path=data_path,
+            )
+            for job_name, specifier, _ in jobs
+        }
+
+    behavior_directory = session.raw_data.behavior_data_path
+    camera_directory = session.raw_data.camera_data_path
+    widest_frame_pixels = (
+        _resolve_widest_camera_frame_pixels(camera_directory=camera_directory)
+        if pipeline is ProcessingPipelines.VIDEO
+        else 0
+    )
 
     footprints: dict[tuple[str, str], JobFootprint] = {}
     for job_name, specifier, cores in jobs:
-        # The two extraction stages record the whole footprint their own library resolved, while every other stage
-        # models its memory alone and is planned at the declared allocation the closing statement attaches.
-        if pipeline is ProcessingPipelines.TWO_PHOTON:
-            if geometry is None or configuration is None:
-                memory_mb, memory_modeled = _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
-            else:
-                memory_mb, memory_modeled = _estimate_two_photon_memory(
-                    job_name=job_name,
-                    specifier=specifier,
-                    output_root=output_root,
-                    configuration=configuration,
-                    data_path=data_path,
-                )
-        elif job_name == CHECKSUM_JOB_NAME:
-            memory_mb, memory_modeled = _estimate_checksum_memory(cores=cores), True
+        if job_name == CHECKSUM_JOB_NAME:
+            footprint = _size_checksum_job(cores=cores)
         elif job_name == CAMERA_EXTRACTION_JOB_NAME:
-            footprints[job_name, specifier] = _size_camera_extraction_job(
-                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), declared_cores=cores
+            footprint = _size_camera_extraction_job(
+                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
             )
-            continue
         elif job_name == CONTROLLER_EXTRACTION_JOB_NAME:
-            footprints[job_name, specifier] = _size_controller_extraction_job(
-                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), declared_cores=cores
+            footprint = _size_controller_extraction_job(
+                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
             )
-            continue
         elif job_name == RUNTIME_JOB_NAME:
-            archive = behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
-            memory_mb, memory_modeled = _estimate_runtime_reader_memory(archive_path=archive, cores=cores)
+            footprint = _size_runtime_job(
+                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), cores=cores
+            )
         elif job_name == ENERGY_JOB_NAME:
-            memory_mb, memory_modeled = _estimate_motion_energy_memory(frame_pixels=widest_frame_pixels, cores=cores)
+            footprint = _size_motion_energy_job(frame_pixels=widest_frame_pixels, cores=cores)
         elif job_name == TRACKING_JOB_NAME:
-            memory_mb, memory_modeled = _estimate_widest_file_memory(
-                directory=session.raw_data.camera_data_path,
-                pattern="*.h5",
-                expansion_ratio=_POSE_PREDICTION_RATIO,
-            )
+            footprint = _size_pose_tracking_job(camera_directory=camera_directory, cores=cores)
         elif job_name == PARSE_JOB_NAME:
-            memory_mb, memory_modeled = _estimate_widest_file_memory(
-                directory=behavior_directory, pattern=f"*{LOG_ARCHIVE_SUFFIX}", expansion_ratio=_MODULE_TABLE_RATIO
-            )
+            footprint = _size_module_parse_job(behavior_directory=behavior_directory, cores=cores)
+        elif job_name == RENAME_JOB_NAME:
+            footprint = _size_rename_job(cores=cores)
         else:
-            memory_mb, memory_modeled = _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
-        footprints[job_name, specifier] = JobFootprint(cores=cores, memory_mb=memory_mb, memory_modeled=memory_modeled)
+            message = (
+                f"Unable to size job '{job_name}' of session '{session.session_name}'. The job type routes to no "
+                f"sizing model, and a job whose resources nothing resolves cannot be admitted to a batch."
+            )
+            console.error(message=message, error=ValueError)
+        footprints[job_name, specifier] = footprint
 
     return footprints
 
 
-def estimate_dataset_job_memory(
-    dataset: DatasetData, jobs: list[tuple[str, str, int]]
-) -> dict[tuple[str, str], JobFootprint]:
+def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
     """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
     Notes:
@@ -255,26 +250,27 @@ def estimate_dataset_job_memory(
         single-recording pipeline wrote for the sessions that carry two-photon data.
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
-        per job. A job whose processed input is absent falls back to the worker baseline, which the flag marks as a
-        floor to plan around. The two cross-recording stages belong to cindra, so they are sized by cindra's own
-        model, which refuses a dataset any recording leaves short rather than sizing it from the recordings that
-        happen to be complete. That refusal becomes the fallback here, and the discovery stage carries an allowance
-        above the baseline on it, because nothing else bounds how many of its jobs one batch admits at once.
-
-        Every stage a dataset runs holds one width whatever data it reads, cindra's two among them, so the declared
-        allocation the caller supplied is the width each of these jobs is dispatched at.
+        per job. The two cross-recording stages belong to cindra, so both halves of their figures are cindra's own
+        sizing pass, which refuses a dataset any recording leaves short rather than sizing it from the recordings
+        that happen to be complete. That refusal propagates, because a stage cindra will not size is a stage the
+        dataset cannot run until its recordings are complete.
 
         The per-session assembly stage is this package's own, so no dependency models it and its projection stays
-        here.
+        here. Its width holds one value whatever data it reads, so it reports the allocation its type declared.
 
     Args:
         dataset: The resolved dataset the jobs operate on.
         jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at, its estimated
-        memory in megabytes, and a flag that is True when the memory follows from the job's own input rather than
-        from a flat allowance.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at and the memory
+        it holds there, in megabytes.
+
+    Raises:
+        FileNotFoundError: If a job's processed input cannot be read, in which case the job that reads it cannot run
+            either.
+        ValueError: If the dataset's acquisition system donates no multi-recording configuration, or if a job name
+            routes to no sizing model.
     """
     project_root = dataset.dataset_data_path.parent.parent
     animals = {entry.session: entry.animal for entry in dataset.sessions}
@@ -284,17 +280,16 @@ def estimate_dataset_job_memory(
     for job_name, specifier, cores in jobs:
         if job_name == MULTIDAY_DISCOVERY_JOB_NAME:
             # The discovery stage runs over one animal, so its specifier names that animal rather than a session.
-            memory_mb, memory_modeled = _estimate_multi_recording_memory(
+            footprint = _size_multi_recording_job(
                 job_name=MultiRecordingJobNames.DISCOVER,
                 specifier=specifier,
                 recording_directories=_animal_recording_directories(
                     dataset=dataset, animal=specifier, project_root=project_root
                 ),
                 configuration=configuration,
-                unmodeled_allowance_mb=_DISCOVERY_FLOOR_MEMORY_MB,
             )
         elif job_name == MULTIDAY_EXTRACTION_JOB_NAME:
-            memory_mb, memory_modeled = _estimate_multi_recording_memory(
+            footprint = _size_multi_recording_job(
                 job_name=MultiRecordingJobNames.EXTRACT,
                 specifier=specifier,
                 recording_directories=_animal_recording_directories(
@@ -302,18 +297,22 @@ def estimate_dataset_job_memory(
                 ),
                 configuration=configuration,
             )
-        else:
-            animal = animals.get(specifier, "")
-            geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=specifier)
-            regions = _resolve_tracked_regions(
+        elif job_name == FORGING_JOB_NAME:
+            footprint = _size_forging_job(
                 dataset=dataset,
-                animal=animal,
+                animal=animals.get(specifier, ""),
                 session=specifier,
                 project_root=project_root,
                 configuration=configuration,
+                cores=cores,
             )
-            memory_mb, memory_modeled = _estimate_assembly_memory(geometry=geometry, regions=regions)
-        footprints[job_name, specifier] = JobFootprint(cores=cores, memory_mb=memory_mb, memory_modeled=memory_modeled)
+        else:
+            message = (
+                f"Unable to size job '{job_name}' of dataset '{dataset.name}'. The job type routes to no sizing "
+                f"model, and a job whose resources nothing resolves cannot be admitted to a batch."
+            )
+            console.error(message=message, error=ValueError)
+        footprints[job_name, specifier] = footprint
 
     return footprints
 
@@ -367,7 +366,7 @@ def _apply_tolerance(memory_mb: int) -> int:
     return _round_to_gigabyte(memory_mb=int(memory_mb * MEMORY_ESTIMATE_TOLERANCE) + 1)
 
 
-def _size_camera_extraction_job(archive_path: Path, declared_cores: int) -> JobFootprint:
+def _size_camera_extraction_job(archive_path: Path) -> JobFootprint:
     """Sizes one camera timestamp extraction job through the video library's own sizing pass.
 
     Notes:
@@ -377,28 +376,23 @@ def _size_camera_extraction_job(archive_path: Path, declared_cores: int) -> JobF
         rule nor reserves cores for a pool the stage would not open.
 
         Reading the archive reads its central directory alone, and the library refuses an archive it cannot read
-        because the job reading it could not run either. That refusal is the same condition this module reports as an
-        unmodeled floor, so the job falls back to the allocation its type declares.
+        because the job reading it could not run either. That refusal is left to propagate, since a job with no
+        readable input is a job to drop from the workflow rather than one to plan at a guessed figure.
 
     Args:
         archive_path: The path to the log archive the job reads.
-        declared_cores: The cores the job's type declares, which stand in when the archive cannot be read.
 
     Returns:
-        The job's footprint, whose modeled flag is True when the archive was found and read.
+        The job's footprint, holding the library's own width and its memory at that width.
+
+    Raises:
+        FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
-    try:
-        sizing = size_camera_extraction_job(archive_path=archive_path)
-    except FileNotFoundError:
-        return JobFootprint(
-            cores=declared_cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB), memory_modeled=False
-        )
-    return JobFootprint(
-        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
-    )
+    sizing = size_camera_extraction_job(archive_path=archive_path)
+    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
-def _size_controller_extraction_job(archive_path: Path, declared_cores: int) -> JobFootprint:
+def _size_controller_extraction_job(archive_path: Path) -> JobFootprint:
     """Sizes one microcontroller data extraction job through the communication library's own sizing pass.
 
     Notes:
@@ -408,63 +402,88 @@ def _size_controller_extraction_job(archive_path: Path, declared_cores: int) -> 
         rule nor reserves cores for a pool the stage would not open.
 
         Reading the archive reads its central directory alone, and the library refuses an archive it cannot read
-        because the job reading it could not run either. That refusal is the same condition this module reports as an
-        unmodeled floor, so the job falls back to the allocation its type declares.
+        because the job reading it could not run either. That refusal is left to propagate, since a job with no
+        readable input is a job to drop from the workflow rather than one to plan at a guessed figure.
 
     Args:
         archive_path: The path to the log archive the job reads.
-        declared_cores: The cores the job's type declares, which stand in when the archive cannot be read.
 
     Returns:
-        The job's footprint, whose modeled flag is True when the archive was found and read.
+        The job's footprint, holding the library's own width and its memory at that width.
+
+    Raises:
+        FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
-    try:
-        sizing = size_controller_extraction_job(archive_path=archive_path)
-    except FileNotFoundError:
-        return JobFootprint(
-            cores=declared_cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB), memory_modeled=False
-        )
-    return JobFootprint(
-        cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb), memory_modeled=True
-    )
+    sizing = size_controller_extraction_job(archive_path=archive_path)
+    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
-def _estimate_runtime_reader_memory(archive_path: Path, cores: int) -> tuple[int, bool]:
-    """Estimates the memory one runtime log job holds.
+def _size_runtime_job(archive_path: Path, cores: int) -> JobFootprint:
+    """Sizes one runtime log job from the archive it reads.
 
     Notes:
         The stage splits one log archive across a worker pool, and every worker opens the archive itself, so the
         archive's directory is held once per allocated core. The runtime pipeline is this package's own, so no
-        dependency models it.
+        dependency models it, and the pool it opens is the allocation its type declared.
 
     Args:
         archive_path: The path to the log archive the job reads.
         cores: The cores the job is allocated, which is how many readers it opens.
 
     Returns:
-        The reportable memory in megabytes and a flag that is True when the archive was found and read.
+        The job's footprint, holding the declared width and the memory the readers hold at it.
+
+    Raises:
+        FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
     if not archive_path.is_file():
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
+        message = (
+            f"Unable to size the runtime log job reading '{archive_path}'. The path does not name an existing file, "
+            f"so nothing states how much the job's readers hold and the job could not run either."
+        )
+        console.error(message=message, error=FileNotFoundError)
     per_reader = _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
-    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * (per_reader + SPAWNED_CHILD_MEMORY_MB)), True
+    return JobFootprint(
+        cores=cores,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * (per_reader + SPAWNED_CHILD_MEMORY_MB)),
+    )
 
 
-def _estimate_checksum_memory(cores: int) -> int:
-    """Estimates the memory one raw-data checksum job holds.
+def _size_checksum_job(cores: int) -> JobFootprint:
+    """Sizes one raw-data checksum job from the readers it opens.
 
     Notes:
         Each worker streams its file in fixed chunks and holds one at a time, so the figure is flat across every
         session size. The parent retains one pending result per file, which stays below the rounding this estimate
-        already carries.
+        already carries. The stage is this package's own and gains nothing from a width the data picks, so it runs at
+        the allocation its type declared.
 
     Args:
         cores: The cores the job is allocated, which is how many files it hashes at once.
 
     Returns:
-        The reportable memory in megabytes.
+        The job's footprint, holding the declared width and the memory its readers hold at it.
     """
-    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * _CHECKSUM_READER_MEMORY_MB)
+    return JobFootprint(
+        cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * _CHECKSUM_READER_MEMORY_MB)
+    )
+
+
+def _size_rename_job(cores: int) -> JobFootprint:
+    """Sizes one camera timestamp rename job.
+
+    Notes:
+        The stage performs a fixed handful of filesystem operations and reads no recording, so it holds a worker and
+        nothing besides. There is no input to scale with, which is what makes the worker itself the whole model
+        rather than a floor standing in for one.
+
+    Args:
+        cores: The cores the job is allocated, which its type declares.
+
+    Returns:
+        The job's footprint, holding the declared width and one worker's memory.
+    """
+    return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB))
 
 
 def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:
@@ -495,8 +514,8 @@ def _resolve_widest_camera_frame_pixels(camera_directory: Path) -> int:
     return widest
 
 
-def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> tuple[int, bool]:
-    """Estimates the memory one video motion-energy job holds, from the frame it decodes.
+def _size_motion_energy_job(frame_pixels: int, cores: int) -> JobFootprint:
+    """Sizes one video motion-energy job from the frame it decodes.
 
     Notes:
         Each decode worker holds the binned frame and its predecessor. Binning slices a strided view out of a
@@ -504,68 +523,41 @@ def _estimate_motion_energy_memory(frame_pixels: int, cores: int) -> tuple[int, 
         small share of a worker's memory next to the cost of the worker itself. Charging every job of a session its
         widest frame therefore stays on the safe side at a cost well inside the tolerance.
 
+        The stage is this package's own and opens one decoder per core it holds, so it runs at the allocation its
+        type declared and the per-core decoder and child cost is charged at that width.
+
     Args:
         frame_pixels: The pixels the frame this job decodes holds.
         cores: The cores the job is allocated, which bounds how many chunks it decodes at once.
 
     Returns:
-        The reportable memory in megabytes and a flag that is always True, because the per-core decoder and child
-        cost is modeled whether or not a readable recording supplied a frame.
+        The job's footprint, holding the declared width and the memory its decoders hold at it.
     """
     per_worker = (
         _bytes_to_megabytes(byte_count=frame_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
         + _DECODER_BUFFER_MEMORY_MB
         + SPAWNED_CHILD_MEMORY_MB
     )
-    return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * per_worker), True
+    return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + cores * per_worker))
 
 
-def _resolve_two_photon_geometry(
-    output_root: Path, data_path: Path, configuration: SingleRecordingConfiguration
-) -> RecordingGeometry | None:
-    """Reads a two-photon recording's shape through cindra's own geometry resolver.
-
-    Notes:
-        Resolved once per session rather than once per job, because the resolution reads the acquisition metadata and
-        one source file header while every job of the recording answers to the same shape.
-
-        The result gates the session's two-photon estimates rather than sizing them, since cindra sizes each of its
-        stages from the recording itself. A session whose geometry resolves to None carries no readable raw imaging
-        data, so every one of its jobs falls back to the worker baseline.
-
-    Args:
-        output_root: The output root the recording's cindra configuration was given.
-        data_path: The raw imaging directory holding the recording's source files.
-        configuration: The recording's resolved processing configuration, consulted for the image names the
-            conversion stage excludes.
-
-    Returns:
-        The recording's geometry, or None when the session holds no readable raw imaging data.
-    """
-    try:
-        geometry = resolve_recording_geometry(
-            output_root=output_root,
-            data_path=data_path,
-            ignored_file_names=tuple(configuration.file_io.ignored_file_names),
-        )
-    except OSError, ValueError, RuntimeError:
-        return None
-    return geometry if geometry.planes else None
-
-
-def _estimate_two_photon_memory(
+def _size_two_photon_job(
     job_name: str,
     specifier: str,
     output_root: Path,
     configuration: SingleRecordingConfiguration,
     data_path: Path | None,
-) -> tuple[int, bool]:
-    """Estimates the memory one two-photon job holds, through cindra's own per-stage model.
+) -> JobFootprint:
+    """Sizes one two-photon job through cindra's own per-stage sizing pass.
 
     Notes:
+        cindra reads the recording once and answers both halves of its model from that read, so the width a stage
+        runs at is the measured knee of its own scaling curve rather than a figure this package repeats. Taking both
+        figures whole is what keeps a retune of either half reaching slf without a change here.
+
         cindra rejects a stage it cannot size, either because the recording carries no readable raw imaging data or
-        because a per-plane specifier names a plane the recording does not hold. Both are the condition this module
-        reports as an unmodeled floor, so the refusal is translated rather than propagated.
+        because a per-plane specifier names a plane the recording does not hold. Both refusals propagate, since a
+        recording cindra will not size is a recording whose stages cannot run.
 
     Args:
         job_name: The tracker job name identifying the stage.
@@ -576,38 +568,38 @@ def _estimate_two_photon_memory(
         data_path: The raw imaging directory, consulted when the recording carries no output yet.
 
     Returns:
-        The reportable memory in megabytes and a flag that is True when cindra sized the stage.
+        The job's footprint, holding cindra's own width for the stage and its memory at that width.
+
+    Raises:
+        FileNotFoundError: If the recording carries neither pipeline output nor readable raw imaging data, in which
+            case no stage of it can run.
+        ValueError: If the specifier names an imaging plane the recording does not hold.
     """
-    try:
-        memory_mb = estimate_single_recording_job_memory_mb(
-            job_name=SingleRecordingJobNames(job_name),
-            specifier=specifier,
-            output_root=output_root,
-            configuration=configuration,
-            data_path=data_path,
-        )
-    except FileNotFoundError, ValueError:
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
-    return _round_to_gigabyte(memory_mb=memory_mb), True
+    sizing = size_single_recording_job(
+        job_name=SingleRecordingJobNames(job_name),
+        specifier=specifier,
+        output_root=output_root,
+        configuration=configuration,
+        data_path=data_path,
+    )
+    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
-def _estimate_multi_recording_memory(
+def _size_multi_recording_job(
     job_name: MultiRecordingJobNames,
     specifier: str,
     recording_directories: tuple[Path, ...],
     configuration: MultiRecordingConfiguration | None,
-    unmodeled_allowance_mb: int = 0,
-) -> tuple[int, bool]:
-    """Estimates the memory one cross-recording job holds, through cindra's own per-stage model.
+) -> JobFootprint:
+    """Sizes one cross-recording job through cindra's own per-stage sizing pass.
 
     Notes:
         Both cross-recording stages read every recording of the animal they run over, so the whole recording set is
-        handed to the model whichever stage is being sized. cindra refuses a set any recording leaves short, which is
-        the condition this module reports as an unmodeled floor.
+        handed to cindra whichever stage is being sized, and both halves of the figure come back from that one read.
 
-        A stage whose refusal would otherwise report the bare worker baseline carries an allowance above it instead,
-        which stands in for the terms cindra's model would have read. That floor is what bounds how many of the
-        stage's jobs a batch admits at once, since a narrow allocation alone lets a core budget admit a great many.
+        cindra refuses a set any recording leaves short rather than sizing it from the recordings that happen to be
+        complete, and that refusal propagates. A dataset whose recordings carry no combined output cannot run either
+        stage yet, so it is dropped from the workflow rather than planned at a floor.
 
     Args:
         job_name: The cindra stage the job runs.
@@ -616,27 +608,89 @@ def _estimate_multi_recording_memory(
         recording_directories: The cindra output directory of every recording the job spans.
         configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system
             donates none.
-        unmodeled_allowance_mb: The memory charged above the worker baseline when cindra refuses to size the stage.
 
     Returns:
-        The reportable memory in megabytes and a flag that is True when cindra sized the stage.
+        The job's footprint, holding cindra's own width for the stage and its memory at that width.
+
+    Raises:
+        FileNotFoundError: If no recording the job spans carries a combined metadata archive, in which case neither
+            cross-recording stage can run.
+        ValueError: If the dataset's acquisition system donates no multi-recording configuration, which leaves the
+            stage with no parameters to be sized against.
     """
-    if configuration is None or not recording_directories:
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + unmodeled_allowance_mb), False
-    try:
-        memory_mb = estimate_multi_recording_job_memory_mb(
-            job_name=job_name,
-            specifier=specifier,
-            recording_directories=recording_directories,
-            configuration=configuration,
+    if configuration is None:
+        message = (
+            f"Unable to size the '{job_name.value}' job of '{specifier}'. The dataset resolved no multi-recording "
+            f"configuration, either because its acquisition system tracks no regions across the sessions it holds "
+            f"or because none of those sessions remains under the project root, so the stage has no parameters to "
+            f"be sized against and no data to run over."
         )
-    except FileNotFoundError, ValueError, RuntimeError:
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB + unmodeled_allowance_mb), False
-    return _round_to_gigabyte(memory_mb=memory_mb), True
+        console.error(message=message, error=ValueError)
+    sizing = size_multi_recording_job(
+        job_name=job_name,
+        specifier=specifier,
+        recording_directories=recording_directories,
+        configuration=configuration,
+    )
+    return JobFootprint(cores=sizing.cores, memory_mb=_round_to_gigabyte(memory_mb=sizing.memory_mb))
 
 
-def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio: float) -> tuple[int, bool]:
-    """Estimates memory from the largest file in a directory matching a pattern, for a stage whose input is one of
+def _size_pose_tracking_job(camera_directory: Path, cores: int) -> JobFootprint:
+    """Sizes one pose-tracking job from the widest prediction file its session recorded.
+
+    Notes:
+        The stage reads predictions written upstream and never runs inference, so its working set follows the table
+        it reads. The stage is this package's own and its own fan-out is fixed, so it runs at the allocation its type
+        declared.
+
+    Args:
+        camera_directory: The raw camera directory holding the session's prediction files.
+        cores: The cores the job is allocated, which its type declares.
+
+    Returns:
+        The job's footprint, holding the declared width and the memory the widest prediction file implies.
+
+    Raises:
+        FileNotFoundError: If the session recorded no prediction file, in which case the job that reads one cannot
+            run either.
+    """
+    return JobFootprint(
+        cores=cores,
+        memory_mb=_widest_file_memory_mb(
+            directory=camera_directory, pattern="*.h5", expansion_ratio=_POSE_PREDICTION_RATIO
+        ),
+    )
+
+
+def _size_module_parse_job(behavior_directory: Path, cores: int) -> JobFootprint:
+    """Sizes one module parse job from the widest log archive its session recorded.
+
+    Notes:
+        One module holds a share of its controller's archive, and the whole archive bounds that share from above, so
+        the widest archive the session recorded is what the job is charged. The stage is a single pass over one
+        module's extracted table, so it runs at the allocation its type declared.
+
+    Args:
+        behavior_directory: The raw behavior directory holding the session's log archives.
+        cores: The cores the job is allocated, which its type declares.
+
+    Returns:
+        The job's footprint, holding the declared width and the memory the widest archive implies.
+
+    Raises:
+        FileNotFoundError: If the session recorded no log archive, in which case the job that parses one cannot run
+            either.
+    """
+    return JobFootprint(
+        cores=cores,
+        memory_mb=_widest_file_memory_mb(
+            directory=behavior_directory, pattern=f"*{LOG_ARCHIVE_SUFFIX}", expansion_ratio=_MODULE_TABLE_RATIO
+        ),
+    )
+
+
+def _widest_file_memory_mb(directory: Path, pattern: str, expansion_ratio: float) -> int:
+    """Models memory from the largest file in a directory matching a pattern, for a stage whose input is one of
     several files it may read.
 
     Notes:
@@ -649,17 +703,26 @@ def _estimate_widest_file_memory(directory: Path, pattern: str, expansion_ratio:
         expansion_ratio: The resident memory a job holds per byte of the file it reads.
 
     Returns:
-        The reportable memory in megabytes and a flag that is True when a candidate file was found and measured.
+        The reportable memory in megabytes.
+
+    Raises:
+        FileNotFoundError: If the directory is absent or holds no file matching the pattern, in which case the job
+            reading one of those files cannot run either.
     """
-    if not directory.is_dir():
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
-    candidates = sorted(directory.glob(pattern), key=lambda path: path.stat().st_size, reverse=True)
+    candidates = (
+        sorted(directory.glob(pattern), key=lambda path: path.stat().st_size, reverse=True)
+        if directory.is_dir()
+        else []
+    )
     if not candidates:
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
-    widest = candidates[0]
+        message = (
+            f"Unable to size a job reading a '{pattern}' file from '{directory}'. The directory holds no file the "
+            f"pattern matches, so nothing states how much the job holds and the job could not run either."
+        )
+        console.error(message=message, error=FileNotFoundError)
     return _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
-    ), True
+        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=candidates[0].stat().st_size * expansion_ratio)
+    )
 
 
 @cache
@@ -834,29 +897,57 @@ def _resolve_tracked_regions(
     return max(1, min(pooled, max(geometry.regions for geometry in geometries)))
 
 
-def _estimate_assembly_memory(geometry: _RecordingGeometry | None, regions: int) -> tuple[int, bool]:
-    """Estimates the memory one per-session assembly job holds.
+def _size_forging_job(
+    dataset: DatasetData,
+    animal: str,
+    session: str,
+    project_root: Path,
+    configuration: MultiRecordingConfiguration | None,
+    cores: int,
+) -> JobFootprint:
+    """Sizes one per-session assembly job from the processed output it reads.
 
     Notes:
         The assembled frame retains every fluorescence column it attaches, and the write that closes the job rechunks
-        the frame into a second copy of the whole thing. A session carrying no fluorescence falls back to the worker
-        baseline, which the flag marks as a floor to plan around.
+        the frame into a second copy of the whole thing, so the shape of the session's own fluorescence is what the
+        job is charged. The stage is this package's own, and its fan-out is a fixed handful of threads, so it runs at
+        the allocation its type declared.
+
+        A session carrying no fluorescence has nothing to assemble, so its refusal propagates rather than resolving
+        to a floor.
 
     Args:
-        geometry: The session's processed geometry.
-        regions: The regions each retained fluorescence column spans.
+        dataset: The resolved dataset the session belongs to.
+        animal: The animal the session belongs to.
+        session: The session name whose assembly job is sized.
+        project_root: The path to the project's root directory.
+        configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system
+            donates none.
+        cores: The cores the job is allocated, which its type declares.
 
     Returns:
-        The reportable memory in megabytes and a flag stating whether the fluorescence geometry was found.
+        The job's footprint, holding the declared width and the memory the assembled frame holds at it.
+
+    Raises:
+        FileNotFoundError: If the session carries no processed imaging output, in which case the job assembling it
+            cannot run either.
     """
+    geometry = _resolve_recording_geometry(project_root=project_root, animal=animal, session=session)
     if geometry is None:
-        return _apply_tolerance(memory_mb=WORKER_MEMORY_MB), False
+        message = (
+            f"Unable to size the assembly job of session '{session}'. The session carries no processed imaging "
+            f"output, so nothing states the shape of the frame the job assembles and the job could not run either."
+        )
+        console.error(message=message, error=FileNotFoundError)
+    regions = _resolve_tracked_regions(
+        dataset=dataset, animal=animal, session=session, project_root=project_root, configuration=configuration
+    )
 
     columns = (
         _ASSEMBLY_FLUORESCENCE_COLUMNS * _ASSEMBLY_WRITE_COPIES * geometry.samples * regions * _SINGLE_PRECISION_BYTES
     )
     sub_datasets = geometry.samples * _SUB_DATASET_BYTES_PER_SAMPLE
-    return (
-        _apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
-        True,
+    return JobFootprint(
+        cores=cores,
+        memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + sub_datasets)),
     )

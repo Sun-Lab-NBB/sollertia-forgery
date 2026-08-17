@@ -16,7 +16,6 @@ from ataraxis_data_structures import (
     LOG_ARCHIVE_SUFFIX,
     ProcessingTracker,
     limit_worker_threads,
-    discover_log_archives,
     initialize_worker_threads,
 )
 from ataraxis_communication_interface import (
@@ -28,6 +27,7 @@ from ataraxis_communication_interface import (
     MicroControllerManifest,
     ControllerExtractionConfig,
     execute_job,
+    resolve_jobs,
     partition_events,
     resolve_module_path,
 )
@@ -90,8 +90,9 @@ def run_microcontroller_processing_pipeline(
         FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
             extraction job's log archive is not present.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
-            no manifest controller declares a module the session's acquisition system extracts, if no processable
-            controllers are discovered, or if the provided job_id does not match any available job.
+            the raw behavior data tree holds more than one microcontroller manifest, if no manifest controller
+            declares a module the session's acquisition system extracts, if no processable controllers are
+            discovered, or if the provided job_id does not match any available job.
     """
     session = SessionData.load(session_path=session_path)
     console.echo(
@@ -149,6 +150,7 @@ def run_microcontroller_processing_pipeline(
             parsers=parsers,
             session=session,
             log_directory=log_directory,
+            extraction_archives=extraction_archives,
             extraction_output=extraction_output,
             parse_output=parse_output,
             config_path=config_path,
@@ -205,8 +207,9 @@ def discover_microcontroller_jobs(
         The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
         controller that declares at least one module the acquisition system parses and the session configured for use,
         plus one parse job per such module. The possible subset narrows the universe to controllers whose log archive
-        is present on disk, since a controller with no archive can be neither extracted nor parsed. Discovery reads
-        the manifest and globs for archives, leaving the archives' contents and every output file untouched.
+        is present on disk, since a controller with no archive can be neither extracted nor parsed. Locating those
+        archives is delegated to the acquisition library's own resolver, so discovery reads the manifest and indexes
+        the archive names, leaving the archives' contents and every output file untouched.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -218,8 +221,9 @@ def discover_microcontroller_jobs(
 
     Raises:
         FileNotFoundError: If the session's microcontroller manifest is not present.
-        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, or
-            if no manifest controller declares a module the acquisition system extracts.
+        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
+            the raw behavior data tree holds more than one microcontroller manifest, or if no manifest controller
+            declares a module the acquisition system extracts.
     """
     session = SessionData.load(session_path=session_path)
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
@@ -378,37 +382,6 @@ def _materialize_extraction_config(
     return config_path
 
 
-def _discover_controller_archives(log_directory: Path) -> dict[str, Path]:
-    """Discovers the log archive every source wrote into the session's raw behavior data directory.
-
-    Notes:
-        One directory scan resolves every archive, so a session running many controllers pays the same walk as a
-        session running one. A controller with no archive is simply absent from the mapping, so an unstaged
-        controller is skipped and the session continues. A session whose behavior data directory does not exist yet
-        yields an empty mapping for the same reason.
-
-        Only the directory's own entries are read. The DataLogger assembles the archives of one logger side by side
-        in that logger's output directory, which for an acquisition session is the raw behavior data directory
-        itself, and every other archive consumer in this library addresses an archive by that flat name. An archive
-        filed in a subdirectory therefore does not participate, which keeps a nested copy of a session's data from
-        being processed as though it belonged to the session holding it.
-
-        The mapping also carries the archives of the sources that are not microcontrollers (the cameras and the
-        runtime logger), since every source of a session logs into the same directory. Callers look up the
-        controller IDs they resolved from the manifest, so those entries are never read.
-
-    Args:
-        log_directory: The session's raw behavior data directory holding the log archives.
-
-    Returns:
-        The path to every log archive stored directly in the directory, keyed by the identifier of the source that
-        produced it.
-    """
-    if not log_directory.is_dir():
-        return {}
-    return discover_log_archives(log_directory=log_directory)
-
-
 def _extract_controller(
     archive_path: Path,
     output_directory: Path,
@@ -469,12 +442,17 @@ def _discover_jobs(
     """Builds the job universe and the requested-job set for the session.
 
     Notes:
-        A controller contributes jobs only if at least one of its configured modules is eligible (present in the
+        Locating the controllers is the acquisition library's own job, so a single ``resolve_jobs`` call reads the
+        manifest and indexes each registered controller's archive, yielding the controllers in ascending identifier
+        order and resolving an archive only when exactly one file under the directory carries that controller's
+        name. This function composes that locating with the eligibility rule the library knows nothing about: a
+        controller contributes jobs only if at least one of its configured modules is eligible (present in the
         resolved parser mapping). Extracting a controller with no parseable modules would produce intermediate
-        feathers that nothing consumes. The universe enumerates every job the configuration could produce (one
-        extraction job per such controller plus one parse job per eligible module), which stays stable across
-        invocations for foreign-entry detection and remote-job validation. The requested set narrows the universe
-        to controllers whose log archive is actually present on disk.
+        feathers that nothing consumes.
+
+        The universe enumerates every job the configuration could produce (one extraction job per such controller
+        plus one parse job per eligible module), which stays stable across invocations for foreign-entry detection
+        and remote-job validation. The requested set narrows the universe to controllers whose archive resolved.
 
     Args:
         controllers: The per-controller extraction configurations, keyed by controller ID.
@@ -486,16 +464,26 @@ def _discover_jobs(
         lists of ``(job_name, specifier)`` tuples. ``extraction_archives`` maps each present controller ID to its
         archive path. ``parse_specifiers`` maps each requested parse specifier (``"{controller}-{type}-{id}"``) to
         its ``(controller_id, module_type, module_id)`` triple.
+
+    Raises:
+        FileNotFoundError: If the raw behavior data directory does not exist.
+        ValueError: If the raw behavior data tree holds more than one microcontroller manifest, or if the manifest
+            registers no controllers.
     """
     universe: list[tuple[str, str]] = []
     requested: list[tuple[str, str]] = []
     extraction_archives: dict[str, Path] = {}
     parse_specifiers: dict[str, tuple[str, int, int]] = {}
 
-    # Resolves every controller's archive with a single directory scan, rather than one scan per controller.
-    archives = _discover_controller_archives(log_directory=log_directory)
+    # Delegates locating to the acquisition library, which resolves every registered controller's archive in one
+    # pass rather than one scan per controller.
+    job_universe = resolve_jobs(log_directory=log_directory)
 
-    for controller_id, controller_config in controllers.items():
+    for source in job_universe.sources:
+        controller_config = controllers.get(source.source_id)
+        if controller_config is None:
+            continue
+
         eligible = [
             (module.module_type, module.module_id)
             for module in controller_config.modules
@@ -504,20 +492,19 @@ def _discover_jobs(
         if not eligible:
             continue
 
-        universe.append((CONTROLLER_EXTRACTION_JOB_NAME, controller_id))
+        universe.append((CONTROLLER_EXTRACTION_JOB_NAME, source.source_id))
         for module_type, module_id in eligible:
-            universe.append((PARSE_JOB_NAME, f"{controller_id}-{module_type}-{module_id}"))
+            universe.append((PARSE_JOB_NAME, f"{source.source_id}-{module_type}-{module_id}"))
 
-        archive_path = archives.get(controller_id)
-        if archive_path is None:
+        if source.archive_path is None:
             continue
 
-        extraction_archives[controller_id] = archive_path
-        requested.append((CONTROLLER_EXTRACTION_JOB_NAME, controller_id))
+        extraction_archives[source.source_id] = source.archive_path
+        requested.append((CONTROLLER_EXTRACTION_JOB_NAME, source.source_id))
         for module_type, module_id in eligible:
-            specifier = f"{controller_id}-{module_type}-{module_id}"
+            specifier = f"{source.source_id}-{module_type}-{module_id}"
             requested.append((PARSE_JOB_NAME, specifier))
-            parse_specifiers[specifier] = (controller_id, module_type, module_id)
+            parse_specifiers[specifier] = (source.source_id, module_type, module_id)
 
     return universe, requested, extraction_archives, parse_specifiers
 
@@ -784,6 +771,7 @@ def _execute_remote_job(
     parsers: Mapping[tuple[int, int], MicrocontrollerParser],
     session: SessionData,
     log_directory: Path,
+    extraction_archives: Mapping[str, Path],
     extraction_output: Path,
     parse_output: Path,
     config_path: Path,
@@ -794,13 +782,19 @@ def _execute_remote_job(
 ) -> None:
     """Executes the single job matching the provided identifier (remote mode).
 
+    Notes:
+        The archives are the ones job discovery already resolved through the acquisition library, so dispatching a
+        single remote job costs no additional walk of the session's raw behavior data tree.
+
     Args:
         job_id: The hexadecimal identifier of the job to execute.
         universe: Every ``(job_name, specifier)`` tuple the configuration could produce, used to resolve the job.
         parsers: The registered module parsers for the session's acquisition system, keyed by
             ``(module_type, module_id)``.
         session: The loaded session, passed through to the parser for a remote parse job.
-        log_directory: The raw behavior data directory holding the controller log archives.
+        log_directory: The raw behavior data directory the archives were resolved from, reported when the requested
+            controller has none.
+        extraction_archives: The resolved archive path of every processable controller, keyed by controller ID.
         extraction_output: The directory holding (or receiving) the raw per-module feathers.
         parse_output: The directory a parser writes its domain-specific feather into.
         config_path: The path to the materialized extraction configuration a remote extraction job reads.
@@ -816,11 +810,12 @@ def _execute_remote_job(
 
     if job_name == CONTROLLER_EXTRACTION_JOB_NAME:
         controller_id = specifier
-        archive_path = _discover_controller_archives(log_directory=log_directory).get(controller_id)
+        archive_path = extraction_archives.get(controller_id)
         if archive_path is None:
             message = (
                 f"Unable to run the extraction job for controller '{controller_id}'. No log archive "
-                f"'{controller_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'."
+                f"'{controller_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. A controller whose archive "
+                f"is absent, or whose name resolves to several archives under that directory, cannot be extracted."
             )
             console.error(message=message, error=FileNotFoundError)
         resolved_workers = resolve_worker_count(requested_workers=workers)

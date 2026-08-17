@@ -11,22 +11,16 @@ from contextlib import ExitStack
 from concurrent.futures import ProcessPoolExecutor
 
 import polars as pl
-from natsort import natsorted
 from ataraxis_video_system import (
     CAMERA_MANIFEST_FILENAME,
     CAMERA_EXTRACTION_JOB_NAME,
-    CameraManifest,
     execute_job,
+    resolve_jobs,
     resolve_timestamps_path,
 )
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
-from ataraxis_data_structures import (
-    ProcessingTracker,
-    limit_worker_threads,
-    discover_log_archives,
-    initialize_worker_threads,
-)
+from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
 from ataraxis_video_system.orchestration import OutputLayout
 
 from ..registries import resolve_video_tracking
@@ -38,6 +32,8 @@ from .motion_energy import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from ataraxis_video_system import JobUniverse
 
 RENAME_JOB_NAME: str = "camera_timestamp_rename"
 """The job name used to identify the single timestamp renaming job in the video processing tracker. The job uses an
@@ -108,10 +104,10 @@ def run_video_processing_pipeline(
             motion-energy measurement.
 
     Raises:
-        ValueError: If the camera manifest registers no cameras, if no camera log archives are discovered for the
-            timestamp stage, or if job_id does not match an available job. Also raised when target_camera has no
-            discovered log archive while the timestamp stage runs, or is not registered in the camera manifest while
-            the motion-energy stage runs.
+        ValueError: If the camera manifest registers no cameras, if the raw behavior data tree holds more than one
+            camera manifest, if no camera log archives are discovered for the timestamp stage, or if job_id does not
+            match an available job. Also raised when target_camera has no discovered log archive while the timestamp
+            stage runs, or is not registered in the camera manifest while the motion-energy stage runs.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
     """
@@ -122,31 +118,23 @@ def run_video_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Resolves the colloquial name of every camera registered in the acquisition-time manifest. The manifest defines
-    # the full job universe, decoupling tracker alignment from whichever archives are currently on disk. Both
+    # Resolves every camera the acquisition-time manifest registers and the archive backing each of them. The manifest
+    # defines the full job universe, decoupling tracker alignment from whichever archives are currently on disk. Both
     # the manifest and the archives it describes live in the raw behavior-data directory, which collects the messages
     # every DataLogger-backed source emits during acquisition. The raw camera-data directory holds the recordings
     # themselves, which this pipeline's motion-energy job reads, alongside the pose predictions its tracking job
     # reads.
     log_directory = session.raw_data.behavior_data_path
-    camera_names = _resolve_camera_names(data_directory=log_directory)
-    if not camera_names:
-        message = (
-            f"Unable to process camera timestamps for session '{session.session_name}'. The camera manifest in "
-            f"'{log_directory}' does not register any cameras."
-        )
-        console.error(message=message, error=ValueError)
+    camera_jobs = _resolve_camera_jobs(data_directory=log_directory)
+    camera_names = {source.source_id: source.name for source in camera_jobs.sources}
+    log_paths = camera_jobs.archives
 
-    # The universe is one parse job per registered camera, the single rename job, the single tracking job, and one
-    # energy job per registered camera, used for tracker alignment. The tracking and energy jobs are always present
-    # (both no-op when the inputs they read are absent), so a partial invocation never wipes them from the shared
-    # video tracker.
-    universe = [(CAMERA_EXTRACTION_JOB_NAME, str(source_id)) for source_id in camera_names]
-    universe.append((RENAME_JOB_NAME, ""))
-    universe.append((TRACKING_JOB_NAME, ""))
-    universe.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
-
-    log_paths = _discover_camera_logs(data_directory=log_directory, camera_names=camera_names)
+    # The universe is the library's parse job per registered camera, plus the three job kinds this pipeline owns: the
+    # single rename job, the single tracking job, and one energy job per registered camera, used for tracker
+    # alignment. The tracking and energy jobs are always present (both no-op when the inputs they read are absent), so
+    # a partial invocation never wipes them from the shared video tracker.
+    universe = [*camera_jobs.universe, (RENAME_JOB_NAME, ""), (TRACKING_JOB_NAME, "")]
+    universe.extend((ENERGY_JOB_NAME, source_id) for source_id in camera_names)
 
     # All four job kinds write into the single processed video-data directory. The processing tracker lives
     # there too, matching SessionData.processed_data.video_tracker_path.
@@ -161,7 +149,7 @@ def run_video_processing_pipeline(
         job_name, specifier = tracker.resolve_job(job_id=job_id, universe=universe)
         tracker.align_jobs(jobs=[(job_name, specifier)], universe=universe)
 
-        if job_name == CAMERA_EXTRACTION_JOB_NAME and int(specifier) not in log_paths:
+        if job_name == CAMERA_EXTRACTION_JOB_NAME and specifier not in log_paths:
             message = (
                 f"Unable to execute the requested timestamp parsing job with ID '{job_id}'. No raw log archive was "
                 f"discovered for camera source ID {specifier} in '{log_directory}'."
@@ -191,6 +179,10 @@ def run_video_processing_pipeline(
     if not (timestamp or track or energy):
         timestamp = track = energy = True
 
+    # Every manifest source identifier and every job specifier is a string, so the numeric camera selector is matched
+    # against the registered cameras in that same form.
+    target_specifier = str(target_camera)
+
     jobs: list[tuple[str, str]] = []
     if timestamp:
         if not log_paths:
@@ -200,15 +192,15 @@ def run_video_processing_pipeline(
             )
             console.error(message=message, error=ValueError)
         if target_camera == -1:
-            jobs.extend((CAMERA_EXTRACTION_JOB_NAME, str(source_id)) for source_id in log_paths)
+            jobs.extend((CAMERA_EXTRACTION_JOB_NAME, source_id) for source_id in log_paths)
         else:
-            if target_camera not in log_paths:
+            if target_specifier not in log_paths:
                 message = (
                     f"Unable to parse camera timestamps for the requested camera source ID {target_camera}. No "
                     f"registered camera log archive was discovered for it in '{log_directory}'."
                 )
                 console.error(message=message, error=ValueError)
-            jobs.append((CAMERA_EXTRACTION_JOB_NAME, str(target_camera)))
+            jobs.append((CAMERA_EXTRACTION_JOB_NAME, target_specifier))
         # The rename job republishes every parsed feather under its canonical name, so it belongs to the timestamp
         # stage and always follows the parse jobs that write those feathers.
         jobs.append((RENAME_JOB_NAME, ""))
@@ -222,15 +214,15 @@ def run_video_processing_pipeline(
         # camera rather than only those with a discovered log archive, since a recording can be measured without its
         # archive.
         if target_camera == -1:
-            jobs.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+            jobs.extend((ENERGY_JOB_NAME, source_id) for source_id in camera_names)
         else:
-            if target_camera not in camera_names:
+            if target_specifier not in camera_names:
                 message = (
                     f"Unable to measure motion energy for the requested camera source ID {target_camera}. It is not "
                     f"registered in the camera manifest in '{log_directory}'."
                 )
                 console.error(message=message, error=ValueError)
-            jobs.append((ENERGY_JOB_NAME, str(target_camera)))
+            jobs.append((ENERGY_JOB_NAME, target_specifier))
 
     # Detects foreign entries against the full universe rather than the requested subset, so a partial invocation (a
     # single job kind, or a partial discovery) aligns the tracker without wiping the previously completed sibling jobs.
@@ -283,11 +275,11 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
         The universe is the full acquisition-time job set the camera manifest defines. It holds one timestamp job and
         one motion-energy job per registered camera, plus the single rename and tracking jobs. The possible subset is
         the job set the session's own data supports. A timestamp job is possible only when its camera's
-        ``{source_id}_log.npz`` archive is on disk, and the rename job joins them when at least one is possible. The
-        tracking and energy jobs are always possible because they read only their own inputs and complete with no
-        output when those are absent. A camera with a recording but no log archive therefore keeps its energy job
-        possible while its timestamp job stays in the universe alone. This is discovery only, reading the manifest and
-        globbing for archives while decoding no data and mutating nothing.
+        ``{source_id}_log.npz`` archive resolves to exactly one file, and the rename job joins them when at least one
+        is possible. The tracking and energy jobs are always possible because they read only their own inputs and
+        complete with no output when those are absent. A camera with a recording but no log archive therefore keeps its
+        energy job possible while its timestamp job stays in the universe alone. This is discovery only, reading the
+        manifest and indexing archive names while decoding no data and mutating nothing.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -299,30 +291,21 @@ def discover_video_jobs(session_path: Path) -> tuple[SessionData, list[tuple[str
 
     Raises:
         FileNotFoundError: If the session's camera manifest is not present.
-        ValueError: If the camera manifest registers no cameras.
+        ValueError: If the camera manifest registers no cameras, or the raw behavior data tree holds more than one
+            camera manifest.
     """
     session = SessionData.load(session_path=session_path)
-    log_directory = session.raw_data.behavior_data_path
-    camera_names = _resolve_camera_names(data_directory=log_directory)
-    if not camera_names:
-        message = (
-            f"Unable to resolve video processing jobs for session '{session.session_name}'. The camera manifest in "
-            f"'{log_directory}' does not register any cameras."
-        )
-        console.error(message=message, error=ValueError)
+    camera_jobs = _resolve_camera_jobs(data_directory=session.raw_data.behavior_data_path)
+    source_ids = [source.source_id for source in camera_jobs.sources]
 
-    universe = [(CAMERA_EXTRACTION_JOB_NAME, str(source_id)) for source_id in camera_names]
-    universe.append((RENAME_JOB_NAME, ""))
-    universe.append((TRACKING_JOB_NAME, ""))
-    universe.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+    universe = [*camera_jobs.universe, (RENAME_JOB_NAME, ""), (TRACKING_JOB_NAME, "")]
+    universe.extend((ENERGY_JOB_NAME, source_id) for source_id in source_ids)
 
-    log_paths = _discover_camera_logs(data_directory=log_directory, camera_names=camera_names)
-
-    possible: list[tuple[str, str]] = [(CAMERA_EXTRACTION_JOB_NAME, str(source_id)) for source_id in log_paths]
-    if log_paths:
+    possible = [*camera_jobs.possible]
+    if camera_jobs.possible:
         possible.append((RENAME_JOB_NAME, ""))
     possible.append((TRACKING_JOB_NAME, ""))
-    possible.extend((ENERGY_JOB_NAME, str(source_id)) for source_id in camera_names)
+    possible.extend((ENERGY_JOB_NAME, source_id) for source_id in source_ids)
 
     return session, universe, possible
 
@@ -353,13 +336,23 @@ def video_job_prerequisites(
     return {job: (timestamp_jobs if job[0] == RENAME_JOB_NAME else ()) for job in universe}
 
 
-def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
-    """Maps each camera source ID registered in the acquisition-time manifest to its colloquial camera name.
+def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
+    """Resolves the camera timestamp-extraction jobs the acquisition-time manifest defines for one session.
 
-    Reads the camera manifest that every VideoSystem writes alongside its log archives. The manifest is the sole
-    source of camera names, so the pipeline requires no acquisition-system-specific configuration. The colloquial
-    source names recorded at acquisition time (for example, ``left_camera``) determine every output filename this
-    pipeline writes and locate each camera's recording on disk.
+    Notes:
+        The ataraxis-video-system resolver owns this discovery end to end. It locates the single camera manifest every
+        VideoSystem writes alongside its log archives, reads the source identifier and colloquial name of every camera
+        the manifest registers, and indexes the log archive backing each of them. The pipeline composes its own rename,
+        tracking, and motion-energy jobs on top of the universe it returns.
+
+        The colloquial names recorded at acquisition time (for example, ``left_camera``) determine every output
+        filename this pipeline writes and locate each camera's recording on disk, so the manifest is the only camera
+        configuration the pipeline needs.
+
+        The resolver answers a tree holding no manifest with an empty universe rather than an error, and refuses a
+        directory that is not there at all. A session that ran no DataLogger-backed source has no behavior data
+        directory, which carries no manifest exactly as an empty directory would, so both outcomes are reported here as
+        the one condition this pipeline cannot proceed past: the manifest that defines its job universe is absent.
 
     Args:
         data_directory: The path to the session's raw behavior data directory
@@ -367,62 +360,29 @@ def _resolve_camera_names(data_directory: Path) -> dict[int, str]:
             manifest alongside every other DataLogger-backed source's archives.
 
     Returns:
-        A dictionary mapping each registered camera source ID to its colloquial camera name.
+        The resolved job universe, carrying every registered camera, the archive backing each of them, and the
+        timestamp-extraction jobs the manifest defines.
 
     Raises:
-        FileNotFoundError: If the camera manifest file does not exist in the data directory.
+        FileNotFoundError: If the raw behavior data directory holds no camera manifest.
+        ValueError: If the camera manifest registers no cameras, or the directory tree holds more than one manifest.
     """
-    manifest_path = data_directory.joinpath(CAMERA_MANIFEST_FILENAME)
-    if not manifest_path.is_file():
+    camera_jobs = resolve_jobs(log_directory=data_directory) if data_directory.is_dir() else None
+    if camera_jobs is None or camera_jobs.manifest_path is None:
         message = (
             f"Unable to resolve camera names. No camera manifest ('{CAMERA_MANIFEST_FILENAME}') was found in the "
             f"raw behavior data directory '{data_directory}'."
         )
         console.error(message=message, error=FileNotFoundError)
-
-    manifest = CameraManifest.from_yaml(file_path=manifest_path)
-    return {source.id: source.name for source in manifest.sources}
-
-
-def _discover_camera_logs(data_directory: Path, camera_names: dict[int, str]) -> dict[int, Path]:
-    """Discovers the raw log archive backing each camera registered in the acquisition-time manifest.
-
-    The raw behavior data directory holds the archives of every DataLogger-backed source the session ran, so the
-    discovered archives are narrowed to the cameras the manifest registers.
-
-    A discovered archive is keyed by whatever its filename carries ahead of the archive suffix, while a camera source
-    ID is a number in both the manifest and every job specifier this pipeline builds. The discovered keys are
-    therefore filtered to the ones that read as a number and converted before they are matched against the registered
-    cameras, so an archive whose name is not a source ID cannot enter the pipeline as one.
-
-    Args:
-        data_directory: The path to the session's raw behavior data directory
-            (``session.raw_data.behavior_data_path``).
-        camera_names: The mapping of registered camera source IDs to their colloquial manifest names.
-
-    Returns:
-        A dictionary mapping each registered camera source ID whose archive is on disk to that archive's path, in
-        ascending source ID order. Returns an empty dictionary if the directory does not exist.
-    """
-    # A session that ran no DataLogger-backed source has no behavior data directory at all. That is not an error for
-    # this pipeline: it leaves every camera without an archive, exactly as an empty directory would.
-    if not data_directory.is_dir():
-        return {}
-
-    archives = {
-        int(source_id): archive_path
-        for source_id, archive_path in discover_log_archives(log_directory=data_directory).items()
-        if source_id.isdigit()
-    }
-    return {source_id: archives[source_id] for source_id in natsorted(camera_names) if source_id in archives}
+    return camera_jobs
 
 
 def _dispatch_job(
     job_name: str,
     specifier: str,
     session: SessionData,
-    log_paths: dict[int, Path],
-    camera_names: dict[int, str],
+    log_paths: dict[str, Path],
+    camera_names: dict[str, str],
     video_data_directory: Path,
     tracker: ProcessingTracker,
     *,
@@ -468,7 +428,7 @@ def _dispatch_job(
         # 'camera_{source_id}_timestamps.feather' into the video data directory, and records this job's start,
         # completion, or failure on the tracker.
         execute_job(
-            log_path=log_paths[int(specifier)],
+            log_path=log_paths[specifier],
             output_directory=video_data_directory,
             source_id=specifier,
             job_id=job_id,
@@ -503,7 +463,7 @@ def _dispatch_job(
     elif job_name == ENERGY_JOB_NAME:
         _run_motion_energy(
             session=session,
-            camera_name=camera_names[int(specifier)],
+            camera_name=camera_names[specifier],
             video_data_directory=video_data_directory,
             job_id=job_id,
             tracker=tracker,
@@ -522,7 +482,7 @@ def _dispatch_job(
 
 def _link_parsed_timestamps(
     video_data_directory: Path,
-    camera_names: dict[int, str],
+    camera_names: dict[str, str],
     job_id: str,
     tracker: ProcessingTracker,
 ) -> None:
@@ -549,7 +509,7 @@ def _link_parsed_timestamps(
             # The parsing job (ataraxis-video-system extraction binding) writes each camera's feather under the name
             # its own resolver builds. The rename job then hardlinks it under its canonical name, which follows the
             # same layout with the camera's manifest name in place of the library's prefixed source ID.
-            parsed_path = resolve_timestamps_path(output_directory=video_data_directory, source_id=str(source_id))
+            parsed_path = resolve_timestamps_path(output_directory=video_data_directory, source_id=source_id)
             if not parsed_path.is_file():
                 continue
             canonical_path = video_data_directory.joinpath(

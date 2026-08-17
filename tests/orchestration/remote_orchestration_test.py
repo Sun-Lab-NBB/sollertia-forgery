@@ -120,7 +120,6 @@ def build_descriptor(
         "pipeline": pipeline,
         "cores": cores,
         "memory_mb": memory_mb,
-        "memory_modeled": True,
         "prerequisite_ids": list(prerequisite_ids),
         "options": {},
     }
@@ -169,7 +168,6 @@ def build_plan_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
                 "specifier": "1",
                 "cores": 16,
                 "memory_mb": 4096,
-                "memory_modeled": True,
                 "prerequisite_ids": [],
                 **row,
             }

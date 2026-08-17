@@ -23,7 +23,6 @@ from sollertia_forgery.video.pipeline import (
     TRACKING_JOB_NAME,
     _dispatch_job,
     discover_video_jobs,
-    _discover_camera_logs,
     video_job_prerequisites,
     run_video_processing_pipeline,
 )
@@ -358,12 +357,18 @@ def test_manifest_without_cameras_errors(experiment_session: SessionData) -> Non
     """Verifies an empty camera manifest stops the run instead of aligning an empty job universe."""
     _write_manifest(experiment_session.raw_data.behavior_data_path, {})
 
-    with pytest.raises(ValueError, match="does not register any cameras"):
+    with pytest.raises(ValueError, match="contains no source entries"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), workers=1)
 
 
 def test_missing_manifest_errors(experiment_session: SessionData) -> None:
-    """Verifies a session with no camera manifest reports the missing file rather than an empty universe."""
+    """Verifies a session with no camera manifest reports the missing file rather than an empty universe.
+
+    The created session hierarchy carries no behavior-data directory until a source writes into it, so this also
+    covers the session that ran no DataLogger-backed source at all.
+    """
+    assert not experiment_session.raw_data.behavior_data_path.exists()
+
     with pytest.raises(FileNotFoundError, match=f"No camera manifest \\('{CAMERA_MANIFEST_FILENAME}'\\)"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), workers=1)
 
@@ -549,7 +554,7 @@ def test_discovery_rejects_a_manifest_without_cameras(experiment_session: Sessio
     """Verifies discovery on an empty manifest errors rather than returning an empty universe."""
     _write_manifest(experiment_session.raw_data.behavior_data_path, {})
 
-    with pytest.raises(ValueError, match="does not register any cameras"):
+    with pytest.raises(ValueError, match="contains no source entries"):
         discover_video_jobs(session_path=_session_path(experiment_session))
 
 
@@ -572,35 +577,19 @@ def test_prerequisites_order_the_rename_job_after_every_parse_job(camera_session
 # Archive discovery and dispatch guards
 
 
-def test_archive_discovery_tolerates_a_missing_directory(tmp_path: Path) -> None:
-    """Verifies discovery over a behavior directory that was never created reports no archives."""
-    absent = tmp_path.joinpath("absent")
-
-    assert _discover_camera_logs(data_directory=absent, camera_names={_FACE_SOURCE_ID: _FACE_CAMERA}) == {}
-
-
-def test_archive_discovery_sorts_the_archives_naturally(tmp_path: Path, write_log_archive: Callable[..., Path]) -> None:
-    """Verifies the discovered archives are ordered by their numeric source identifier rather than lexically."""
-    cameras = {2: "second_camera", 10: "tenth_camera", 1: "first_camera"}
-    for source_id in cameras:
-        write_log_archive(tmp_path.joinpath(f"{source_id}_log.npz"), source_id, [(1, b"")])
-
-    discovered = _discover_camera_logs(data_directory=tmp_path, camera_names=cameras)
-
-    assert list(discovered) == [1, 2, 10]
-    assert [path.name for path in discovered.values()] == ["1_log.npz", "2_log.npz", "10_log.npz"]
-
-
 @pytest.mark.parametrize("filename", ["sync_log.npz", "51_frames.npz", "51_log_extra.npz"])
-def test_archive_discovery_ignores_a_foreign_archive_name(tmp_path: Path, filename: str) -> None:
+def test_archive_discovery_ignores_a_foreign_archive_name(camera_session: SessionData, filename: str) -> None:
     """Verifies an archive whose name is not a registered camera's is passed over rather than parsed as one.
 
     A name that carries no source identifier, and a name that carries one without the archive suffix, must both leave
     the registered camera without an archive rather than yielding it the wrong file.
     """
-    tmp_path.joinpath(filename).touch()
+    camera_session.raw_data.behavior_data_path.joinpath(filename).touch()
 
-    assert _discover_camera_logs(data_directory=tmp_path, camera_names={_FACE_SOURCE_ID: _FACE_CAMERA}) == {}
+    _session, _universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
+
+    assert not [job for job in possible if job[0] == CAMERA_EXTRACTION_JOB_NAME]
+    assert (RENAME_JOB_NAME, "") not in possible
 
 
 def test_dispatch_rejects_an_unknown_job_name(camera_session: SessionData) -> None:
@@ -615,7 +604,7 @@ def test_dispatch_rejects_an_unknown_job_name(camera_session: SessionData) -> No
             specifier="",
             session=camera_session,
             log_paths={},
-            camera_names={_FACE_SOURCE_ID: _FACE_CAMERA},
+            camera_names={str(_FACE_SOURCE_ID): _FACE_CAMERA},
             video_data_directory=video_directory,
             tracker=tracker,
             workers=1,

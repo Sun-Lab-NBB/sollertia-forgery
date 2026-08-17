@@ -9,13 +9,9 @@ from functools import cache
 from dataclasses import dataclass
 
 from cindra import (
-    DISCOVERY_WORKERS,
-    EXTRACTION_WORKERS,
-    PROCESSING_WORKERS,
-    COMBINATION_WORKERS,
-    BINARIZATION_WORKERS,
-    REGISTRATION_WORKERS,
     RESOURCE_CLASS_BY_JOB_NAME,
+    MultiRecordingJobNames,
+    resolve_stage_workers,
 )
 from threadpoolctl import threadpool_limits
 from ataraxis_video_system import CAMERA_EXTRACTION_JOB_CORES
@@ -55,7 +51,7 @@ from ..managing import (
     checksum_job_prerequisites,
     run_checksum_processing_pipeline,
 )
-from .footprints import JobFootprint, estimate_dataset_job_memory, estimate_session_job_memory
+from .footprints import JobFootprint, size_dataset_jobs, size_session_jobs
 from ..two_photon import (
     SingleRecordingJobNames,
     discover_two_photon_jobs,
@@ -99,12 +95,14 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # always is one, so the job is single-core by construction.
     RUNTIME_JOB_NAME: 1,
     # The communication library owns this stage and declares the width its own scaling curve turns over at. It picks
-    # a width per job from the archive that job reads, so this figure stands for a job whose archive cannot be read.
+    # a width per job from the archive that job reads, and the sizing pass answers with the width it picked, so this
+    # figure is the ceiling that width climbs to rather than the width every job of the stage runs at.
     CONTROLLER_EXTRACTION_JOB_NAME: CONTROLLER_EXTRACTION_JOB_CORES,
     # A single pass over one module's extracted table, short enough that pool dispatch dominates the work itself.
     PARSE_JOB_NAME: 1,
     # The video library owns this stage and declares the width its own scaling curve turns over at. It picks a width
-    # per job from the archive that job reads, so this figure stands for a job whose archive cannot be read.
+    # per job from the archive that job reads, and the sizing pass answers with the width it picked, so this figure
+    # is the ceiling that width climbs to rather than the width every job of the stage runs at.
     CAMERA_EXTRACTION_JOB_NAME: CAMERA_EXTRACTION_JOB_CORES,
     # A fixed handful of filesystem operations, independent of recording length.
     RENAME_JOB_NAME: 1,
@@ -116,33 +114,37 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # cindra owns the four single-recording stages, and each of its constants is the measured knee of that stage's
-    # own scaling curve.
-    str(SingleRecordingJobNames.BINARIZE): BINARIZATION_WORKERS,
-    str(SingleRecordingJobNames.REGISTER): REGISTRATION_WORKERS,
-    str(SingleRecordingJobNames.PROCESS): PROCESSING_WORKERS,
-    str(SingleRecordingJobNames.COMBINE): COMBINATION_WORKERS,
-    # cindra measured this stage as having no parallel critical path, where quadrupling the allocation shortens a
-    # twenty-recording dataset by two percent, so its figure covers the deformation pool alone. A width this narrow
-    # lets a core budget admit a great many of these jobs at once, so the stage's memory floor is what bounds them.
-    MULTIDAY_DISCOVERY_JOB_NAME: DISCOVERY_WORKERS,
-    # cindra sizes this stage for the concurrency a host sustains rather than for a plateau, since the stage keeps
-    # shortening well past this width. Its figure leaves room for the datasets a compute node extracts at once while
-    # still reaching a sevenfold speedup on one job.
-    MULTIDAY_EXTRACTION_JOB_NAME: EXTRACTION_WORKERS,
+    # cindra owns the four single-recording stages, and its own resolver answers each one with the measured knee of
+    # that stage's scaling curve.
+    str(SingleRecordingJobNames.BINARIZE): resolve_stage_workers(job_name=SingleRecordingJobNames.BINARIZE),
+    str(SingleRecordingJobNames.REGISTER): resolve_stage_workers(job_name=SingleRecordingJobNames.REGISTER),
+    str(SingleRecordingJobNames.PROCESS): resolve_stage_workers(job_name=SingleRecordingJobNames.PROCESS),
+    str(SingleRecordingJobNames.COMBINE): resolve_stage_workers(job_name=SingleRecordingJobNames.COMBINE),
+    # cindra's resolver reports this stage as having no parallel critical path, where quadrupling the allocation
+    # shortens a twenty-recording dataset by two percent, so the width it answers with covers the deformation pool
+    # alone. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed by that name
+    # while its width is cindra's.
+    MULTIDAY_DISCOVERY_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.DISCOVER),
+    # cindra's resolver sizes this stage for the concurrency a host sustains rather than for a plateau, since the
+    # stage keeps shortening well past this width. The width it answers with leaves room for the datasets a compute
+    # node extracts at once while still reaching a sevenfold speedup on one job, and the entry is keyed by the name
+    # the forging pipeline dispatches it under.
+    MULTIDAY_EXTRACTION_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.EXTRACT),
     # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
     # threads, so the stage gains nothing from a wider allocation.
     FORGING_JOB_NAME: 1,
 }
 """The cores one job of each type declares, keyed by the tracker job name. A stage a dependency owns takes that
-dependency's declared width, so a retune there reaches this table without an edit. Every value this module states for
-itself follows from how that stage parallelizes and is safe to retune. Preparing a processing unit that resolves a job
-type absent from this map fails for that unit, since dispatching it would run it at a width nobody chose.
+dependency's own width, read from its resolver or its declared constant, so a retune there reaches this table without
+an edit. Every value this module states for itself follows from how that stage parallelizes and is safe to retune.
+Preparing a processing unit that resolves a job type absent from this map fails for that unit, since dispatching it
+would run it at a width nobody chose.
 
 Notes:
-    A declared width is what a job is dispatched at for every stage whose cost holds one shape whatever data it reads.
-    The two extraction stages instead resolve a width per job from the archive that job reads, which the sizing pass
-    takes from the library that owns them, so their entries here stand for a job whose archive cannot be read.
+    A declared width is what a job is dispatched at for every stage this package owns, since each of those holds one
+    shape whatever data it reads. A stage a dependency owns is instead sized whole by that dependency, which answers
+    with the width it picked for the job's own input, so the entry here restates that dependency's figure rather than
+    deciding it.
 """
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
@@ -241,10 +243,11 @@ class PipelineDispatch[UnitT]:
     acquired data, since removing that directory would take the inputs with it."""
     unit_name: Callable[[UnitT], str]
     """Resolves the unit's name, which every tool response reports the unit by."""
-    estimate_memory: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], JobFootprint]]
+    size_jobs: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], JobFootprint]]
     """Sizes each job of the pipeline's universe from the data it will process, reporting the cores it is dispatched
     at alongside the memory it holds there. The declared allocation reaches it as the width every stage this package
-    owns runs at, while a stage a dependency owns answers with the width that dependency's own sizing pass picked."""
+    owns runs at, while a stage a dependency owns answers with the width that dependency's own sizing pass picked. A
+    job whose input cannot be read raises, since a job nothing can size is a job the unit cannot run."""
     command: Callable[[GenericPendingJob], tuple[str, ...]]
     """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
     backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
@@ -340,10 +343,10 @@ def resolve_job_cores(job_name: str) -> int:
 
     Notes:
         Reports the declared allocation itself, which is the width every stage this package sizes for itself runs at.
-        The two extraction stages a dependency owns resolve a width per job from the archive that job reads, so for
-        them the declared allocation is what a job whose archive cannot be read falls back to rather than the answer
-        for every job. Narrowing an allocation to what a host can supply belongs to the execution layer, because the
-        host that plans a unit and the host that runs its jobs need not be the same one.
+        A stage a dependency owns is sized whole by that dependency, so for those the declared allocation restates
+        the dependency's own figure and the sizing pass is what a plan records. Narrowing an allocation to what a
+        host can supply belongs to the execution layer, because the host that plans a unit and the host that runs its
+        jobs need not be the same one.
 
     Args:
         job_name: The tracker job name whose allocation to resolve.
@@ -617,18 +620,18 @@ def _load_dataset(dataset_path: Path) -> DatasetData:
     return DatasetData.load(dataset_path=dataset_path)
 
 
-def _session_memory(
+def _session_sizer(
     pipeline: ProcessingPipelines,
 ) -> Callable[[SessionData, list[tuple[str, str, int]]], dict[tuple[str, str], JobFootprint]]:
     """Binds the session sizing pass to one pipeline.
 
     Args:
-        pipeline: The pipeline whose jobs the bound estimator sizes.
+        pipeline: The pipeline whose jobs the bound sizing pass covers.
 
     Returns:
-        The estimator that pipeline's dispatch entry declares.
+        The sizing pass that pipeline's dispatch entry declares.
     """
-    return lambda session, jobs: estimate_session_job_memory(pipeline=pipeline, session=session, jobs=jobs)
+    return lambda session, jobs: size_session_jobs(pipeline=pipeline, session=session, jobs=jobs)
 
 
 def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], Path]:
@@ -665,7 +668,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             # directory a cleanup may remove.
             output_path=lambda _session: None,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.CHECKSUM),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.CHECKSUM),
             command=_checksum_command,
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
@@ -677,7 +680,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.RUNTIME),
             output_path=lambda session: session.processed_data.runtime_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.RUNTIME),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.RUNTIME),
             command=_runtime_command,
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
@@ -689,7 +692,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.MICROCONTROLLER),
             output_path=lambda session: session.processed_data.microcontroller_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.MICROCONTROLLER),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.MICROCONTROLLER),
             command=_microcontroller_command,
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
@@ -701,7 +704,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.VIDEO),
             output_path=lambda session: session.processed_data.video_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.VIDEO),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.VIDEO),
             command=_video_command,
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
@@ -713,7 +716,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.TWO_PHOTON),
             output_path=lambda session: session.processed_data.cindra_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.TWO_PHOTON),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.TWO_PHOTON),
             command=_two_photon_command,
             # cindra requires one single-threaded step to write the shared configuration and every plane's runtime
             # data before any job reads them. That bootstrap is also where the recording's plane count is recorded.
@@ -729,7 +732,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             # Owns the dataset hierarchy outright, which holds the assembled feathers and the tracker beside them.
             output_path=lambda dataset: dataset.dataset_data_path.parent,
             unit_name=lambda dataset: dataset.name,
-            estimate_memory=estimate_dataset_job_memory,
+            size_jobs=size_dataset_jobs,
             command=_forging_command,
         ),
     }
