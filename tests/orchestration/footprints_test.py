@@ -990,6 +990,33 @@ def test_a_session_that_left_the_project_root_contributes_no_recording(
     )
 
 
+def test_an_assembly_job_is_sized_when_a_sibling_session_left_the_project_root(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """The region bound is drawn from every recording the animal contributes, so a sibling moved to long-term storage
+    is skipped on the same terms the recording set skips it rather than failing the surviving session's own estimate.
+    """
+    first = session_factory(animal_id="305", experiment_name="test_experiment")
+    second = session_factory(animal_id="305", experiment_name="test_experiment")
+    for session in (first, second):
+        write_surgery_metadata(session=session)
+        write_processed_recording(session=session, regions=120, samples=900)
+    dataset = build_dataset(
+        project_root=project_root,
+        name="ds_sibling_relocated",
+        sessions=[first, second],
+        session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+    )
+    shutil.rmtree(project_root.joinpath("305", first.session_name))
+
+    estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, second.session_name, 1)])
+
+    # The surviving recording is the whole set the bound is drawn from, so it narrows to that recording's own regions.
+    assert estimates[FORGING_JOB_NAME, second.session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=900, regions=120)
+    )
+
+
 def test_a_recording_whose_metadata_is_absent_is_refused(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:

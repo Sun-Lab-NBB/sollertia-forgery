@@ -870,8 +870,13 @@ def _resolve_tracked_regions(
     entries = dataset.get_sessions_for_animal(animal=animal)
     geometries = [
         geometry
+        # A session that has moved to long-term storage cannot be loaded at all, so it is skipped before its geometry
+        # is read rather than failing the whole animal's estimate. A dataset outlives the source data of the animals it
+        # has already forged, and the recording set this bound is drawn from skips a relocated session on the same
+        # terms, so reading one here would make an estimate depend on data the dataset no longer needs.
         for entry in entries
-        if (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
+        if project_root.joinpath(animal, entry.session).is_dir()
+        and (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
         is not None
     ]
     if not geometries:
