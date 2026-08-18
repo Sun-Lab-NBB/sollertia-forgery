@@ -11,6 +11,7 @@ import polars as pl
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    DESCRIPTOR_REGISTRY,
     SessionData,
     SessionTypes,
     ProcessingTrackers,
@@ -18,7 +19,6 @@ from sollertia_shared_assets import (
     parse_session_timestamp,
 )
 from ataraxis_data_structures import TrackerStatus, ProcessingTracker, atomic_write
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
 from .jobs import write_project_jobs
 from ..shared_assets import (

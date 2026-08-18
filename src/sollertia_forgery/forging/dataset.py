@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    DATASET_MARKER_FILENAME,
     DatasetData,
     SessionData,
     RawDataFiles,
@@ -17,7 +18,6 @@ from sollertia_shared_assets import (
     discover_sessions,
 )
 from ataraxis_data_structures import delete_directory
-from sollertia_shared_assets.data_hierarchy import DATASET_MARKER_FILENAME
 
 from .admission import verify_session_admissibility
 from ..registries import resolve_forging_column_descriptions

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 
 from cindra import (
+    MULTI_RECORDING_CONFIGURATION_FILENAME,
     MultiRecordingJobNames,
     prime_dataset,
     execute_multi_recording_job,
@@ -19,7 +20,6 @@ from cindra import (
 )
 import polars as pl
 from natsort import natsorted
-from cindra.layout import MULTI_RECORDING_CONFIGURATION_FILENAME
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import (
     DatasetData,

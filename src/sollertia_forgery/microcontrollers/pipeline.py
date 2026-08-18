@@ -31,7 +31,6 @@ from ataraxis_communication_interface import (
     partition_events,
     resolve_module_path,
 )
-from ataraxis_communication_interface.orchestration import generate_job_ids
 
 from ..registries import (
     resolve_microcontroller_parsers,
@@ -540,7 +539,14 @@ def _run_extraction_stage(
     if not extraction_archives:
         return
 
-    extraction_job_ids = generate_job_ids(source_ids=tuple(extraction_archives))
+    # The identifier follows from the job name and the controller it runs over, which is how the tracker derives the
+    # identifier it records, so both sides name the same job without either passing the identifier to the other.
+    extraction_job_ids = {
+        controller_id: ProcessingTracker.generate_job_id(
+            job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier=controller_id
+        )
+        for controller_id in extraction_archives
+    }
     for controller_id, extraction_job_id in extraction_job_ids.items():
         console.echo(
             message=(

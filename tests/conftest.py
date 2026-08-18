@@ -18,6 +18,8 @@ import polars as pl
 import pytest
 import platformdirs
 from sollertia_shared_assets import (
+    DESCRIPTOR_REGISTRY,
+    SESSION_TYPES_USING_VR_TASK,
     Cue,
     ProjectData,
     SessionData,
@@ -35,7 +37,6 @@ from sollertia_shared_assets import (
     set_task_templates_directory,
 )
 from ataraxis_data_structures import ProcessingTracker
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY, SESSION_TYPES_USING_VR_TASK
 
 from sollertia_forgery.server import Server
 from sollertia_forgery.managing import project_manifest_path, generate_project_manifest

@@ -8,9 +8,12 @@ import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from cindra import SingleRecordingJobNames, SingleRecordingConfiguration
+from cindra import (
+    SINGLE_RECORDING_CONFIGURATION_FILENAME,
+    SingleRecordingJobNames,
+    SingleRecordingConfiguration,
+)
 import pytest
-from cindra.layout import SINGLE_RECORDING_CONFIGURATION_FILENAME
 from sollertia_shared_assets import (
     SubjectData,
     SurgeryData,

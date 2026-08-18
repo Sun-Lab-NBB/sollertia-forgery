@@ -12,9 +12,8 @@ import polars as pl
 import pytest
 from filelock import FileLock
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SessionTypes, ProcessingTrackers
+from sollertia_shared_assets import DESCRIPTOR_REGISTRY, SessionTypes, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
 from sollertia_forgery.managing import (
     MANIFEST_JOB_NAME,

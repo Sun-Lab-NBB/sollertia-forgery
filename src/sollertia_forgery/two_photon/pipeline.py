@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from cindra import (
     PARAMETERS_FILENAME,
+    SINGLE_RECORDING_CONFIGURATION_FILENAME,
     SingleRecordingJobNames,
     prime_recording,
     resolve_plane_specifier,
@@ -17,7 +18,6 @@ from cindra import (
     resolve_single_recording_job_universe,
     resolve_single_recording_prerequisites,
 )
-from cindra.layout import SINGLE_RECORDING_CONFIGURATION_FILENAME
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker, discover_marker_files
