@@ -17,14 +17,16 @@ from ataraxis_communication_interface import (
     CONTROLLER_EXTRACTION_JOB_NAME,
     EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
+    SerialProtocols,
     ExtractionConfig,
     ModuleSourceData,
+    SerialPrototypes,
     ModuleExtractionConfig,
     MicroControllerManifest,
     MicroControllerSourceData,
     ControllerExtractionConfig,
+    resolve_jobs,
 )
-from ataraxis_communication_interface.communication import SerialProtocols, SerialPrototypes
 
 from sollertia_forgery.registries import (
     _MICROCONTROLLER_PARSER_REGISTRY,
@@ -418,7 +420,11 @@ def test_resolve_controllers_derives_config_from_manifest(tmp_path: Path) -> Non
     # (9, 9) is not registered for any system, so it must be excluded from the derived configuration.
     _write_inputs(session, modules=((2, 1), (9, 9)), stage_archive=False)
 
-    controllers = pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52), (4, 1): (51,)})
+    controllers = pipeline_module._resolve_controllers(
+        session=session,
+        event_codes={(2, 1): (51, 52), (4, 1): (51,)},
+        job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+    )
 
     assert set(controllers) == {"101"}
     config = controllers["101"]
@@ -432,7 +438,11 @@ def test_resolve_controllers_rejects_manifest_with_no_extractable_module(tmp_pat
     _write_inputs(session, modules=((9, 9),), stage_archive=False)
 
     with pytest.raises(ValueError, match="declares a module"):
-        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+        pipeline_module._resolve_controllers(
+            session=session,
+            event_codes={(2, 1): (51, 52)},
+            job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+        )
 
 
 def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
@@ -440,7 +450,11 @@ def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
 
     with pytest.raises(FileNotFoundError, match="microcontroller manifest"):
-        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+        pipeline_module._resolve_controllers(
+            session=session,
+            event_codes={(2, 1): (51, 52)},
+            job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+        )
 
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
@@ -468,7 +482,7 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
     parsers = {(2, 1): _stub_parse_2_1, (6, 1): _stub_parse_6_1}
 
     universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
-        controllers=controllers, parsers=parsers, log_directory=tmp_path
+        controllers=controllers, parsers=parsers, job_universe=resolve_jobs(log_directory=tmp_path)
     )
 
     # Module (4, 1) has no registered parser, so it never appears. Controller 102 is parseable but has no archive.
@@ -503,7 +517,9 @@ def test_discover_jobs_leaves_an_ambiguously_named_archive_unresolved(tmp_path: 
     }
 
     universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
-        controllers=controllers, parsers={(2, 1): _stub_parse_2_1}, log_directory=tmp_path
+        controllers=controllers,
+        parsers={(2, 1): _stub_parse_2_1},
+        job_universe=resolve_jobs(log_directory=tmp_path),
     )
 
     # The controller still declares its jobs, but none of them can run until exactly one archive carries its name.

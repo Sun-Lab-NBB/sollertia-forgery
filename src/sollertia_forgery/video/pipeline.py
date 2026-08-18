@@ -14,6 +14,7 @@ import polars as pl
 from ataraxis_video_system import (
     CAMERA_MANIFEST_FILENAME,
     CAMERA_EXTRACTION_JOB_NAME,
+    OutputLayout,
     execute_job,
     resolve_jobs,
     resolve_timestamps_path,
@@ -21,7 +22,6 @@ from ataraxis_video_system import (
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
-from ataraxis_video_system.orchestration import OutputLayout
 
 from ..registries import resolve_video_tracking
 from .motion_energy import (

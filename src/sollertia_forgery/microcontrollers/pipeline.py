@@ -21,10 +21,9 @@ from ataraxis_data_structures import (
 from ataraxis_communication_interface import (
     CONTROLLER_EXTRACTION_JOB_NAME,
     EXTRACTION_CONFIGURATION_FILENAME,
-    MICROCONTROLLER_MANIFEST_FILENAME,
+    JobUniverse,
     ExtractionConfig,
     ModuleExtractionConfig,
-    MicroControllerManifest,
     ControllerExtractionConfig,
     execute_job,
     resolve_jobs,
@@ -104,15 +103,19 @@ def run_microcontroller_processing_pipeline(
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
     event_codes = _resolve_eligible_event_codes(session=session)
 
-    # Derives the per-controller extraction configurations from the microcontroller manifest and the event codes.
-    controllers = _resolve_controllers(session=session, event_codes=event_codes)
-
     log_directory = session.raw_data.behavior_data_path
     extraction_output = session.processed_data.microcontroller_data_path
     parse_output = session.processed_data.microcontroller_data_path
 
+    # Reads the manifest and indexes every registered controller's archive once, so the configuration derivation and
+    # the job discovery that both need that topology share one read.
+    job_universe = resolve_jobs(log_directory=log_directory)
+
+    # Derives the per-controller extraction configurations from the manifest topology and the event codes.
+    controllers = _resolve_controllers(session=session, event_codes=event_codes, job_universe=job_universe)
+
     universe, requested, extraction_archives, parse_specifiers = _discover_jobs(
-        controllers=controllers, parsers=parsers, log_directory=log_directory
+        controllers=controllers, parsers=parsers, job_universe=job_universe
     )
 
     if not requested:
@@ -227,10 +230,9 @@ def discover_microcontroller_jobs(
     session = SessionData.load(session_path=session_path)
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
     event_codes = _resolve_eligible_event_codes(session=session)
-    controllers = _resolve_controllers(session=session, event_codes=event_codes)
-    universe, requested, _, _ = _discover_jobs(
-        controllers=controllers, parsers=parsers, log_directory=session.raw_data.behavior_data_path
-    )
+    job_universe = resolve_jobs(log_directory=session.raw_data.behavior_data_path)
+    controllers = _resolve_controllers(session=session, event_codes=event_codes, job_universe=job_universe)
+    universe, requested, _, _ = _discover_jobs(controllers=controllers, parsers=parsers, job_universe=job_universe)
     return session, universe, requested
 
 
@@ -283,17 +285,19 @@ def _resolve_eligible_event_codes(session: SessionData) -> dict[tuple[int, int],
 
 
 def _resolve_controllers(
-    session: SessionData, event_codes: Mapping[tuple[int, int], tuple[int, ...]]
+    session: SessionData,
+    event_codes: Mapping[tuple[int, int], tuple[int, ...]],
+    job_universe: JobUniverse,
 ) -> dict[str, ControllerExtractionConfig]:
     """Derives the per-controller extraction configurations for the target session.
 
     Notes:
-        The configurations are built in memory. The microcontroller manifest written alongside the log archives
-        supplies the controller and module topology, and the session's acquisition system supplies the event codes
-        each module's parser reads (resolved via ``resolve_microcontroller_event_codes``). A manifest module the
-        system does not parse, or that the session did not configure for use, is excluded, since extracting it would
-        produce an intermediate feather nothing consumes, and a controller left with no such module contributes no
-        configuration at all. Requiring the manifest also
+        The configurations are built in memory. The resolved job universe supplies the controller and module topology
+        the manifest declares, and the session's acquisition system supplies the event codes each module's parser
+        reads. Taking the topology from the universe is what lets one manifest read serve both this derivation and
+        the job discovery that shares it. A manifest module the system does not parse, or that the session did not
+        configure for use, is excluded, since extracting it would produce an intermediate feather nothing consumes,
+        and a controller left with no such module contributes no configuration at all. Requiring the manifest also
         confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
         microcontroller controllers from the runtime DataLogger archive that shares the same directory. Kernel
         extraction is never configured, because this pipeline does not consume the kernel feather.
@@ -302,6 +306,7 @@ def _resolve_controllers(
         session: The loaded session whose microcontroller logs are being processed.
         event_codes: The event codes of the modules that the session's acquisition system parses and the session
             configured for use, keyed by ``(module_type, module_id)``.
+        job_universe: The resolved job universe, whose sources carry the modules each registered controller declares.
 
     Returns:
         An ordered mapping from each manifest controller ID (as a string) to its derived ControllerExtractionConfig.
@@ -309,43 +314,39 @@ def _resolve_controllers(
     Raises:
         FileNotFoundError: If the microcontroller manifest is not present at the session's canonical raw behavior
             data location.
-        ValueError: If the manifest does not store its controller entries as a list, or if no manifest controller
-            declares a module the session's acquisition system extracts.
+        ValueError: If no manifest controller declares a module the session's acquisition system extracts.
     """
-    log_directory = session.raw_data.behavior_data_path
-
-    manifest_path = log_directory.joinpath(MICROCONTROLLER_MANIFEST_FILENAME)
-    if not manifest_path.is_file():
+    if job_universe.manifest_path is None:
         message = (
             f"Unable to resolve microcontroller controllers for session '{session.session_name}'. No "
-            f"microcontroller manifest was found at '{manifest_path}'. The manifest enumerates the controllers and "
-            f"modules to extract and confirms the log archives were produced by ataraxis-communication-interface."
+            f"microcontroller manifest was found in '{job_universe.log_directory}'. The manifest enumerates the "
+            f"controllers and modules to extract and confirms the log archives were produced by "
+            f"ataraxis-communication-interface."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    manifest = MicroControllerManifest.from_yaml(file_path=manifest_path)
-
     controllers: dict[str, ControllerExtractionConfig] = {}
-    for controller in manifest.controllers:
+    for source in job_universe.sources:
         modules = tuple(
             ModuleExtractionConfig(
                 module_type=module.module_type,
                 module_id=module.module_id,
                 event_codes=event_codes[(module.module_type, module.module_id)],
             )
-            for module in controller.modules
+            for module in source.modules
             if (module.module_type, module.module_id) in event_codes
         )
         if not modules:
             continue
-        controllers[str(controller.id)] = ControllerExtractionConfig(
-            controller_id=controller.id, modules=modules, kernel=None
+        controllers[source.source_id] = ControllerExtractionConfig(
+            controller_id=int(source.source_id), modules=modules, kernel=None
         )
 
     if not controllers:
         message = (
             f"Unable to resolve microcontroller controllers for session '{session.session_name}'. None of the "
-            f"controllers registered in the microcontroller manifest at '{manifest_path}' declares a module the "
+            f"controllers registered in the microcontroller manifest at '{job_universe.manifest_path}' declares a "
+            f"module the "
             f"'{session.acquisition_system}' acquisition system extracts."
         )
         console.error(message=message, error=ValueError)
@@ -436,15 +437,15 @@ def _extract_controller(
 def _discover_jobs(
     controllers: dict[str, ControllerExtractionConfig],
     parsers: Mapping[tuple[int, int], MicrocontrollerParser],
-    log_directory: Path,
+    job_universe: JobUniverse,
 ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], dict[str, Path], dict[str, tuple[str, int, int]]]:
     """Builds the job universe and the requested-job set for the session.
 
     Notes:
-        Locating the controllers is the acquisition library's own job, so a single ``resolve_jobs`` call reads the
-        manifest and indexes each registered controller's archive, yielding the controllers in ascending identifier
-        order and resolving an archive only when exactly one file under the directory carries that controller's
-        name. This function composes that locating with the eligibility rule the library knows nothing about: a
+        Locating the controllers is the acquisition library's own job, so the resolved universe already carries each
+        registered controller's archive, in ascending identifier order and resolved only when exactly one file under
+        the directory carries that controller's name. This function composes that locating with the eligibility rule
+        the library knows nothing about: a
         controller contributes jobs only if at least one of its configured modules is eligible (present in the
         resolved parser mapping). Extracting a controller with no parseable modules would produce intermediate
         feathers that nothing consumes.
@@ -456,7 +457,7 @@ def _discover_jobs(
     Args:
         controllers: The per-controller extraction configurations, keyed by controller ID.
         parsers: The eligible module parsers for the session, keyed by ``(module_type, module_id)``.
-        log_directory: The raw behavior data directory holding the controller log archives.
+        job_universe: The resolved job universe, whose sources carry each registered controller's archive.
 
     Returns:
         A tuple of (universe, requested, extraction_archives, parse_specifiers). ``universe`` and ``requested`` are
@@ -464,19 +465,11 @@ def _discover_jobs(
         archive path. ``parse_specifiers`` maps each requested parse specifier (``"{controller}-{type}-{id}"``) to
         its ``(controller_id, module_type, module_id)`` triple.
 
-    Raises:
-        FileNotFoundError: If the raw behavior data directory does not exist.
-        ValueError: If the raw behavior data tree holds more than one microcontroller manifest, or if the manifest
-            registers no controllers.
     """
     universe: list[tuple[str, str]] = []
     requested: list[tuple[str, str]] = []
     extraction_archives: dict[str, Path] = {}
     parse_specifiers: dict[str, tuple[str, int, int]] = {}
-
-    # Delegates locating to the acquisition library, which resolves every registered controller's archive in one
-    # pass rather than one scan per controller.
-    job_universe = resolve_jobs(log_directory=log_directory)
 
     for source in job_universe.sources:
         controller_config = controllers.get(source.source_id)
