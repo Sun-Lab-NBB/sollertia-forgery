@@ -366,7 +366,7 @@ def _decompose_multiple_cue_sequences_into_trials(
     cumulative_distance = 0.0
 
     for sequence_index, cue_sequence in enumerate(cue_sequences):
-        trial_indices_array, trial_count = _decompose_cue_sequence_into_trials(
+        trial_indices_array, trial_count, failure_position = _decompose_cue_sequence_into_trials(
             cue_sequence=cue_sequence,
             motifs_flat=motifs_flat,
             motif_starts=motif_starts,
@@ -376,18 +376,10 @@ def _decompose_multiple_cue_sequences_into_trials(
         )
 
         if trial_count == -1:
-            sequence_position = 0
-            trial_indices_list = trial_indices_array[:max_trials].tolist()
-
-            for trial_index in trial_indices_list:
-                if trial_index == 0 and sequence_position > 0:
-                    break
-                sequence_position += len(trial_motifs[trial_index])
-
-            remaining_sequence = cue_sequence[sequence_position : sequence_position + _ERROR_CONTEXT_CUE_COUNT]
+            remaining_sequence = cue_sequence[failure_position : failure_position + _ERROR_CONTEXT_CUE_COUNT]
             message = (
                 f"Unable to decompose VR wall cue sequence {sequence_index + 1} of {len(cue_sequences)} into a "
-                f"sequence of trial distances. No trial motif matched at position {sequence_position}. The next "
+                f"sequence of trial distances. No trial motif matched at position {failure_position}. The next "
                 f"{_ERROR_CONTEXT_CUE_COUNT} cues: {remaining_sequence.tolist()}"
             )
             console.error(message=message, error=RuntimeError)
@@ -472,7 +464,7 @@ def _decompose_cue_sequence_into_trials(
     motif_lengths: NDArray[np.int32],
     motif_indices: NDArray[np.int32],
     max_trials: int,
-) -> tuple[NDArray[np.int32], int]:
+) -> tuple[NDArray[np.int32], int, int]:
     """Decomposes a long sequence of Virtual Reality wall cues into individual trial motifs.
 
     Notes:
@@ -487,9 +479,10 @@ def _decompose_cue_sequence_into_trials(
         max_trials: The maximum number of trials that can make up the entire cue sequence.
 
     Returns:
-        A tuple of two elements. The first element is the array of trial-type indices decoded from the cue sequence,
-        trimmed to the extracted trial count on success and returned as the full max_trials buffer on failure. The
-        second element is the total number of trials extracted, or -1 if decomposition failed.
+        A tuple of three elements. The first element is the array of trial-type indices decoded from the cue sequence,
+        trimmed to the extracted trial count. The second element is the total number of trials extracted, or -1 if
+        decomposition failed. The third element is the cue sequence position at which decomposition stopped, which is
+        the position of the unmatched cue when the second element is -1.
     """
     trial_indices: NDArray[np.int32] = np.zeros(max_trials, dtype=np.int32)
     trial_count = 0
@@ -520,9 +513,9 @@ def _decompose_cue_sequence_into_trials(
                     break
 
         if not motif_found:
-            return trial_indices, -1
+            return trial_indices[:trial_count], -1, sequence_position
 
-    return trial_indices[:trial_count], trial_count
+    return trial_indices[:trial_count], trial_count, sequence_position
 
 
 def _process_trial_sequence(

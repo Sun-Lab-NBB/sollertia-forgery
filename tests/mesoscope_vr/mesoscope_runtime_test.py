@@ -446,7 +446,7 @@ def test_parse_runtime_raises_for_undecomposable_cue_sequence(experiment_session
     assert "No trial motif matched at position 501. The next 20 cues: [3]" in _normalized(str(raised.value))
 
 
-def test_decompose_reports_the_first_motif_length_when_no_trial_is_decoded() -> None:
+def test_decompose_reports_the_failure_position_when_no_trial_is_decoded() -> None:
     """Verifies the reported failure context of a corridor shorter than the shortest trial motif."""
     with pytest.raises(RuntimeError, match="Unable to decompose VR wall cue sequence") as raised:
         _decompose_multiple_cue_sequences_into_trials(
@@ -456,7 +456,22 @@ def test_decompose_reports_the_first_motif_length_when_no_trial_is_decoded() -> 
             distance_breakpoints=[],
         )
 
-    assert "No trial motif matched at position 3. The next 20 cues: []" in _normalized(str(raised.value))
+    assert "No trial motif matched at position 0. The next 20 cues: [1, 2]" in _normalized(str(raised.value))
+
+
+def test_decompose_reports_the_failure_position_of_a_corridor_built_from_the_first_trial_type() -> None:
+    """Verifies that the reported failure position counts every decoded trial of the first configured trial type."""
+    corridor = [*_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 3), 3]
+
+    with pytest.raises(RuntimeError, match="Unable to decompose VR wall cue sequence") as raised:
+        _decompose_multiple_cue_sequences_into_trials(
+            experiment_configuration=_build_experiment_configuration(["reward_trial"]),
+            task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
+            cue_sequences=[np.array(corridor, dtype=np.uint8)],
+            distance_breakpoints=[],
+        )
+
+    assert "No trial motif matched at position 6. The next 20 cues: [3]" in _normalized(str(raised.value))
 
 
 def test_decompose_accumulates_trial_distances_of_a_single_sequence() -> None:
@@ -522,7 +537,7 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
 
 def test_decompose_cue_sequence_kernel_prefers_the_longest_matching_motif() -> None:
     """Verifies that the decomposition kernel consumes the longer motif before the shorter one."""
-    trial_indices, trial_count = _decompose_cue_sequence_into_trials.py_func(
+    trial_indices, trial_count, stop_position = _decompose_cue_sequence_into_trials.py_func(
         cue_sequence=np.array([1, 2, 3, 1, 2], dtype=np.uint8),
         motifs_flat=np.array([1, 2, 3, 1, 2], dtype=np.uint8),
         motif_starts=np.array([0, 3], dtype=np.int32),
@@ -533,11 +548,12 @@ def test_decompose_cue_sequence_kernel_prefers_the_longest_matching_motif() -> N
 
     assert trial_count == 2
     assert trial_indices.tolist() == [0, 1]
+    assert stop_position == 5
 
 
 def test_decompose_cue_sequence_kernel_reports_an_unmatched_position() -> None:
-    """Verifies that the decomposition kernel reports failure and returns its untrimmed buffer."""
-    trial_indices, trial_count = _decompose_cue_sequence_into_trials.py_func(
+    """Verifies that the decomposition kernel reports failure at the position of the unmatched cue."""
+    trial_indices, trial_count, failure_position = _decompose_cue_sequence_into_trials.py_func(
         cue_sequence=np.array([1, 2, 3, 1, 2, 9], dtype=np.uint8),
         motifs_flat=np.array([1, 2, 3, 1, 2], dtype=np.uint8),
         motif_starts=np.array([0, 3], dtype=np.int32),
@@ -547,7 +563,8 @@ def test_decompose_cue_sequence_kernel_reports_an_unmatched_position() -> None:
     )
 
     assert trial_count == -1
-    assert trial_indices.tolist() == [0, 1, 0, 0, 0]
+    assert trial_indices.tolist() == [0, 1]
+    assert failure_position == 5
 
 
 # Runtime dataset assembly
