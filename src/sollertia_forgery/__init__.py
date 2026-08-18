@@ -29,6 +29,13 @@ multiprocessing.set_start_method("spawn", force=True)
 # TBB for lower overhead on flat prange loops.
 config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"  # type: ignore[attr-defined]
 
+# Verifies that the threading layer selected above has a runtime to load. The layer is selected here, so the
+# verification belongs here too, and running it before any dependency compiles a parallel kernel is what keeps
+# an unusable host from failing deep inside a processing stage instead.
+from .shared_assets import verify_parallel_runtime  # noqa: E402 - imported after the threading layer choice.
+
+verify_parallel_runtime()
+
 from ataraxis_base_utilities import console  # noqa: E402 - imported after the process-wide configuration above.
 
 # Ensures console and progress bars are enabled when this library is used.

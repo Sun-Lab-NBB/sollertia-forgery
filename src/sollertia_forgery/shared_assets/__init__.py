@@ -13,6 +13,7 @@ from .utilities import (
     multi_recording_dataset_directory,
 )
 from .microcontroller import merge_event_streams
+from .parallel_runtime import verify_parallel_runtime
 
 __all__ = [
     "DELAY_TIMER",
@@ -22,4 +23,5 @@ __all__ = [
     "merge_event_streams",
     "multi_recording_dataset_directory",
     "resolve_session_tracker_path",
+    "verify_parallel_runtime",
 ]
