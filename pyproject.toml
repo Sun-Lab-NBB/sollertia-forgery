@@ -52,9 +52,6 @@ dependencies = [
     "ataraxis-communication-interface>=7.0.1rc2,<8",
     "cindra>=2.0.0rc5,<3",
 
-    # Machine Vision (GenICam runtime for ataraxis-video-system, resolved from the TestPyPI index that tox.ini adds)
-    "genicam==1.6.0",
-
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
     "opencv-python>=5,<6",
