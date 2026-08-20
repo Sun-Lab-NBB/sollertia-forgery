@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-import yaml  # type: ignore[import-untyped]
+import yaml
 from ataraxis_data_structures import direct_write
 
 from ..server import (
