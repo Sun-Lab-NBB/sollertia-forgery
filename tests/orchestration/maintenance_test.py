@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
@@ -15,7 +16,6 @@ from sollertia_forgery.orchestration.maintenance import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from collections.abc import Callable
 
     from sollertia_shared_assets import SessionData
@@ -175,13 +175,18 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
 ) -> None:
     """The checksum pipeline verifies the acquired data in place, so cleaning it must leave that data untouched."""
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.CHECKSUM)
-    write_tracker(tracker_path, [("checksum", "")])
+    tracker = write_tracker(tracker_path, [("checksum", "")])
+    lock_path = Path(tracker.lock_path)
     descriptor_path = experiment_session.raw_data.session_descriptor_path
+
+    assert lock_path.is_file(), "the tracker did not leave the lock file the cleanup is expected to remove"
 
     removed = clean_pipeline_output(pipeline="checksum", unit_paths=[session_root(experiment_session)])
 
     assert [entry["path"] for entry in removed] == [str(tracker_path)]
     assert not tracker_path.exists()
+    # The lock is bookkeeping beside the tracker, so it goes with it rather than outliving the record it guarded.
+    assert not lock_path.exists()
     assert descriptor_path.is_file(), "cleaning the checksum pipeline removed acquired data"
 
 

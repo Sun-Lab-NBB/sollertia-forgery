@@ -5,7 +5,6 @@ removing pipeline output.
 
 from __future__ import annotations
 
-from time import time_ns
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
@@ -13,7 +12,7 @@ from collections import deque
 
 from ataraxis_time import TimeUnits, convert_time
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-from ataraxis_data_structures import JobState, ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from .responses import (
     ok_response,
@@ -42,6 +41,7 @@ from ..orchestration import (
     run_batch_job,
     build_pending_job,
     connect_to_server,
+    current_timestamp,
     query_submissions,
     read_batch_outcome,
     resolve_batch_host,
@@ -122,17 +122,13 @@ _RESOURCE_SEMI_FIELDS: tuple[str, ...] = ("job_id", "job_name", "specifier", "co
 path is left off a semi-detail row because the unit entry already names it, and detail adds it back for a caller
 reading one job closely."""
 
-_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled", "prerequisite_ids", "unit_path", "options")
-"""The job fields detail adds, stating whether the memory figure was modeled, which jobs it waits for, and the
-parameters it would run with."""
+_RESOURCE_DETAIL_FIELDS: tuple[str, ...] = ("prerequisite_ids", "unit_path", "options")
+"""The job fields detail adds, naming the unit the job reads, which jobs it waits for, and the parameters it would run
+with."""
 
-_STATUS_COUNT_KEYS: dict[ProcessingStatus, str] = {
-    ProcessingStatus.SUCCEEDED: "succeeded",
-    ProcessingStatus.FAILED: "failed",
-    ProcessingStatus.RUNNING: "running",
-    ProcessingStatus.SCHEDULED: "scheduled",
-}
-"""Maps each tracker job status to its aggregate-count key in the status response."""
+_STATUS_LABELS: tuple[str, ...] = tuple(member.name.lower() for member in ProcessingStatus)
+"""The status labels a tracked job reports, which are the tracker's own status names in lower case. These are the
+values a caller filters the listing by, and the keys a tracker summary counts under."""
 
 
 @mcp.tool()
@@ -234,8 +230,8 @@ def inspect_job_resources_tool(
     A bare call reports the figures a batch is planned against alongside a ``breakdown`` naming every job type and how
     many of each the named sessions still have to run. A job the units already recorded as succeeded, and a job this
     run could not unblock, are both absent, so this reports what a batch would dispatch rather than the whole universe.
-    Naming a filter adds a page of jobs carrying their figures, and opting into detail adds whether each memory figure
-    was modeled from the job's own input.
+    Naming a filter adds a page of jobs carrying their figures, and opting into detail adds the unit each job reads,
+    the jobs it waits for, and the parameters it would run with.
 
     Estimates each job's memory from the data it will process, so a long recording is not charged the same as a short
     one. The figures already carry the shared tolerance, so they are the values to plan a local batch against or to
@@ -254,12 +250,13 @@ def inspect_job_resources_tool(
             every match.
         start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report whether their memory figure was modeled.
+        detailed: Determines whether the listed jobs report the unit they read, the jobs they wait for, and the
+            parameters they would run with.
 
     Returns:
         A response dict with the host's ``total_memory_mb`` and the batch-available ``total_cores`` left after the
-        reserved system cores. Carries a ``totals`` summary giving ``jobs``, ``jobs_without_a_modeled_estimate``,
-        ``widest_job_cores``, ``largest_job_memory_mb``, and ``summed_memory_mb``. Carries a ``breakdown`` per job type
+        reserved system cores. Carries a ``totals`` summary giving ``jobs``, ``widest_job_cores``,
+        ``largest_job_memory_mb``, and ``summed_memory_mb``. Carries a ``breakdown`` per job type
         and a ``units`` list naming each session and how many jobs it resolved. Carries a ``jobs`` list with ``rows``,
         ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
     """
@@ -279,7 +276,6 @@ def inspect_job_resources_tool(
         total_memory_mb=resolve_host_memory_mb(),
         totals={
             "jobs": len(jobs),
-            "jobs_without_a_modeled_estimate": sum(1 for job in jobs if not job.get("memory_modeled", False)),
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
             "largest_job_memory_mb": max((int(job["memory_mb"]) for job in jobs), default=0),
             "summed_memory_mb": sum(int(job["memory_mb"]) for job in jobs),
@@ -415,7 +411,10 @@ def get_processing_status_tool(
 
     A bare call re-reads the processing trackers of every job the batch holds and reports the counts alongside a
     ``breakdown`` naming every pipeline, job type, status, and session in the batch. That is what tracks a run at a size
-    a response can always carry, however many jobs it holds, and the counts are where a failure first shows.
+    a response can always carry, however many jobs it holds, and the counts are where a failure first shows. The counts
+    cover the batch's own jobs alone, so their total is the number of jobs the batch dispatched and a job of the same
+    tracker that this batch did not dispatch is left out of them. The ``status`` label the response carries is what
+    those same counts resolve to, so the label and the counts describe one set.
 
     Naming a filter adds a page of jobs carrying identity and status. Filtering to ``failed`` is how a caller reads
     which jobs failed, and opting into detail adds each one's error text, timing, and the resources it was admitted at.
@@ -446,11 +445,12 @@ def get_processing_status_tool(
         For ``remote``, a response dict with ``active``, the ``batches`` covered, a ``summary`` counting the allocations
         by scheduler state, a ``breakdown`` per axis, and the ``outcomes`` of any batch that closed on this call. For
         ``local``, a response dict with ``active`` (whether the manager thread is still running), ``canceled``, a
-        ``summary`` counting succeeded, failed, running, and scheduled jobs, and a ``breakdown`` per axis. Carries a
-        ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named
-        or the listing is requested. A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count
-        with a ``blocked_reason``, and those jobs are listed by filtering to ``scheduled``. If no batch has run,
-        ``active`` is False with an explanatory ``message``.
+        ``summary`` counting the batch's succeeded, failed, running, and scheduled jobs alongside their total, the
+        ``status`` label those counts resolve to, and a ``breakdown`` per axis. Carries a ``jobs`` list with ``rows``,
+        ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
+        A batch that could not dispatch some jobs also reports ``blocked_jobs`` as a count with a ``blocked_reason``,
+        and those jobs are listed by filtering to ``scheduled``. If no batch has run, ``active`` is False with an
+        explanatory ``message``.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -475,15 +475,16 @@ def get_processing_status_tool(
             return ok_response(active=False, outcomes=recorded, message=_CLOSED_BATCH_MESSAGE)
         return ok_response(active=False, message="No batch is running in this process.")
 
-    if status_filter is not None and status_filter not in _STATUS_COUNT_KEYS.values():
+    if status_filter is not None and status_filter not in _STATUS_LABELS:
         return error_response(
-            message=f"Unknown status '{status_filter}'. Available: {', '.join(sorted(_STATUS_COUNT_KEYS.values()))}."
+            message=f"Unknown status '{status_filter}'. Available: {', '.join(sorted(_STATUS_LABELS))}."
         )
 
     per_job, summary = _collect_status(state=state)
     response = ok_response(
         active=state.manager_thread is not None and state.manager_thread.is_alive(),
         canceled=state.canceled,
+        status=ProcessingTracker.resolve_status(summary=summary).value,
         summary=summary,
         breakdown={axis: count_values(values=[entry[axis] for entry in per_job]) for axis in _STATUS_AXES},
     )
@@ -762,15 +763,30 @@ def _execute_local_batch(
     # maximum for a storage-bound job type is the one admission actually enforces.
     concurrency_limits = resolve_concurrency_limits(job_names={job.job_name for job in dispatchable})
     concurrency_reservations = resolve_concurrency_reservations(job_names={job.job_name for job in dispatchable})
+
+    # Represents each type by the widest job carrying its name. Sizing is per-job rather than per-type, so one type
+    # holds jobs of several widths, and the resolved figure serves as the cap those jobs are held to below and as the
+    # divisor the reported concurrency follows from. Taking the widest is what leaves every library-chosen width
+    # intact, since a narrower representative would cap a type's own wide jobs down to a sibling's figure, and it
+    # settles on one representative whatever order the batch holds its jobs in. Admission reads neither figure and
+    # weighs each job's own width against the budget, so this governs the cap and the report rather than what runs.
+    type_cores: dict[str, int] = {}
+    for job in dispatchable:
+        type_cores[job.job_name] = max(type_cores.get(job.job_name, 0), job.core_weight)
+
     allocations = resolve_core_allocations(
-        job_cores={job.job_name: job.core_weight for job in dispatchable},
-        job_names={job.job_name for job in dispatchable},
+        job_cores=type_cores,
+        job_names=set(type_cores),
         core_budget=core_budget,
         job_limits=concurrency_limits,
         job_reservations=concurrency_reservations,
     )
+
+    # Caps each job at what the host can supply for its type rather than replacing its width with that figure, which
+    # preserves the width the owning library sized this particular job at. A job the library read a small archive for
+    # and sized at one core stays at one core, and only a job wider than the host allows is brought down.
     for pending_job in dispatchable:
-        pending_job.core_weight = allocations[pending_job.job_name].cores_per_job
+        pending_job.core_weight = max(1, min(pending_job.core_weight, allocations[pending_job.job_name].cores_per_job))
 
     # Sizes the pool by how many of the narrowest jobs the core budget could admit at once, so worker processes are
     # never spawned for capacity the core budget cannot supply.
@@ -916,6 +932,16 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
         specifier alone. A pipeline whose specifier does not vary by session therefore gives every session's copy of
         that stage one identifier, and the entries would be indistinguishable without the unit that separates them.
 
+        Each tracker is summarized once, so the record of every job the batch holds comes from one read. The counts
+        are then tallied from the batch's own jobs rather than taken from the trackers' aggregates, because a tracker
+        holds the whole job universe of the unit's pipeline while the batch holds the subset it dispatched. Counting
+        the aggregates would report a total the batch's job count does not match.
+
+        A tracker's record carries the executor that ran the job, when it started, and when it finished, because a
+        caller asking about one job wants all three. A job the tracker does not know yet reports empty timing rather
+        than absent keys, so every entry carries the same fields. Only the error text is conditional, because a job
+        that recorded none has nothing to report.
+
     Args:
         state: The batch execution state whose jobs to report.
 
@@ -924,13 +950,15 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
         jobs alongside the total.
     """
     per_job: list[dict[str, Any]] = []
-    counts = {"succeeded": 0, "failed": 0, "running": 0, "scheduled": 0}
+    summary = dict.fromkeys(("total", *_STATUS_LABELS), 0)
     for tracker_path, jobs in group_jobs_by_tracker(state=state).items():
-        snapshot = ProcessingTracker(file_path=tracker_path).snapshot()
+        payload = ProcessingTracker(file_path=tracker_path).summarize()
+        records: dict[str, dict[str, Any]] = {record["job_id"]: record for record in payload["jobs"]}
         for job in jobs:
-            job_state = snapshot.get(job.job_id)
-            status = job_state.status if job_state is not None else ProcessingStatus.SCHEDULED
-            counts[_STATUS_COUNT_KEYS.get(status, "scheduled")] += 1
+            record = records.get(job.job_id, {})
+            status = record.get("status", ProcessingStatus.SCHEDULED.name).lower()
+            summary["total"] += 1
+            summary[status] += 1
             entry: dict[str, Any] = {
                 "job_id": job.job_id,
                 "pipeline": job.pipeline,
@@ -938,60 +966,42 @@ def _collect_status(state: JobExecutionState[GenericPendingJob]) -> tuple[list[d
                 "specifier": job.specifier,
                 "session_path": str(job.unit_path),
                 "tracker_path": str(tracker_path),
-                "status": status.name.lower(),
+                "status": status,
                 "cores": job.core_weight,
                 "memory_mb": job.memory_mb,
                 "options": dict(job.options),
                 "prerequisite_ids": list(job.prerequisite_ids),
+                "executor_id": record.get("executor_id"),
+                "started_at": record.get("started_at"),
+                "completed_at": record.get("completed_at"),
+                "elapsed_seconds": _elapsed_seconds(
+                    started_at=record.get("started_at"), completed_at=record.get("completed_at")
+                ),
             }
-            entry.update(_job_state_record(job_state=job_state))
+            if "error_message" in record:
+                entry["error_message"] = record["error_message"]
             per_job.append(entry)
-    return per_job, {"total": len(per_job), **counts}
+    return per_job, summary
 
 
-def _job_state_record(job_state: JobState | None) -> dict[str, Any]:
-    """Renders a tracker's record of one job as a response payload.
-
-    Notes:
-        Reports the whole record rather than the status alone, because a caller asking about one job wants which
-        executor ran it, when it started, and how long it took. A job the tracker does not know yet reports empty
-        timing rather than an absent key, so every entry carries the same timing fields. Only the error text is
-        conditional, because a job that recorded none has nothing to report.
-
-    Args:
-        job_state: The tracker's record of the job, or None when the tracker holds no entry for it.
-
-    Returns:
-        A dictionary carrying the executor identifier, the start and completion timestamps, the elapsed seconds, and
-        any recorded error message.
-    """
-    if job_state is None:
-        return {"executor_id": None, "started_at": None, "completed_at": None, "elapsed_seconds": None}
-
-    record: dict[str, Any] = {
-        "executor_id": job_state.executor_id,
-        "started_at": job_state.started_at,
-        "completed_at": job_state.completed_at,
-        "elapsed_seconds": _elapsed_seconds(job_state=job_state),
-    }
-    if job_state.error_message is not None:
-        record["error_message"] = job_state.error_message
-    return record
-
-
-def _elapsed_seconds(job_state: JobState) -> float | None:
+def _elapsed_seconds(started_at: int | None, completed_at: int | None) -> float | None:
     """Resolves how long a job has run, measuring a finished job to its completion and a running one to now.
 
     Args:
-        job_state: The tracker's record of the job.
+        started_at: The microsecond-precision epoch the tracker recorded the job as starting at, or None when the job
+            has not started.
+        completed_at: The microsecond-precision epoch the tracker recorded the job as finishing at, or None when the
+            job is still running.
 
     Returns:
         The elapsed seconds, or None when the job has not started.
     """
-    if job_state.started_at is None:
+    if started_at is None:
         return None
-    end = job_state.completed_at if job_state.completed_at is not None else time_ns() // 1000
+    # A running job is measured to now on the same clock the tracker stamps its own timestamps with, so the two are
+    # directly subtractable.
+    end = completed_at if completed_at is not None else current_timestamp()
     seconds = convert_time(
-        time=end - job_state.started_at, from_units=TimeUnits.MICROSECOND, to_units=TimeUnits.SECOND, as_float=True
+        time=end - started_at, from_units=TimeUnits.MICROSECOND, to_units=TimeUnits.SECOND, as_float=True
     )
     return round(seconds, 3)

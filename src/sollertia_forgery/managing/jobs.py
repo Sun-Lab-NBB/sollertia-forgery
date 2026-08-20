@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+from ataraxis_data_structures import atomic_write
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,6 +57,10 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
         Stored uncompressed so a reader memory-maps it rather than decoding it, which is what makes a filtered read
         cost the same whether a project holds fifty sessions or eight hundred.
 
+        Published through a temporary file renamed over the destination, since the readers that memory-map the
+        artifact take no lock of their own. Rewriting the destination in place would let such a reader map a file
+        that is mid-write.
+
     Args:
         project_directory: The path to the project's root directory.
         job_rows: The job rows to record, each carrying the animal and session that recorded it.
@@ -64,7 +69,9 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
         The path the artifact was written to.
     """
     jobs_path = project_jobs_path(project_directory=project_directory)
-    pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False).sort(
+    frame = pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False).sort(
         by=["animal", "session", "pipeline", "job_name", "specifier"], nulls_last=True
-    ).write_ipc(file=jobs_path, compression="uncompressed")
+    )
+    with atomic_write(file_path=jobs_path, binary=True) as file:
+        frame.write_ipc(file=file, compression="uncompressed")
     return jobs_path

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from collections import deque
 from dataclasses import field, dataclass
 from concurrent.futures import Future
 
+import cv2
+import numba
+from cindra import MEMORY_ESTIMATE_TOLERANCE
 import psutil
 import pytest
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.forging import (
     FORGING_JOB_NAME,
@@ -20,7 +24,6 @@ from sollertia_forgery.forging import (
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
-    SUCCEEDED_STATUS,
     JobExecutionState,
     resolve_dispatch,
     build_pending_job,
@@ -35,17 +38,16 @@ from sollertia_forgery.orchestration import (
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.local import (
-    _PINNED_THREAD_VARIABLES,
     PendingJob,
     _admit_pending_jobs,
+    _initialize_worker_threads,
 )
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
 from sollertia_forgery.orchestration.footprints import (
     _MEGABYTES_PER_GIGABYTE,
     _CHECKSUM_READER_MEMORY_MB,
-    _MEMORY_ESTIMATE_TOLERANCE,
     _apply_tolerance,
-    _estimate_checksum_memory,
+    _size_checksum_job,
 )
 
 if TYPE_CHECKING:
@@ -285,12 +287,27 @@ def test_forward_progress_floor_admits_a_job_larger_than_the_budget() -> None:
 
 
 def test_estimates_carry_the_shared_tolerance() -> None:
-    """Verifies that a reported estimate clears its modeled value by the shared margin and lands on a whole gigabyte."""
+    """Verifies that a reported estimate carries the shared margin and lands on the first whole gigabyte above it."""
+    margin = int(1000 * MEMORY_ESTIMATE_TOLERANCE) + 1
     reportable = _apply_tolerance(memory_mb=1000)
-    assert reportable >= int(1000 * _MEMORY_ESTIMATE_TOLERANCE) + 1
+
+    # The reported figure is the smallest whole gigabyte the margin fits inside, so the margin clears the gigabyte
+    # below it and does not clear the figure itself. Bounding it from both sides is what separates this rounding from
+    # any larger figure that would also cover the margin.
     assert reportable % _MEGABYTES_PER_GIGABYTE == 0
+    assert reportable - _MEGABYTES_PER_GIGABYTE < margin <= reportable
+
+    # The modeled figure sits below one gigabyte, so only a margin of real magnitude carries it onto the second one.
+    # Pinning the figure it reaches is what fails if the tolerance ever collapses toward one, which the bounds above
+    # would still accept because the rounding adds an increment of its own.
+    assert reportable == 2 * _MEGABYTES_PER_GIGABYTE
+
+    # A modeled figure sitting exactly on a gigabyte shows the margin is applied before the rounding rather than
+    # absorbed by it, since the tolerance carries it off its own quantum and onto the next one.
+    assert _apply_tolerance(memory_mb=_MEGABYTES_PER_GIGABYTE) == 2 * _MEGABYTES_PER_GIGABYTE
+
+    # A modeled figure of zero still reports a whole gigabyte, because the margin's own increment lands above nothing.
     assert _apply_tolerance(memory_mb=0) == _MEGABYTES_PER_GIGABYTE
-    assert _MEMORY_ESTIMATE_TOLERANCE > 1.0
 
 
 def test_host_memory_is_readable_and_positive() -> None:
@@ -345,27 +362,39 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     Every other estimator scales a per-byte ratio off an input file. A checksum worker streams its file in fixed
     chunks, so the session's size does not enter the estimate and only the reader count does.
     """
-    single = _estimate_checksum_memory(cores=1)
+    single = _size_checksum_job(cores=1).memory_mb
     # Reportable figures land on whole gigabytes, so the per-reader growth shows across a wide core spread rather
     # than between two adjacent core counts, where the rounding absorbs it.
-    many = _estimate_checksum_memory(cores=16)
+    many = _size_checksum_job(cores=16).memory_mb
     assert many - single >= 15 * _CHECKSUM_READER_MEMORY_MB
-    assert _estimate_checksum_memory(cores=8) > single
-    assert _estimate_checksum_memory(cores=2) >= single
+    assert _size_checksum_job(cores=8).memory_mb > single
+    assert _size_checksum_job(cores=2).memory_mb >= single
+    # The sizing pass answers both halves, so the width the job is dispatched at comes back beside its memory.
+    assert _size_checksum_job(cores=16).cores == 16
 
 
-def test_worker_initializer_leaves_the_numba_thread_variable_alone() -> None:
+def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that the worker initializer controls numba through its runtime setter rather than its environment.
 
     numba reads NUMBA_NUM_THREADS once at import and compares the variable against that latched count on every
     compilation, rejecting a disagreement once its thread pool has started. A worker imports numba before the
     initializer runs, so pinning the variable there would fail every job that compiles a numba function.
     """
-    assert "NUMBA_NUM_THREADS" not in _PINNED_THREAD_VARIABLES
+    for variable in ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "POLARS_MAX_THREADS"):
+        monkeypatch.setenv(variable, os.environ.get(variable, ""))
+    monkeypatch.delenv("NUMBA_NUM_THREADS", raising=False)
+    numba_threads = numba.get_num_threads()
+    opencv_threads = cv2.getNumThreads()
+
+    _initialize_worker_threads(thread_ceiling=1)
+    numba.set_num_threads(n=numba_threads)
+    cv2.setNumThreads(opencv_threads)
+
+    assert "NUMBA_NUM_THREADS" not in os.environ
 
     # The other threading layers stay pinned, since they read their variables when the job itself starts.
-    assert "OMP_NUM_THREADS" in _PINNED_THREAD_VARIABLES
-    assert "POLARS_MAX_THREADS" in _PINNED_THREAD_VARIABLES
+    assert os.environ["OMP_NUM_THREADS"] == "1"
+    assert os.environ["POLARS_MAX_THREADS"] == "1"
 
 
 @pytest.mark.parametrize("pipeline", sorted(member.value for member in BATCH_PIPELINES))
@@ -385,7 +414,7 @@ def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str)
         "tracker_path",
         "output_path",
         "unit_name",
-        "estimate_memory",
+        "size_jobs",
     ):
         assert callable(getattr(dispatch, field_name)), f"{pipeline} declares no {field_name}"
 
@@ -447,7 +476,6 @@ def plan_row(
         "specifier": specifier,
         "cores": cores,
         "memory_mb": memory_mb,
-        "memory_modeled": True,
         "prerequisite_ids": [identifier(job_name=name, specifier=upstream) for name, upstream in prerequisites],
     }
 
@@ -501,7 +529,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
             plan_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
         ],
         state_rows=[
-            state_row(unit=unit.name, job_name="hash", specifier="a", status=SUCCEEDED_STATUS),
+            state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
             state_row(unit=unit.name, job_name="hash", specifier="b"),
             state_row(unit=unit.name, job_name="hash", specifier="c", pipeline="runtime"),
         ],
@@ -524,7 +552,6 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "tracker_path": "/nonexistent/project/305/a_session/tracker.yaml",
         "cores": 8,
         "memory_mb": 4096,
-        "memory_modeled": True,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
     }
@@ -612,7 +639,7 @@ def test_a_unit_whose_outstanding_job_carries_no_figures_is_rejected() -> None:
             state_row(unit=unit.name, job_name="hash", specifier="a"),
             state_row(unit=unit.name, job_name="hash", specifier="unplanned"),
             # An unplanned job that already succeeded is tolerated, since this run would never dispatch it.
-            state_row(unit=unit.name, job_name="hash", specifier="retired", status=SUCCEEDED_STATUS),
+            state_row(unit=unit.name, job_name="hash", specifier="retired", status=ProcessingStatus.SUCCEEDED.name),
         ],
         unit_paths=[unit],
         options={},

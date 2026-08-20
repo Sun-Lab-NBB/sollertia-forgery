@@ -42,25 +42,22 @@ classifiers = [
 # Runtime project dependencies.
 dependencies = [
     # Sollertia Libraries
-    "ataraxis-time>=6,<7",
-    "ataraxis-base-utilities>=6.0.2,<7",
-    "ataraxis-data-structures>=6.2.0rc1,<7",
-    "sollertia-shared-assets>=9.1.0rc4,<10",
+    "ataraxis-time>=7,<8",
+    "ataraxis-base-utilities>=7,<8",
+    "ataraxis-data-structures>=7.1,<8",  # 7.1 first exports the log-archive, marker, and worker-thread helpers
+    "sollertia-shared-assets>=10.0.0rc3,<11",  # rc3 first exports the per-system session type registry
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
-    "ataraxis-video-system>=4,<5",
-    "ataraxis-communication-interface>=6,<7",
-    "cindra>=2.0.0rc3,<3",
-
-    # Machine Vision (GenICam runtime for ataraxis-video-system, resolved from the TestPyPI index that tox.ini adds)
-    "genicam==1.6.0",
+    "ataraxis-video-system>=5.1.1,<6",
+    "ataraxis-communication-interface>=7.1.1,<8",
+    "cindra>=2.0.0rc6,<3",  # rc6 first exports the pipeline data records, including the combined recording metadata
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
-    "opencv-python>=4.13,<5",
+    "opencv-python>=5,<6",
 
     # System Introspection (reads the host's physical memory when sizing a processing batch)
-    "psutil>=6,<8",
+    "psutil>=7,<8",
 
     # Thread-Pool Control (holds the native BLAS and OpenMP pools at the cores each batch job was admitted at)
     "threadpoolctl>=3,<4",
@@ -78,7 +75,7 @@ dependencies = [
     "paramiko>=5,<6",
 
     # Model Context Protocol
-    "mcp[cli]>=1,<2",
+    "mcp>=2,<3",
 
     # Utilities
     "filelock>=3,<4",
@@ -235,6 +232,12 @@ module = [
     "sollertia_forgery.interfaces.server_tools",
 ]
 ignore_errors = true
+
+# threadpoolctl ships no py.typed marker and publishes no stub distribution, so the module that bounds the native
+# thread pools through it is checked against an untyped import rather than failing on the import itself.
+[[tool.mypy.overrides]]
+module = ["threadpoolctl"]
+ignore_missing_imports = true
 
 # Pytest configuration. The import mode is declared here so that a bare 'pytest' invocation resolves test modules the
 # same way the '{py}-test' tox task does.

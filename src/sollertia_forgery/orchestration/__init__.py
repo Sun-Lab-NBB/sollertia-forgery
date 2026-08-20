@@ -4,7 +4,6 @@ prepared-batch registry with its closure.
 """
 
 from .graph import (
-    SUCCEEDED_STATUS,
     PendingJob,
     BatchDocument,
     GenericPendingJob,
@@ -125,7 +124,6 @@ __all__ = [
     "REMOTE_JOB_WALLTIME_MINUTES",
     "RESERVED_CORES",
     "SESSION_UNIT",
-    "SUCCEEDED_STATUS",
     "ActiveJob",
     "BatchDocument",
     "BatchOutcome",

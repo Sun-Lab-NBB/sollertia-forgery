@@ -8,20 +8,22 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest, CameraSourceData
+from ataraxis_video_system import (
+    CAMERA_MANIFEST_FILENAME,
+    CAMERA_EXTRACTION_JOB_NAME,
+    CameraManifest,
+    CameraSourceData,
+)
 from sollertia_shared_assets import ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
-from ataraxis_video_system.video import TIMESTAMP_JOB_NAME
 
 from sollertia_forgery.video.pipeline import (
     ENERGY_JOB_NAME,
     RENAME_JOB_NAME,
     TRACKING_JOB_NAME,
     _dispatch_job,
-    _find_camera_logs,
     discover_video_jobs,
     video_job_prerequisites,
-    _extract_camera_source_id,
     run_video_processing_pipeline,
 )
 from sollertia_forgery.video.motion_energy import MOTION_ENERGY_SUFFIX
@@ -251,7 +253,7 @@ def test_unflagged_run_executes_every_stage(
         assert pl.read_ipc(parsed).height == _RECORDING_FRAMES
         assert canonical.stat().st_ino == parsed.stat().st_ino
         assert pl.read_ipc(video_directory.joinpath(f"{camera_name}{MOTION_ENERGY_SUFFIX}")).height == _RECORDING_FRAMES
-        assert _job_status(camera_session, TIMESTAMP_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
+        assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
         assert _job_status(camera_session, ENERGY_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
     assert not video_directory.joinpath("camera_101_timestamps.feather").exists()
     assert _job_status(camera_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
@@ -316,9 +318,9 @@ def test_timestamp_stage_honors_the_target_camera(
     video_directory = _video_directory(camera_session)
     assert video_directory.joinpath(f"camera_{_FACE_SOURCE_ID}_timestamps.feather").is_file()
     assert not video_directory.joinpath(f"camera_{_BODY_SOURCE_ID}_timestamps.feather").exists()
-    assert _job_status(camera_session, TIMESTAMP_JOB_NAME, str(_FACE_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
+    assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
     # A stage-scoped invocation registers only the jobs it runs, leaving its siblings out of the shared tracker.
-    assert _job_status(camera_session, TIMESTAMP_JOB_NAME, str(_BODY_SOURCE_ID)) is None
+    assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)) is None
     assert _job_status(camera_session, TRACKING_JOB_NAME, "") is None
     assert _job_status(camera_session, ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)) is None
     assert _job_status(camera_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
@@ -355,12 +357,18 @@ def test_manifest_without_cameras_errors(experiment_session: SessionData) -> Non
     """Verifies an empty camera manifest stops the run instead of aligning an empty job universe."""
     _write_manifest(experiment_session.raw_data.behavior_data_path, {})
 
-    with pytest.raises(ValueError, match="does not register any cameras"):
+    with pytest.raises(ValueError, match="contains no source entries"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), workers=1)
 
 
 def test_missing_manifest_errors(experiment_session: SessionData) -> None:
-    """Verifies a session with no camera manifest reports the missing file rather than an empty universe."""
+    """Verifies a session with no camera manifest reports the missing file rather than an empty universe.
+
+    The created session hierarchy carries no behavior-data directory until a source writes into it, so this also
+    covers the session that ran no DataLogger-backed source at all.
+    """
+    assert not experiment_session.raw_data.behavior_data_path.exists()
+
     with pytest.raises(FileNotFoundError, match=f"No camera manifest \\('{CAMERA_MANIFEST_FILENAME}'\\)"):
         run_video_processing_pipeline(session_path=_session_path(experiment_session), workers=1)
 
@@ -376,7 +384,7 @@ def test_remote_mode_runs_only_the_requested_timestamp_job(
     behavior_directory = camera_session.raw_data.behavior_data_path
     write_frame_archive(behavior_directory, _FACE_SOURCE_ID)
     write_frame_archive(behavior_directory, _BODY_SOURCE_ID)
-    job_id = ProcessingTracker.generate_job_id(job_name=TIMESTAMP_JOB_NAME, specifier=str(_BODY_SOURCE_ID))
+    job_id = ProcessingTracker.generate_job_id(job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(_BODY_SOURCE_ID))
 
     run_video_processing_pipeline(
         session_path=_session_path(camera_session), job_id=job_id, energy=True, target_camera=_FACE_SOURCE_ID, workers=1
@@ -385,7 +393,7 @@ def test_remote_mode_runs_only_the_requested_timestamp_job(
     video_directory = _video_directory(camera_session)
     assert video_directory.joinpath(f"camera_{_BODY_SOURCE_ID}_timestamps.feather").is_file()
     assert not video_directory.joinpath(f"camera_{_FACE_SOURCE_ID}_timestamps.feather").exists()
-    assert _job_status(camera_session, TIMESTAMP_JOB_NAME, str(_BODY_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
+    assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
     # The stage flag and the target camera are ignored, so the energy job the flags name never reaches the tracker.
     assert _job_status(camera_session, ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)) is None
 
@@ -396,7 +404,7 @@ def test_remote_mode_runs_the_rename_job(
 ) -> None:
     """Verifies the rename job is dispatchable on its own, publishing whichever parsed feathers are already present."""
     write_frame_archive(camera_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
-    parse_id = ProcessingTracker.generate_job_id(job_name=TIMESTAMP_JOB_NAME, specifier=str(_FACE_SOURCE_ID))
+    parse_id = ProcessingTracker.generate_job_id(job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(_FACE_SOURCE_ID))
     run_video_processing_pipeline(session_path=_session_path(camera_session), job_id=parse_id, workers=1)
 
     rename_id = ProcessingTracker.generate_job_id(job_name=RENAME_JOB_NAME, specifier="")
@@ -410,13 +418,13 @@ def test_remote_mode_runs_the_rename_job(
 
 def test_remote_mode_rejects_an_unknown_job_id(camera_session: SessionData) -> None:
     """Verifies an identifier outside the session's job universe errors and names the valid identifiers."""
-    with pytest.raises(ValueError, match="does not match any camera processing job"):
+    with pytest.raises(ValueError, match="must name a job the pipeline could produce"):
         run_video_processing_pipeline(session_path=_session_path(camera_session), job_id="deadbeef", workers=1)
 
 
 def test_remote_mode_rejects_a_timestamp_job_without_an_archive(camera_session: SessionData) -> None:
     """Verifies dispatching a parse job whose camera archive is absent reports the missing archive."""
-    job_id = ProcessingTracker.generate_job_id(job_name=TIMESTAMP_JOB_NAME, specifier=str(_FACE_SOURCE_ID))
+    job_id = ProcessingTracker.generate_job_id(job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(_FACE_SOURCE_ID))
 
     with pytest.raises(FileNotFoundError, match="No raw log archive was discovered for"):
         run_video_processing_pipeline(session_path=_session_path(camera_session), job_id=job_id, workers=1)
@@ -515,15 +523,15 @@ def test_discovery_reports_the_universe_and_the_possible_subset(
 
     assert session.session_name == camera_session.session_name
     assert universe == [
-        (TIMESTAMP_JOB_NAME, str(_FACE_SOURCE_ID)),
-        (TIMESTAMP_JOB_NAME, str(_BODY_SOURCE_ID)),
+        (CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)),
+        (CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)),
         (RENAME_JOB_NAME, ""),
         (TRACKING_JOB_NAME, ""),
         (ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)),
         (ENERGY_JOB_NAME, str(_BODY_SOURCE_ID)),
     ]
     assert possible == [
-        (TIMESTAMP_JOB_NAME, str(_FACE_SOURCE_ID)),
+        (CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)),
         (RENAME_JOB_NAME, ""),
         (TRACKING_JOB_NAME, ""),
         (ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)),
@@ -546,7 +554,7 @@ def test_discovery_rejects_a_manifest_without_cameras(experiment_session: Sessio
     """Verifies discovery on an empty manifest errors rather than returning an empty universe."""
     _write_manifest(experiment_session.raw_data.behavior_data_path, {})
 
-    with pytest.raises(ValueError, match="does not register any cameras"):
+    with pytest.raises(ValueError, match="contains no source entries"):
         discover_video_jobs(session_path=_session_path(experiment_session))
 
 
@@ -557,40 +565,31 @@ def test_prerequisites_order_the_rename_job_after_every_parse_job(camera_session
     prerequisites = video_job_prerequisites(session=session, universe=universe)
 
     assert prerequisites[RENAME_JOB_NAME, ""] == (
-        (TIMESTAMP_JOB_NAME, str(_FACE_SOURCE_ID)),
-        (TIMESTAMP_JOB_NAME, str(_BODY_SOURCE_ID)),
+        (CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)),
+        (CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)),
     )
     assert prerequisites[TRACKING_JOB_NAME, ""] == ()
     assert prerequisites[ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)] == ()
-    assert prerequisites[TIMESTAMP_JOB_NAME, str(_FACE_SOURCE_ID)] == ()
+    assert prerequisites[CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)] == ()
     assert set(prerequisites) == set(universe)
 
 
 # Archive discovery and dispatch guards
 
 
-def test_archive_discovery_tolerates_a_missing_directory(tmp_path: Path) -> None:
-    """Verifies discovery over a behavior directory that was never created reports no archives."""
-    assert _find_camera_logs(data_directory=tmp_path.joinpath("absent")) == []
-
-
-def test_archive_discovery_sorts_the_archives_naturally(tmp_path: Path, write_log_archive: Callable[..., Path]) -> None:
-    """Verifies the discovered archives are ordered by their numeric source identifier rather than lexically."""
-    for source_id in (2, 10, 1):
-        write_log_archive(tmp_path.joinpath(f"{source_id}_log.npz"), source_id, [(1, b"")])
-
-    assert [path.name for path in _find_camera_logs(data_directory=tmp_path)] == [
-        "1_log.npz",
-        "2_log.npz",
-        "10_log.npz",
-    ]
-
-
 @pytest.mark.parametrize("filename", ["sync_log.npz", "51_frames.npz", "51_log_extra.npz"])
-def test_source_id_extraction_rejects_a_foreign_archive_name(tmp_path: Path, filename: str) -> None:
-    """Verifies an archive whose name breaks the convention errors instead of yielding a wrong source identifier."""
-    with pytest.raises(ValueError, match="does not follow the expected"):
-        _extract_camera_source_id(log_path=tmp_path.joinpath(filename))
+def test_archive_discovery_ignores_a_foreign_archive_name(camera_session: SessionData, filename: str) -> None:
+    """Verifies an archive whose name is not a registered camera's is passed over rather than parsed as one.
+
+    A name that carries no source identifier, and a name that carries one without the archive suffix, must both leave
+    the registered camera without an archive rather than yielding it the wrong file.
+    """
+    camera_session.raw_data.behavior_data_path.joinpath(filename).touch()
+
+    _session, _universe, possible = discover_video_jobs(session_path=_session_path(camera_session))
+
+    assert not [job for job in possible if job[0] == CAMERA_EXTRACTION_JOB_NAME]
+    assert (RENAME_JOB_NAME, "") not in possible
 
 
 def test_dispatch_rejects_an_unknown_job_name(camera_session: SessionData) -> None:
@@ -605,7 +604,7 @@ def test_dispatch_rejects_an_unknown_job_name(camera_session: SessionData) -> No
             specifier="",
             session=camera_session,
             log_paths={},
-            camera_names={_FACE_SOURCE_ID: _FACE_CAMERA},
+            camera_names={str(_FACE_SOURCE_ID): _FACE_CAMERA},
             video_data_directory=video_directory,
             tracker=tracker,
             workers=1,

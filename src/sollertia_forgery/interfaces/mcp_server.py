@@ -8,16 +8,7 @@ import importlib
 
 from .mcp_instance import mcp
 
-__all__ = ["run_mcp_server", "run_server"]
-
-
-def run_mcp_server() -> None:
-    """Starts the shared MCP server with stdio transport.
-
-    Serves as a CLI entry point, launching the MCP server using the stdio transport protocol recommended for
-    Claude Desktop integration.
-    """
-    run_server(transport="stdio")
+__all__ = ["run_server"]
 
 
 def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") -> None:
@@ -28,6 +19,12 @@ def run_server(transport: Literal["stdio", "sse", "streamable-http"] = "stdio") 
             communication, 'sse' for server-sent-event streaming, and 'streamable-http' for HTTP-based communication.
     """
     # Blocks until the transport connection is closed, so the caller owns the process for the server's lifetime.
+    if transport == "streamable-http":
+        # Frames each response as a single JSON body instead of an event stream. Only the streamable-http transport
+        # accepts this flag, so it stays out of the call below.
+        mcp.run(transport=transport, json_response=True)
+        return
+
     mcp.run(transport=transport)
 
 

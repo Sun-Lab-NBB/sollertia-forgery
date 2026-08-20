@@ -5,16 +5,18 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from cindra import CombinedData, DetectionData, ExtractionData, resolve_dataset_path
 import polars as pl
 import pytest
 
-from sollertia_forgery.shared_assets import multi_recording_dataset_directory
+from sollertia_forgery.shared_assets import multi_recording_dataset_name
 from sollertia_forgery.mesoscope_vr.forging import assemble_mesoscope_session
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
 from sollertia_forgery.mesoscope_vr.experiment_dataset import assemble_experiment_dataset
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Sequence
 
     from numpy.typing import NDArray
     from sollertia_shared_assets import SessionData
@@ -36,6 +38,10 @@ MULTI_ROI_COUNT: int = 2
 
 SAMPLING_RATE_HZ: float = 10.0
 """The per-plane sampling rate the combined cindra metadata reports, which sets the expected scan pulse duration."""
+
+COMBINED_FRAME_EXTENT: int = 512
+"""The height and the width recorded in the synthetic combined metadata archive. The assembler reads the sampling
+rate alone, so the extent only has to be a shape cindra's writer accepts."""
 
 FIRST_PULSE_US: int = 1_000_000
 """The timestamp of the first mesoscope scan pulse rising edge."""
@@ -268,34 +274,63 @@ def write_runtime_sources(session: SessionData) -> None:
     )
 
 
+def build_extraction(roi_count: int, is_cell: Sequence[int] | None = None) -> ExtractionData:
+    """Builds the cindra extraction record the fluorescence assembly reads back.
+
+    Every trace array counts up from zero in row-major order, so a value pins both the region of interest it came from
+    and the frame it was sampled at, and the per-array offset keeps the four distinguishable.
+
+    Args:
+        roi_count: The number of region rows every trace array carries.
+        is_cell: The per-region cell label, one entry per row, or None for a record carrying no classification.
+
+    Returns:
+        The populated extraction record, which cindra's own writer saves under its canonical array names.
+    """
+    base = np.arange(roi_count * FRAME_COUNT, dtype=np.float32).reshape(roi_count, FRAME_COUNT)
+    classification: NDArray[np.float32] | None = None
+    if is_cell is not None:
+        classification = np.zeros((roi_count, 2), dtype=np.float32)
+        classification[:, 0] = np.asarray(is_cell, dtype=np.float32)
+    return ExtractionData(
+        cell_fluorescence=base,
+        neuropil_fluorescence=base + 1.0,
+        subtracted_fluorescence=base + 2.0,
+        spikes=base + 3.0,
+        cell_classification=classification,
+    )
+
+
 def write_cindra_outputs(session: SessionData) -> None:
     """Writes the single-recording and multi-recording cindra arrays the fluorescence assembly reads.
 
-    Every trace array counts up from zero in row-major order, so a value pins both the region of interest it came from
-    and the frame it was sampled at.
+    Notes:
+        Both directories are written through cindra's own writers, so the arrays and the combined metadata archive the
+        assembler reads back are the ones cindra's stages publish.
 
     Args:
         session: The loaded experiment session whose cindra directories receive the arrays.
     """
     single_path = session.processed_data.cindra_data_path
-    multi_path = session.processed_data.cindra_multi_recording_path.joinpath(
-        multi_recording_dataset_directory(animal_id=str(session.animal_id), dataset_name=DATASET_NAME)
+    multi_path = resolve_dataset_path(
+        output_root=session.processed_data_path,
+        dataset_name=multi_recording_dataset_name(animal_id=str(session.animal_id), dataset_name=DATASET_NAME),
     )
     single_path.mkdir(parents=True, exist_ok=True)
     multi_path.mkdir(parents=True, exist_ok=True)
 
-    classification = np.zeros((ROI_COUNT, 2), dtype=np.float32)
-    classification[[0, 2, 3], 0] = 1.0
-    np.save(file=single_path.joinpath("cell_classification.npy"), arr=classification)
-    np.savez(single_path.joinpath("combined_metadata.npz"), sampling_rate=np.array([SAMPLING_RATE_HZ]))
+    is_cell = [1 if index in {0, 2, 3} else 0 for index in range(ROI_COUNT)]
+    CombinedData(
+        detection=DetectionData(),
+        extraction=build_extraction(roi_count=ROI_COUNT, is_cell=is_cell),
+        plane_count=1,
+        frame_count=FRAME_COUNT,
+        combined_height=COMBINED_FRAME_EXTENT,
+        combined_width=COMBINED_FRAME_EXTENT,
+        sampling_rate=SAMPLING_RATE_HZ,
+    ).save(root_path=single_path)
 
-    for index, filename in enumerate(
-        ("cell_fluorescence.npy", "neuropil_fluorescence.npy", "subtracted_fluorescence.npy", "spikes.npy")
-    ):
-        single_traces = np.arange(ROI_COUNT * FRAME_COUNT, dtype=np.float32).reshape(ROI_COUNT, FRAME_COUNT)
-        np.save(file=single_path.joinpath(filename), arr=single_traces + float(index))
-        multi_traces = np.arange(MULTI_ROI_COUNT * FRAME_COUNT, dtype=np.float32).reshape(MULTI_ROI_COUNT, FRAME_COUNT)
-        np.save(file=multi_path.joinpath(filename), arr=multi_traces + float(index))
+    build_extraction(roi_count=MULTI_ROI_COUNT).save_arrays(output_path=multi_path)
 
 
 def write_video_sources(session: SessionData) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from time import sleep
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 from pathlib import Path
 from collections import deque
 from concurrent.futures import Future
@@ -12,6 +12,7 @@ from concurrent.futures import Future
 import cv2
 import numba
 import pytest
+from ataraxis_base_utilities import console
 from sollertia_shared_assets import (
     DatasetData,
     SessionData,
@@ -40,9 +41,9 @@ from sollertia_forgery.orchestration import (
     resolve_concurrency_reservations,
 )
 from sollertia_forgery.orchestration.local import (
-    _PINNED_THREAD_VARIABLES,
     _reset_queued_jobs,
     _admit_pending_jobs,
+    _pinned_pool_imports,
     _refresh_job_outcomes,
     _initialize_worker_threads,
     apply_decode_thread_ceiling,
@@ -53,6 +54,24 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
     from sollertia_shared_assets import ProjectData
+
+PINNED_THREAD_VARIABLES: tuple[str, ...] = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "POLARS_MAX_THREADS",
+    "OPENCV_FFMPEG_THREADS",
+    "TIFFFILE_NUM_THREADS",
+)
+"""The threading-layer environment variables the worker initializer is expected to pin.
+
+Notes:
+    The pinning itself belongs to ataraxis-data-structures, which keeps its own list of these variables private, so
+    this module names them again rather than reaching for that private tuple. NUMBA_NUM_THREADS is deliberately
+    absent, since numba is pinned through its runtime setter instead of through the environment.
+"""
 
 CORE_BUDGET: int = 64
 """The cores every admission test in this module weighs its jobs against."""
@@ -292,11 +311,48 @@ def pinned_thread_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]
     """
     numba_threads = numba.get_num_threads()
     opencv_threads = cv2.getNumThreads()
-    for variable in (*_PINNED_THREAD_VARIABLES, "TIFFFILE_NUM_THREADS"):
+    for variable in PINNED_THREAD_VARIABLES:
         monkeypatch.setenv(variable, os.environ.get(variable, ""))
     yield
     numba.set_num_threads(n=numba_threads)
     cv2.setNumThreads(opencv_threads)
+
+
+@pytest.fixture
+def restored_console() -> Iterator[None]:
+    """Hands the process back the console state it started with once the test finishes.
+
+    The console is a process-global singleton, so a test that silences it to stand in for the MCP server on the stdio
+    transport would otherwise leave every later test running against a silent console.
+
+    Yields:
+        Nothing, since the fixture exists for the restoration it performs.
+    """
+    enabled = console.enabled
+    yield
+    if enabled:
+        console.enable()
+    else:
+        console.disable()
+
+
+@pytest.fixture
+def recorded_opencv_thread_counts(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Records the width the worker initializer pins the OpenCV core thread pool to.
+
+    OpenCV selects its parallel backend at build time, and the backend the macOS wheels ship accepts a pinned width
+    without reporting it back through the reader, so the request itself is what states that the pin happened on every
+    platform this package supports.
+
+    Args:
+        monkeypatch: The fixture used to replace the OpenCV thread setter for the duration of one test.
+
+    Returns:
+        The list every requested thread count is appended to, in request order.
+    """
+    counts: list[int] = []
+    monkeypatch.setattr(cv2, "setNumThreads", counts.append)
+    return counts
 
 
 @pytest.fixture
@@ -644,23 +700,91 @@ def test_the_decode_ceiling_follows_the_cores_a_job_holds(pinned_thread_environm
     assert os.environ["TIFFFILE_NUM_THREADS"] == "1"
 
 
-def test_the_worker_initializer_pins_every_declared_threading_layer(pinned_thread_environment: None) -> None:
+def test_the_worker_initializer_pins_every_declared_threading_layer(
+    pinned_thread_environment: None, recorded_opencv_thread_counts: list[int]
+) -> None:
     """A worker holds one core, so every library pool it opens has to be pinned before the job starts."""
     _initialize_worker_threads(thread_ceiling=1)
 
-    for variable in _PINNED_THREAD_VARIABLES:
+    for variable in PINNED_THREAD_VARIABLES:
         assert os.environ[variable] == "1"
-    assert os.environ["TIFFFILE_NUM_THREADS"] == "1"
-    assert cv2.getNumThreads() == 1
+    assert recorded_opencv_thread_counts == [1]
     assert numba.get_num_threads() == 1
 
 
-def test_the_worker_initializer_raises_a_non_positive_ceiling_to_one(pinned_thread_environment: None) -> None:
+def test_the_worker_initializer_raises_a_non_positive_ceiling_to_one(
+    pinned_thread_environment: None, recorded_opencv_thread_counts: list[int]
+) -> None:
     """A pool pinned to zero threads would open nothing at all, so the floor of one is applied first."""
     _initialize_worker_threads(thread_ceiling=0)
 
     assert os.environ["OMP_NUM_THREADS"] == "1"
-    assert cv2.getNumThreads() == 1
+    assert recorded_opencv_thread_counts == [1]
+
+
+def test_the_worker_initializer_mirrors_a_silenced_parent_console(
+    pinned_thread_environment: None, recorded_opencv_thread_counts: list[int], restored_console: None
+) -> None:
+    """A spawned worker comes up with a freshly enabled console while writing to the stream the parent handed it, so
+    a parent that silenced its own has to have that silence carried into the child.
+    """
+    console.enable()
+    _initialize_worker_threads(1, True)  # noqa: FBT003
+    assert not console.enabled
+
+    console.enable()
+    _initialize_worker_threads(1, False)  # noqa: FBT003
+    assert console.enabled
+
+
+def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
+    monkeypatch: pytest.MonkeyPatch, restored_console: None
+) -> None:
+    """Mirroring the parent is what keeps a batch run's worker output intact while silencing the children of the MCP
+    server on the stdio transport, whose stdout carries the JSON-RPC stream an echoed line would corrupt.
+    """
+    recorded: list[tuple[Any, ...]] = []
+
+    class CapturingPool(RecordingPool):
+        """Stands in for the shared pool, recording the arguments its children would be initialized with."""
+
+        def __init__(self, max_workers: int, initializer: Callable[..., None], initargs: tuple[Any, ...]) -> None:  # noqa: ARG002
+            super().__init__()
+            recorded.append(initargs)
+
+        def __enter__(self) -> Self:
+            """Enters the pool's scope, which the manager holds for the session."""
+            return self
+
+        def __exit__(self, *_exception: object) -> None:
+            """Leaves the pool's scope without suppressing anything."""
+
+    monkeypatch.setattr("sollertia_forgery.orchestration.local.ProcessPoolExecutor", CapturingPool)
+
+    console.enable()
+    job_execution_manager(state=build_state(jobs=[]))
+
+    console.disable()
+    job_execution_manager(state=build_state(jobs=[]))
+
+    assert [initargs[1] for initargs in recorded] == [False, True]
+
+
+def test_the_pool_import_pin_hands_the_parent_back_what_it_was_using(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parent has already imported the same libraries, so the pin covering the pool's lifetime has to leave the
+    parent's own threading exactly as it found it.
+    """
+    monkeypatch.setenv("POLARS_MAX_THREADS", "12")
+
+    with _pinned_pool_imports():
+        assert os.environ["POLARS_MAX_THREADS"] == "1"
+    assert os.environ["POLARS_MAX_THREADS"] == "12"
+
+    # A variable the parent never set is removed again rather than left behind at the pinned width.
+    monkeypatch.delenv("POLARS_MAX_THREADS")
+    with _pinned_pool_imports():
+        assert os.environ["POLARS_MAX_THREADS"] == "1"
+    assert "POLARS_MAX_THREADS" not in os.environ
 
 
 # The dispatch table
@@ -672,7 +796,9 @@ def test_an_identifier_outside_the_pipeline_enumeration_resolves_to_no_dispatch(
 
 
 def test_a_registered_job_type_reports_the_cores_it_declares() -> None:
-    """The declared allocation is what a plan records and a scheduler requests, so it is reported unnarrowed."""
+    """The declared allocation is what a stage this package sizes for itself runs at, and what a stage a library
+    sizes per job falls back to, so it is reported unnarrowed either way.
+    """
     assert resolve_job_cores(job_name=CHECKSUM_JOB_NAME) == 8
     assert resolve_job_cores(job_name=FORGING_JOB_NAME) == 1
 

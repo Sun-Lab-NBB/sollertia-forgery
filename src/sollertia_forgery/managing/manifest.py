@@ -5,27 +5,25 @@ captures the snapshot of a project's state.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from datetime import UTC, datetime
 from collections import Counter
 
 import polars as pl
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    DESCRIPTOR_REGISTRY,
     SessionData,
     SessionTypes,
     ProcessingTrackers,
     iterate_sessions,
+    parse_session_timestamp,
 )
-from ataraxis_data_structures import ProcessingTracker
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
+from ataraxis_data_structures import TrackerStatus, ProcessingTracker, atomic_write
 
 from .jobs import write_project_jobs
 from ..shared_assets import (
     SESSION_PIPELINES,
     ProcessingPipelines,
-    summarize_tracker,
-    derive_tracker_status,
     resolve_session_tracker_path,
 )
 
@@ -74,9 +72,6 @@ Notes:
     The ``complete`` column and the five pipeline columns each hold a 0 or a 1, so a reader applies one done or
     not-done convention across all six.
 """
-
-_COMPLETED_STATUS: str = "completed"
-"""The rolled-up tracker label that counts as a finished pipeline, which the manifest stores as 1."""
 
 
 def project_manifest_path(project_directory: Path) -> Path:
@@ -213,8 +208,11 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
             sorted_manifest = manifest_frame.sort(by=["animal", "session"])
 
             # Saves the generated manifest to the project-specific uncompressed .feather file to allow
-            # memory-mapped reads.
-            sorted_manifest.write_ipc(file=manifest_path, compression="uncompressed")
+            # memory-mapped reads. Published through a temporary file renamed over the destination, so a reader
+            # that memory-maps the artifact without taking this lock observes either the previous manifest or the
+            # complete new one, never a partially rewritten file.
+            with atomic_write(file_path=manifest_path, binary=True) as file:
+                sorted_manifest.write_ipc(file=file, compression="uncompressed")
 
             # Written while this lock is held, so a reader never sees one artifact refreshed without the other.
             write_project_jobs(project_directory=project_directory, job_rows=job_rows)
@@ -545,18 +543,9 @@ def _build_session_row(
     Raises:
         ValueError: If the session's type has no registered descriptor class.
     """
-    # Parses the session name, a UTC timestamp, into a timezone-aware UTC datetime.
-    date_time_components = session_data.session_name.split("-")
-    date_time = datetime(
-        year=int(date_time_components[0]),
-        month=int(date_time_components[1]),
-        day=int(date_time_components[2]),
-        hour=int(date_time_components[3]),
-        minute=int(date_time_components[4]),
-        second=int(date_time_components[5]),
-        microsecond=int(date_time_components[6]),
-        tzinfo=UTC,
-    )
+    # Parses the session name, a UTC timestamp, into a timezone-aware UTC datetime. A name that does not follow the
+    # session naming format yields None, which the manifest stores as a null date rather than aborting the walk.
+    date_time = parse_session_timestamp(session_name=session_data.session_name)
 
     # Loads the session descriptor to extract experimenter notes and completeness status. Every session carries a
     # valid descriptor, so a missing or unparseable descriptor propagates as an error.
@@ -589,7 +578,7 @@ def _build_session_row(
     for pipeline in SESSION_PIPELINES:
         tracker_path = resolve_session_tracker_path(session=session_data, pipeline=pipeline)
         status, pipeline_jobs = _read_pipeline_state(pipeline=pipeline, tracker_path=tracker_path)
-        row[PIPELINE_STATUS_COLUMNS[pipeline]] = int(status == _COMPLETED_STATUS)
+        row[PIPELINE_STATUS_COLUMNS[pipeline]] = int(status == TrackerStatus.COMPLETED)
         session_jobs.extend(pipeline_jobs)
 
     # Each job row carries the session that recorded it, since the rows of every session are written to one artifact.
@@ -597,8 +586,14 @@ def _build_session_row(
     return row, [{**subject, **entry} for entry in session_jobs]
 
 
-def _read_pipeline_state(pipeline: ProcessingPipelines, tracker_path: Path) -> tuple[str, list[dict[str, Any]]]:
+def _read_pipeline_state(
+    pipeline: ProcessingPipelines, tracker_path: Path
+) -> tuple[TrackerStatus, list[dict[str, Any]]]:
     """Reads one pipeline's processing tracker into a rolled-up status label and its per-job entries.
+
+    Notes:
+        A tracker holding no jobs is reported as not started, rather than through the label the tracker resolves an
+        empty registry to, which is in progress and would read as a pipeline that has already begun.
 
     Args:
         pipeline: The pipeline whose identifier is recorded on each emitted job entry.
@@ -609,13 +604,12 @@ def _read_pipeline_state(pipeline: ProcessingPipelines, tracker_path: Path) -> t
         discriminator alongside the full ``JobState`` payload. A tracker that does not exist yields ``not_started``
         and no entries.
     """
-    jobs = ProcessingTracker(file_path=tracker_path).snapshot()
-    if not jobs:
-        return "not_started", []
+    status_payload = ProcessingTracker(file_path=tracker_path).summarize()
+    if not status_payload["jobs"]:
+        return TrackerStatus.NOT_STARTED, []
 
-    status_payload = summarize_tracker(jobs=jobs)
     entries = [{"pipeline": pipeline.value, **entry} for entry in status_payload["jobs"]]
-    return derive_tracker_status(summary=status_payload["summary"]), entries
+    return status_payload["status"], entries
 
 
 def _assert_status_column_coverage() -> None:

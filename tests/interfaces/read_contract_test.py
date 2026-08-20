@@ -6,9 +6,9 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 import pytest
+from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.video import ENERGY_JOB_NAME
-from sollertia_forgery.forging import DATASET_MARKER_FILENAME
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME, PROJECT_JOBS_SCHEMA, project_jobs_path
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.interfaces.responses import (

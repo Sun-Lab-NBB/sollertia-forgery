@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from dataclasses import replace
 
+import numpy as np
 import polars as pl
 import pytest
 from sollertia_shared_assets import DatasetData, SessionData, SessionTypes, DatasetSession
@@ -38,6 +39,7 @@ from sollertia_forgery.orchestration import (
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS, PipelineDispatch
+from sollertia_forgery.orchestration.footprints import JobFootprint
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,6 +49,76 @@ _CHECKSUM_JOBS: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, "")]
 
 _RUNTIME_JOBS: list[tuple[str, str]] = [(RUNTIME_JOB_NAME, "51")]
 """A single-job universe standing in for the runtime pipeline."""
+
+
+def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+    """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
+
+    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
+    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
+
+    Args:
+        _frame: The frame the writer was called on, which this stand-in never serializes.
+        file: The open file object the artifact is written to.
+        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
+    """
+    file.write(b"partial")
+    message = "the artifact writer died mid-write"
+    raise RuntimeError(message)
+
+
+def write_processed_recording(session: SessionData, *, regions: int, samples: int) -> Path:
+    """Writes the single-recording outputs a dataset's assembly job is sized from.
+
+    The assembly stage reads the trace array's header and the presence of the combination stage's archive, so writing
+    both is what makes the session's own fluorescence resolvable without decoding anything.
+
+    Args:
+        session: The session whose processed data receives the outputs.
+        regions: The regions the recording's traces hold.
+        samples: The samples each trace holds.
+
+    Returns:
+        The path to the session's cindra output directory.
+    """
+    directory = session.processed_data.cindra_data_path
+    directory.mkdir(parents=True, exist_ok=True)
+    with directory.joinpath("cell_fluorescence.npy").open("wb") as array_file:
+        np.lib.format.write_array(array_file, np.zeros((regions, samples), dtype=np.float32))
+    np.savez(
+        directory.joinpath("combined_metadata.npz"), combined_height=np.array([128]), combined_width=np.array([96])
+    )
+    return directory
+
+
+def define_planned_dataset(project_root: Path, session: SessionData) -> DatasetData:
+    """Creates the single-session forged dataset hierarchy the dataset planning tests operate on."""
+    return DatasetData.create(
+        name="ds_planned",
+        project=project_root.stem,
+        session_type=SessionTypes.RUN_TRAINING,
+        acquisition_system=session.acquisition_system,
+        sessions=(DatasetSession(session=session.session_name, animal=str(session.animal_id)),),
+        datasets_root=project_root,
+        column_descriptions={"time_us": "The sample timestamp."},
+    )
+
+
+def refuse_to_size(_unit: Any, _jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+    """Stands in for a sizing pass whose job input cannot be read, naming the input the way the real pass does.
+
+    Args:
+        _unit: The unit the jobs operate on, which this stand-in never reads.
+        _jobs: The jobs to size, which this stand-in never sizes.
+
+    Raises:
+        FileNotFoundError: Always, standing in for a job whose input is absent.
+    """
+    message = "Unable to size the job. The archive 'camera_77.npz' does not exist."
+    raise FileNotFoundError(message)
 
 
 def make_session(root: Path) -> SimpleNamespace:
@@ -81,9 +153,11 @@ def make_dispatch(
             raise FileNotFoundError(message)
         return unit, universe, universe
 
-    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], tuple[int, bool]]:
-        """Returns the fixed memory figure for every job it is handed."""
-        return {(job_name, specifier): (memory_mb, True) for job_name, specifier, _cores in jobs}
+    def estimate(_unit: Any, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
+        """Returns the fixed memory figure for every job it is handed, at the width the caller declared for it."""
+        return {
+            (job_name, specifier): JobFootprint(cores=cores, memory_mb=memory_mb) for job_name, specifier, cores in jobs
+        }
 
     return PipelineDispatch[Any](
         pipeline=pipeline,
@@ -98,7 +172,7 @@ def make_dispatch(
         ).joinpath(f"{pipeline.value}_tracker.yaml"),
         output_path=lambda _unit: None,
         unit_name=lambda resolved: getattr(resolved, "session_name", None) or resolved.name,
-        estimate_memory=estimate,
+        size_jobs=estimate,
         command=lambda job: ("slf", pipeline.value, job.job_id),
     )
 
@@ -154,9 +228,32 @@ def test_a_plan_records_every_resolved_job_and_persists_it(tmp_path: Path) -> No
         ("checksum", CHECKSUM_JOB_NAME, ""),
         ("runtime", RUNTIME_JOB_NAME, "51"),
     }
-    # Cores come from the real allocation table, which is what makes this assertion independent of the stand-in.
+    # The declared allocation reaches the sizing pass and comes back unchanged for a stage that holds one width, so
+    # the recorded figure is the real allocation table's rather than the stand-in's.
     assert plan.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].cores == _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME]
     assert JobPlan.from_yaml(file_path=session_plan_path(session=session)).entry_map() == plan.entry_map()
+
+
+def test_a_plan_records_the_width_the_sizing_pass_resolved(tmp_path: Path) -> None:
+    """Verifies that a stage whose library picks a width per job records that width rather than the declared one.
+
+    The declared allocation reaches the sizing pass as the width to fall back on, so a pass that answers with one of
+    its own is what the plan entry, and therefore the scheduler, carries.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
+    # Stands in for a library that read its job's input and picked a narrower width than the job type declares.
+    dispatch = replace(
+        dispatch,
+        size_jobs=lambda _unit, jobs: {
+            (job_name, specifier): JobFootprint(cores=1, memory_mb=2048) for job_name, specifier, _cores in jobs
+        },
+    )
+
+    plan = plan_session(unit=session, dispatches=[dispatch])
+
+    assert _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME] != 1
+    assert plan.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].cores == 1
 
 
 def test_recorded_figures_are_frozen_across_replanning(tmp_path: Path) -> None:
@@ -261,6 +358,47 @@ def test_a_unit_no_pipeline_resolves_stops_the_plan(tmp_path: Path) -> None:
         )
 
 
+def test_a_pipeline_whose_input_cannot_be_read_is_dropped_rather_than_planned(tmp_path: Path) -> None:
+    """Verifies that a pipeline the sizing pass refuses leaves the other pipelines' jobs planned.
+
+    Every job is modeled from the data it will read, so a sizing pass that cannot read one of a pipeline's inputs
+    states that the pipeline cannot say what this unit costs. That pipeline drops out of the plan entirely rather than
+    contributing a figure nothing measured, and it takes the same reporting path a rejected resolver takes.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    refused = make_dispatch(pipeline=ProcessingPipelines.VIDEO, unit=session, universe=_CHECKSUM_JOBS)
+    refused = replace(refused, size_jobs=refuse_to_size)
+    plan = plan_session(
+        unit=session,
+        dispatches=[
+            refused,
+            make_dispatch(pipeline=ProcessingPipelines.RUNTIME, unit=session, universe=_RUNTIME_JOBS, memory_mb=900),
+        ],
+    )
+
+    assert {entry.pipeline for entry in plan.entries} == {"runtime"}
+    # Sizing precedes the tracker write, so the dropped pipeline registers no job a scheduler would then read.
+    assert not refused.tracker_path(session).exists()
+
+
+def test_a_unit_no_pipeline_can_size_stops_the_plan(tmp_path: Path) -> None:
+    """Verifies that a unit whose every pipeline is refused writes no plan and names the input that could not be read.
+
+    A dropped unit must be absent from the plan rather than present at a floor, and the refusal must name what it
+    could not read, so a caller learns which input to restore.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.VIDEO, unit=session, universe=_CHECKSUM_JOBS)
+    dispatch = replace(dispatch, size_jobs=refuse_to_size)
+
+    # Matches the unwrapped opening of the message, since the console formatter wraps long lines.
+    with pytest.raises(ValueError, match="Unable to plan the jobs") as failure:
+        plan_session(unit=session, dispatches=[dispatch])
+
+    assert "camera_77.npz" in " ".join(str(failure.value).split())
+    assert not session_plan_path(session=session).exists()
+
+
 def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -331,6 +469,52 @@ def test_an_unplanned_unit_contributes_no_rows(tmp_path: Path, monkeypatch: pyte
     assert dict(frame.schema) == PROJECT_PLAN_SCHEMA
 
 
+def test_a_failed_projection_leaves_the_previously_published_one_readable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a writer dying mid-write leaves the published projection whole rather than truncated.
+
+    A scheduler memory-maps the projection without taking the writer's lock, so only publishing by rename keeps it
+    off a file that is being rewritten.
+    """
+    project = tmp_path.joinpath("Project")
+    session = make_session(root=project.joinpath("305", "2026-01-02-03-04-05-000006"))
+
+    plan_session(
+        unit=session,
+        dispatches=[
+            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200)
+        ],
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="iterate_sessions",
+        value=lambda root_path: [session],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="discover_project_datasets",
+        value=lambda project_root: [],  # noqa: ARG005
+    )
+    published = generate_project_plan(project_directory=project)
+
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+
+    with pytest.raises(RuntimeError, match="died mid-write"):
+        generate_project_plan(project_directory=project)
+
+    assert pl.read_ipc(source=published, memory_map=True).get_column("memory_mb").to_list() == [3200]
+    assert [entry.name for entry in project.iterdir() if entry.name.endswith(".tmp")] == []
+
+
+def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
+    """A missing project holds neither a unit to read nor a location to write to, so it is named here rather than
+    surfacing as a walk failure partway through the projection.
+    """
+    with pytest.raises(FileNotFoundError, match="does not name an existing directory"):
+        generate_project_plan(project_directory=tmp_path.joinpath("NeverCreated"))
+
+
 def test_the_dataset_cache_lands_at_the_dataset_root(tmp_path: Path) -> None:
     """Verifies that a dataset's plan sits at its root beside its marker, so the dataset stays self-contained."""
     dataset = make_dataset(root=tmp_path.joinpath("ds_a"))
@@ -364,6 +548,25 @@ def test_a_job_the_unit_cannot_run_never_reaches_the_tracker(tmp_path: Path) -> 
     assert [state.specifier for state in recorded.values()] == [""]
     # The plan still sizes every job the pipeline could produce, since a plan describes cost rather than eligibility.
     assert len(plan.entries) == len(universe)
+
+
+def test_a_pipeline_supporting_no_job_records_its_figures_without_writing_a_tracker(tmp_path: Path) -> None:
+    """Verifies that a pipeline resolving a universe but no runnable job is still planned, and writes no tracker.
+
+    A tracker states which jobs a unit supports, so an empty registry states nothing and is not written at all. The
+    figures the pipeline resolved still belong in the cache, since a plan describes what its jobs would cost wherever
+    the unit is eventually processed.
+    """
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, ""), (CHECKSUM_JOB_NAME, "unreachable")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    # Empties the possible subset, as a resolver does for a unit carrying none of the inputs its jobs read.
+    dispatch = replace(dispatch, discover=lambda _path: (session, universe, []))
+
+    plan = plan_unit(unit_path=tmp_path.joinpath("2024_11_04"), unit_kind=SESSION_UNIT, dispatches=[dispatch])
+
+    assert not dispatch.tracker_path(session).exists()
+    assert {entry.specifier for entry in plan.entries} == {"", "unreachable"}
 
 
 def test_the_plan_records_the_ordering_a_scheduler_builds_its_graph_from(tmp_path: Path) -> None:
@@ -434,18 +637,11 @@ def test_planning_an_acquired_session_records_the_pipelines_that_resolve_jobs(
 
 
 def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path, training_session: SessionData) -> None:
-    """Verifies that a dataset is plannable as soon as its hierarchy is defined, since its figures follow from the
-    single-day outputs its jobs consume.
+    """Verifies that a dataset is plannable as soon as its sessions carry the single-day outputs its jobs consume,
+    since every figure it records follows from those outputs.
     """
-    dataset = DatasetData.create(
-        name="ds_planned",
-        project=project_root.stem,
-        session_type=SessionTypes.RUN_TRAINING,
-        acquisition_system=training_session.acquisition_system,
-        sessions=(DatasetSession(session=training_session.session_name, animal=str(training_session.animal_id)),),
-        datasets_root=project_root,
-        column_descriptions={"time_us": "The sample timestamp."},
-    )
+    write_processed_recording(session=training_session, regions=64, samples=1200)
+    dataset = define_planned_dataset(project_root=project_root, session=training_session)
 
     plan = resolve_dataset_plan(dataset_path=dataset.dataset_data_path.parent, display_progress=True)
 
@@ -454,6 +650,26 @@ def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path,
     assert {entry.pipeline for entry in plan.entries} == {ProcessingPipelines.FORGING.value}
     assert [entry.specifier for entry in plan.entries] == [training_session.session_name]
     assert JobPlan.from_yaml(file_path=dataset_plan_path(dataset=dataset)).entry_map() == plan.entry_map()
+
+
+def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
+    project_root: Path, training_session: SessionData
+) -> None:
+    """Verifies that a dataset whose assembly job has nothing to read is dropped rather than planned at a floor.
+
+    The assembly stage is charged the shape of the session's own fluorescence, so a session that has not reached the
+    end of the single-recording pipeline states nothing the stage could be sized from. Recording it at an unmodeled
+    figure would hand a scheduler a reservation nothing measured, so the whole dataset drops out of the plan and the
+    refusal names the session it could not read.
+    """
+    dataset = define_planned_dataset(project_root=project_root, session=training_session)
+
+    # Matches the unwrapped opening of the message, since the console formatter wraps long lines.
+    with pytest.raises(ValueError, match="Unable to plan the jobs") as failure:
+        resolve_dataset_plan(dataset_path=dataset.dataset_data_path.parent)
+
+    assert training_session.session_name in " ".join(str(failure.value).split())
+    assert not dataset_plan_path(dataset=dataset).exists()
 
 
 def test_the_projection_reports_the_units_that_carry_no_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

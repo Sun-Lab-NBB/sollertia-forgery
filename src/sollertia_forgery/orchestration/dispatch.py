@@ -8,16 +8,23 @@ from typing import TYPE_CHECKING, Any
 from functools import cache
 from dataclasses import dataclass
 
+from cindra import (
+    RESOURCE_CLASS_BY_JOB_NAME,
+    MultiRecordingJobNames,
+    resolve_stage_workers,
+)
 from threadpoolctl import threadpool_limits
+from ataraxis_video_system import CAMERA_EXTRACTION_JOB_CORES
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import DatasetData, SessionData
+from ataraxis_communication_interface import CONTROLLER_EXTRACTION_JOB_CORES
 
 from .local import apply_decode_thread_ceiling
 from ..video import (
     ENERGY_JOB_NAME,
     RENAME_JOB_NAME,
     TRACKING_JOB_NAME,
-    TIMESTAMP_JOB_NAME,
+    CAMERA_EXTRACTION_JOB_NAME,
     discover_video_jobs,
     video_job_prerequisites,
     run_video_processing_pipeline,
@@ -44,7 +51,7 @@ from ..managing import (
     checksum_job_prerequisites,
     run_checksum_processing_pipeline,
 )
-from .footprints import estimate_dataset_job_memory, estimate_session_job_memory
+from .footprints import JobFootprint, size_dataset_jobs, size_session_jobs
 from ..two_photon import (
     SingleRecordingJobNames,
     discover_two_photon_jobs,
@@ -55,7 +62,7 @@ from ..two_photon import (
 from ..shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from ..microcontrollers import (
     PARSE_JOB_NAME,
-    EXTRACTION_JOB_NAME,
+    CONTROLLER_EXTRACTION_JOB_NAME,
     discover_microcontroller_jobs,
     microcontroller_job_prerequisites,
     run_microcontroller_processing_pipeline,
@@ -87,13 +94,16 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # Decode falls back to a serial path on any archive below its own parallelism threshold, and a runtime archive
     # always is one, so the job is single-core by construction.
     RUNTIME_JOB_NAME: 1,
-    # Splits its archive across a worker pool. Every worker re-opens the archive, so the fixed cost per worker does
-    # not shrink as workers are added and the speedup flattens well before the core count.
-    EXTRACTION_JOB_NAME: 8,
+    # The communication library owns this stage and declares the width its own scaling curve turns over at. It picks
+    # a width per job from the archive that job reads, and the sizing pass answers with the width it picked, so this
+    # figure is the ceiling that width climbs to rather than the width every job of the stage runs at.
+    CONTROLLER_EXTRACTION_JOB_NAME: CONTROLLER_EXTRACTION_JOB_CORES,
     # A single pass over one module's extracted table, short enough that pool dispatch dominates the work itself.
     PARSE_JOB_NAME: 1,
-    # Splits its archive across a worker pool on the same fixed-cost-per-worker terms as controller extraction.
-    TIMESTAMP_JOB_NAME: 8,
+    # The video library owns this stage and declares the width its own scaling curve turns over at. It picks a width
+    # per job from the archive that job reads, and the sizing pass answers with the width it picked, so this figure
+    # is the ceiling that width climbs to rather than the width every job of the stage runs at.
+    CAMERA_EXTRACTION_JOB_NAME: CAMERA_EXTRACTION_JOB_CORES,
     # A fixed handful of filesystem operations, independent of recording length.
     RENAME_JOB_NAME: 1,
     # Reads pose predictions written upstream and never runs inference. Its ellipse fit solves once per distinct
@@ -104,33 +114,38 @@ _JOB_CORE_ALLOCATIONS: dict[str, int] = {
     # than by cores, so it saturates while cores remain. The chunk count is separately bounded by the recording's own
     # length, which caps a short recording below this allocation.
     ENERGY_JOB_NAME: 16,
-    # Decodes a compressed image set into a binary of comparable size. cindra reads each batch through one keyed call
-    # and caps the decode threads it opens at a ceiling of its own, so this allocation is what that pool is sized from.
-    # The stage is bound by how fast the batch reaches it rather than by the threads waiting on it.
-    str(SingleRecordingJobNames.BINARIZE): 3,
-    # Removes motion from one plane and computes its registration-quality components. Its pass over the plane holds
-    # every thread busy, and its gain flattens once the batch it aligns stops covering the added cores. The width
-    # covers the compiled kernels and the linear-algebra pool the stage runs concurrently, which overlap rather than
-    # taking turns.
-    str(SingleRecordingJobNames.REGISTER): 12,
-    # Discovers regions and extracts their fluorescence for one plane. Detection is bound by movie binning and a
-    # serial loop, so the stage plateaus while cores remain and running more planes at once pays better.
-    str(SingleRecordingJobNames.PROCESS): 10,
-    # A single-threaded concatenation over every plane's extracted traces.
-    str(SingleRecordingJobNames.COMBINE): 1,
-    # Registers an animal's recordings against each other across a thread pool it sizes from this allocation, and
-    # keeps every thread busy for the whole pass.
-    MULTIDAY_DISCOVERY_JOB_NAME: 30,
-    # Gathers each tracked region's pixels through a numba kernel that parallelizes over regions. Every batch the
-    # kernel consumes is read serially before it runs, so the stage plateaus well below the width it is given.
-    MULTIDAY_EXTRACTION_JOB_NAME: 16,
+    # cindra owns the four single-recording stages, and its own resolver answers each one with the measured knee of
+    # that stage's scaling curve.
+    str(SingleRecordingJobNames.BINARIZE): resolve_stage_workers(job_name=SingleRecordingJobNames.BINARIZE),
+    str(SingleRecordingJobNames.REGISTER): resolve_stage_workers(job_name=SingleRecordingJobNames.REGISTER),
+    str(SingleRecordingJobNames.PROCESS): resolve_stage_workers(job_name=SingleRecordingJobNames.PROCESS),
+    str(SingleRecordingJobNames.COMBINE): resolve_stage_workers(job_name=SingleRecordingJobNames.COMBINE),
+    # cindra's resolver reports this stage as having no parallel critical path, where quadrupling the allocation
+    # shortens a twenty-recording dataset by two percent, so the width it answers with covers the deformation pool
+    # alone. The forging pipeline dispatches the stage under a name of its own, so the entry is keyed by that name
+    # while its width is cindra's.
+    MULTIDAY_DISCOVERY_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.DISCOVER),
+    # cindra's resolver sizes this stage for the concurrency a host sustains rather than for a plateau, since the
+    # stage keeps shortening well past this width. The width it answers with leaves room for the datasets a compute
+    # node extracts at once while still reaching a sevenfold speedup on one job, and the entry is keyed by the name
+    # the forging pipeline dispatches it under.
+    MULTIDAY_EXTRACTION_JOB_NAME: resolve_stage_workers(job_name=MultiRecordingJobNames.EXTRACT),
     # Reads its session's arrays and feathers and writes the merged result. Its own fan-out is a fixed handful of
     # threads, so the stage gains nothing from a wider allocation.
     FORGING_JOB_NAME: 1,
 }
-"""The cores one job of each type occupies, keyed by the tracker job name. Each value follows from how that stage
-parallelizes, and every value is safe to retune. Preparing a processing unit that resolves a job type absent from this
-map fails for that unit, since dispatching it would run it at a width nobody chose."""
+"""The cores one job of each type declares, keyed by the tracker job name. A stage a dependency owns takes that
+dependency's own width, read from its resolver or its declared constant, so a retune there reaches this table without
+an edit. Every value this module states for itself follows from how that stage parallelizes and is safe to retune.
+Preparing a processing unit that resolves a job type absent from this map fails for that unit, since dispatching it
+would run it at a width nobody chose.
+
+Notes:
+    A declared width is what a job is dispatched at for every stage this package owns, since each of those holds one
+    shape whatever data it reads. A stage a dependency owns is instead sized whole by that dependency, which answers
+    with the width it picked for the job's own input, so the entry here restates that dependency's figure rather than
+    deciding it.
+"""
 
 _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # Hashes its session across readers that each stream a file, so the stage's rate is the storage's rate. Past a
@@ -141,9 +156,14 @@ _JOB_CONCURRENCY_LIMITS: dict[str, int] = {
     # decoder per core it holds. Three jobs at its core allocation reach that ceiling, so this limit keeps the stage
     # at its best aggregate rate while leaving the cores it would otherwise idle to other work.
     ENERGY_JOB_NAME: 3,
-    # Sits at the root of the two-photon chain, so each job that finishes releases that recording's plane jobs. Four
-    # run at their full decode rate, which is what returns those plane jobs to the queue soonest.
-    str(SingleRecordingJobNames.BINARIZE): 4,
+    # cindra models the same ceiling-and-reservation distinction this table expresses, so its single-recording stages
+    # take their ceilings from its own resource classes. Its cross-recording classes are keyed by cindra's job names,
+    # while the forging pipeline dispatches those stages under names of its own, so they are not read here.
+    **{
+        str(job_name): ceiling
+        for job_name in SingleRecordingJobNames
+        if (ceiling := RESOURCE_CLASS_BY_JOB_NAME[job_name].concurrency_limit) is not None
+    },
     # The forging pipeline declares its own ceilings, since it owns their job names.
     **FORGING_JOB_CONCURRENCY_LIMITS,
 }
@@ -165,14 +185,13 @@ Notes:
 """
 
 _JOB_CONCURRENCY_RESERVATIONS: dict[str, int] = {
-    # Gates the plane that waits on it, so holding a share back keeps the stages that wait on no other job running
-    # while a recording's planes are still being registered. It converts spare capacity into progress, so the hold is
-    # released whenever nothing else can use what it gives up.
-    str(SingleRecordingJobNames.REGISTER): 4,
-    # Holds back part of the core budget so the stages that wait on no other job keep a share of the host while this
-    # one runs. Its cores are the batch's scarcest resource once the two-photon chain opens, and it converts spare
-    # capacity into progress, so the hold is released whenever nothing else can use what it gives up.
-    str(SingleRecordingJobNames.PROCESS): 5,
+    # The plane-registration stage gates the plane job that waits on it and the plane-processing stage holds the
+    # batch's scarcest cores once the two-photon chain opens, so both give a share back. cindra declares how large
+    # that share is, and both convert spare capacity into progress, so each hold is released whenever nothing else
+    # can use what it gives up.
+    str(job_name): reservation
+    for job_name in SingleRecordingJobNames
+    if (reservation := RESOURCE_CLASS_BY_JOB_NAME[job_name].concurrency_reservation) is not None
 }
 """The jobs of each type that run at once while other work can still use the capacity the type gives up, keyed by
 the tracker job name.
@@ -224,9 +243,11 @@ class PipelineDispatch[UnitT]:
     acquired data, since removing that directory would take the inputs with it."""
     unit_name: Callable[[UnitT], str]
     """Resolves the unit's name, which every tool response reports the unit by."""
-    estimate_memory: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]
-    """Estimates the memory each job of the pipeline's universe occupies at its allocated core count, from the data it
-    will process."""
+    size_jobs: Callable[[UnitT, list[tuple[str, str, int]]], dict[tuple[str, str], JobFootprint]]
+    """Sizes each job of the pipeline's universe from the data it will process, reporting the cores it is dispatched
+    at alongside the memory it holds there. The declared allocation reaches it as the width every stage this package
+    owns runs at, while a stage a dependency owns answers with the width that dependency's own sizing pass picked. A
+    job whose input cannot be read raises, since a job nothing can size is a job the unit cannot run."""
     command: Callable[[GenericPendingJob], tuple[str, ...]]
     """Renders the command line that runs one job on a host holding the data, as an argument vector. The remote
     backend submits this, so one table states both how a job runs in-process and how it runs as a scheduled
@@ -321,9 +342,11 @@ def resolve_job_cores(job_name: str) -> int:
     """Resolves the cores the named job type declares for one of its jobs.
 
     Notes:
-        Reports the declared allocation itself, which is the figure a plan records and a scheduler requests. Narrowing
-        an allocation to what a host can supply belongs to the execution layer, because the host that plans a unit and
-        the host that runs its jobs need not be the same one.
+        Reports the declared allocation itself, which is the width every stage this package sizes for itself runs at.
+        A stage a dependency owns is sized whole by that dependency, so for those the declared allocation restates
+        the dependency's own figure and the sizing pass is what a plan records. Narrowing an allocation to what a
+        host can supply belongs to the execution layer, because the host that plans a unit and the host that runs its
+        jobs need not be the same one.
 
     Args:
         job_name: The tracker job name whose allocation to resolve.
@@ -597,18 +620,18 @@ def _load_dataset(dataset_path: Path) -> DatasetData:
     return DatasetData.load(dataset_path=dataset_path)
 
 
-def _session_memory(
+def _session_sizer(
     pipeline: ProcessingPipelines,
-) -> Callable[[SessionData, list[tuple[str, str, int]]], dict[tuple[str, str], tuple[int, bool]]]:
-    """Binds the session memory estimator to one pipeline.
+) -> Callable[[SessionData, list[tuple[str, str, int]]], dict[tuple[str, str], JobFootprint]]:
+    """Binds the session sizing pass to one pipeline.
 
     Args:
-        pipeline: The pipeline whose jobs the bound estimator sizes.
+        pipeline: The pipeline whose jobs the bound sizing pass covers.
 
     Returns:
-        The estimator that pipeline's dispatch entry declares.
+        The sizing pass that pipeline's dispatch entry declares.
     """
-    return lambda session, jobs: estimate_session_job_memory(pipeline=pipeline, session=session, jobs=jobs)
+    return lambda session, jobs: size_session_jobs(pipeline=pipeline, session=session, jobs=jobs)
 
 
 def _session_tracker(pipeline: ProcessingPipelines) -> Callable[[SessionData], Path]:
@@ -645,7 +668,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             # directory a cleanup may remove.
             output_path=lambda _session: None,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.CHECKSUM),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.CHECKSUM),
             command=_checksum_command,
         ),
         ProcessingPipelines.RUNTIME: PipelineDispatch[SessionData](
@@ -657,7 +680,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.RUNTIME),
             output_path=lambda session: session.processed_data.runtime_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.RUNTIME),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.RUNTIME),
             command=_runtime_command,
         ),
         ProcessingPipelines.MICROCONTROLLER: PipelineDispatch[SessionData](
@@ -669,7 +692,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.MICROCONTROLLER),
             output_path=lambda session: session.processed_data.microcontroller_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.MICROCONTROLLER),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.MICROCONTROLLER),
             command=_microcontroller_command,
         ),
         ProcessingPipelines.VIDEO: PipelineDispatch[SessionData](
@@ -681,7 +704,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.VIDEO),
             output_path=lambda session: session.processed_data.video_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.VIDEO),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.VIDEO),
             command=_video_command,
         ),
         ProcessingPipelines.TWO_PHOTON: PipelineDispatch[SessionData](
@@ -693,7 +716,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             tracker_path=_session_tracker(pipeline=ProcessingPipelines.TWO_PHOTON),
             output_path=lambda session: session.processed_data.cindra_data_path,
             unit_name=lambda session: session.session_name,
-            estimate_memory=_session_memory(pipeline=ProcessingPipelines.TWO_PHOTON),
+            size_jobs=_session_sizer(pipeline=ProcessingPipelines.TWO_PHOTON),
             command=_two_photon_command,
             # cindra requires one single-threaded step to write the shared configuration and every plane's runtime
             # data before any job reads them. That bootstrap is also where the recording's plane count is recorded.
@@ -709,7 +732,7 @@ def _pipeline_dispatch() -> dict[ProcessingPipelines, PipelineDispatch[Any]]:
             # Owns the dataset hierarchy outright, which holds the assembled feathers and the tracker beside them.
             output_path=lambda dataset: dataset.dataset_data_path.parent,
             unit_name=lambda dataset: dataset.name,
-            estimate_memory=estimate_dataset_job_memory,
+            size_jobs=size_dataset_jobs,
             command=_forging_command,
         ),
     }

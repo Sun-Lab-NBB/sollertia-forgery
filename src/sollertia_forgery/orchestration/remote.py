@@ -9,13 +9,13 @@ from typing import TYPE_CHECKING, Any
 from dataclasses import asdict
 
 from ataraxis_base_utilities import LogLevel, console
-from sollertia_shared_assets import ProcessingTrackers
+from sollertia_shared_assets import DATASET_MARKER_FILENAME, ProcessingTrackers
 
 from .graph import build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
 from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
 from ..server import Job, Server, get_server_configuration
-from ..forging import DATASET_STATE_FILENAME, DATASET_MARKER_FILENAME
+from ..forging import DATASET_STATE_FILENAME
 from .dispatch import resolve_job_command
 from .planning import project_plan_path
 from ..managing import project_jobs_path, project_manifest_path

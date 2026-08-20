@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
+    DATASET_MARKER_FILENAME,
     DatasetData,
     SessionData,
     RawDataFiles,
@@ -25,11 +26,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from sollertia_shared_assets import SessionTypes
-
-DATASET_MARKER_FILENAME: str = "dataset.yaml"
-"""The marker filename identifying a top-level project directory as a forged dataset. This mirrors the canonical
-marker name sollertia-shared-assets declares, so forging discovery and every consumer that tests for a dataset agree
-on it."""
 
 
 def resolve_dataset(
@@ -47,6 +43,9 @@ def resolve_dataset(
     left alone and a session it does not hold is appended.
 
     Notes:
+        The provided list names the set of sessions the dataset must contain, so a session named more than once in it
+        is resolved once and joins the dataset once.
+
         An animal already in the dataset is frozen. Providing a session it does not hold is rejected, because
         widening an animal's session set often requires rebuilding the entire animal's dataset. Adding an animal
         the dataset does not hold stays safe.
@@ -254,7 +253,7 @@ def _create_dataset(
 
     console.echo(
         message=(
-            f"Dataset '{name}' data hierarchy: Defined with {len(sessions)} session(s) across "
+            f"Dataset '{name}' data hierarchy: Defined with {len(dataset.sessions)} session(s) across "
             f"{len(dataset.animals)} animal(s)."
         ),
         level=LogLevel.SUCCESS,
@@ -368,12 +367,17 @@ def _update_dataset(
 def _resolve_session_paths(sessions: tuple[str, ...], project_root: Path) -> list[Path]:
     """Resolves each provided session name to its source session directory under the project root.
 
+    Notes:
+        The provided list names the sessions the dataset must contain rather than the sessions to append one by one,
+        so a name provided more than once resolves to a single directory. A dataset holds each of its sessions once,
+        and the shared hierarchy rejects a creation or extension request that names the same session twice.
+
     Args:
         sessions: The session names to resolve.
         project_root: The path to the project's root directory that stores the animal and session data directories.
 
     Returns:
-        The resolved source session directories, in the order the names were provided.
+        The resolved source session directories, in the order the names were first provided.
 
     Raises:
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
@@ -384,6 +388,7 @@ def _resolve_session_paths(sessions: tuple[str, ...], project_root: Path) -> lis
         discovered.setdefault(session_root.name, []).append(session_root)
 
     session_paths: list[Path] = []
+    resolved: set[Path] = set()
     for session_name in sessions:
         matches = discovered.get(session_name, [])
         if len(matches) != 1:
@@ -393,7 +398,9 @@ def _resolve_session_paths(sessions: tuple[str, ...], project_root: Path) -> lis
                 f"'{RawDataFiles.SESSION_DATA}' markers, but found {len(matches)}."
             )
             console.error(message=message, error=FileNotFoundError if not matches else RuntimeError)
-        session_paths.append(matches[0])
+        if matches[0] not in resolved:
+            resolved.add(matches[0])
+            session_paths.append(matches[0])
 
     return session_paths
 

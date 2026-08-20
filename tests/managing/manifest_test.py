@@ -12,9 +12,8 @@ import polars as pl
 import pytest
 from filelock import FileLock
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SessionTypes, ProcessingTrackers
+from sollertia_shared_assets import DESCRIPTOR_REGISTRY, SessionTypes, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker
-from sollertia_shared_assets.registries import DESCRIPTOR_REGISTRY
 
 from sollertia_forgery.managing import (
     MANIFEST_JOB_NAME,
@@ -78,6 +77,25 @@ def read_manifest(project_root: Path) -> pl.DataFrame:
         The manifest contents, one row per recorded session.
     """
     return pl.read_ipc(source=project_manifest_path(project_directory=project_root), memory_map=True)
+
+
+def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
+    """Stands in for the frame writer, writing a partial artifact into the handle it is given before it fails.
+
+    Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
+    this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
+
+    Args:
+        _frame: The frame the writer was called on, which this stand-in never serializes.
+        file: The open file object the artifact is written to.
+        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+
+    Raises:
+        RuntimeError: Always, standing in for a writer that dies partway through.
+    """
+    file.write(b"partial")
+    message = "the artifact writer died mid-write"
+    raise RuntimeError(message)
 
 
 # Tests for the generation walk
@@ -243,6 +261,27 @@ def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
 
     assert not failures
     assert read_manifest(project_root=project_root).get_column("session").to_list() == [experiment_session.session_name]
+
+
+def test_a_failed_write_leaves_the_previously_published_manifest_readable(
+    project_root: Path,
+    project_manifest: Path,  # Requested so a complete manifest is already published when the failing run starts.
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The artifact is published by rename, so a writer that dies mid-write leaves the mapped file untouched.
+
+    Rewriting the destination in place truncates it first, which would leave every reader that memory-maps the
+    manifest without taking its lock facing an unreadable file.
+    """
+    published = read_manifest(project_root=project_root).get_column("session").to_list()
+
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+
+    with pytest.raises(RuntimeError, match="died mid-write"):
+        generate_project_manifest(project_directory=project_root)
+
+    assert read_manifest(project_root=project_root).get_column("session").to_list() == published
+    assert [entry.name for entry in project_root.iterdir() if entry.name.endswith(".tmp")] == []
 
 
 def test_every_session_pipeline_declares_a_status_column(monkeypatch: pytest.MonkeyPatch) -> None:

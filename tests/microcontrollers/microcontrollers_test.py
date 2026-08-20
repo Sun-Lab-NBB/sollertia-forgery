@@ -13,14 +13,19 @@ import pytest
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import AcquisitionSystems, ProcessingTrackers, MesoscopeHardwareState
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
-from ataraxis_communication_interface.microcontroller import (
-    EXTRACTION_JOB_NAME,
+from ataraxis_communication_interface import (
+    CONTROLLER_EXTRACTION_JOB_NAME,
+    EXTRACTION_CONFIGURATION_FILENAME,
     MICROCONTROLLER_MANIFEST_FILENAME,
+    SerialProtocols,
+    ExtractionConfig,
     ModuleSourceData,
+    SerialPrototypes,
     ModuleExtractionConfig,
     MicroControllerManifest,
     MicroControllerSourceData,
     ControllerExtractionConfig,
+    resolve_jobs,
 )
 
 from sollertia_forgery.registries import (
@@ -45,16 +50,16 @@ if TYPE_CHECKING:
 
     from sollertia_forgery.registries import MicrocontrollerParser
 
-_MODULE_STATE_PROTOCOL: int = 8
+_MODULE_STATE_PROTOCOL: int = SerialProtocols.MODULE_STATE
 """The axci serial protocol code marking a state-only hardware module message."""
 
-_MODULE_DATA_PROTOCOL: int = 6
+_MODULE_DATA_PROTOCOL: int = SerialProtocols.MODULE_DATA
 """The axci serial protocol code marking a data-carrying hardware module message."""
 
-_ONE_UINT16_PROTOTYPE: int = 7
+_ONE_UINT16_PROTOTYPE: int = SerialPrototypes.ONE_UINT16
 """The axci payload prototype code of a message carrying a single unsigned 16-bit value."""
 
-_ONE_UINT32_PROTOTYPE: int = 17
+_ONE_UINT32_PROTOTYPE: int = SerialPrototypes.ONE_UINT32
 """The axci payload prototype code of a message carrying a single unsigned 32-bit value."""
 
 
@@ -169,17 +174,18 @@ def _write_inputs(
             )
         ]
     )
-    manifest.save(file_path=behavior / MICROCONTROLLER_MANIFEST_FILENAME)
+    manifest.to_yaml(file_path=behavior / MICROCONTROLLER_MANIFEST_FILENAME)
 
     if stage_archive:
         (behavior / "101_log.npz").touch()
 
 
-def _write_manifest(session: SimpleNamespace, controllers: dict[int, tuple[tuple[int, int], ...]]) -> None:
+def _write_manifest(directory: Path, controllers: dict[int, tuple[tuple[int, int], ...]]) -> None:
     """Writes an acquisition-time microcontroller manifest declaring several controllers.
 
     Args:
-        session: The session stand-in whose raw behavior directory receives the manifest.
+        directory: The log directory that receives the manifest. The acquisition library resolves every controller
+            and its archive from the manifest it finds there, so a test staging archives has to stage this too.
         controllers: The declared ``(module_type, module_id)`` pairs, keyed by controller identifier.
     """
     manifest = MicroControllerManifest(
@@ -197,7 +203,7 @@ def _write_manifest(session: SimpleNamespace, controllers: dict[int, tuple[tuple
             for controller_id, modules in controllers.items()
         ]
     )
-    manifest.save(file_path=session.raw_data.behavior_data_path / MICROCONTROLLER_MANIFEST_FILENAME)
+    manifest.to_yaml(file_path=directory / MICROCONTROLLER_MANIFEST_FILENAME)
 
 
 def _module_state_payload(module_type: int, module_id: int, event_code: int) -> bytes:
@@ -243,15 +249,34 @@ def _make_raw_module_dataframe() -> pl.DataFrame:
     )
 
 
+def _read_controller_config(config_path: Path, controller_id: str) -> ControllerExtractionConfig:
+    """Reads one controller's entry out of the extraction configuration the pipeline materialized.
+
+    Args:
+        config_path: The path to the materialized extraction configuration file.
+        controller_id: The identifier of the controller whose entry to read.
+
+    Returns:
+        The extraction configuration the file declares for the requested controller.
+    """
+    configuration = ExtractionConfig.from_yaml(file_path=config_path)
+    return next(entry for entry in configuration.controllers if str(entry.controller_id) == controller_id)
+
+
 def _fake_extract_factory(skip: set[tuple[int, int]] | None = None) -> Callable[..., None]:
-    """Returns a stand-in for ``_extract_controller`` that writes raw module feathers and drives the tracker."""
+    """Returns a stand-in for ``_extract_controller`` that writes raw module feathers and drives the tracker.
+
+    The stand-in reads its controller's modules out of the materialized extraction configuration, exactly as the
+    acquisition binding it replaces does, so a test exercises the file the pipeline writes rather than an in-memory
+    object the pipeline no longer passes.
+    """
     skipped = set(skip or set())
 
     def fake_extract(
         archive_path: Path,
         output_directory: Path,
         controller_id: str,
-        controller_config: ControllerExtractionConfig,
+        config_path: Path,
         job_id: str,
         tracker: ProcessingTracker,
         *,
@@ -262,6 +287,7 @@ def _fake_extract_factory(skip: set[tuple[int, int]] | None = None) -> Callable[
         """Writes a raw module feather for each configured module and records the job on the tracker."""
         tracker.start_job(job_id=job_id)
         Path(output_directory).mkdir(parents=True, exist_ok=True)
+        controller_config = _read_controller_config(config_path=config_path, controller_id=controller_id)
         for module in controller_config.modules:
             if (module.module_type, module.module_id) in skipped:
                 continue
@@ -394,7 +420,11 @@ def test_resolve_controllers_derives_config_from_manifest(tmp_path: Path) -> Non
     # (9, 9) is not registered for any system, so it must be excluded from the derived configuration.
     _write_inputs(session, modules=((2, 1), (9, 9)), stage_archive=False)
 
-    controllers = pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52), (4, 1): (51,)})
+    controllers = pipeline_module._resolve_controllers(
+        session=session,
+        event_codes={(2, 1): (51, 52), (4, 1): (51,)},
+        job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+    )
 
     assert set(controllers) == {"101"}
     config = controllers["101"]
@@ -408,7 +438,11 @@ def test_resolve_controllers_rejects_manifest_with_no_extractable_module(tmp_pat
     _write_inputs(session, modules=((9, 9),), stage_archive=False)
 
     with pytest.raises(ValueError, match="declares a module"):
-        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+        pipeline_module._resolve_controllers(
+            session=session,
+            event_codes={(2, 1): (51, 52)},
+            job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+        )
 
 
 def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
@@ -416,11 +450,18 @@ def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
     session = _make_session(tmp_path)
 
     with pytest.raises(FileNotFoundError, match="microcontroller manifest"):
-        pipeline_module._resolve_controllers(session=session, event_codes={(2, 1): (51, 52)})
+        pipeline_module._resolve_controllers(
+            session=session,
+            event_codes={(2, 1): (51, 52)},
+            job_universe=resolve_jobs(log_directory=session.raw_data.behavior_data_path),
+        )
 
 
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
     """Verifies that _discover_jobs requests only parseable modules whose controller archive is present."""
+    # The acquisition library resolves the registered controllers and their archives from the manifest, so the
+    # manifest has to name every controller the eligibility filter is expected to see.
+    _write_manifest(directory=tmp_path, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
     (tmp_path / "101_log.npz").touch()  # Controller 101's archive is present and controller 102's is absent.
     controllers = {
         "101": ControllerExtractionConfig(
@@ -441,19 +482,51 @@ def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> No
     parsers = {(2, 1): _stub_parse_2_1, (6, 1): _stub_parse_6_1}
 
     universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
-        controllers=controllers, parsers=parsers, log_directory=tmp_path, extraction_job_name=EXTRACTION_JOB_NAME
+        controllers=controllers, parsers=parsers, job_universe=resolve_jobs(log_directory=tmp_path)
     )
 
     # Module (4, 1) has no registered parser, so it never appears. Controller 102 is parseable but has no archive.
     assert set(universe) == {
-        (EXTRACTION_JOB_NAME, "101"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),
-        (EXTRACTION_JOB_NAME, "102"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "102"),
         (PARSE_JOB_NAME, "102-6-1"),
     }
-    assert set(requested) == {(EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert set(requested) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
     assert set(archives) == {"101"}
     assert parse_specifiers == {"101-2-1": ("101", 2, 1)}
+
+
+def test_discover_jobs_leaves_an_ambiguously_named_archive_unresolved(tmp_path: Path) -> None:
+    """Verifies that a controller matching several archives in the tree contributes no requested job.
+
+    One DataLogger writes every archive of a session side by side, so a second archive carrying the same controller
+    name belongs to another logger and makes that controller's data ambiguous rather than redundant.
+    """
+    _write_manifest(directory=tmp_path, controllers={101: ((2, 1),)})
+    (tmp_path / "101_log.npz").touch()
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "101_log.npz").touch()
+    controllers = {
+        "101": ControllerExtractionConfig(
+            controller_id=101,
+            modules=(ModuleExtractionConfig(module_type=2, module_id=1, event_codes=(51,)),),
+            kernel=None,
+        )
+    }
+
+    universe, requested, archives, parse_specifiers = pipeline_module._discover_jobs(
+        controllers=controllers,
+        parsers={(2, 1): _stub_parse_2_1},
+        job_universe=resolve_jobs(log_directory=tmp_path),
+    )
+
+    # The controller still declares its jobs, but none of them can run until exactly one archive carries its name.
+    assert set(universe) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert requested == []
+    assert archives == {}
+    assert parse_specifiers == {}
 
 
 # End-to-end pipeline.
@@ -469,6 +542,12 @@ def test_local_pipeline_runs_both_stages(
 
     run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
+    # The extraction configuration reaches disk before any job runs, since the acquisition binding reads each
+    # controller's targets from the file rather than from an in-memory object.
+    controller_config = _read_controller_config(
+        config_path=output_directory / EXTRACTION_CONFIGURATION_FILENAME, controller_id="101"
+    )
+    assert [(module.module_type, module.module_id) for module in controller_config.modules] == [(2, 1), (4, 1)]
     # Stage 1 wrote the raw per-module feathers into the microcontroller data directory.
     assert (output_directory / "controller_101_module_2_1.feather").is_file()
     assert (output_directory / "controller_101_module_4_1.feather").is_file()
@@ -537,14 +616,14 @@ def test_remote_extraction_runs_single_controller(
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
-    extraction_job_id = ProcessingTracker.generate_job_id(job_name=EXTRACTION_JOB_NAME, specifier="101")
+    extraction_job_id = ProcessingTracker.generate_job_id(job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="101")
     run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=extraction_job_id, workers=1)
 
     # The extraction ran (raw feathers present) but no parse job did (no domain feathers).
     assert (output_directory / "controller_101_module_2_1.feather").is_file()
     assert not (output_directory / "module_2_1.feather").exists()
     tracker_path = output_directory / ProcessingTrackers.MICROCONTROLLER
-    assert _status(tracker_path=tracker_path, job_name=EXTRACTION_JOB_NAME, specifier="101") == (
+    assert _status(tracker_path=tracker_path, job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="101") == (
         ProcessingStatus.SUCCEEDED
     )
     assert _status(tracker_path=tracker_path, job_name=PARSE_JOB_NAME, specifier="101-2-1") == (
@@ -582,7 +661,7 @@ def test_invalid_job_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1)})
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
 
-    with pytest.raises(ValueError, match=r"does not match any job available for this\s+session"):
+    with pytest.raises(ValueError, match=r"must name a job the pipeline could\s+produce"):
         run_microcontroller_processing_pipeline(session_path=tmp_path, job_id="deadbeef", workers=1)
 
 
@@ -595,7 +674,7 @@ def test_discover_microcontroller_jobs_reports_universe_and_possible_subset(
     """Verifies that discovery reports every declared job and requests only the ones a staged archive supports."""
     session = _make_session(tmp_path)
     # Controller 101 staged its archive, controller 102 did not, so only 101 contributes possible jobs.
-    _write_manifest(session=session, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)})
     (session.raw_data.behavior_data_path / "101_log.npz").touch()
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1), (6, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
@@ -604,14 +683,14 @@ def test_discover_microcontroller_jobs_reports_universe_and_possible_subset(
 
     assert loaded is session
     assert set(universe) == {
-        (EXTRACTION_JOB_NAME, "101"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),
         (PARSE_JOB_NAME, "101-4-1"),
-        (EXTRACTION_JOB_NAME, "102"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "102"),
         (PARSE_JOB_NAME, "102-6-1"),
     }
     assert set(requested) == {
-        (EXTRACTION_JOB_NAME, "101"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),
         (PARSE_JOB_NAME, "101-4-1"),
     }
@@ -619,42 +698,48 @@ def test_discover_microcontroller_jobs_reports_universe_and_possible_subset(
     assert not session.processed_data.microcontroller_data_path.exists()
 
 
+def test_a_manifest_controller_the_system_does_not_extract_contributes_no_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a registered controller left out of the eligibility filter contributes neither job.
+
+    The acquisition library locates every controller the manifest registers, while the eligibility rule that decides
+    which of them are worth extracting is this package's own. A controller declaring only modules the acquisition
+    system does not parse therefore reaches discovery without a configuration behind it, and it must drop out
+    silently rather than being requested, even though its archive is staged beside the eligible one's.
+    """
+    session = _make_session(tmp_path)
+    # Module (9, 9) is registered for no acquisition system, so controller 102 declares nothing slf extracts.
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1),), 102: ((9, 9),)})
+    (session.raw_data.behavior_data_path / "101_log.npz").touch()
+    (session.raw_data.behavior_data_path / "102_log.npz").touch()
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1)})
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+
+    _loaded, universe, requested = discover_microcontroller_jobs(session_path=tmp_path)
+
+    # Controller 102 is absent from both sets, so nothing extracts an archive whose modules nothing would parse.
+    assert set(universe) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert set(requested) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+
+
 def test_microcontroller_job_prerequisites_orders_parses_after_their_extraction() -> None:
     """Verifies that each parse job declares its controller's extraction job as its only prerequisite."""
     universe = [
-        (EXTRACTION_JOB_NAME, "101"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "101"),
         (PARSE_JOB_NAME, "101-2-1"),
-        (EXTRACTION_JOB_NAME, "102"),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "102"),
         (PARSE_JOB_NAME, "102-6-1"),
     ]
 
     prerequisites = microcontroller_job_prerequisites(session=SimpleNamespace(), universe=universe)
 
     assert prerequisites == {
-        (EXTRACTION_JOB_NAME, "101"): (),
-        (PARSE_JOB_NAME, "101-2-1"): ((EXTRACTION_JOB_NAME, "101"),),
-        (EXTRACTION_JOB_NAME, "102"): (),
-        (PARSE_JOB_NAME, "102-6-1"): ((EXTRACTION_JOB_NAME, "102"),),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "101"): (),
+        (PARSE_JOB_NAME, "101-2-1"): ((CONTROLLER_EXTRACTION_JOB_NAME, "101"),),
+        (CONTROLLER_EXTRACTION_JOB_NAME, "102"): (),
+        (PARSE_JOB_NAME, "102-6-1"): ((CONTROLLER_EXTRACTION_JOB_NAME, "102"),),
     }
-
-
-def test_find_controller_archive_returns_none_for_an_absent_log_directory(tmp_path: Path) -> None:
-    """Verifies that the archive lookup returns None when the log directory does not exist."""
-    assert (
-        pipeline_module._find_controller_archive(log_directory=tmp_path / "never_acquired", controller_id="101") is None
-    )
-
-
-def test_find_controller_archive_takes_the_first_natural_sorted_match(tmp_path: Path) -> None:
-    """Verifies that the archive lookup returns the first naturally sorted match under the log directory."""
-    nested = tmp_path / "nested"
-    nested.mkdir()
-    (nested / "101_log.npz").touch()
-    (tmp_path / "101_log.npz").touch()
-
-    assert pipeline_module._find_controller_archive(log_directory=tmp_path, controller_id="101") == (
-        tmp_path / "101_log.npz"
-    )
 
 
 # Stage helpers with nothing to run.
@@ -668,10 +753,9 @@ def test_extraction_stage_writes_nothing_without_archives(tmp_path: Path) -> Non
 
     pipeline_module._run_extraction_stage(
         extraction_archives={},
-        controllers={},
         extraction_output=output_directory,
+        config_path=output_directory / EXTRACTION_CONFIGURATION_FILENAME,
         tracker=tracker,
-        extraction_job_name=EXTRACTION_JOB_NAME,
         workers=1,
         executor=None,
         display_progress=False,
@@ -838,14 +922,14 @@ def test_remote_extraction_requires_the_controller_archive(tmp_path: Path, monke
     """Verifies that a remote extraction job rejects a controller whose log archive is absent."""
     session = _make_session(tmp_path)
     # Controller 102 is registered in the manifest but never staged its archive.
-    _write_manifest(session=session, controllers={101: ((2, 1),), 102: ((4, 1),)})
+    _write_manifest(directory=session.raw_data.behavior_data_path, controllers={101: ((2, 1),), 102: ((4, 1),)})
     (session.raw_data.behavior_data_path / "101_log.npz").touch()
     _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fail_if_called)
 
-    job_id = ProcessingTracker.generate_job_id(job_name=EXTRACTION_JOB_NAME, specifier="102")
-    with pytest.raises(FileNotFoundError, match=r"No log archive\s+'102_log.npz' was found"):
+    job_id = ProcessingTracker.generate_job_id(job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="102")
+    with pytest.raises(FileNotFoundError, match=r"resolved no log archive for that\s+controller"):
         run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=job_id, workers=1)
 
 

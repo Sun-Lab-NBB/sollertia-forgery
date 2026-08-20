@@ -7,9 +7,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import polars as pl
+from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingTracker, atomic_write
 
 from .pipeline import (
     FORGING_JOB_NAME,
@@ -17,7 +18,6 @@ from .pipeline import (
     MULTIDAY_EXTRACTION_JOB_NAME,
     forging_tracker_path,
 )
-from ..shared_assets import summarize_tracker
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,10 +109,13 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
 
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         rows = _build_job_rows(dataset=dataset)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        pl.DataFrame(data=rows, schema=DATASET_STATE_SCHEMA, strict=False).sort(
+        frame = pl.DataFrame(data=rows, schema=DATASET_STATE_SCHEMA, strict=False).sort(
             by=["animal", "session", "job_name"], nulls_last=True
-        ).write_ipc(file=state_path, compression="uncompressed")
+        )
+        # Published through a temporary file renamed over the destination, which also creates the destination's
+        # parent. A reader of the artifact takes no lock, so an in-place rewrite would let it read a torn file.
+        with atomic_write(file_path=state_path, binary=True) as file:
+            frame.write_ipc(file=file, compression="uncompressed")
 
     if display_progress:
         console.echo(
@@ -142,13 +145,15 @@ def _build_job_rows(dataset: DatasetData) -> list[dict[str, str | int | None]]:
     if not tracker_path.is_file():
         return []
 
-    jobs = ProcessingTracker(file_path=tracker_path).snapshot()
+    # The summary carries every field the tracker records for a job, so one read serves both the scope check and the
+    # rows built from it.
+    jobs = ProcessingTracker(file_path=tracker_path).summarize()["jobs"]
     if not jobs:
         return []
 
     animal_of_session = {entry.session: entry.animal for entry in dataset.sessions}
 
-    unscoped = sorted({state.job_name for state in jobs.values() if state.job_name not in DATASET_JOB_SCOPES})
+    unscoped = natsorted({entry["job_name"] for entry in jobs if entry["job_name"] not in DATASET_JOB_SCOPES})
     if unscoped:
         message = (
             f"Unable to serialize the state of dataset '{dataset.name}'. Its forging tracker records job name(s) "
@@ -158,7 +163,7 @@ def _build_job_rows(dataset: DatasetData) -> list[dict[str, str | int | None]]:
         console.error(message=message, error=ValueError)
 
     rows: list[dict[str, str | int | None]] = []
-    for entry in summarize_tracker(jobs=jobs)["jobs"]:
+    for entry in jobs:
         scope = DATASET_JOB_SCOPES[entry["job_name"]]
         specifier = entry["specifier"]
         session = specifier if scope == SESSION_SCOPE else None

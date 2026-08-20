@@ -10,7 +10,7 @@ from pathlib import Path
 import polars as pl
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sollertia_shared_assets import ProcessingTrackers
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import TrackerStatus, ProcessingTracker
 
 from ..managing import (
     MANIFEST_JOB_NAME,
@@ -376,7 +376,7 @@ def get_manifest_status_tool(project_path: str, host: str = "local") -> dict[str
         "manifest_path": str(manifest_path),
         "jobs_path": str(jobs_path),
         "exists": {"manifest": manifest_path.is_file(), "jobs": jobs_path.is_file()},
-        "status": "not_started",
+        "status": TrackerStatus.NOT_STARTED.value,
     }
     if not tracker_path.is_file():
         return ok_response(**response)

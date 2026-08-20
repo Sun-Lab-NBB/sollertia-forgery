@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
+from pathlib import Path
 
 from ataraxis_base_utilities import LogLevel, console
 from ataraxis_data_structures import ProcessingTracker, delete_directory
@@ -10,7 +11,6 @@ from ataraxis_data_structures import ProcessingTracker, delete_directory
 from .dispatch import resolve_dispatch
 
 if TYPE_CHECKING:
-    from pathlib import Path
     from collections.abc import Sequence
 
 
@@ -95,21 +95,20 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
             )
             continue
 
-        targets = [dispatch.tracker_path(unit)]
-        owned = dispatch.output_path(unit)
-        if owned is not None:
-            targets.append(owned)
+        # The tracker is a file and the directory a pipeline owns is a directory, so the two are removed on their own
+        # terms rather than through one branch that would have to ask which it was handed.
+        tracker_path = dispatch.tracker_path(unit)
+        if tracker_path.exists():
+            removed.append({"path": str(tracker_path), "removed_bytes": resolve_path_size(path=tracker_path)})
+            tracker_path.unlink()
+            # The lock file is bookkeeping beside the tracker rather than tracked output of its own, and its path
+            # comes from the tracker's own derivation, so the removal cannot disagree with the file the tracker locks.
+            Path(ProcessingTracker(file_path=tracker_path).lock_path).unlink(missing_ok=True)
 
-        for target in targets:
-            if not target.exists():
-                continue
-            removed.append({"path": str(target), "removed_bytes": resolve_path_size(path=target)})
-            if target.is_dir():
-                delete_directory(directory_path=target)
-            else:
-                target.unlink()
-                # The tracker's lock file is bookkeeping beside it rather than tracked output of its own.
-                target.with_suffix(target.suffix + ".lock").unlink(missing_ok=True)
+        owned = dispatch.output_path(unit)
+        if owned is not None and owned.exists():
+            removed.append({"path": str(owned), "removed_bytes": resolve_path_size(path=owned)})
+            delete_directory(directory_path=owned)
     return removed
 
 

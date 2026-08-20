@@ -10,13 +10,10 @@ from dataclasses import field, dataclass
 
 import polars as pl
 import pytest
+from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.server import Job, JobStatus
-from sollertia_forgery.forging import (
-    DATASET_STATE_SCHEMA,
-    DATASET_STATE_FILENAME,
-    DATASET_MARKER_FILENAME,
-)
+from sollertia_forgery.forging import DATASET_STATE_SCHEMA, DATASET_STATE_FILENAME
 from sollertia_forgery.managing import PROJECT_JOBS_SCHEMA, project_jobs_path
 from sollertia_forgery.orchestration import (
     PROJECT_PLAN_SCHEMA,
@@ -120,7 +117,6 @@ def build_descriptor(
         "pipeline": pipeline,
         "cores": cores,
         "memory_mb": memory_mb,
-        "memory_modeled": True,
         "prerequisite_ids": list(prerequisite_ids),
         "options": {},
     }
@@ -169,7 +165,6 @@ def build_plan_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
                 "specifier": "1",
                 "cores": 16,
                 "memory_mb": 4096,
-                "memory_modeled": True,
                 "prerequisite_ids": [],
                 **row,
             }

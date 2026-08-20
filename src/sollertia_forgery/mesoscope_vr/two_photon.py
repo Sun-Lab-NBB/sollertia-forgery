@@ -9,11 +9,13 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
-from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
-from cindra.dataclasses import (
+from cindra import (
     Main,
     FileIO,
+    ROITracking,
+    RecordingIO,
     ROIDetection,
+    ROISelection,
     Registration,
     BaselineMethod,
     SignalExtraction,
@@ -21,15 +23,12 @@ from cindra.dataclasses import (
     SpikeDeconvolution,
     NonrigidRegistration,
     OnePhotonRegistration,
+    DiffeomorphicRegistration,
+    MultiRecordingConfiguration,
+    SingleRecordingConfiguration,
 )
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import SurgeryData, SessionTypes, MesoscopeDirectories
-from cindra.dataclasses.multi_recording_configuration import (
-    ROITracking,
-    RecordingIO,
-    ROISelection,
-    DiffeomorphicRegistration,
-)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -321,6 +320,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
         diffeomorphic_registration=DiffeomorphicRegistration(
             image_type=ReferenceImageType.ENHANCED_MEAN,
             grid_sampling_factor=1,
+            final_grid_sampling=16.0,
             scale_sampling=30,
             speed_factor=3,
             repeat_registration=False,

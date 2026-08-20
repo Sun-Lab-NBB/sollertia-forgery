@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from dataclasses import dataclass
 
 from ataraxis_base_utilities import console
-from sollertia_shared_assets import SessionTypes, AcquisitionSystems
+from sollertia_shared_assets import SYSTEM_SESSION_TYPES, SessionTypes, AcquisitionSystems
 
 from .mesoscope_vr import (
     RUNTIME_SOURCE_ID,
@@ -458,12 +458,14 @@ def _assert_registry_coverage() -> None:
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, runtime-parser,
     two-photon-data, video-tracking, microcontroller event-code, microcontroller eligibility, cindra configuration,
     and forging-admission registries. Confirms that every member registers at least one microcontroller module parser,
-    and that every parseable microcontroller module declares the event codes its parser reads.
+    that every parseable microcontroller module declares the event codes its parser reads, and that every session type
+    a system admits into a dataset is a session type that system records.
 
     Raises:
-        RuntimeError: If any acquisition system is missing from a donor registry, or if a parseable microcontroller
-            module does not declare its event codes. The error names the offending members so extenders can
-            immediately locate the unwired touch point.
+        RuntimeError: If any acquisition system is missing from a donor registry, if a parseable microcontroller
+            module does not declare its event codes, or if a forging-admission entry names a session type its system
+            does not record. The error names the offending members so extenders can immediately locate the unwired
+            touch point.
     """
     systems = frozenset(AcquisitionSystems)
     microcontroller_systems = frozenset(system for system, _, _ in _MICROCONTROLLER_PARSER_REGISTRY)
@@ -505,6 +507,22 @@ def _assert_registry_coverage() -> None:
                 f"Unable to validate donor-registry coverage for _MICROCONTROLLER_EVENT_CODE_REGISTRY. Every module "
                 f"registered in _MICROCONTROLLER_PARSER_REGISTRY must also declare the event codes its parser reads, "
                 f"but {target_system.name} does not declare codes for the following modules: {module_names}."
+            )
+            console.error(message=message, error=RuntimeError)
+
+    # The session types a system records are the shared assets library's to declare, so an admission entry naming a
+    # type outside that declaration is a typo or a stale entry rather than a system this library knows more about. A
+    # type the system records and this registry omits is not an error, since a session type may deliberately join no
+    # dataset.
+    for target_system, requirements in sorted(_FORGING_ADMISSION_REGISTRY.items(), key=lambda item: item[0].name):
+        unrecorded_types = sorted(set(requirements) - SYSTEM_SESSION_TYPES[target_system])
+        if unrecorded_types:
+            type_names = ", ".join(session_type.value for session_type in unrecorded_types)
+            message = (
+                f"Unable to validate donor-registry coverage for _FORGING_ADMISSION_REGISTRY. Every session type a "
+                f"system admits into a forged dataset must be a session type that system records, but "
+                f"{target_system.name} declares admission requirements for the following unrecorded type(s): "
+                f"{type_names}."
             )
             console.error(message=message, error=RuntimeError)
 

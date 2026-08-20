@@ -8,11 +8,20 @@ import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from cindra import SingleRecordingJobNames, SingleRecordingConfiguration
+from cindra import (
+    SINGLE_RECORDING_CONFIGURATION_FILENAME,
+    SingleRecordingJobNames,
+    SingleRecordingConfiguration,
+)
 import pytest
-from sollertia_shared_assets import SubjectData, SurgeryData, ProcedureData, MesoscopeDirectories
-from ataraxis_data_structures import ProcessingTracker
-from ataraxis_data_structures.data_structures.processing_tracker import ProcessingStatus
+from sollertia_shared_assets import (
+    SubjectData,
+    SurgeryData,
+    ProcedureData,
+    AcquisitionSystems,
+    MesoscopeDirectories,
+)
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.two_photon import (
     discover_two_photon_jobs,
@@ -38,8 +47,9 @@ _GENOTYPE: str = "GP5.17"
 """The genotype the synthetic surgery metadata records, which the Mesoscope-VR resolver maps to a GCaMP6f
 configuration."""
 
-_CONFIGURATION_FILENAME: str = "configuration.yaml"
-"""The name the session's shared cindra configuration is materialized under, inside its cindra directory."""
+_CONFIGURATION_FILENAME: str = SINGLE_RECORDING_CONFIGURATION_FILENAME
+"""The name the session's shared cindra configuration is materialized under, inside its cindra directory. cindra owns
+the name, and the pipeline writes the file where cindra's own priming step would."""
 
 _STUB_SESSION_NAME: str = "2024_11_04"
 """The directory name every stand-in session is built under, which is also the name the pipeline reads from it."""
@@ -149,7 +159,9 @@ def _stub_session(session_path: Path) -> SimpleNamespace:
     cindra_directory.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
         session_name=session_path.name,
+        acquisition_system=AcquisitionSystems.MESOSCOPE_VR,
         raw_data_path=session_path.joinpath("raw_data"),
+        processed_data_path=session_path.joinpath("processed_data"),
         processed_data=SimpleNamespace(cindra_data_path=cindra_directory),
     )
 
@@ -172,6 +184,7 @@ def _forbid_writes(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError(message)
 
     monkeypatch.setattr(two_photon_pipeline, "_resolve_configuration", _refuse)
+    monkeypatch.setattr(two_photon_pipeline, "prime_recording", _refuse)
     monkeypatch.setattr(two_photon_pipeline, "resolve_single_recording_contexts", _refuse)
 
 
@@ -192,6 +205,24 @@ def stubbed_recording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Callab
     def _build(plane_count: int | None) -> SimpleNamespace:
         session = _stub_session(session_path=tmp_path.joinpath(_STUB_SESSION_NAME))
         _patch_session_loader(monkeypatch=monkeypatch, session=session)
+        monkeypatch.setattr(
+            two_photon_pipeline,
+            "_resolve_data_path",
+            lambda session: session.raw_data_path,
+        )
+        # Discovery reads the recording's shape through cindra's own universe resolver, so the stand-in reports the
+        # requested plane count there. A None plane count stands for a recording carrying no acquisition parameters,
+        # which the resolver reports through its resolved flag rather than by raising.
+        monkeypatch.setattr(
+            two_photon_pipeline,
+            "resolve_single_recording_job_universe",
+            lambda output_root, data_path: SimpleNamespace(  # noqa: ARG005
+                resolved=plane_count is not None,
+                universe=tuple(_expected_universe(plane_count=plane_count or 0)),
+            ),
+        )
+        # Priming still asks whether the bootstrap this session carries is complete, which is the guard that keeps a
+        # second preparation pass from rewriting it.
         monkeypatch.setattr(
             two_photon_pipeline,
             "_resolve_primed_plane_count",
@@ -251,18 +282,31 @@ def test_discovering_jobs_reports_the_cindra_universe(primed_session: SessionDat
     assert possible == universe
 
 
-def test_discovering_jobs_without_a_bootstrap_names_the_priming_step(imaging_session: SessionData) -> None:
-    """Verifies a session that has never been primed carries no plane count, so resolution names the priming step."""
-    with pytest.raises(FileNotFoundError, match="Prime the recording"):
-        discover_two_photon_jobs(session_path=_session_path(imaging_session))
+def test_discovering_jobs_without_a_bootstrap_reads_the_raw_acquisition_parameters(
+    imaging_session: SessionData,
+) -> None:
+    """Verifies a session that has never been primed still resolves its universe, read from the raw parameters.
+
+    Resolution follows the recording's acquisition parameters rather than the bootstrap, so a session can be planned
+    before any preparation pass has primed it.
+    """
+    _session, universe, possible = discover_two_photon_jobs(session_path=_session_path(imaging_session))
+
+    assert universe == _expected_universe()
+    assert possible == universe
 
 
-def test_an_incomplete_bootstrap_reports_an_unprimed_recording(primed_session: SessionData) -> None:
-    """Verifies a missing per-plane runtime file marks the bootstrap as needing a rewrite rather than as broken."""
+def test_an_incomplete_bootstrap_still_resolves_the_universe(primed_session: SessionData) -> None:
+    """Verifies a missing per-plane runtime file leaves resolution intact, since it reads the parameters instead.
+
+    An interrupted preparation pass is repaired by priming again rather than by failing every later resolution.
+    """
     primed_session.processed_data.cindra_data_path.joinpath("plane_1", "runtime_data.yaml").unlink()
 
-    with pytest.raises(FileNotFoundError, match="Prime the recording"):
-        discover_two_photon_jobs(session_path=_session_path(primed_session))
+    _session, universe, possible = discover_two_photon_jobs(session_path=_session_path(primed_session))
+
+    assert universe == _expected_universe()
+    assert possible == universe
 
 
 def test_priming_rewrites_an_incomplete_bootstrap(primed_session: SessionData) -> None:
@@ -317,11 +361,13 @@ def test_resolving_jobs_reads_the_bootstrap_and_writes_nothing(
     assert possible == universe
 
 
-def test_resolving_jobs_reports_an_absent_plane_count(stubbed_recording: Callable[..., SimpleNamespace]) -> None:
-    """Verifies a session with no primed plane count is reported as needing the priming step run first."""
+def test_resolving_jobs_reports_a_recording_carrying_no_parameters(
+    stubbed_recording: Callable[..., SimpleNamespace],
+) -> None:
+    """Verifies a recording whose acquisition parameters resolve nowhere is refused as holding no imaging data."""
     session = stubbed_recording(plane_count=None)
 
-    with pytest.raises(FileNotFoundError, match="Prime the recording"):
+    with pytest.raises(FileNotFoundError, match="carries the acquisition parameters"):
         discover_two_photon_jobs(session_path=_session_path(session))
 
 
@@ -343,31 +389,36 @@ def test_priming_an_unprimed_recording_persists_both_halves(
 ) -> None:
     """Verifies an absent bootstrap is written once, the single-threaded step cindra requires before any job runs."""
     session = stubbed_recording(plane_count=None)
+    configuration_path = tmp_path.joinpath(_CONFIGURATION_FILENAME)
 
     persisted: list[bool] = []
+    primed: list[Path] = []
 
     def _record_configuration(
         session: Any,
+        data_path: Path,
         *,
         display_progress: bool,
         persist: bool,
     ) -> tuple[None, Path]:
         """Records the persist flag the pipeline passed when building the configuration."""
         persisted.append(persist)
-        return None, tmp_path.joinpath(_CONFIGURATION_FILENAME)
+        return None, configuration_path
 
-    def _record_contexts(configuration: Any, *, persist: bool) -> list[Any]:
-        """Records the persist flag the pipeline passed when resolving the recording contexts."""
-        persisted.append(persist)
-        return []
+    def _record_priming(configuration_path: Path) -> SimpleNamespace:
+        """Records the configuration the pipeline handed cindra's own single-threaded priming step."""
+        primed.append(configuration_path)
+        return SimpleNamespace(plane_count=_PLANE_COUNT)
 
     monkeypatch.setattr(two_photon_pipeline, "_resolve_configuration", _record_configuration)
-    monkeypatch.setattr(two_photon_pipeline, "resolve_single_recording_contexts", _record_contexts)
+    monkeypatch.setattr(two_photon_pipeline, "prime_recording", _record_priming)
 
     prime_two_photon_recording(session_path=_session_path(session))
 
     # Both halves of the bootstrap are written, which is what an unprimed recording needs before its jobs dispatch.
-    assert persisted == [True, True]
+    # The configuration is persisted first, then handed to cindra, which writes each plane's runtime data from it.
+    assert persisted == [True]
+    assert primed == [configuration_path]
 
 
 # Local dispatch
@@ -420,6 +471,29 @@ def test_a_target_plane_narrows_the_per_plane_stages(
     ]
 
 
+def test_a_per_plane_stage_on_a_recording_holding_no_plane_dispatches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    primed_session: SessionData,
+    dispatched_jobs: list[dict[str, Any]],
+) -> None:
+    """Verifies a per-plane stage requested for a recording that holds no plane resolves no job and aligns nothing.
+
+    The tracker refuses an empty alignment request, so the run has to skip the alignment rather than offer it one.
+    """
+    monkeypatch.setattr(
+        two_photon_pipeline,
+        "prime_recording",
+        lambda configuration_path: SimpleNamespace(plane_count=0),  # noqa: ARG005
+    )
+
+    run_two_photon_processing_pipeline(session_path=_session_path(primed_session), register=True, process=True)
+
+    assert dispatched_jobs == []
+    # Nothing was registered, so the tracker keeps whatever the earlier priming left it holding.
+    tracker = ProcessingTracker(file_path=primed_session.processed_data.two_photon_tracker_path)
+    assert tracker.snapshot() == {}
+
+
 def test_a_local_run_keeps_the_recorded_state_of_the_jobs_it_skips(
     primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
 ) -> None:
@@ -463,7 +537,7 @@ def test_an_unknown_job_identifier_lists_the_available_jobs(
     primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
 ) -> None:
     """Verifies a job identifier outside the session's universe is refused before anything is dispatched."""
-    with pytest.raises(ValueError, match="does not match any two-photon"):
+    with pytest.raises(ValueError, match="must name a job the pipeline could produce"):
         run_two_photon_processing_pipeline(session_path=_session_path(primed_session), job_id="0123456789abcdef")
 
     assert dispatched_jobs == []
@@ -499,6 +573,22 @@ def test_raw_imaging_data_without_acquisition_parameters_is_refused(experiment_s
     """
     _write_surgery_metadata(session=experiment_session)
     experiment_session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA).mkdir(parents=True)
+
+    with pytest.raises(FileNotFoundError, match="No cindra acquisition"):
+        run_two_photon_processing_pipeline(session_path=_session_path(experiment_session))
+
+
+def test_a_directory_carrying_the_parameters_name_does_not_satisfy_the_screen(
+    experiment_session: SessionData,
+) -> None:
+    """Verifies the screen answers on files alone, so a directory carrying the parameters name refuses the session.
+
+    The screen exists to guarantee the recording's acquisition metadata can be read, which a directory sharing the
+    filename cannot supply.
+    """
+    _write_surgery_metadata(session=experiment_session)
+    imaging_directory = experiment_session.raw_data_path.joinpath(MesoscopeDirectories.MESOSCOPE_DATA)
+    imaging_directory.joinpath("cindra_parameters.json").mkdir(parents=True)
 
     with pytest.raises(FileNotFoundError, match="No cindra acquisition"):
         run_two_photon_processing_pipeline(session_path=_session_path(experiment_session))

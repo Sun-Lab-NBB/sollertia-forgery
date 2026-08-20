@@ -35,7 +35,7 @@ from sollertia_forgery.forging import (
     define_forging_dataset,
     materialize_multiday_plan,
 )
-from sollertia_forgery.shared_assets import multi_recording_dataset_directory
+from sollertia_forgery.shared_assets import multi_recording_dataset_name
 import sollertia_forgery.forging.pipeline as pipeline_module
 
 if TYPE_CHECKING:
@@ -115,7 +115,6 @@ class MultidayCall:
         job_name: The cindra job the invocation requested.
         specifier: The recording identifier the invocation named.
         job_id: The forging tracker identifier the invocation recorded against.
-        persist_bootstrap: Whether the invocation was asked to persist the shared bootstrap.
         workers: The worker count the invocation was given.
     """
 
@@ -123,7 +122,6 @@ class MultidayCall:
     job_name: MultiRecordingJobNames
     specifier: str
     job_id: str
-    persist_bootstrap: bool
     workers: int
 
 
@@ -177,14 +175,39 @@ def write_surgery_metadata(session: SessionData) -> None:
 
 
 @pytest.fixture
-def recorded_multiday_jobs(monkeypatch: pytest.MonkeyPatch) -> list[MultidayCall]:
+def recorded_primings(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Replaces the cindra dataset priming call with a recorder that writes no bootstrap.
+
+    Every cross-recording stage now reads a shared bootstrap the priming call writes, and writing it needs processed
+    imaging output these tests never produce, so the call is recorded rather than performed.
+
+    Args:
+        monkeypatch: The fixture used to replace the priming call the pipeline module holds.
+
+    Returns:
+        The list every primed configuration path is appended to, in call order.
+    """
+    primed: list[Path] = []
+
+    def _prime(configuration_path: Path) -> None:
+        """Records one priming call without writing the bootstrap it would otherwise materialize."""
+        primed.append(configuration_path)
+
+    monkeypatch.setattr(pipeline_module, "prime_dataset", _prime)
+    return primed
+
+
+@pytest.fixture
+def recorded_multiday_jobs(monkeypatch: pytest.MonkeyPatch, recorded_primings: list[Path]) -> list[MultidayCall]:
     """Replaces the cindra cross-recording entry point with a recorder that succeeds on the forging tracker.
 
     cindra records each stage's state directly on the tracker it is handed, so the recorder drives the same
-    transitions the real entry point would.
+    transitions the real entry point would. The priming recorder is requested alongside it, since the discovery stage
+    primes the shared bootstrap before it dispatches.
 
     Args:
         monkeypatch: The fixture used to replace the entry point the pipeline module holds.
+        recorded_primings: The recorder standing in for the dataset priming the discovery stage performs first.
 
     Returns:
         The list every dispatched invocation is appended to, in dispatch order.
@@ -198,7 +221,6 @@ def recorded_multiday_jobs(monkeypatch: pytest.MonkeyPatch) -> list[MultidayCall
         job_id: str,
         tracker: ProcessingTracker,
         *,
-        persist_bootstrap: bool = False,
         workers: int | None = None,
     ) -> None:
         """Records one invocation and marks its job as succeeded on the forging tracker."""
@@ -208,7 +230,6 @@ def recorded_multiday_jobs(monkeypatch: pytest.MonkeyPatch) -> list[MultidayCall
                 job_name=job_name,
                 specifier=specifier,
                 job_id=job_id,
-                persist_bootstrap=persist_bootstrap,
                 workers=workers,
             )
         )
@@ -335,13 +356,26 @@ def test_define_forging_dataset_materializes_a_configuration_for_each_tracked_an
     assert plan["305"][1] == list(experiment_project.names()[:2])
 
     written = MultiRecordingConfiguration.from_yaml(file_path=plan["305"][0])
-    assert written.recording_io.dataset_name == multi_recording_dataset_directory(
-        animal_id="305", dataset_name=DATASET_NAME
-    )
+    assert written.recording_io.dataset_name == multi_recording_dataset_name(animal_id="305", dataset_name=DATASET_NAME)
     assert written.recording_io.recording_directories == tuple(
         session.processed_data.cindra_data_path for session in experiment_project.sessions[:2]
     )
     assert written.runtime.display_progress_bars is False
+
+
+def test_define_forging_dataset_names_a_repeated_session_once(experiment_project: ForgingProject) -> None:
+    """The session list names the sessions the dataset must contain rather than the sessions to append, and the shared
+    hierarchy rejects a request naming the same session twice, so a repeat resolves to one directory.
+    """
+    names = experiment_project.names()
+
+    dataset = define_forging_dataset(
+        name=DATASET_NAME,
+        session_names=(names[0], names[1], names[0]),
+        project_root=experiment_project.project_root,
+    )
+
+    assert [entry.session for entry in dataset.sessions] == [names[0], names[1]]
 
 
 def test_define_forging_dataset_skips_an_animal_without_cross_recording_tracking(
@@ -500,6 +534,7 @@ def define_whole_project(experiment_project: ForgingProject) -> DatasetData:
 def test_run_forging_pipeline_completes_every_stage_across_a_worker_pool(
     experiment_project: ForgingProject,
     recorded_multiday_jobs: list[MultidayCall],
+    recorded_primings: list[Path],
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
     """Verifies that a full local run performs each animal's discovery, every extraction, and every assembly, and
@@ -518,9 +553,9 @@ def test_run_forging_pipeline_completes_every_stage_across_a_worker_pool(
     discovery = [call for call in recorded_multiday_jobs if call.job_name is MultiRecordingJobNames.DISCOVER]
     extraction = [call for call in recorded_multiday_jobs if call.job_name is MultiRecordingJobNames.EXTRACT]
     assert [call.specifier for call in discovery] == ["", ""]
-    assert all(call.persist_bootstrap for call in discovery)
     assert sorted(call.specifier for call in extraction) == sorted(names)
-    assert not any(call.persist_bootstrap for call in extraction)
+    # The shared bootstrap is primed once per animal, ahead of that animal's own discovery stage.
+    assert recorded_primings == [call.configuration_path for call in discovery]
 
     states = tracker_states(dataset=DatasetData.load(dataset_path=dataset.dataset_data_path.parent))
     assert set(states.values()) == {ProcessingStatus.SUCCEEDED}

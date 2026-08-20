@@ -36,8 +36,8 @@ from .host_resolution import (
     unsupported_host_message,
 )
 
-_PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name", "memory_modeled")
-"""The axes a plan breakdown counts. Every one but ``memory_modeled`` is also a column a caller may filter by."""
+_PLAN_AXES: tuple[str, ...] = ("unit_kind", "animal", "dataset", "pipeline", "job_name")
+"""The axes a plan breakdown counts, each of which is also a column a caller may filter by."""
 
 _PLAN_SEMI_FIELDS: tuple[str, ...] = (
     "unit_kind",
@@ -52,8 +52,8 @@ _PLAN_SEMI_FIELDS: tuple[str, ...] = (
 )
 """The job fields a semi-detail listing carries, which is the job's subject, its identity, and its figures."""
 
-_PLAN_DETAIL_FIELDS: tuple[str, ...] = ("memory_modeled",)
-"""The job field detail adds, stating whether the memory figure follows from the job's own input."""
+_PLAN_DETAIL_FIELDS: tuple[str, ...] = ("job_id", "prerequisite_ids")
+"""The job fields detail adds, which are the identifier a tracked job is recorded under and the jobs it waits for."""
 
 
 @mcp.tool()
@@ -122,9 +122,8 @@ def generate_project_plan_tool(project_path: str, host: str = "local") -> dict[s
 
     Returns:
         A response dict with ``project_path``, ``host``, ``plan_path``, ``total_jobs``, ``summed_memory_mb``,
-        ``largest_job_memory_mb``, ``widest_job_cores``, ``jobs_without_a_modeled_estimate``, a per-unit-kind and
-        per-pipeline ``pipeline_totals``, and the ``elapsed_seconds`` the projection took. Returns an error when the
-        project cannot be read.
+        ``largest_job_memory_mb``, ``widest_job_cores``, a per-unit-kind and per-pipeline ``pipeline_totals``, and the
+        ``elapsed_seconds`` the projection took. Returns an error when the project cannot be read.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -170,7 +169,7 @@ def read_project_plan_tool(
 
     A bare call reports the figures a submission is sized against alongside a ``breakdown`` naming every unit kind,
     animal, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs carrying their
-    subject and their figures. Opting into detail adds whether each figure was modeled from the job's own input.
+    subject and their figures. Opting into detail adds each job's tracked identifier and the jobs it waits for.
 
     The totals and the breakdown span every planned job regardless of the filters, so narrowing what is listed never
     distorts what is reported. Reads the stored table rather than any unit's data, so the cost is independent of how
@@ -190,7 +189,7 @@ def read_project_plan_tool(
             every match, which is how a caller reading under a tight filter takes the whole result at once.
         start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
-        detailed: Determines whether the listed jobs report whether their memory figure was modeled.
+        detailed: Determines whether the listed jobs report their tracked identifier and the jobs they wait for.
 
     Returns:
         A response dict with ``project_path``, ``plan_path``, the whole-projection totals, and a ``breakdown`` per
@@ -302,23 +301,15 @@ def _plan_totals(frame: pl.DataFrame) -> dict[str, Any]:
         frame: The whole plan projection.
 
     Returns:
-        A dictionary with the total jobs, the summed and largest memory, the widest core allocation, and how many jobs
-        carry no modeled estimate.
+        A dictionary with the total jobs, the summed and largest memory, and the widest core allocation.
     """
     if frame.height == 0:
-        return {
-            "total_jobs": 0,
-            "summed_memory_mb": 0,
-            "largest_job_memory_mb": 0,
-            "widest_job_cores": 0,
-            "jobs_without_a_modeled_estimate": 0,
-        }
+        return {"total_jobs": 0, "summed_memory_mb": 0, "largest_job_memory_mb": 0, "widest_job_cores": 0}
     return {
         "total_jobs": frame.height,
         "summed_memory_mb": int(frame["memory_mb"].sum()),
         "largest_job_memory_mb": int(frame["memory_mb"].max()),  # type: ignore[arg-type]
         "widest_job_cores": int(frame["cores"].max()),  # type: ignore[arg-type]
-        "jobs_without_a_modeled_estimate": int(frame.filter(~pl.col("memory_modeled")).height),
     }
 
 

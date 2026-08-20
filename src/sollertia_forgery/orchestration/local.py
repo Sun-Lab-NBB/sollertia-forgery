@@ -13,9 +13,9 @@ from dataclasses import field, dataclass
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 
 import cv2
-import numba
+from cindra import TIFF_DECODE_CEILING
 from ataraxis_base_utilities import console
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, initialize_worker_threads
 
 from .graph import PendingJob, resolve_dispatch_priorities
 
@@ -45,26 +45,12 @@ Notes:
     Every job type that uses polars in the executor process itself declares a single core, so one thread is the width
     that matches what those jobs were admitted at.
 
-    The BLAS and OpenMP variables are deliberately absent. Their pools are resized at runtime for the duration of each
-    job, which holds every job to its own core weight rather than to one width shared by every job a worker runs.
-"""
-
-_PINNED_THREAD_VARIABLES: tuple[str, ...] = (
-    "OMP_NUM_THREADS",
-    "OPENBLAS_NUM_THREADS",
-    "MKL_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS",
-    "POLARS_MAX_THREADS",
-    "OPENCV_FFMPEG_THREADS",
-)
-"""The threading-layer environment variables a pool worker pins when it starts.
-
-Notes:
-    ``NUMBA_NUM_THREADS`` is deliberately absent. numba reads that variable once, when it is imported, and treats the
-    value it read as the ceiling for the rest of the process. It then re-reads the variable on every compilation and
-    raises if the two disagree once its thread pool has started. A worker imports numba before this pin could run, so
-    writing the variable here would guarantee that disagreement and fail every job that compiles a numba function.
-    The worker sets numba's thread count through its runtime API instead, which is the supported way to change it.
+    The BLAS and OpenMP variables are deliberately absent, which is why this narrower tuple stands in for the shared
+    ``limit_worker_threads`` context that pins all of them. Their pools are resized at runtime for the duration of
+    each job, which holds every job to its own core weight rather than to one width shared by every job a worker
+    runs. A BLAS backend that reads its variable at load also treats the value it read as the widest pool it will
+    ever allocate buffers for, so pinning it here would cap the compute stages at one thread for the life of the
+    worker and leave the per-job resize with nothing to raise.
 """
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
@@ -72,17 +58,15 @@ _LIVENESS_WAIT_SECONDS: float = 10 * 60
 event the loop acts on, so this bound never governs a healthy batch and exists so a future that never resolves
 cannot stall the manager for good."""
 
-_TIFF_DECODE_THREAD_CEILING: int = 4
-"""The widest image-decode pool one job may open, whatever cores it holds. A decode stops shortening once it reaches
-this width, so the cores a job holds beyond it are spent on the stage itself."""
-
 
 @dataclass(frozen=True, slots=True)
 class JobAllocation:
-    """Describes the cores one job type receives and how many of its jobs may run at once."""
+    """Describes the cores the host can supply for one job of a type and how many of its jobs may run at once."""
 
     cores_per_job: int
-    """The cores each job of this type occupies while it runs."""
+    """The cores the host can supply for one job of this type, resolved from the widest job the type holds. Sizing is
+    per job rather than per type, so dispatch caps each job at this width instead of running every job at it, and a
+    job the sizing pass placed below it keeps the narrower width its own model chose."""
     maximum_parallel: int
     """The jobs of this type that may run at once, which is what the core budget alone would allow narrowed by any
     concurrency limit the type declares. Reported for the caller's planning, since admission weighs each running job
@@ -170,19 +154,24 @@ def resolve_core_allocations(
     job_limits: dict[str, int] | None = None,
     job_reservations: dict[str, int] | None = None,
 ) -> dict[str, JobAllocation]:
-    """Resolves how many cores each queued job type receives and how many of its jobs run at once.
+    """Resolves the cores the host can supply for one job of each queued job type and how many of its jobs run at once.
 
     Notes:
-        A type's core count is its declared allocation, narrowed to the budget so a small host never promises a job
-        more cores than it has. The concurrency that follows is the budget divided by that count, narrowed again by
-        any ceiling the type declares for itself. The core term the engine treats as a guide, since admission weighs
-        every running job against the same budget, while the declared ceiling admission enforces exactly.
+        A type's core count is the allocation its representative job declares, narrowed to the budget so a small host
+        never promises a job more cores than it has. The caller supplies the widest job of each type as that
+        representative, because sizing is per job and one type can hold jobs of several widths. Dispatch then caps
+        each job at the count resolved here rather than dispatching every job of the type at it, so a narrower job
+        keeps the width its own sizing pass chose. The concurrency that follows is the budget divided by that count,
+        narrowed again by any ceiling the type declares for itself. The core term the engine treats as a guide, since
+        admission weighs every running job against the same budget at that job's own width, while the declared ceiling
+        admission enforces exactly.
 
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
 
     Args:
-        job_cores: The cores one job of each type occupies, keyed by tracker job name.
+        job_cores: The cores the widest job of each type occupies, keyed by tracker job name, which is the
+            representative width the type's allocation is resolved from.
         job_names: The job type names present in the batch.
         core_budget: The cores the batch may commit across all concurrently running jobs.
         job_limits: The concurrent-job ceilings the job types declare beyond the budgets, keyed by tracker job name.
@@ -242,7 +231,13 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
     with (
         _pinned_pool_imports(),
         ProcessPoolExecutor(
-            max_workers=state.pool_size, initializer=_initialize_worker_threads, initargs=(state.thread_ceiling,)
+            max_workers=state.pool_size,
+            initializer=_initialize_worker_threads,
+            # A spawned worker re-imports the library and comes up with a freshly enabled console while inheriting
+            # this process' stdout, so the parent's silence has to travel with it. Mirroring the parent is what keeps
+            # a batch run's worker output intact and silences only the children of a parent that is already silent,
+            # which is the MCP server on the stdio transport, where an echoed line would corrupt the JSON-RPC stream.
+            initargs=(state.thread_ceiling, not console.enabled),
         ) as pool,
     ):
         with state.lock:
@@ -361,37 +356,44 @@ def apply_decode_thread_ceiling(cores: int) -> None:
     Args:
         cores: The cores the job about to run holds.
     """
-    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(_TIFF_DECODE_THREAD_CEILING, cores)))
+    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(TIFF_DECODE_CEILING, cores)))
 
 
-def _initialize_worker_threads(thread_ceiling: int = _WORKER_THREAD_CEILING) -> None:
-    """Pins a pool worker's library thread pools when the worker process starts.
+def _initialize_worker_threads(
+    thread_ceiling: int = _WORKER_THREAD_CEILING,
+    console_disabled: bool = False,  # noqa: FBT001, FBT002 - pool initargs are positional.
+) -> None:
+    """Pins a pool worker's library thread pools and mirrors the parent's console state when the worker process starts.
 
     Notes:
-        Runs as the ``ProcessPoolExecutor`` initializer in every spawned child. Setting the environment variables
-        alone is not sufficient, because the package imports numba to select its threading layer, so numba latches
-        its maximum thread count from the unpinned environment before this runs. The runtime setters are therefore
-        called alongside the variables. A job that needs more threads raises its own count once it starts, which
-        numba permits up to the count latched at import.
+        Runs as the ``ProcessPoolExecutor`` initializer in every spawned child. The pinning itself belongs to
+        ataraxis-data-structures, which writes the threading-layer variables the lazily-initialized backends still
+        read at this point and pins numba through its own runtime setter, since numba latched its ceiling from the
+        unpinned environment when the worker imported it. A job that needs more threads raises its own count once it
+        starts, which numba permits up to that latched ceiling.
 
-        numba is pinned through its runtime setter alone, leaving the variable it reads at import untouched. It
-        already holds the count it read when the worker imported it, so rewriting that variable would break the
-        worker. The library compares the variable against the latched count on every compilation and rejects a
-        disagreement once its threads have started, which is exactly the state a late pin creates.
+        The OpenCV core thread count is pinned here rather than there, because it is a runtime setter that library
+        declines to reach for. Its FFmpeg decoder reads a variable of its own and is covered by the shared pin.
 
-        OpenCV takes both, since its core thread count is a runtime setter while its FFmpeg decoder reads its own
-        variable when a capture opens.
+        The shared pin writes the image-decode width at the same count as every other backend, so the decode ceiling
+        is reapplied over it and a worker starting at a wider count still opens no wider a decode pool than a decode
+        gains from.
+
+        A spawned worker re-imports the library rather than inheriting the parent's modules, so it comes up with a
+        freshly enabled console however the parent left its own. Since the worker also inherits the parent's standard
+        output stream, a parent that silenced its console has to have that silence carried across, and only a parent
+        that silenced its own is mirrored.
 
     Args:
         thread_ceiling: The number of threads each library thread pool is pinned to.
+        console_disabled: Determines whether the parent process silenced its console, which the worker mirrors.
     """
     ceiling = max(1, thread_ceiling)
-    for variable in _PINNED_THREAD_VARIABLES:
-        os.environ[variable] = str(ceiling)
+    initialize_worker_threads(thread_count=ceiling)
     apply_decode_thread_ceiling(cores=ceiling)
-
-    numba.set_num_threads(n=min(ceiling, numba.config.NUMBA_NUM_THREADS))  # type: ignore[attr-defined]
     cv2.setNumThreads(ceiling)
+    if console_disabled:
+        console.disable()
 
 
 def _reset_queued_jobs[PendingJobT: PendingJob](state: JobExecutionState[PendingJobT]) -> None:

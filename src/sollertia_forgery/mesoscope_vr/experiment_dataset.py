@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from functools import reduce, partial
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from cindra import resolve_dataset_path
 import polars as pl
 from ataraxis_base_utilities import console, ensure_directory_exists
 from sollertia_shared_assets import (
@@ -16,7 +17,7 @@ from sollertia_shared_assets import (
 )
 
 from .video_dataset import assemble_video_dataset
-from ..shared_assets import multi_recording_dataset_directory
+from ..shared_assets import multi_recording_dataset_name
 from .runtime_dataset import clip_to_session_bounds, assemble_runtime_dataset, mask_non_run_experiment_data
 from .behavior_dataset import assemble_behavior_dataset
 from .two_photon_dataset import assemble_cindra_dataset
@@ -81,14 +82,15 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # cindra writes the multi-recording dataset directory as ``{animal_id}_{dataset_name}`` (lowercased) to avoid
-    # collisions when batching multiple animals under a single forged dataset name. The same shared helper the forging
-    # pipeline uses to name the directory resolves it here.
-    multiday_data_path = session.processed_data.cindra_multi_recording_path.joinpath(
-        multi_recording_dataset_directory(animal_id=str(session.animal_id), dataset_name=dataset_name)
+    # The forging pipeline qualifies the dataset name with the animal identifier, so an animal's multi-recording
+    # output stays separate when a dataset spans several animals. cindra owns the directory that name resolves to, so
+    # its own resolver locates it here rather than this module respelling the layout.
+    multiday_data_path = resolve_dataset_path(
+        output_root=session.processed_data_path,
+        dataset_name=multi_recording_dataset_name(animal_id=str(session.animal_id), dataset_name=dataset_name),
     )
 
-    ensure_directory_exists(path=output_path)
+    ensure_directory_exists(path=output_path, is_file=True)
 
     # Loads the experiment configuration once so the runtime assembly resolves its state and trial mappings without
     # re-reading the same YAML.

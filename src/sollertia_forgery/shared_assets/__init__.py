@@ -1,12 +1,13 @@
 """Provides the system-agnostic substrate shared across acquisition systems, including the pipeline-identity
-enumeration, the per-session tracker locations, the tracked-job execution envelope, the microcontroller feather
-primitives, and the shared utilities.
+enumeration, the per-session tracker locations, the microcontroller event-stream primitive, the OpenMP runtime
+discovery, and the shared utilities.
 """
 
-from .tracking import (
-    tracked_job,
-    summarize_tracker,
-    derive_tracker_status,
+from .openmp import (
+    OpenMPStatus,
+    OpenMPSummary,
+    verify_openmp_runtime,
+    resolve_openmp_runtime,
 )
 from .pipelines import (
     SESSION_PIPELINES,
@@ -15,36 +16,21 @@ from .pipelines import (
 )
 from .utilities import (
     DELAY_TIMER,
-    LOG_ARCHIVE_SUFFIX,
     delay_terminal,
-    pinned_worker_threads,
-    multi_recording_dataset_directory,
+    multi_recording_dataset_name,
 )
-from .microcontroller import (
-    get_event_data,
-    partition_events,
-    merge_event_streams,
-    find_module_feathers,
-    get_event_timestamps,
-    parse_module_feather_name,
-)
+from .microcontroller import merge_event_streams
 
 __all__ = [
     "DELAY_TIMER",
-    "LOG_ARCHIVE_SUFFIX",
     "SESSION_PIPELINES",
+    "OpenMPStatus",
+    "OpenMPSummary",
     "ProcessingPipelines",
     "delay_terminal",
-    "derive_tracker_status",
-    "find_module_feathers",
-    "get_event_data",
-    "get_event_timestamps",
     "merge_event_streams",
-    "multi_recording_dataset_directory",
-    "parse_module_feather_name",
-    "partition_events",
-    "pinned_worker_threads",
+    "multi_recording_dataset_name",
+    "resolve_openmp_runtime",
     "resolve_session_tracker_path",
-    "summarize_tracker",
-    "tracked_job",
+    "verify_openmp_runtime",
 ]

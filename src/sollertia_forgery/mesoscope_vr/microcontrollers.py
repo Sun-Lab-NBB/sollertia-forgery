@@ -12,13 +12,10 @@ import polars as pl
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import MesoscopeHardwareState
 from ataraxis_data_structures import interpolate_data
+from ataraxis_communication_interface import get_event_data, get_event_timestamps
 
 from .metadata import BehaviorDataFiles
-from ..shared_assets import (
-    get_event_data,
-    merge_event_streams,
-    get_event_timestamps,
-)
+from ..shared_assets import merge_event_streams
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -161,6 +158,9 @@ def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Pa
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
+        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
+            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
+            not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_ENCODER_MODULE, hardware_state=hardware_state):
@@ -274,7 +274,9 @@ def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path,
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
-        ValueError: If the hardware state carries no lick detection threshold.
+        ValueError: If the hardware state carries no lick detection threshold, or if the lick event code carries no
+            data payload, stores a null payload inside an otherwise decodable stream, spreads its payloads across more
+            than one dtype, or decodes into a value count that is not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_LICK_MODULE, hardware_state=hardware_state):
@@ -297,6 +299,9 @@ def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Pat
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
+        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
+            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
+            not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_TORQUE_MODULE, hardware_state=hardware_state):
@@ -426,6 +431,11 @@ def _parse_encoder_data(
         event_partition: The event-code-keyed partition dictionary containing the encoder module event data.
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration providing the ``cm_per_pulse`` conversion factor.
+
+    Raises:
+        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
+            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
+            not a whole multiple of its message count.
     """
     cm_per_pulse = np.float64(hardware_state.cm_per_pulse)
 
@@ -699,7 +709,9 @@ def _parse_lick_data(
 
     Raises:
         ValueError: If the hardware state carries no lick detection threshold, which means the module eligibility
-            filter and the parser registry disagree.
+            filter and the parser registry disagree. Also if the lick event code carries no data payload, stores a
+            null payload inside an otherwise decodable stream, spreads its payloads across more than one dtype, or
+            decodes into a value count that is not a whole multiple of its message count.
     """
     if hardware_state.lick_threshold is None:
         message = (
@@ -739,6 +751,11 @@ def _parse_torque_data(
         event_partition: The event-code-keyed partition dictionary containing the raw torque sensor module event data.
         output_file: The path to the output .feather file.
         hardware_state: The hardware configuration providing the torque conversion factor.
+
+    Raises:
+        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
+            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
+            not a whole multiple of its message count.
     """
     torque_per_adc_unit = np.float64(hardware_state.torque_per_adc_unit)
 

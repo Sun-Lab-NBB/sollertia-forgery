@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 from ataraxis_base_utilities import LogLevel, console
-from sollertia_shared_assets import get_working_directory
+from sollertia_shared_assets import CONFIGURATION_DIRECTORY, get_working_directory
 from ataraxis_data_structures import YamlConfig
 
 if TYPE_CHECKING:
@@ -17,10 +17,6 @@ if TYPE_CHECKING:
 _SERVER_CONFIGURATION_FILENAME: str = "server_configuration.yaml"
 """Canonical filename for the ServerConfiguration YAML stored under the working directory's configuration
 subdirectory."""
-
-_CONFIGURATION_DIRECTORY: str = "configuration"
-"""Subdirectory under the working directory that stores the server configuration YAML alongside other Sollertia
-configuration assets."""
 
 _REMOTE_STATE_DIRECTORY: str = "remote_state"
 """Subdirectory under the working directory that holds this host's remote-run state, which is the artifacts mirrored
@@ -64,7 +60,7 @@ def create_server_configuration_file(
         environment: The name of the shared conda environment, on the remote compute server, in which
             sollertia-forgery and all of its processing dependencies are installed.
     """
-    output_directory = get_working_directory().joinpath(_CONFIGURATION_DIRECTORY)
+    output_directory = get_working_directory().joinpath(CONFIGURATION_DIRECTORY)
     ServerConfiguration(
         username=username,
         password=password,
@@ -87,7 +83,7 @@ def get_server_configuration() -> ServerConfiguration:
             working directory.
         ValueError: If the loaded server configuration is unconfigured or contains placeholder access credentials.
     """
-    configuration_directory = get_working_directory().joinpath(_CONFIGURATION_DIRECTORY)
+    configuration_directory = get_working_directory().joinpath(CONFIGURATION_DIRECTORY)
 
     configuration_path = configuration_directory.joinpath(_SERVER_CONFIGURATION_FILENAME)
 
@@ -129,7 +125,7 @@ def get_server_configuration_path() -> Path:
         The path to the configuration file under the Sollertia platform working directory, resolved without reading
         the file.
     """
-    return get_working_directory().joinpath(_CONFIGURATION_DIRECTORY, _SERVER_CONFIGURATION_FILENAME)
+    return get_working_directory().joinpath(CONFIGURATION_DIRECTORY, _SERVER_CONFIGURATION_FILENAME)
 
 
 def remote_state_path() -> Path:

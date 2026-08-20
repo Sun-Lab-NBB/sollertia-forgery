@@ -388,7 +388,6 @@ def write_plan_table(path: Path, rows: list[dict[str, Any]]) -> Path:
                 "specifier": "1",
                 "cores": 16,
                 "memory_mb": 4096,
-                "memory_modeled": True,
                 "prerequisite_ids": [],
                 **row,
             }
@@ -474,10 +473,11 @@ def test_materializing_a_session_batch_writes_the_plan_and_the_state_it_is_resol
 
     plan_rows = LocalHost.read_rows(path=project_plan_path(project_directory=project_root))
     state_rows = LocalHost.read_rows(path=project_jobs_path(project_directory=project_root))
-    assert {row["pipeline"] for row in plan_rows} == {"checksum", "runtime"}
+    # Every planned figure is modeled from the data its job reads, so the runtime pipeline, whose only job for this
+    # session reads an archive the session never wrote, is refused and drops out of the plan rather than being
+    # recorded at a figure nothing measured.
+    assert {row["pipeline"] for row in plan_rows} == {"checksum"}
     assert {row["session"] for row in plan_rows} == {experiment_session.session_name}
-    # The plan records the whole job universe while the state records the subset the session can actually run, so the
-    # runtime stage the session carries no archive for is planned and not registered.
     assert {row["pipeline"] for row in state_rows} == {"checksum"}
     assert {row["session"] for row in state_rows} == {experiment_session.session_name}
     assert project_manifest_path(project_directory=project_root).is_file()
@@ -492,7 +492,9 @@ def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, exp
     assert len(planned) == 1
     assert planned[0]["unit_path"] == str(session_path)
     assert planned[0]["unit_name"] == experiment_session.session_name
-    assert planned[0]["job_count"] == 2
+    # The checksum stage is the one pipeline whose every job reads data this session carries, so it is the one that
+    # survives the sizing pass.
+    assert planned[0]["job_count"] == 1
     assert planned[0]["summed_memory_mb"] > 0
 
 
@@ -508,8 +510,8 @@ def test_a_unit_no_pipeline_resolves_a_job_for_is_reported_beside_the_ones_that_
     )
 
     assert planned[0]["job_count"] == 0
-    assert "No pipeline resolved any job" in planned[0]["error"]
-    assert planned[1]["job_count"] == 2
+    assert "No pipeline planned any job" in planned[0]["error"]
+    assert planned[1]["job_count"] == 1
 
 
 def test_planning_a_dataset_reads_the_forging_pipeline_alone(project_root: Path) -> None:

@@ -12,8 +12,7 @@ import cv2
 import numpy as np
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
-
-from ..shared_assets import pinned_worker_threads
+from ataraxis_data_structures import limit_worker_threads, initialize_worker_threads
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -148,10 +147,13 @@ def compute_camera_motion_energy(
     else:
         # Caps the worker threading layers before the pool starts its children, so each of them costs the single
         # core it was budgeted. A shared pool is instead capped by whoever created it, since its children may
-        # already exist by the time this runs.
+        # already exist by the time this runs. The initializer covers numba, which latches its ceiling while it is
+        # imported and therefore never reads the environment its children inherit.
         with (
-            pinned_worker_threads(),
-            ProcessPoolExecutor(max_workers=min(resolved_workers, len(chunks))) as own_executor,
+            limit_worker_threads(),
+            ProcessPoolExecutor(
+                max_workers=min(resolved_workers, len(chunks)), initializer=initialize_worker_threads
+            ) as own_executor,
         ):
             results = _submit_chunks(
                 executor=own_executor, video_path=video_path, chunks=chunks, display_progress=display_progress

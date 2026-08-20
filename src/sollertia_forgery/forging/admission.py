@@ -6,19 +6,13 @@ from typing import TYPE_CHECKING
 
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionData, SessionTypes
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import TrackerStatus, ProcessingStatus, ProcessingTracker
 
 from ..registries import resolve_forging_admission_pipelines
 from ..shared_assets import resolve_session_tracker_path
 
 if TYPE_CHECKING:
     from ..shared_assets import ProcessingPipelines
-
-_COMPLETED_STATE: str = "completed"
-"""The state label of a pipeline whose every tracked job succeeded, which is the only state that admits a session."""
-
-_NOT_STARTED_STATE: str = "not_started"
-"""The state label of a pipeline that holds no tracker or no tracked jobs for the session."""
 
 _PARTIAL_STATE_TEMPLATE: str = "{unfinished} of {total} job(s) not succeeded"
 """The state label template of a pipeline that has tracked jobs which have not all succeeded."""
@@ -58,8 +52,10 @@ def verify_session_admissibility(session: SessionData) -> None:
     outstanding: dict[str, str] = {}
     for pipeline in sorted(required):
         state = _resolve_pipeline_state(session=session, pipeline=pipeline)
-        if state != _COMPLETED_STATE:
-            outstanding[pipeline.value] = state
+        if state != TrackerStatus.COMPLETED:
+            # Stored as plain text, so the reported mapping renders the labels themselves rather than the enum
+            # representation of the tracker members.
+            outstanding[pipeline.value] = str(state)
 
     if outstanding:
         message = (
@@ -78,18 +74,18 @@ def _resolve_pipeline_state(session: SessionData, pipeline: ProcessingPipelines)
         pipeline: The pipeline whose progress to resolve.
 
     Returns:
-        ``completed`` when every tracked job succeeded, ``not_started`` when the pipeline has no tracker or no tracked
-        jobs, and otherwise a label naming how many of its jobs are not yet succeeded.
+        The COMPLETED tracker label when every tracked job succeeded, the NOT_STARTED label when the pipeline has no
+        tracker or no tracked jobs, and otherwise a label naming how many of its jobs are not yet succeeded.
     """
     tracker_path = resolve_session_tracker_path(session=session, pipeline=pipeline)
     if not tracker_path.is_file():
-        return _NOT_STARTED_STATE
+        return TrackerStatus.NOT_STARTED
 
     jobs = ProcessingTracker(file_path=tracker_path).snapshot()
     if not jobs:
-        return _NOT_STARTED_STATE
+        return TrackerStatus.NOT_STARTED
 
     unfinished = sum(1 for state in jobs.values() if state.status is not ProcessingStatus.SUCCEEDED)
     if unfinished == 0:
-        return _COMPLETED_STATE
+        return TrackerStatus.COMPLETED
     return _PARTIAL_STATE_TEMPLATE.format(unfinished=unfinished, total=len(jobs))
