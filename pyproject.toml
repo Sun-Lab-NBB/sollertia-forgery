@@ -74,16 +74,23 @@ dependencies = [
     # Remote Execution
     "paramiko>=5,<6",
 
-    # Model Context Protocol
+    # Command-Line Interface and MCP Server
+    "click>=8,<9",
     "mcp>=2,<3",
 
     # Utilities
     "filelock>=3,<4",
     "natsort>=8,<9",
     "tabulate>=0,<1",
+    # YAML serialization (used directly by the MCP server-configuration tools to stage the caller-supplied payload for
+    # YamlConfig validation)
+    "pyyaml>=6,<7",
 
-    # Platform-Specific Acceleration
+    # Platform-Specific Acceleration. Supplies the TBB runtime the package selects as Numba's threading layer on every
+    # platform other than macOS, which has no Apple Silicon 'tbb4py' wheel and falls back to OpenMP.
     "tbb4py>=2023,<2024; sys_platform != 'darwin'",
+    # Supplies the SVML runtime Numba's vectorization path loads. The path stays inert while llvmlite reports no SVML
+    # support, and the pin is held so that a Numba release restoring it needs no packaging change here.
     "intel-cmplr-lib-rt>=2026,<2027; sys_platform != 'darwin'",
 ]
 
@@ -116,7 +123,14 @@ dev = [
     "types-filelock>=3,<4",
     "types-tabulate>=0,<1",
     "types-paramiko>=5,<6",
+    "types-pyyaml>=6,<7",
     "pandas-stubs>=3,<4",
+
+    # Test-suite fixtures. The test corpus imports both directly: 'tifffile' writes the synthetic stacks the imaging
+    # footprint tests read, and 'platformdirs' is monkeypatched to redirect the platform data directory the shared
+    # assets library resolves.
+    "tifffile>=2026,<2027",
+    "platformdirs>=4,<5",
 ]
 
 # Specifies files that should not be included in the source-code distribution but are also not part of gitignore.
