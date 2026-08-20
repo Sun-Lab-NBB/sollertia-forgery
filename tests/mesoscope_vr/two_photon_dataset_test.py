@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from cindra import CombinedData, DetectionData, ExtractionData
 import polars as pl
 import pytest
 from sollertia_shared_assets import MesoscopeDirectories
@@ -31,6 +32,10 @@ IN_WINDOW_DURATION_US: int = 90_000
 
 OUT_OF_WINDOW_DURATION_US: int = 10
 """A scan pulse duration that falls outside the accepted window for ``SAMPLING_RATE_HZ``."""
+
+COMBINED_FRAME_EXTENT: int = 512
+"""The height and the width recorded in every synthetic combined metadata archive. The assembler reads the sampling
+rate alone, so the extent only has to be a shape cindra's writer accepts."""
 
 
 def _write_ttl_feather(path: Path, pulses: Sequence[tuple[int, int]]) -> None:
@@ -76,6 +81,38 @@ def _pulse_train(
     return [(start_us + index * period_us, duration_us) for index in range(count)]
 
 
+def _build_extraction(
+    *, roi_count: int, frame_count: int, offset: float, is_cell: Sequence[int] | None = None
+) -> ExtractionData:
+    """Builds the cindra extraction record holding the four fluorescence trace arrays and, optionally, the labels.
+
+    Every trace array counts up from a shared ramp, so a value pins both the ROI row it came from and the frame it was
+    sampled at, and the per-array offset keeps the four distinguishable.
+
+    Args:
+        roi_count: The number of ROI rows every array carries.
+        frame_count: The number of frame columns every array carries.
+        offset: The constant added to the base ramp, so each directory carries distinguishable values.
+        is_cell: The per-ROI cell label, one entry per ROI row, or None for a record carrying no classification.
+
+    Returns:
+        The populated extraction record, which cindra's own writer saves under its canonical array names.
+    """
+    base = np.arange(roi_count * frame_count, dtype=np.float32).reshape(roi_count, frame_count) + offset
+    classification: NDArray[np.float32] | None = None
+    if is_cell is not None:
+        classification = np.zeros((roi_count, 2), dtype=np.float32)
+        classification[:, 0] = np.asarray(is_cell, dtype=np.float32)
+        classification[:, 1] = 0.5
+    return ExtractionData(
+        cell_fluorescence=base,
+        neuropil_fluorescence=base + 1,
+        subtracted_fluorescence=base + 2,
+        spikes=base + 3,
+        cell_classification=classification,
+    )
+
+
 def _write_traces(directory: Path, *, roi_count: int, frame_count: int, offset: float) -> None:
     """Writes the four cindra fluorescence trace arrays into a processing output directory.
 
@@ -86,15 +123,15 @@ def _write_traces(directory: Path, *, roi_count: int, frame_count: int, offset: 
         offset: The constant added to the base ramp, so each directory carries distinguishable values.
     """
     directory.mkdir(parents=True, exist_ok=True)
-    base = np.arange(roi_count * frame_count, dtype=np.float32).reshape(roi_count, frame_count)
-    for index, filename in enumerate(
-        ("cell_fluorescence.npy", "neuropil_fluorescence.npy", "subtracted_fluorescence.npy", "spikes.npy")
-    ):
-        np.save(file=directory.joinpath(filename), arr=base + offset + index)
+    _build_extraction(roi_count=roi_count, frame_count=frame_count, offset=offset).save_arrays(output_path=directory)
 
 
 def _write_cindra_outputs(directory: Path, *, is_cell: Sequence[int], frame_count: int, offset: float = 0.0) -> None:
-    """Writes a complete single-recording cindra output directory.
+    """Writes a complete single-recording cindra output directory through cindra's own writer.
+
+    Notes:
+        The combined record is saved rather than assembled by hand, so the archive the assembler reads back is the one
+        cindra's combination stage publishes, including every metadata field its reader expects.
 
     Args:
         directory: The directory the single-recording outputs are written into.
@@ -102,15 +139,16 @@ def _write_cindra_outputs(directory: Path, *, is_cell: Sequence[int], frame_coun
         frame_count: The number of frames every trace array carries.
         offset: The constant added to the base ramp of every trace array.
     """
-    _write_traces(directory, roi_count=len(is_cell), frame_count=frame_count, offset=offset)
-    classification = np.zeros((len(is_cell), 2), dtype=np.float32)
-    classification[:, 0] = np.asarray(is_cell, dtype=np.float32)
-    classification[:, 1] = 0.5
-    np.save(file=directory.joinpath("cell_classification.npy"), arr=classification)
-    np.savez(
-        directory.joinpath("combined_metadata.npz"),
-        sampling_rate=np.asarray([SAMPLING_RATE_HZ], dtype=np.float64),
-    )
+    directory.mkdir(parents=True, exist_ok=True)
+    CombinedData(
+        detection=DetectionData(),
+        extraction=_build_extraction(roi_count=len(is_cell), frame_count=frame_count, offset=offset, is_cell=is_cell),
+        plane_count=1,
+        frame_count=frame_count,
+        combined_height=COMBINED_FRAME_EXTENT,
+        combined_width=COMBINED_FRAME_EXTENT,
+        sampling_rate=SAMPLING_RATE_HZ,
+    ).save(root_path=directory)
 
 
 def _write_frame_metadata(

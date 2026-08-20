@@ -12,12 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
-from ataraxis_data_structures import (
-    LOG_ARCHIVE_SUFFIX,
-    ProcessingTracker,
-    limit_worker_threads,
-    initialize_worker_threads,
-)
+from ataraxis_data_structures import ProcessingTracker, limit_worker_threads, initialize_worker_threads
 from ataraxis_communication_interface import (
     CONTROLLER_EXTRACTION_JOB_NAME,
     EXTRACTION_CONFIGURATION_FILENAME,
@@ -36,6 +31,7 @@ from ..registries import (
     resolve_microcontroller_event_codes,
     resolve_eligible_microcontroller_modules,
 )
+from ..shared_assets import verify_openmp_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,7 +55,7 @@ def run_microcontroller_processing_pipeline(
     """Discovers, validates, and executes microcontroller log processing jobs for the target session.
 
     Notes:
-        This is a two-stage pipeline. Stage 1 (extraction) reads each ``{controller_id}_log.npz`` archive via the
+        This is a two-stage pipeline. Stage 1 (extraction) reads each controller's log archive via the
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
         parser registered for the session's acquisition system (resolved via ``resolve_microcontroller_parsers``),
@@ -87,11 +83,15 @@ def run_microcontroller_processing_pipeline(
     Raises:
         FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
             extraction job's log archive is not present.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
             the raw behavior data tree holds more than one microcontroller manifest, if no manifest controller
             declares a module the session's acquisition system extracts, if no processable controllers are
             discovered, or if the provided job_id does not match any available job.
     """
+    # A stage this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
+    # runtime to load fails here rather than partway through a session.
+    verify_openmp_runtime()
     session = SessionData.load(session_path=session_path)
     console.echo(
         message=f"Initializing microcontroller processing pipeline for session '{session.session_name}'...",
@@ -406,7 +406,7 @@ def _extract_controller(
         does not consume. The output directory is created if it does not exist.
 
     Args:
-        archive_path: The path to the controller's ``{controller_id}_log.npz`` archive.
+        archive_path: The path to the controller's log archive, as the communication library resolved it.
         output_directory: The directory where the raw per-module feather files are written (the session's
             microcontroller data directory).
         controller_id: The controller ID whose archive is being extracted.
@@ -812,9 +812,9 @@ def _execute_remote_job(
         archive_path = extraction_archives.get(controller_id)
         if archive_path is None:
             message = (
-                f"Unable to run the extraction job for controller '{controller_id}'. No log archive "
-                f"'{controller_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. A controller whose archive "
-                f"is absent, or whose name resolves to several archives under that directory, cannot be extracted."
+                f"Unable to run the extraction job for controller '{controller_id}'. The communication library "
+                f"resolved no log archive for that controller in '{log_directory}'. A controller whose archive is "
+                f"absent, or whose name resolves to several archives under that directory, cannot be extracted."
             )
             console.error(message=message, error=FileNotFoundError)
         resolved_workers = resolve_worker_count(requested_workers=workers)

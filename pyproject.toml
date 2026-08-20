@@ -45,12 +45,12 @@ dependencies = [
     "ataraxis-time>=7,<8",
     "ataraxis-base-utilities>=7,<8",
     "ataraxis-data-structures>=7.1,<8",  # 7.1 first exports the log-archive, marker, and worker-thread helpers
-    "sollertia-shared-assets>=10.0.0rc2,<11",
+    "sollertia-shared-assets>=10.0.0rc3,<11",  # rc3 first exports the per-system session type registry
 
     # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
-    "ataraxis-video-system>=5.0.1rc2,<6",
-    "ataraxis-communication-interface>=7.0.1rc2,<8",
-    "cindra>=2.0.0rc5,<3",
+    "ataraxis-video-system>=5.1.1,<6",
+    "ataraxis-communication-interface>=7.1.1,<8",
+    "cindra>=2.0.0rc6,<3",  # rc6 first exports the pipeline data records, including the combined recording metadata
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
     # The wheel vendors its own FFmpeg, so no system ffmpeg binary is required.
@@ -232,6 +232,12 @@ module = [
     "sollertia_forgery.interfaces.server_tools",
 ]
 ignore_errors = true
+
+# threadpoolctl ships no py.typed marker and publishes no stub distribution, so the module that bounds the native
+# thread pools through it is checked against an untyped import rather than failing on the import itself.
+[[tool.mypy.overrides]]
+module = ["threadpoolctl"]
+ignore_missing_imports = true
 
 # Pytest configuration. The import mode is declared here so that a bare 'pytest' invocation resolves test modules the
 # same way the '{py}-test' tox task does.

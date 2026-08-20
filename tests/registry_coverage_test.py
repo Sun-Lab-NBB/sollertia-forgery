@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
-from sollertia_shared_assets import AcquisitionSystems
+from sollertia_shared_assets import SYSTEM_SESSION_TYPES, SessionTypes, AcquisitionSystems
 
 from sollertia_forgery.registries import (
     _MICROCONTROLLER_ELIGIBILITY_REGISTRY,
@@ -88,6 +88,33 @@ def test_a_parseable_module_that_declares_no_event_codes_fails_the_check(monkeyp
     uncoded = r"MESOSCOPE_VR does not declare\s+codes for the following modules: \(1, 1\)"
     with pytest.raises(RuntimeError, match=uncoded):
         _assert_registry_coverage()
+
+
+def test_admitting_a_session_type_the_system_does_not_record_fails_the_check(monkeypatch):
+    """The shared assets library declares which session types a system records, so an admission entry naming a type
+    outside that declaration is a stale entry rather than a system this library knows more about."""
+    monkeypatch.setattr(
+        "sollertia_forgery.registries._FORGING_ADMISSION_REGISTRY",
+        {AcquisitionSystems.MESOSCOPE_VR: {SessionTypes.WINDOW_CHECKING: frozenset()}},
+    )
+    monkeypatch.setattr(
+        "sollertia_forgery.registries.SYSTEM_SESSION_TYPES",
+        {AcquisitionSystems.MESOSCOPE_VR: frozenset({SessionTypes.MESOSCOPE_EXPERIMENT})},
+    )
+
+    unrecorded = (
+        r"MESOSCOPE_VR declares admission requirements for the\s+following unrecorded type\(s\): window checking"
+    )
+    with pytest.raises(RuntimeError, match=unrecorded):
+        _assert_registry_coverage()
+
+
+def test_every_admitted_session_type_is_one_the_system_records():
+    """The admission registry is keyed by session type, so a typo there would silently hold every session of the
+    mistyped type out of every dataset."""
+    admitted = set(resolve_forging_admission_pipelines(system=AcquisitionSystems.MESOSCOPE_VR))
+
+    assert admitted <= SYSTEM_SESSION_TYPES[AcquisitionSystems.MESOSCOPE_VR]
 
 
 @pytest.mark.parametrize("system", [AcquisitionSystems.MESOSCOPE_VR, AcquisitionSystems.MESOSCOPE_VR.value])

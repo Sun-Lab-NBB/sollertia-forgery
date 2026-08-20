@@ -12,12 +12,13 @@ from cindra import (
     WORKER_MEMORY_MB,
     SPAWNED_CHILD_MEMORY_MB,
     MEMORY_ESTIMATE_TOLERANCE,
-    COMBINED_METADATA_FILENAME,
-    MULTI_RECORDING_DIRECTORY_NAME,
     RecordingArrays,
     MultiRecordingJobNames,
     SingleRecordingJobNames,
     resolve_array_path,
+    resolve_output_path,
+    resolve_dataset_path,
+    is_recording_processed,
     size_multi_recording_job,
     size_single_recording_job,
 )
@@ -27,7 +28,7 @@ from numpy.lib.format import read_magic, read_array_header_1_0, read_array_heade
 from ataraxis_video_system import size_archive_job as size_camera_extraction_job
 from ataraxis_base_utilities import console
 from sollertia_shared_assets import SessionData
-from ataraxis_data_structures import LOG_ARCHIVE_SUFFIX
+from ataraxis_data_structures import find_log_archives, discover_log_archives
 from ataraxis_communication_interface import size_archive_job as size_controller_extraction_job
 
 from ..video import ENERGY_JOB_NAME, RENAME_JOB_NAME, TRACKING_JOB_NAME, CAMERA_EXTRACTION_JOB_NAME
@@ -39,11 +40,12 @@ from ..registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from ..shared_assets import ProcessingPipelines, multi_recording_dataset_directory
+from ..shared_assets import ProcessingPipelines, multi_recording_dataset_name
 from ..microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Collection
 
     from cindra import MultiRecordingConfiguration, SingleRecordingConfiguration
     from sollertia_shared_assets import DatasetData
@@ -100,6 +102,20 @@ emits one array per column and the interpolation that aligns them holds double-p
 
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
+
+_POSE_PREDICTION_PATTERN: str = "*.h5"
+"""The glob the pose-tracking sizing model discovers a session's prediction files by. The predictions are written
+upstream of this platform, so they are matched by their container extension rather than by a name this library sets."""
+
+_ARCHIVE_JOB_NAMES: frozenset[str] = frozenset(
+    {CAMERA_EXTRACTION_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME, RUNTIME_JOB_NAME}
+)
+"""The job types whose input is one source's log archive, which the data-structures locator resolves for them.
+
+Notes:
+    Each of these jobs is specified by the identifier of the source that recorded its archive, so one locating pass
+    over the session's raw behavior data answers every one of them.
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,8 +193,11 @@ def size_session_jobs(
 
     Raises:
         FileNotFoundError: If a job's input cannot be read, in which case the job that reads it cannot run either.
+        OSError: If any directory beneath the session's raw behavior data cannot be read while its log archives are
+            located.
         ValueError: If a two-photon job's specifier names an imaging plane the recording does not hold, if the
-            recording's acquisition metadata cannot be parsed, or if a job name routes to no sizing model.
+            recording's acquisition metadata cannot be parsed, if the session's raw behavior data holds more than one
+            archive for a source, or if a job name routes to no sizing model.
     """
     # Every job of the two-photon pipeline runs a cindra stage, so the whole pipeline is sized by cindra's own pass
     # and the recording's configuration and raw imaging location are resolved once for the session that carries them.
@@ -206,22 +225,21 @@ def size_session_jobs(
         else 0
     )
 
+    # Locating a source's archive belongs to the library that writes it, and one pass answers every archive-reading
+    # job the session holds. A source the pass cannot resolve raises there, which is the same refusal each sizing
+    # model raises for an input it cannot read.
+    archives = _resolve_job_archives(behavior_directory=behavior_directory, jobs=jobs)
+
     footprints: dict[tuple[str, str], JobFootprint] = {}
     for job_name, specifier, cores in jobs:
         if job_name == CHECKSUM_JOB_NAME:
             footprint = _size_checksum_job(cores=cores)
         elif job_name == CAMERA_EXTRACTION_JOB_NAME:
-            footprint = _size_camera_extraction_job(
-                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
-            )
+            footprint = _size_camera_extraction_job(archive_path=archives[specifier])
         elif job_name == CONTROLLER_EXTRACTION_JOB_NAME:
-            footprint = _size_controller_extraction_job(
-                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}")
-            )
+            footprint = _size_controller_extraction_job(archive_path=archives[specifier])
         elif job_name == RUNTIME_JOB_NAME:
-            footprint = _size_runtime_job(
-                archive_path=behavior_directory.joinpath(f"{specifier}{LOG_ARCHIVE_SUFFIX}"), cores=cores
-            )
+            footprint = _size_runtime_job(archive_path=archives[specifier], cores=cores)
         elif job_name == ENERGY_JOB_NAME:
             footprint = _size_motion_energy_job(frame_pixels=widest_frame_pixels, cores=cores)
         elif job_name == TRACKING_JOB_NAME:
@@ -239,6 +257,35 @@ def size_session_jobs(
         footprints[job_name, specifier] = footprint
 
     return footprints
+
+
+def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
+    """Locates the log archive every archive-reading job of one session consumes.
+
+    Notes:
+        The archive filename a source writes is the data-structures library's own contract, so the sources are handed
+        to its locator rather than having their filenames rebuilt here. One traversal resolves every source, which is
+        the same pass the acquisition libraries' own job resolvers make.
+
+    Args:
+        behavior_directory: The session's raw behavior data directory, whose tree holds every archive it recorded.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose archive-reading members
+            carry the identifier of the source that recorded their archive.
+
+    Returns:
+        The path to the archive of every source the jobs read, keyed by that source identifier. Empty when the jobs
+        read no archive.
+
+    Raises:
+        FileNotFoundError: If the behavior data directory is absent, or if a source recorded no archive, in which case
+            the job reading it cannot run either.
+        OSError: If any directory beneath the behavior data directory cannot be read.
+        ValueError: If the tree holds more than one archive for a source, which leaves the job's input ambiguous.
+    """
+    sources = [specifier for job_name, specifier, _ in jobs if job_name in _ARCHIVE_JOB_NAMES]
+    if not sources:
+        return {}
+    return find_log_archives(log_directory=behavior_directory, source_ids=sources)
 
 
 def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
@@ -427,21 +474,12 @@ def _size_runtime_job(archive_path: Path, cores: int) -> JobFootprint:
         dependency models it, and the pool it opens is the allocation its type declared.
 
     Args:
-        archive_path: The path to the log archive the job reads.
+        archive_path: The path to the log archive the job reads, as the shared locating pass resolved it.
         cores: The cores the job is allocated, which is how many readers it opens.
 
     Returns:
         The job's footprint, holding the declared width and the memory the readers hold at it.
-
-    Raises:
-        FileNotFoundError: If the archive cannot be read, in which case the job that reads it cannot run either.
     """
-    if not archive_path.is_file():
-        message = (
-            f"Unable to size the runtime log job reading '{archive_path}'. The path does not name an existing file, "
-            f"so nothing states how much the job's readers hold and the job could not run either."
-        )
-        console.error(message=message, error=FileNotFoundError)
     per_reader = _bytes_to_megabytes(byte_count=archive_path.stat().st_size * _ARCHIVE_DIRECTORY_RATIO)
     return JobFootprint(
         cores=cores,
@@ -654,10 +692,13 @@ def _size_pose_tracking_job(camera_directory: Path, cores: int) -> JobFootprint:
         FileNotFoundError: If the session recorded no prediction file, in which case the job that reads one cannot
             run either.
     """
+    predictions = sorted(camera_directory.glob(_POSE_PREDICTION_PATTERN)) if camera_directory.is_dir() else []
     return JobFootprint(
         cores=cores,
         memory_mb=_widest_file_memory_mb(
-            directory=camera_directory, pattern="*.h5", expansion_ratio=_POSE_PREDICTION_RATIO
+            candidates=predictions,
+            expansion_ratio=_POSE_PREDICTION_RATIO,
+            description=f"a '{_POSE_PREDICTION_PATTERN}' pose prediction file from '{camera_directory}'",
         ),
     )
 
@@ -681,67 +722,67 @@ def _size_module_parse_job(behavior_directory: Path, cores: int) -> JobFootprint
         FileNotFoundError: If the session recorded no log archive, in which case the job that parses one cannot run
             either.
     """
+    archives = discover_log_archives(log_directory=behavior_directory) if behavior_directory.is_dir() else {}
     return JobFootprint(
         cores=cores,
         memory_mb=_widest_file_memory_mb(
-            directory=behavior_directory, pattern=f"*{LOG_ARCHIVE_SUFFIX}", expansion_ratio=_MODULE_TABLE_RATIO
+            candidates=archives.values(),
+            expansion_ratio=_MODULE_TABLE_RATIO,
+            description=f"a log archive from '{behavior_directory}'",
         ),
     )
 
 
-def _widest_file_memory_mb(directory: Path, pattern: str, expansion_ratio: float) -> int:
-    """Models memory from the largest file in a directory matching a pattern, for a stage whose input is one of
-    several files it may read.
+def _widest_file_memory_mb(candidates: Collection[Path], expansion_ratio: float, description: str) -> int:
+    """Models memory from the largest of the files a stage may read, for a stage whose input is one of several.
 
     Notes:
-        Inputs are discovered by extension rather than by name, because the naming of an acquired file belongs to the
-        acquisition system that produced it.
+        The candidates are discovered by the party that owns their naming, which is the acquisition system for a
+        prediction file and the data-structures library for a log archive, so no naming rule is repeated here.
 
     Args:
-        directory: The directory to search.
-        pattern: The glob pattern the candidate files match.
+        candidates: The files the stage may read, one of which the estimate is drawn from.
         expansion_ratio: The resident memory a job holds per byte of the file it reads.
+        description: The phrase naming the input, which the refusal reports when the stage has nothing to read.
 
     Returns:
         The reportable memory in megabytes.
 
     Raises:
-        FileNotFoundError: If the directory is absent or holds no file matching the pattern, in which case the job
-            reading one of those files cannot run either.
+        FileNotFoundError: If no candidate is present, in which case the job reading one of them cannot run either.
     """
-    candidates = (
-        sorted(directory.glob(pattern), key=lambda path: path.stat().st_size, reverse=True)
-        if directory.is_dir()
-        else []
-    )
-    if not candidates:
+    widest = max(candidates, key=lambda path: path.stat().st_size, default=None)
+    if widest is None:
         message = (
-            f"Unable to size a job reading a '{pattern}' file from '{directory}'. The directory holds no file the "
-            f"pattern matches, so nothing states how much the job holds and the job could not run either."
+            f"Unable to size a job reading {description}. Nothing the job could read is present, so nothing states "
+            f"how much the job holds and the job could not run either."
         )
         console.error(message=message, error=FileNotFoundError)
     return _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=candidates[0].stat().st_size * expansion_ratio)
+        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=widest.stat().st_size * expansion_ratio)
     )
 
 
 @cache
-def _two_photon_output_directory(project_root: Path, animal: str, session: str) -> Path:
-    """Resolves a session's single-recording two-photon output directory through the session hierarchy.
+def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Path:
+    """Resolves the output root a session's two-photon processing was configured with.
 
     Notes:
+        This is the root cindra creates its own output directory under, so every location beneath it is resolved
+        through cindra's own resolvers rather than by rebuilding its layout here.
+
         Cached, because one dataset's estimates resolve the same session from several stages and each resolution
         otherwise re-reads that session's marker.
 
     Args:
         project_root: The path to the project's root directory.
         animal: The animal the session belongs to.
-        session: The session name whose output directory is resolved.
+        session: The session name whose output root is resolved.
 
     Returns:
-        The path to the session's cindra output directory.
+        The path to the session's processed-data root, which is the output root its cindra jobs were given.
     """
-    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data.cindra_data_path
+    return SessionData.load(session_path=project_root.joinpath(animal, session)).processed_data_path
 
 
 def _animal_recording_directories(dataset: DatasetData, animal: str, project_root: Path) -> tuple[Path, ...]:
@@ -765,7 +806,9 @@ def _animal_recording_directories(dataset: DatasetData, animal: str, project_roo
         if not project_root.joinpath(animal, entry.session).is_dir():
             continue
         directories.append(
-            _two_photon_output_directory(project_root=project_root, animal=animal, session=entry.session)
+            resolve_output_path(
+                output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=entry.session)
+            )
         )
     return tuple(directories)
 
@@ -774,9 +817,9 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
     """Reads a processed recording's shape from the arrays the single-recording pipeline wrote.
 
     Notes:
-        The combined metadata archive gates the result alongside the trace array, because both are written by the
-        combination stage and a recording that has not reached the end of it carries no output the forging stages can
-        read. Neither file's contents are loaded, so the resolution reads array headers and directory entries alone.
+        cindra's own completion predicate gates the result alongside the trace array, because a recording that has
+        not reached the end of the combination stage carries no output the forging stages can read. Neither file's
+        contents are loaded, so the resolution reads one array header and one directory entry.
 
     Args:
         project_root: The path to the project's root directory.
@@ -786,11 +829,15 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
     Returns:
         The recording's geometry, or None when the session holds no processed imaging output.
     """
-    directory = _two_photon_output_directory(project_root=project_root, animal=animal, session=session)
+    output_root = _two_photon_output_root(project_root=project_root, animal=animal, session=session)
+    if not is_recording_processed(output_root=output_root):
+        return None
     traces = _read_array_shape(
-        array_path=resolve_array_path(root_path=directory, array=RecordingArrays.CELL_FLUORESCENCE)
+        array_path=resolve_array_path(
+            root_path=resolve_output_path(output_root=output_root), array=RecordingArrays.CELL_FLUORESCENCE
+        )
     )
-    if traces is None or not directory.joinpath(COMBINED_METADATA_FILENAME).is_file():
+    if traces is None:
         return None
     return _RecordingGeometry(regions=traces[0], samples=traces[1])
 
@@ -884,9 +931,9 @@ def _resolve_tracked_regions(
 
     tracked = _read_array_shape(
         array_path=resolve_array_path(
-            root_path=_two_photon_output_directory(project_root=project_root, animal=animal, session=session).joinpath(
-                MULTI_RECORDING_DIRECTORY_NAME,
-                multi_recording_dataset_directory(animal_id=animal, dataset_name=dataset.name),
+            root_path=resolve_dataset_path(
+                output_root=_two_photon_output_root(project_root=project_root, animal=animal, session=session),
+                dataset_name=multi_recording_dataset_name(animal_id=animal, dataset_name=dataset.name),
             ),
             array=RecordingArrays.CELL_FLUORESCENCE,
         )

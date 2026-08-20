@@ -215,8 +215,8 @@ def task_template() -> TaskTemplate:
     """
     return TaskTemplate(
         cues=[
-            Cue(name="grating", code=1, length_cm=30.0),
-            Cue(name="checker", code=2, length_cm=30.0),
+            Cue(name="grating", code=1, length_cm=30.0, texture="Cue 001 - 4x1.png"),
+            Cue(name="checker", code=2, length_cm=30.0, texture="Cue 002 - 4x1.png"),
         ],
         vr_environment=VREnvironment(
             corridor_spacing_cm=200.0,

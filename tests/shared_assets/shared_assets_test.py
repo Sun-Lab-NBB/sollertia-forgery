@@ -16,8 +16,8 @@ from sollertia_forgery.shared_assets import (
     SESSION_PIPELINES,
     ProcessingPipelines,
     delay_terminal,
+    multi_recording_dataset_name,
     resolve_session_tracker_path,
-    multi_recording_dataset_directory,
 )
 
 if TYPE_CHECKING:
@@ -73,9 +73,10 @@ def test_the_terminal_delay_holds_the_runtime_for_its_declared_period() -> None:
     assert time.perf_counter() - start >= 0.09
 
 
-def test_the_multi_recording_directory_is_qualified_by_animal_and_lowercased() -> None:
-    """cindra lowercases the configured dataset name, so the writer and the reader agree only when this one does."""
-    assert multi_recording_dataset_directory(animal_id="305", dataset_name="PlaceCells") == "305_placecells"
+def test_the_multi_recording_dataset_name_is_qualified_by_animal() -> None:
+    """An animal's multi-recording output stays separate from its peers only when the name carries the animal, and
+    the fold that reaches the directory is cindra's, so the name itself keeps the casing it was given."""
+    assert multi_recording_dataset_name(animal_id="305", dataset_name="PlaceCells") == "305_PlaceCells"
 
 
 # Import-time terminal configuration

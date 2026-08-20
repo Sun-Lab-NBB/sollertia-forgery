@@ -929,7 +929,7 @@ def test_remote_extraction_requires_the_controller_archive(tmp_path: Path, monke
     monkeypatch.setattr(pipeline_module, "_extract_controller", _fail_if_called)
 
     job_id = ProcessingTracker.generate_job_id(job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="102")
-    with pytest.raises(FileNotFoundError, match=r"No log archive\s+'102_log.npz' was found"):
+    with pytest.raises(FileNotFoundError, match=r"resolved no log archive for that\s+controller"):
         run_microcontroller_processing_pipeline(session_path=tmp_path, job_id=job_id, workers=1)
 
 

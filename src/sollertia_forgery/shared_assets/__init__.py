@@ -1,7 +1,14 @@
 """Provides the system-agnostic substrate shared across acquisition systems, including the pipeline-identity
-enumeration, the per-session tracker locations, the microcontroller event-stream primitive, and the shared utilities.
+enumeration, the per-session tracker locations, the microcontroller event-stream primitive, the OpenMP runtime
+discovery, and the shared utilities.
 """
 
+from .openmp import (
+    OpenMPStatus,
+    OpenMPSummary,
+    verify_openmp_runtime,
+    resolve_openmp_runtime,
+)
 from .pipelines import (
     SESSION_PIPELINES,
     ProcessingPipelines,
@@ -10,18 +17,20 @@ from .pipelines import (
 from .utilities import (
     DELAY_TIMER,
     delay_terminal,
-    multi_recording_dataset_directory,
+    multi_recording_dataset_name,
 )
 from .microcontroller import merge_event_streams
-from .parallel_runtime import verify_parallel_runtime
 
 __all__ = [
     "DELAY_TIMER",
     "SESSION_PIPELINES",
+    "OpenMPStatus",
+    "OpenMPSummary",
     "ProcessingPipelines",
     "delay_terminal",
     "merge_event_streams",
-    "multi_recording_dataset_directory",
+    "multi_recording_dataset_name",
+    "resolve_openmp_runtime",
     "resolve_session_tracker_path",
-    "verify_parallel_runtime",
+    "verify_openmp_runtime",
 ]

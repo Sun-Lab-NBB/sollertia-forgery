@@ -14,14 +14,15 @@ import polars as pl
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, ProcessingTrackers
 from ataraxis_data_structures import (
-    LOG_ARCHIVE_SUFFIX,
     LogArchiveReader,
     ProcessingTracker,
     limit_worker_threads,
+    discover_log_archives,
     initialize_worker_threads,
 )
 
 from ..registries import resolve_runtime_binding
+from ..shared_assets import verify_openmp_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +44,7 @@ def run_runtime_processing_pipeline(
     """Decodes and parses the acquisition runtime's log archive for the target session.
 
     Notes:
-        This is a single-stage pipeline. It locates the runtime DataLogger archive (``{source_id}_log.npz``) in the
+        This is a single-stage pipeline. It locates the acquisition system's runtime DataLogger archive under the
         session's raw behavior-data directory and decodes it into a raw ``(time_us, payload)`` message table. It then
         hands that table to the registered runtime parser, which writes the system's behavior feathers into the
         session's processed runtime-data directory (``processed_data.runtime_data_path``). The runtime source id and
@@ -60,11 +61,14 @@ def run_runtime_processing_pipeline(
         display_progress: Determines whether to display a progress bar while decoding a multi-batch archive.
 
     Raises:
-        FileNotFoundError: If the session's runtime log archive is not present at its canonical raw behavior data
-            location.
+        FileNotFoundError: If the session's runtime log archive is not present in its raw behavior data directory.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member), or if the
             runtime log archive carries no valid onset timestamp message.
     """
+    # A stage this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
+    # runtime to load fails here rather than partway through a session.
+    verify_openmp_runtime()
     session, universe, possible = discover_runtime_jobs(session_path=session_path)
     console.echo(
         message=f"Initializing runtime processing pipeline for session '{session.session_name}'...",
@@ -82,13 +86,15 @@ def run_runtime_processing_pipeline(
     # failure because it leaves nothing to run.
     if not possible:
         message = (
-            f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive "
-            f"'{source_id}{LOG_ARCHIVE_SUFFIX}' was found in '{log_directory}'. The runtime DataLogger writes exactly "
-            f"one archive per session under its fixed source id."
+            f"Unable to process runtime data for session '{session.session_name}'. No runtime log archive was found "
+            f"for source '{source_id}' in '{log_directory}'. The runtime DataLogger writes exactly one archive per "
+            f"session under its fixed source id."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    archive_path = log_directory.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
+    # The archive filename a source writes is the data-structures library's own contract, so the same indexing pass
+    # discovery ran resolves the path rather than this pipeline rebuilding the name from the source id.
+    archive_path = discover_log_archives(log_directory=log_directory)[source_id]
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -114,9 +120,14 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
     Notes:
         The runtime pipeline produces exactly one job, so the universe is always the single
         ``(RUNTIME_JOB_NAME, source_id)`` pair, where the source id is resolved from the session's acquisition system.
-        That job is possible only when its DataLogger archive is present on disk. Discovery tests for the archive's
-        presence alone, leaving its contents and every output file untouched. An absent archive yields an empty
+        That job is possible only when its DataLogger archive is present on disk. Discovery indexes the archives the
+        logger wrote and reads no message, leaving every output file untouched. An absent archive yields an empty
         possible subset, so a batch layer can align the tracker slot against the universe and skip the job.
+
+        The archives are indexed through the data-structures library, which owns the name each source writes its
+        archive under, so a session that recorded no runtime archive is reported without this pipeline restating that
+        naming rule. The index covers the logger's own output directory, which is where a session's archives are
+        assembled side by side, and the pipeline resolves the archive it runs on through that same index.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -131,8 +142,9 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
     session = SessionData.load(session_path=session_path)
     source_id, _ = resolve_runtime_binding(system=session.acquisition_system)
     universe = [(RUNTIME_JOB_NAME, source_id)]
-    archive_path = session.raw_data.behavior_data_path.joinpath(f"{source_id}{LOG_ARCHIVE_SUFFIX}")
-    possible = list(universe) if archive_path.is_file() else []
+    log_directory = session.raw_data.behavior_data_path
+    archives = discover_log_archives(log_directory=log_directory) if log_directory.is_dir() else {}
+    possible = list(universe) if source_id in archives else []
     return session, universe, possible
 
 
@@ -163,7 +175,7 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
         in-process bulk pass. The returned table carries the timestamps unchanged and the payloads as opaque bytes.
 
     Args:
-        archive_path: The path to the runtime ``{source_id}_log.npz`` archive.
+        archive_path: The path to the runtime log archive, as the data-structures locator resolved it.
         workers: The number of worker processes the decode may use. A value less than 1 uses all available CPU cores
             (minus reserved cores), and 1 forces a single in-process decode.
         display_progress: Determines whether to display a per-batch progress bar during a parallel decode.

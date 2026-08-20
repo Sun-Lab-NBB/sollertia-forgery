@@ -10,13 +10,10 @@ from dataclasses import field, dataclass
 
 import polars as pl
 import pytest
+from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.server import Job, JobStatus
-from sollertia_forgery.forging import (
-    DATASET_STATE_SCHEMA,
-    DATASET_STATE_FILENAME,
-    DATASET_MARKER_FILENAME,
-)
+from sollertia_forgery.forging import DATASET_STATE_SCHEMA, DATASET_STATE_FILENAME
 from sollertia_forgery.managing import PROJECT_JOBS_SCHEMA, project_jobs_path
 from sollertia_forgery.orchestration import (
     PROJECT_PLAN_SCHEMA,

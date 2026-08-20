@@ -167,9 +167,10 @@ def test_running_the_pipeline_records_the_job_as_succeeded(
     assert snapshot[job_identifier].specifier == RUNTIME_SOURCE_ID
 
 
-def test_running_the_pipeline_without_an_archive_names_the_expected_file(training_session: SessionData) -> None:
-    """An absent archive leaves the single job impossible, which this pipeline escalates to a failure."""
-    with pytest.raises(FileNotFoundError, match=r"No runtime log archive '1_log\.npz' was found"):
+def test_running_the_pipeline_without_an_archive_names_the_expected_source(training_session: SessionData) -> None:
+    """An absent archive leaves the single job impossible, which this pipeline escalates to a failure naming the
+    source whose archive is missing."""
+    with pytest.raises(FileNotFoundError, match=r"No runtime log archive was found\s+for source '1'"):
         run_runtime_processing_pipeline(session_path=_session_path(training_session))
 
 

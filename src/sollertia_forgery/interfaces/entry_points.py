@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from pathlib import Path
 
 import click
 from ataraxis_base_utilities import LogLevel, console
@@ -18,6 +19,7 @@ from .manage import (
 )
 from .server import server_cli
 from .process import process_cli
+from ..shared_assets import OpenMPStatus, resolve_openmp_runtime
 
 _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 """Ensures that displayed Click help messages are formatted according to the sollertia platform standard."""
@@ -28,8 +30,9 @@ def slf_cli() -> None:
     """Processes and manages data acquired with the Sollertia data acquisition platform.
 
     Exposes system-agnostic management commands ('manifest', 'checksum', 'dataset-state', 'server', 'reset',
-    'clean'), the agentic MCP server ('mcp'), and the generic processing, forging, and planning commands ('process',
-    'forge', 'plan'). The acquisition system is inferred from the data, so no command takes a system selector.
+    'clean', 'omp'), the agentic MCP server ('mcp'), and the generic processing, forging, and planning commands
+    ('process', 'forge', 'plan'). The acquisition system is inferred from the data, so no command takes a system
+    selector.
     """
 
 
@@ -65,6 +68,61 @@ def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]
         )
 
     run_server(transport=transport)
+
+
+@slf_cli.command("omp")
+@click.option(
+    "-s",
+    "--source",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    required=False,
+    default=None,
+    help=(
+        "The path to the OpenMP runtime to link. Omit to search the macOS package manager directories, the active "
+        "conda environment, and the installed Python distributions for one."
+    ),
+)
+@click.option(
+    "-t",
+    "--target",
+    type=click.Path(exists=False, file_okay=True, dir_okay=False, path_type=Path),
+    required=False,
+    default=None,
+    help="The path to write the link to. Omit to derive it from the directory the dynamic loader searches by default.",
+)
+@click.option(
+    "-f",
+    "--force",
+    is_flag=True,
+    help="Determines whether to link a runtime on a host whose OpenMP runtime already loads.",
+)
+@click.option(
+    "-y",
+    "--yes",
+    is_flag=True,
+    help=(
+        "Determines whether to create the resolved link. Without this flag the command reports what it would do and "
+        "changes nothing."
+    ),
+)
+def omp_command(source: Path | None, target: Path | None, *, force: bool, yes: bool) -> None:
+    """Links the OpenMP runtime that the Numba threading layer loads on macOS into a directory the loader searches.
+
+    The Numba macOS wheel names its OpenMP dependency through an rpath that carries no entries, so the runtime
+    resolves from the dynamic loader's default search path alone. This command finds an installed runtime and links it
+    into that path. Writing the link usually requires running the command through sudo. Running the command on any
+    other platform errors, because those platforms run the TBB threading layer instead.
+    """
+    summary = resolve_openmp_runtime(runtime_path=source, link_path=target, execute=yes, force=force)
+
+    if summary.searched_paths:
+        console.echo(message=f"searched: {', '.join(str(path) for path in summary.searched_paths)}", raw=True)
+    if summary.runtime_path is not None:
+        console.echo(message=f"runtime:  {summary.runtime_path}", raw=True)
+        console.echo(message=f"link:     {summary.link_path}", raw=True)
+    console.echo(message=summary.describe())
+    if summary.status == OpenMPStatus.UNRESOLVED:
+        raise SystemExit(1)
 
 
 def _register_subcommands() -> None:

@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 from itertools import permutations
 
 import numpy as np
-from cindra import COMBINED_METADATA_FILENAME, RecordingArrays, resolve_array_path
+from cindra import CombinedData, RecordingArrays, resolve_array_path
 import polars as pl
+from ataraxis_time import TimeUnits, rate_to_interval
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import MesoscopeDirectories
 
@@ -21,9 +22,6 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
-
-_MILLISECONDS_PER_SECOND: int = 1000
-"""The number of milliseconds in one second."""
 
 _MICROSECONDS_PER_MILLISECOND: int = 1000
 """The number of microseconds in one millisecond."""
@@ -112,13 +110,12 @@ def assemble_cindra_dataset(
         file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_FLUORESCENCE), mmap_mode="r"
     ).shape
 
-    # Loads the combined cindra metadata archive and extracts the per-plane sampling rate in Hz. NPZ archives do not
-    # support memory mapping, so the context manager is used to keep the archive open only long enough to pull the
-    # scalar out. The scanning rate is used to derive the expected scan pulse duration window in milliseconds for
-    # filtering logged scan pulses.
-    with np.load(file=cindra_data_path.joinpath(COMBINED_METADATA_FILENAME)) as metadata:
-        scanning_frequency = float(metadata["sampling_rate"][0])
-    expected_duration_ms = _MILLISECONDS_PER_SECOND / scanning_frequency
+    # Reads the per-plane sampling rate in Hz from the combined metadata cindra's combination stage wrote. The reader
+    # is cindra's own, which loads the metadata alone and no array, so the archive's layout is stated once by the
+    # library that writes it. The scanning rate derives the expected scan pulse duration window in milliseconds used
+    # to filter the logged scan pulses.
+    scanning_frequency = CombinedData.load(root_path=cindra_data_path).sampling_rate
+    expected_duration_ms = rate_to_interval(rate=scanning_frequency, to_units=TimeUnits.MILLISECOND, as_float=True)
     min_duration = expected_duration_ms - _SCAN_PULSE_TOLERANCE_MS
     max_duration = expected_duration_ms + _SCAN_PULSE_TOLERANCE_MS
 

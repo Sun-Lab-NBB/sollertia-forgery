@@ -22,6 +22,7 @@ import polars as pl
 from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import (
+    DATASET_MARKER_FILENAME,
     DatasetData,
     SessionData,
     DatasetFiles,
@@ -35,9 +36,9 @@ from ataraxis_data_structures import (
     initialize_worker_threads,
 )
 
-from .dataset import DATASET_MARKER_FILENAME, resolve_dataset
+from .dataset import resolve_dataset
 from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
-from ..shared_assets import multi_recording_dataset_directory
+from ..shared_assets import verify_openmp_runtime, multi_recording_dataset_name
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -237,8 +238,12 @@ def run_forging_pipeline(
             job's multi-recording configuration is missing, is not a .yaml file, is not a valid multi-recording
             configuration, or names a recording that holds no combined metadata archive.
         RuntimeError: If a discovery job's multi-recording configuration names a recording directory holding several
-            combined metadata archives, or names recording paths that carry no unique identifying component.
+            combined metadata archives, or names recording paths that carry no unique identifying component. It is
+            also raised when the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # The cross-recording stages reach a parallelized kernel, so a host whose threading layer has no runtime to load
+    # fails here rather than partway through a dataset.
+    verify_openmp_runtime()
     console.echo(message=f"Initializing the forging pipeline for dataset '{name}'...", level=LogLevel.INFO)
 
     dataset = resolve_dataset(name=name, session_names=(), project_root=project_root)
@@ -436,9 +441,9 @@ def materialize_multiday_plan(
         configuration.recording_io.recording_directories = tuple(
             session.processed_data.cindra_data_path for session in animal_sessions
         )
-        # The helper applies the same lowercasing cindra does, so the written output directory and the path the
-        # assembler reads back agree.
-        configuration.recording_io.dataset_name = multi_recording_dataset_directory(
+        # cindra folds the configured name when it builds the output directory, and every reader resolves that
+        # directory through cindra's own resolver, so the qualified name is written as-is.
+        configuration.recording_io.dataset_name = multi_recording_dataset_name(
             animal_id=animal, dataset_name=dataset.name
         )
         configuration.runtime.display_progress_bars = display_progress

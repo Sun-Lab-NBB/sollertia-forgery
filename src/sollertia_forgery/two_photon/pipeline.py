@@ -23,6 +23,7 @@ from sollertia_shared_assets import SessionData
 from ataraxis_data_structures import ProcessingTracker, discover_marker_files
 
 from ..registries import resolve_two_photon_data_locator, resolve_single_recording_configuration_resolver
+from ..shared_assets import verify_openmp_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -103,7 +104,11 @@ def run_two_photon_processing_pipeline(
             any available job.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
             the acquisition parameters file is searched for.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # Every cindra stage below reaches a parallelized kernel, so a host whose threading layer has no runtime to load
+    # fails here rather than partway through a recording.
+    verify_openmp_runtime()
     session = SessionData.load(session_path=session_path)
 
     console.echo(
@@ -219,7 +224,11 @@ def prime_two_photon_recording(session_path: Path) -> None:
             acquisition system's resolver cannot resolve a configuration for the session.
         OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
             the acquisition parameters file is searched for.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # Priming precedes every stage of the recording, so a host that cannot open the threading layer is reported
+    # before a preparation pass records anything.
+    verify_openmp_runtime()
     session = SessionData.load(session_path=session_path)
     if _resolve_primed_plane_count(session=session) is not None:
         return

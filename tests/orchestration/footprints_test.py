@@ -14,6 +14,7 @@ from cindra import (
     SPAWNED_CHILD_MEMORY_MB,
     MultiRecordingJobNames,
     SingleRecordingJobNames,
+    resolve_dataset_path,
     size_multi_recording_job,
     size_single_recording_job,
 )
@@ -55,7 +56,7 @@ from sollertia_forgery.registries import (
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
 )
-from sollertia_forgery.shared_assets import ProcessingPipelines, multi_recording_dataset_directory
+from sollertia_forgery.shared_assets import ProcessingPipelines, multi_recording_dataset_name
 from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 from sollertia_forgery.orchestration.footprints import (
     _ASSEMBLY_WRITE_COPIES,
@@ -870,15 +871,16 @@ def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
     """Once the multi-day extraction has written its array, the tracked count is read rather than bounded."""
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
-    directory = write_processed_recording(session=session, regions=300, samples=2000)
+    write_processed_recording(session=session, regions=300, samples=2000)
     dataset = build_dataset(
         project_root=project_root,
         name="ds_tracked",
         sessions=[session],
         session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
     )
-    tracked_directory = directory.joinpath(
-        "multi_recording", multi_recording_dataset_directory(animal_id="305", dataset_name=dataset.name)
+    tracked_directory = resolve_dataset_path(
+        output_root=session.processed_data_path,
+        dataset_name=multi_recording_dataset_name(animal_id="305", dataset_name=dataset.name),
     )
     write_trace_array(path=tracked_directory.joinpath("cell_fluorescence.npy"), shape=(7, 2000))
 

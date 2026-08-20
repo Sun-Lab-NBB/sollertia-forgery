@@ -35,7 +35,7 @@ from sollertia_forgery.forging import (
     define_forging_dataset,
     materialize_multiday_plan,
 )
-from sollertia_forgery.shared_assets import multi_recording_dataset_directory
+from sollertia_forgery.shared_assets import multi_recording_dataset_name
 import sollertia_forgery.forging.pipeline as pipeline_module
 
 if TYPE_CHECKING:
@@ -356,9 +356,7 @@ def test_define_forging_dataset_materializes_a_configuration_for_each_tracked_an
     assert plan["305"][1] == list(experiment_project.names()[:2])
 
     written = MultiRecordingConfiguration.from_yaml(file_path=plan["305"][0])
-    assert written.recording_io.dataset_name == multi_recording_dataset_directory(
-        animal_id="305", dataset_name=DATASET_NAME
-    )
+    assert written.recording_io.dataset_name == multi_recording_dataset_name(animal_id="305", dataset_name=DATASET_NAME)
     assert written.recording_io.recording_directories == tuple(
         session.processed_data.cindra_data_path for session in experiment_project.sessions[:2]
     )

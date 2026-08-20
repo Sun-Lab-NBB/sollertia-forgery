@@ -155,8 +155,8 @@ def _build_task_template(trial_cue_sequences: dict[str, list[str]], *, cue_offse
     """
     return TaskTemplate(
         cues=[
-            Cue(name="grating", code=_GRATING_CODE, length_cm=_CUE_LENGTH_CM),
-            Cue(name="checker", code=_CHECKER_CODE, length_cm=_CUE_LENGTH_CM),
+            Cue(name="grating", code=_GRATING_CODE, length_cm=_CUE_LENGTH_CM, texture="Cue 001 - 4x1.png"),
+            Cue(name="checker", code=_CHECKER_CODE, length_cm=_CUE_LENGTH_CM, texture="Cue 002 - 4x1.png"),
         ],
         vr_environment=VREnvironment(
             corridor_spacing_cm=200.0,

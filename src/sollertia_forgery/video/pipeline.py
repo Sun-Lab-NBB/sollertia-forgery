@@ -29,6 +29,7 @@ from .motion_energy import (
     resolve_camera_video,
     compute_camera_motion_energy,
 )
+from ..shared_assets import verify_openmp_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -110,7 +111,11 @@ def run_video_processing_pipeline(
             stage runs, or is not registered in the camera manifest while the motion-energy stage runs.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # A stage this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
+    # runtime to load fails here rather than partway through a session.
+    verify_openmp_runtime()
     session = SessionData.load(session_path=session_path)
 
     console.echo(

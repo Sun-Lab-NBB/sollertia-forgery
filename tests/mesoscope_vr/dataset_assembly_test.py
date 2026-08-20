@@ -13,7 +13,7 @@ import polars as pl
 import pytest
 from sollertia_shared_assets import RawDataFiles, SessionTypes, MesoscopeHardwareState
 
-from sollertia_forgery.shared_assets import multi_recording_dataset_directory
+from sollertia_forgery.shared_assets import multi_recording_dataset_name
 import sollertia_forgery.mesoscope_vr.forging as dispatcher_module
 from sollertia_forgery.mesoscope_vr.metadata import VideoDataFiles, BehaviorDataFiles
 from sollertia_forgery.mesoscope_vr.video_dataset import resolve_slowest_camera_clock
@@ -161,12 +161,12 @@ def test_resolve_slowest_camera_clock_errors_without_cameras(tmp_path: Path) -> 
         resolve_slowest_camera_clock(video_data_path=tmp_path)
 
 
-def test_multi_recording_dataset_directory_is_lowercased() -> None:
-    """Verifies the multi-recording directory name is lowercased to match cindra, so the forging writer and the
-    experiment assembler resolve the same directory even when the dataset name or animal id carries uppercase.
+def test_multi_recording_dataset_name_is_qualified_by_animal() -> None:
+    """Verifies the multi-recording dataset name carries the animal identifier, which is what keeps one animal's
+    tracked output separate from its peers when a forged dataset spans several animals.
     """
-    assert multi_recording_dataset_directory(animal_id="101", dataset_name="Learning") == "101_learning"
-    assert multi_recording_dataset_directory(animal_id="321", dataset_name="MaalstroomicFlow") == "321_maalstroomicflow"
+    assert multi_recording_dataset_name(animal_id="101", dataset_name="Learning") == "101_Learning"
+    assert multi_recording_dataset_name(animal_id="321", dataset_name="MaalstroomicFlow") == "321_MaalstroomicFlow"
 
 
 def test_dispatch_routes_experiment_session(monkeypatch: pytest.MonkeyPatch) -> None:

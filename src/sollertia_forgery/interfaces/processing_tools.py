@@ -5,7 +5,6 @@ removing pipeline output.
 
 from __future__ import annotations
 
-from time import time_ns
 from typing import TYPE_CHECKING, Any
 from pathlib import Path
 from threading import Thread
@@ -42,6 +41,7 @@ from ..orchestration import (
     run_batch_job,
     build_pending_job,
     connect_to_server,
+    current_timestamp,
     query_submissions,
     read_batch_outcome,
     resolve_batch_host,
@@ -998,7 +998,9 @@ def _elapsed_seconds(started_at: int | None, completed_at: int | None) -> float 
     """
     if started_at is None:
         return None
-    end = completed_at if completed_at is not None else time_ns() // 1000
+    # A running job is measured to now on the same clock the tracker stamps its own timestamps with, so the two are
+    # directly subtractable.
+    end = completed_at if completed_at is not None else current_timestamp()
     seconds = convert_time(
         time=end - started_at, from_units=TimeUnits.MICROSECOND, to_units=TimeUnits.SECOND, as_float=True
     )
