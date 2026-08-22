@@ -695,6 +695,9 @@ class StubSSHTransport:
             if command.startswith(prefix):
                 return response
 
+        if command.startswith("find -L "):
+            return self._find(command=command)
+
         if command.startswith("mkdir -p "):
             self.local_path(shlex.split(command)[2]).mkdir(parents=True, exist_ok=True)
             return "", "", 0
@@ -718,6 +721,45 @@ class StubSSHTransport:
             return "\n".join(rows) + ("\n" if rows else ""), "", 0
 
         return "", "", 0
+
+    def _find(self, command: str) -> tuple[str, str, int]:
+        """Answers one depth-bounded marker search out of the temporary server-side filesystem.
+
+        Reproduces the predicates the server issues: symbolic links are followed, a link whose target does not resolve
+        is not reported, and only the depths between the requested bounds are searched. Records are emitted in reverse
+        name order, because the real command emits directory order and a stub that sorted would let an implementation
+        that never sorts pass.
+
+        Args:
+            command: The search invocation the server issued.
+
+        Returns:
+            A tuple of the NUL-separated records, the standard error, and the exit code.
+        """
+        tokens = shlex.split(command)
+        start = Path(tokens[2])
+        minimum = int(tokens[tokens.index("-mindepth") + 1])
+        maximum = int(tokens[tokens.index("-maxdepth") + 1])
+        names = {tokens[index + 1] for index, argument in enumerate(tokens) if argument == "-name"}
+
+        root = self.local_path(start)
+        if not root.is_dir():
+            return "", f"find: '{start}': No such file or directory\n", 1
+
+        records: list[str] = []
+        pending: list[tuple[Path, int]] = [(root, 0)]
+        while pending:
+            directory, depth = pending.pop()
+            if depth >= maximum:
+                continue
+            for entry in directory.iterdir():
+                # 'exists' follows the link and reports a dangling one as absent, which is what '! -type l' does.
+                if minimum <= depth + 1 <= maximum and entry.name in names and entry.exists():
+                    records.append(str(start.joinpath(entry.relative_to(root))))
+                if entry.is_dir():
+                    pending.append((entry, depth + 1))
+
+        return "".join(f"{record}\0" for record in sorted(records, reverse=True)), "", 0
 
 
 @dataclass

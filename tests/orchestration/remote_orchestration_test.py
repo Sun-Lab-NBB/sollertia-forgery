@@ -1059,4 +1059,7 @@ def test_mirroring_without_regeneration_pulls_the_artifacts_as_the_server_last_w
     )
 
     assert [path.name for path in mirrored] == ["TestProject_jobs.feather"]
-    assert stub_ssh_transport.commands == []
+
+    # Discovery reads the project's datasets with one server-side search, so the invocations the mirror issues carry
+    # that search and nothing else.
+    assert [command for command in stub_ssh_transport.commands if not command.startswith("find -L ")] == []

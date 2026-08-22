@@ -72,6 +72,7 @@ def resolve_readable_project(project_path: str, host: str) -> Path:
 
     Raises:
         FileNotFoundError: If the server holds no directory for the named project.
+        RuntimeError: If the server-side search for the project's datasets reached only part of its tree.
     """
     if host != REMOTE_HOST_LABEL:
         return Path(project_path)
