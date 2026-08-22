@@ -38,7 +38,7 @@ from sollertia_forgery.orchestration import (
 from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session_tracker_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from tests.conftest import StubSSHTransport
     from sollertia_shared_assets import ProjectData, SessionData
@@ -281,7 +281,7 @@ def test_the_local_host_reports_where_an_artifact_already_sits(tmp_path: Path) -
 
 
 def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     """A mirrored table is only readable alongside the file its tool resolves it from, so both travel together."""
     pulled: list[str] = []
@@ -307,9 +307,15 @@ def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
             return True
 
         @staticmethod
-        def list_directory(remote_path: Path) -> list[str]:  # noqa: ARG004
-            """Reports the project's entries."""
-            return ["ds", "305"]
+        def find_paths(
+            remote_path: Path,
+            names: Sequence[str],  # noqa: ARG004
+            *,
+            minimum_depth: int,  # noqa: ARG004
+            maximum_depth: int,  # noqa: ARG004
+        ) -> list[Path]:
+            """Reports the marker the project's one forged dataset carries."""
+            return [remote_path.joinpath("ds", "dataset.yaml")]
 
         @staticmethod
         def pull(local_path: Path, remote_path: Path) -> None:
@@ -317,12 +323,6 @@ def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
             pulled.append(remote_path.name)
             local_path.parent.mkdir(parents=True, exist_ok=True)
             local_path.write_text("mirrored")
-
-    monkeypatch.setattr(
-        remote_module,
-        "_discover_remote_datasets",
-        lambda server, project_path: [project_path.joinpath("ds")],  # noqa: ARG005
-    )
 
     mirrored = remote_module.sync_project_state(
         server=StubMirrorServer(),

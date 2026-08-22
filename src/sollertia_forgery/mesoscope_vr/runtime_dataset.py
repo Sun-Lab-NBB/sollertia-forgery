@@ -230,7 +230,7 @@ def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path
     return clipped
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _check_trigger_zones(
     traversed_distance: NDArray[np.float64],
     trigger_zone_starts: NDArray[np.float64],

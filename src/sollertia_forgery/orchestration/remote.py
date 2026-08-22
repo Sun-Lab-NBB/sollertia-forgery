@@ -14,7 +14,7 @@ from sollertia_shared_assets import DATASET_MARKER_FILENAME, ProcessingTrackers
 from .graph import build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
 from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
-from ..server import Job, Server, get_server_configuration
+from ..server import Job, Server, discover_project_markers, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME
 from .dispatch import resolve_job_command
 from .planning import project_plan_path
@@ -211,6 +211,7 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
 
     Raises:
         FileNotFoundError: If the server holds no directory for the named project.
+        RuntimeError: If the server-side search for the project's datasets reached only part of its tree.
     """
     project_path = server.root.joinpath(project)
     if not server.is_directory(remote_path=project_path):
@@ -220,7 +221,9 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
         )
         console.error(message=message, error=FileNotFoundError)
 
-    datasets = _discover_remote_datasets(server=server, project_path=project_path)
+    # Only the datasets are mirrored, so the search is held to the depth their markers sit at rather than reading
+    # every session directory the project holds.
+    datasets = list(discover_project_markers(project_path=project_path, server=server, include_sessions=False).datasets)
     if regenerate:
         _regenerate_remote_state(server=server, project_path=project_path, datasets=datasets)
 
@@ -359,25 +362,6 @@ def _resolve_slurm_job_name(job: GenericPendingJob, index: int) -> str:
     """
     readable = "-".join(part for part in (job.name or job.unit_path.name, job.job_name, job.specifier) if part)
     return f"{index:04d}-{_SLURM_NAME_SANITIZER.sub('_', readable)}"
-
-
-def _discover_remote_datasets(server: Server, project_path: Path) -> list[Path]:
-    """Lists the forged dataset directories a remote project holds.
-
-    Notes:
-        A forged dataset is a top-level directory under the project root carrying a dataset marker.
-
-    Args:
-        server: The connected server holding the project.
-        project_path: The path to the project's root directory on the server.
-
-    Returns:
-        The paths to the project's dataset directories, ordered by name.
-    """
-    candidates = [project_path.joinpath(entry) for entry in server.list_directory(remote_path=project_path)]
-    return sorted(
-        candidate for candidate in candidates if server.exists(remote_path=candidate.joinpath(DATASET_MARKER_FILENAME))
-    )
 
 
 def _regenerate_remote_state(server: Server, project_path: Path, datasets: Sequence[Path]) -> None:

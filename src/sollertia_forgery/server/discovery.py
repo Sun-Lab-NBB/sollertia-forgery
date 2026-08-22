@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+from dataclasses import dataclass
+
+from natsort import natsorted
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
     RAW_DATA_DIRECTORY,
@@ -13,6 +17,87 @@ from sollertia_shared_assets import (
 from .server import Server
 from ..shared_assets import delay_terminal
 from .server_configuration import get_server_configuration
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_DATASET_MARKER_DEPTH: int = 2
+"""The number of path components that separate a dataset's marker file from the project root."""
+
+_SESSION_MARKER_DEPTH: int = 4
+"""The number of path components that separate an acquired session's marker file from the project root."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectMarkers:
+    """Stores the dataset and session marker files one remote project holds."""
+
+    datasets: tuple[Path, ...]
+    """The absolute paths to the project's forged dataset directories, in natural sort order."""
+    sessions: tuple[DatasetSession, ...]
+    """The project's acquired sessions, in natural sort order, excluding the sessions a dataset directory holds."""
+
+
+def discover_project_markers(project_path: Path, server: Server, *, include_sessions: bool = True) -> ProjectMarkers:
+    """Discovers the dataset and session marker files a remote project holds.
+
+    Notes:
+        Both marker kinds are read in one server-side search, since both answer the same question about the same tree.
+        A directory carrying a dataset marker is a forged dataset rather than an animal, so the sessions it holds are
+        never reported as an animal's sessions.
+
+        The search reads every directory above the depth it covers, so a caller that needs the datasets alone narrows
+        it to the depth their markers sit at. That keeps the answer from depending on the session and output
+        directories every animal holds, which a project shared between accounts need not leave readable.
+
+    Args:
+        project_path: The absolute path to the project's root directory on the remote compute server.
+        server: The Server instance used to communicate with the remote compute server.
+        include_sessions: Determines whether the search covers the project's acquired sessions alongside its datasets.
+
+    Returns:
+        A ProjectMarkers instance holding the project's dataset directories and acquired sessions. The sessions are
+        empty when the search did not cover them.
+
+    Raises:
+        FileNotFoundError: If the server holds no directory at the project path.
+        RuntimeError: If the server-side search reached only part of the project's tree.
+    """
+    records = server.find_paths(
+        remote_path=project_path,
+        names=(DATASET_MARKER_FILENAME, RawDataFiles.SESSION_DATA),
+        minimum_depth=_DATASET_MARKER_DEPTH,
+        maximum_depth=_SESSION_MARKER_DEPTH if include_sessions else _DATASET_MARKER_DEPTH,
+    )
+
+    datasets: list[Path] = []
+    sessions: list[DatasetSession] = []
+    for record in records:
+        parts = record.relative_to(project_path).parts
+
+        # The search matches on the file name alone, so the depth and the parent directory of each match are what
+        # separate a dataset marker from a session marker and both from a same-named file at another position.
+        if len(parts) == _DATASET_MARKER_DEPTH and parts[1] == DATASET_MARKER_FILENAME:
+            datasets.append(project_path.joinpath(parts[0]))
+        elif (
+            len(parts) == _SESSION_MARKER_DEPTH
+            and parts[2] == RAW_DATA_DIRECTORY
+            and parts[3] == RawDataFiles.SESSION_DATA
+        ):
+            sessions.append(DatasetSession(session=parts[1], animal=parts[0]))
+
+    # The search orders the marker paths, where the separator that follows a directory's name orders a name against a
+    # sibling that extends it. Both collections are therefore ordered again on the names they are reported by.
+    dataset_names = {dataset.name for dataset in datasets}
+    return ProjectMarkers(
+        datasets=tuple(natsorted(datasets)),
+        sessions=tuple(
+            natsorted(
+                (session for session in sessions if session.animal not in dataset_names),
+                key=lambda entry: (entry.animal, entry.session),
+            )
+        ),
+    )
 
 
 def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSession, ...]:
@@ -27,32 +112,14 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
         server: The Server instance used to communicate with the remote compute server.
 
     Returns:
-        A tuple of DatasetSession instances representing all discovered sessions.
+        A tuple of DatasetSession instances representing all discovered sessions, in natural sort order.
+
+    Raises:
+        FileNotFoundError: If the server holds no directory for the named project.
+        RuntimeError: If the server-side search reached only part of the project's tree.
     """
-    project_path = server.root.joinpath(project)
-
-    discovered_sessions: list[DatasetSession] = []
-    for animal_directory in console.track(
-        server.list_directory(remote_path=project_path), description="Evaluating animal directories", unit="directory"
-    ):
-        animal_path = project_path.joinpath(animal_directory)
-
-        # Skips non-directory entries (like manifest files).
-        if not server.is_directory(remote_path=animal_path):
-            continue
-
-        if server.exists(remote_path=animal_path.joinpath(DATASET_MARKER_FILENAME)):
-            continue
-
-        discovered_sessions.extend(
-            DatasetSession(session=session_directory, animal=animal_directory)
-            for session_directory in server.list_directory(remote_path=animal_path)
-            if server.exists(
-                remote_path=animal_path.joinpath(session_directory, RAW_DATA_DIRECTORY, RawDataFiles.SESSION_DATA)
-            )
-        )
-
-    return tuple(discovered_sessions)
+    markers = discover_project_markers(project_path=server.root.joinpath(project), server=server)
+    return markers.sessions
 
 
 def discover_project_data(project: str) -> tuple[DatasetSession, ...]:

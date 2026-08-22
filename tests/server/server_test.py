@@ -732,3 +732,71 @@ def test_execute_command_returns_both_streams_and_the_exit_code(
 
     assert result == CommandResult(stdout="prepared\n", stderr="deprecated\n", return_code=3)
     assert stub_ssh_transport.commands == ["slf prepare --project TestProject"]
+
+
+def test_find_paths_reports_matches_at_the_requested_depths_only(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a search reports the depths it was given and never the same name above or below them."""
+    project_path = stub_ssh_transport.local_path("/data/sollertia/TestProject")
+    for relative in (("marker.yaml",), ("305", "marker.yaml"), ("305", "session", "marker.yaml")):
+        planted = project_path.joinpath(*relative)
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_text("marker")
+
+    matches = connected_server.find_paths(
+        remote_path=Path("/data/sollertia/TestProject"), names=("marker.yaml",), minimum_depth=2, maximum_depth=2
+    )
+
+    assert matches == [Path("/data/sollertia/TestProject/305/marker.yaml")]
+
+
+def test_find_paths_rejects_a_path_that_is_not_a_directory(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a file answers as an absent directory, since the search itself reports one as an empty tree."""
+    artifact = stub_ssh_transport.local_path("/data/sollertia/TestProject_manifest.feather")
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("manifest")
+
+    with pytest.raises(FileNotFoundError, match=r"holds no\s+directory at that path"):
+        connected_server.find_paths(
+            remote_path=Path("/data/sollertia/TestProject_manifest.feather"),
+            names=("marker.yaml",),
+            minimum_depth=1,
+            maximum_depth=1,
+        )
+
+
+def test_find_paths_passes_the_searched_path_as_a_start_point_rather_than_a_pattern(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a path carrying a glob metacharacter is searched as a location rather than matched as a pattern."""
+    marker = stub_ssh_transport.local_path("/data/sollertia/Proj[1]").joinpath("305", "marker.yaml")
+    marker.parent.mkdir(parents=True)
+    marker.write_text("marker")
+
+    matches = connected_server.find_paths(
+        remote_path=Path("/data/sollertia/Proj[1]"), names=("marker.yaml",), minimum_depth=2, maximum_depth=2
+    )
+
+    assert matches == [Path("/data/sollertia/Proj[1]/305/marker.yaml")]
+    assert stub_ssh_transport.commands == [
+        "find -L '/data/sollertia/Proj[1]' -mindepth 2 -maxdepth 2 '(' -name marker.yaml ')' '!' -type l -print0"
+    ]
+
+
+def test_find_paths_rejects_a_record_the_search_did_not_produce(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """A login shell that greets the connection writes into the stream the answer arrives on, which is not an answer."""
+    stub_ssh_transport.local_path("/data/sollertia/TestProject").mkdir(parents=True)
+    stub_ssh_transport.respond(
+        prefix="find -L ",
+        stdout="Lmod is replacing 'gcc/9.3' with 'gcc/11.2'\0/data/sollertia/TestProject/305/marker.yaml\0",
+    )
+
+    with pytest.raises(RuntimeError, match=r"does not sit under the searched directory"):
+        connected_server.find_paths(
+            remote_path=Path("/data/sollertia/TestProject"), names=("marker.yaml",), minimum_depth=2, maximum_depth=2
+        )

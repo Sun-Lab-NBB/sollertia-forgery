@@ -276,7 +276,7 @@ def assemble_behavior_dataset(
     return behavior_data.select(columns_to_select)
 
 
-@njit(cache=True)
+@njit(cache=True, nogil=True)
 def _calculate_running_speed(
     sample_time: NDArray[np.uint64],
     distance: NDArray[np.float64],

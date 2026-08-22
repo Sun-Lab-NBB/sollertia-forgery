@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Self
 from pathlib import Path
 import tempfile
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 
+from natsort import natsorted
 import paramiko
 from ataraxis_time import PrecisionTimer, TimerPrecisions
 from ataraxis_base_utilities import LogLevel, console
@@ -33,6 +35,10 @@ the server unreachable."""
 
 _EXPECTED_FIELD_COUNT: int = 2
 """The number of pipe-separated fields a parsable accounting or queue row carries."""
+
+_REPORTED_ERROR_CHARACTERS: int = 2000
+"""The number of characters of a failed command's error output an error message carries. A command that cannot read
+many directories reports one line per directory, which is worth naming but not worth printing whole."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -579,8 +585,101 @@ class Server:
         """
         return self._sftp.listdir(path=str(remote_path))
 
+    def find_paths(
+        self, remote_path: Path, names: Sequence[str], *, minimum_depth: int, maximum_depth: int
+    ) -> list[Path]:
+        """Returns every path under the target directory whose final component matches one of the given names.
+
+        Notes:
+            The search runs as one shell command rather than as a walk over the file-transfer protocol, which trades
+            one query per directory and per candidate for a single round trip. Symbolic links are followed, and a link
+            whose target does not resolve is reported as absent, so the answer matches the one exists() gives for the
+            same path.
+
+        Args:
+            remote_path: The absolute path to the directory to search on the remote server.
+            names: The final path components to match. Each is matched as a shell name pattern, so a name carrying a
+                glob metacharacter matches as a pattern rather than as a literal.
+            minimum_depth: The lowest depth, counted in path components below the searched directory, at which a match
+                is reported.
+            maximum_depth: The highest depth, counted in path components below the searched directory, at which a match
+                is reported. The search never descends past this depth.
+
+        Returns:
+            The absolute paths of every match, in natural sort order.
+
+        Raises:
+            FileNotFoundError: If the searched path is not a directory on the remote server.
+            RuntimeError: If the search command failed, which leaves it having covered only part of the tree.
+        """
+        if not self.is_directory(remote_path=remote_path):
+            message = (
+                f"Unable to search {remote_path} on the remote compute server. The server holds no directory at that "
+                f"path."
+            )
+            console.error(message=message, error=FileNotFoundError)
+
+        name_tests: list[str] = []
+        for name in names:
+            if name_tests:
+                name_tests.append("-o")
+            name_tests.extend(("-name", name))
+
+        # '-L' follows symbolic links, matching the file-transfer queries this search replaces, and '! -type l' then
+        # discards the links '-L' could not resolve, which those queries report as absent.
+        command = shlex.join(
+            [
+                "find",
+                "-L",
+                str(remote_path),
+                "-mindepth",
+                str(minimum_depth),
+                "-maxdepth",
+                str(maximum_depth),
+                "(",
+                *name_tests,
+                ")",
+                "!",
+                "-type",
+                "l",
+                "-print0",
+            ]
+        )
+
+        result = self.execute_command(command=command)
+        if result.return_code != 0:
+            message = (
+                f"Unable to search {remote_path} on the remote compute server. The search reached only part of the "
+                f"tree, so its answer would omit paths the server holds. "
+                f"{result.stderr.strip()[:_REPORTED_ERROR_CHARACTERS]}"
+            )
+            console.error(message=message, error=RuntimeError)
+
+        # Records are separated rather than terminated by the split, so the trailing separator yields one empty entry.
+        matches: list[Path] = []
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            match = Path(record)
+            # The search echoes the directory it was given back at the head of every record, so a record that does not
+            # carry it is output the search did not produce and the answer it belongs to cannot be trusted.
+            if not match.is_relative_to(remote_path):
+                message = (
+                    f"Unable to search {remote_path} on the remote compute server. The search reported the entry "
+                    f"'{record[:_REPORTED_ERROR_CHARACTERS]}', which does not sit under the searched directory, so "
+                    f"its answer carries output another program wrote."
+                )
+                console.error(message=message, error=RuntimeError)
+            matches.append(match)
+        return natsorted(matches)
+
     def execute_command(self, command: str) -> CommandResult:
         """Executes the specified command on the remote server and returns the result.
+
+        Notes:
+            Both streams are drained concurrently. They share the channel's flow-control window, so draining either to
+            its end before the other lets a command that fills that window with the stream nothing is reading block
+            forever, leaving this call waiting on output the command cannot finish writing.
 
         Args:
             command: The shell command to execute on the remote server.
@@ -589,9 +688,14 @@ class Server:
             A CommandResult instance containing stdout, stderr, and the return code of the executed command.
         """
         _, stdout, stderr = self._client.exec_command(command)
+        with ThreadPoolExecutor(max_workers=1) as reader:
+            pending_errors = reader.submit(stderr.read)
+            output = stdout.read()
+            errors = pending_errors.result()
+
         return CommandResult(
-            stdout=stdout.read().decode(),
-            stderr=stderr.read().decode(),
+            stdout=output.decode(),
+            stderr=errors.decode(),
             return_code=stdout.channel.recv_exit_status(),
         )
 
