@@ -16,6 +16,7 @@ from .pipelines import (
 )
 from .utilities import (
     DELAY_TIMER,
+    natural_sort,
     delay_terminal,
     multi_recording_dataset_name,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "delay_terminal",
     "merge_event_streams",
     "multi_recording_dataset_name",
+    "natural_sort",
     "resolve_openmp_runtime",
     "resolve_session_tracker_path",
     "verify_openmp_runtime",

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
@@ -57,7 +57,12 @@ def running_job(
     def _build(executor_id: str | None) -> GenericPendingJob:
         tracker_path = tmp_path.joinpath("tracker.yaml")
         write_tracker(path=tracker_path, jobs=[_TRACKER_JOB], running=[_TRACKER_JOB], executor_id=executor_id)
-        return _make_job(job_id=_tracker_job_id(), tracker_path=tracker_path)
+        return _make_job(
+            job_id=_tracker_job_id(),
+            tracker_path=tracker_path,
+            status=ProcessingStatus.RUNNING.name,
+            executor_id=executor_id or "",
+        )
 
     return _build
 
@@ -75,7 +80,7 @@ def scheduled_job(tmp_path: Path, write_tracker: Callable[..., ProcessingTracker
     """
     tracker_path = tmp_path.joinpath("tracker.yaml")
     write_tracker(path=tracker_path, jobs=[_TRACKER_JOB])
-    return _make_job(job_id=_tracker_job_id(), tracker_path=tracker_path)
+    return _make_job(job_id=_tracker_job_id(), tracker_path=tracker_path, status=ProcessingStatus.SCHEDULED.name)
 
 
 class _StubServer:
@@ -111,13 +116,21 @@ def _tracker_job_id() -> str:
     return ProcessingTracker.generate_job_id(job_name=_TRACKER_JOB[0], specifier=_TRACKER_JOB[1])
 
 
-def _make_job(job_id: str, tracker_path: Path, unit_path: str = _UNIT_PATH) -> GenericPendingJob:
-    """Builds a pending job pointing at a real tracker file.
+def _make_job(
+    job_id: str,
+    tracker_path: Path,
+    unit_path: str = _UNIT_PATH,
+    status: str = "",
+    executor_id: str = "",
+) -> GenericPendingJob:
+    """Builds a pending job carrying the outcome preparation read out of the host's state artifact.
 
     Args:
         job_id: The identifier the job is registered under in the tracker.
         tracker_path: The path to the tracker the job is recorded on.
         unit_path: The processing unit the job runs against.
+        status: The status the state artifact recorded for the job.
+        executor_id: The executor the same record named.
 
     Returns:
         The pending job.
@@ -135,6 +148,8 @@ def _make_job(job_id: str, tracker_path: Path, unit_path: str = _UNIT_PATH) -> G
             "memory_mb": 1024,
             "prerequisite_ids": [],
             "options": {},
+            "status": status,
+            "executor_id": executor_id,
         }
     )
 

@@ -25,6 +25,7 @@ from .jobs import write_project_jobs
 from ..shared_assets import (
     SESSION_PIPELINES,
     ProcessingPipelines,
+    natural_sort,
     resolve_session_tracker_path,
 )
 
@@ -53,7 +54,7 @@ Notes:
 """
 
 PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
-    "animal": pl.UInt64,
+    "animal": pl.String,
     "date": pl.Datetime,
     "session": pl.String,
     "session_path": pl.String,
@@ -70,6 +71,9 @@ PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataT
 """The column layout of the project manifest artifact, one row per session.
 
 Notes:
+    The ``animal`` column is text, matching the project job, dataset state, and project plan artifacts, so a reader
+    joins any pair of them on the animal and session key without casting either side.
+
     The ``complete`` column and the five pipeline columns each hold a 0 or a 1, so a reader applies one done or
     not-done convention across all six.
 """
@@ -105,8 +109,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
     Raises:
         FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
             without its descriptor file.
-        ValueError: If an unsupported session type is encountered, or if a session names an animal identifier that is
-            not an unsigned integer.
+        ValueError: If an unsupported session type is encountered.
         Timeout: If the manifest .feather file lock cannot be acquired within 20 seconds.
     """
     if not project_directory.exists():
@@ -199,26 +202,12 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 # row, so a reader pages it one job at a time.
                 job_rows.extend(session_jobs)
 
-            # The manifest stores the animal identifier as an unsigned integer, so a non-numeric one is named here
-            # rather than left to abort the whole generation through the conversion's own message.
-            non_numeric_animals = natsorted({str(animal) for animal in manifest["animal"] if not str(animal).isdigit()})
-            if non_numeric_animals:
-                message = (
-                    f"Unable to generate the project manifest file for the '{project_directory.stem}' project. The "
-                    f"manifest records every animal identifier as an unsigned integer, but the project holds the "
-                    f"non-numeric identifier(s) {non_numeric_animals}."
-                )
-                console.error(message=message, error=ValueError)
-
-            # Converts animal IDs from strings to integers for proper numeric sorting.
-            manifest["animal"] = [int(animal) for animal in manifest["animal"]]
-
             manifest_frame = pl.DataFrame(data=manifest, schema=PROJECT_MANIFEST_SCHEMA, strict=False)
 
-            # Sorts the DataFrame by animal, then session. Animal IDs are monotonically increasing per Sollertia
-            # standards and session names are acquisition timestamps, so rows are grouped by animal and ordered
-            # chronologically within each animal group.
-            sorted_manifest = manifest_frame.sort(by=["animal", "session"])
+            # Groups the rows by animal and orders each animal's sessions chronologically, since session names are
+            # acquisition timestamps. The animal identifier is text, so the ordering is natural rather than
+            # lexicographic and animal 2 precedes animal 10.
+            sorted_manifest = natural_sort(frame=manifest_frame, by=["animal", "session"])
 
             # The job artifact is published first, because the two renames are ordered rather than simultaneous and a
             # reader takes no lock. Landing the detail before the summary leaves the reader at worst holding job rows
@@ -277,7 +266,7 @@ class ProjectManifest:
         ):
             console.echo(message=str(self._data), raw=True)
 
-    def print_summary(self, animal: int | None = None) -> None:
+    def print_summary(self, animal: str | None = None) -> None:
         """Prints a summary view of the manifest file to the terminal, excluding the experimenter notes data for
         each session.
 
@@ -309,7 +298,7 @@ class ProjectManifest:
         data_frame = self._display_frame().select(summary_columns)
 
         if animal is not None:
-            data_frame = data_frame.filter(pl.col("animal") == int(animal))
+            data_frame = data_frame.filter(pl.col("animal") == animal)
 
         with pl.Config(
             set_tbl_rows=-1,
@@ -320,7 +309,7 @@ class ProjectManifest:
         ):
             console.echo(message=str(data_frame), raw=True)
 
-    def print_notes(self, animal: int | None = None) -> None:
+    def print_notes(self, animal: str | None = None) -> None:
         """Prints the animal ID, per-animal session index, session date, session type, acquisition system, and
         experimenter notes data for each project's session to the terminal.
 
@@ -335,7 +324,7 @@ class ProjectManifest:
         data_frame = self._display_frame().select(["animal", "session", "date", "type", "system", "notes"])
 
         if animal is not None:
-            data_frame = data_frame.filter(pl.col("animal") == int(animal))
+            data_frame = data_frame.filter(pl.col("animal") == animal)
 
         with pl.Config(
             set_tbl_rows=-1,
@@ -353,13 +342,13 @@ class ProjectManifest:
         return self._data
 
     @property
-    def animals(self) -> tuple[int, ...]:
-        """Returns the unique identifiers for each animal participating in the project."""
-        return tuple(self._data.select("animal").unique().sort("animal").to_series().to_list())
+    def animals(self) -> tuple[str, ...]:
+        """Returns the unique identifiers for each animal participating in the project, in natural order."""
+        return tuple(natsorted(self._data.select("animal").unique().to_series().to_list()))
 
     def get_sessions(
         self,
-        animal: int | None = None,
+        animal: str | None = None,
         *,
         exclude_incomplete: bool = True,
     ) -> tuple[str, ...]:
@@ -395,7 +384,7 @@ class ProjectManifest:
         """
         return self._data.filter(pl.col("session") == session)
 
-    def get_animal_for_session(self, session: str) -> int:
+    def get_animal_for_session(self, session: str) -> str:
         """Returns the unique identifier of the animal that participated in the specified session.
 
         Args:
@@ -417,7 +406,7 @@ class ProjectManifest:
             )
             console.error(message=message, error=ValueError)
 
-        return int(data_frame.select("animal").item())
+        return str(data_frame.select("animal").item())
 
     def get_system_for_session(self, session: str) -> str:
         """Returns the data acquisition system used to acquire the specified session's data.
@@ -492,14 +481,14 @@ class ProjectManifest:
         The stored ``session`` and ``date`` columns are left untouched on the underlying data, so this transformation
         only affects the printed views and never the identifiers the other query methods resolve against.
         """
-        return self._data.sort(by=["animal", "session"]).with_columns(
+        return natural_sort(frame=self._data, by=["animal", "session"]).with_columns(
             pl.int_range(1, pl.len() + 1).over("animal").alias("session"),
             pl.col("date").dt.truncate("1s").alias("date"),
         )
 
     def _get_filtered_sessions(
         self,
-        animal: int | None = None,
+        animal: str | None = None,
         *,
         exclude_incomplete: bool = True,
     ) -> tuple[str, ...]:
@@ -531,8 +520,7 @@ class ProjectManifest:
         if exclude_incomplete:
             data = data.filter(pl.col("complete") == 1)
 
-        sessions = data.select("session").sort("session").to_series().to_list()
-        return tuple(sessions)
+        return tuple(natsorted(data.select("session").to_series().to_list()))
 
 
 def _build_session_row(

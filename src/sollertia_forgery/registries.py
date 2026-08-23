@@ -14,6 +14,7 @@ from .mesoscope_vr import (
     RUNTIME_SOURCE_ID,
     MESOSCOPE_ADMISSION_PIPELINES,
     MESOSCOPE_COLUMN_DESCRIPTIONS,
+    MESOSCOPE_MULTI_RECORDING_SESSION_TYPES,
     parse_lick,
     parse_brake,
     parse_valve,
@@ -55,6 +56,7 @@ __all__ = [
     "resolve_microcontroller_event_codes",
     "resolve_microcontroller_parsers",
     "resolve_multi_recording_configuration_resolver",
+    "resolve_multi_recording_session_types",
     "resolve_runtime_binding",
     "resolve_single_recording_configuration_resolver",
     "resolve_two_photon_data_locator",
@@ -190,6 +192,18 @@ configuration resolvers. The agnostic two-photon and forging pipelines obtain a 
 these resolvers, so each system decides for itself how its configuration is derived.
 """
 
+_MULTI_RECORDING_SESSION_TYPE_REGISTRY: dict[AcquisitionSystems, frozenset[SessionTypes]] = {
+    AcquisitionSystems.MESOSCOPE_VR: MESOSCOPE_MULTI_RECORDING_SESSION_TYPES,
+}
+"""Maps each acquisition system to the session types whose animals it tracks across recordings.
+
+Notes:
+    The multi-recording resolver decides the same question per session, but answering it needs a loaded session and
+    therefore the source data. Declaring the session types separately lets the forging pipeline read the answer from a
+    dataset's own recorded type, which is what keeps a dataset growing while part of its source data lives elsewhere.
+    A system that tracks nothing across recordings declares an empty set.
+"""
+
 _RUNTIME_PARSER_REGISTRY: dict[AcquisitionSystems, tuple[str, RuntimeParser]] = {
     AcquisitionSystems.MESOSCOPE_VR: (RUNTIME_SOURCE_ID, parse_runtime),
 }
@@ -307,6 +321,28 @@ def resolve_multi_recording_configuration_resolver(
         ValueError: If the acquisition system is unknown.
     """
     return _CINDRA_CONFIGURATION_REGISTRY[_resolve_system(system=system)].resolve_multi_recording
+
+
+def resolve_multi_recording_session_types(system: str | AcquisitionSystems) -> frozenset[SessionTypes]:
+    """Resolves the session types the target acquisition system tracks across recordings.
+
+    Notes:
+        Answers whether a session type carries cross-recording tracking without loading a session, which the
+        multi-recording configuration resolver needs one for. A caller holding a dataset therefore reads the answer
+        from the dataset's own recorded session type rather than from its animals' source data.
+
+    Args:
+        system: The acquisition system that recorded the dataset being forged, for example the value carried by
+            ``DatasetData.acquisition_system``.
+
+    Returns:
+        The session types whose animals the system registers against each other, which is empty for a system that
+        performs no cross-recording tracking.
+
+    Raises:
+        ValueError: If the acquisition system is unknown.
+    """
+    return _MULTI_RECORDING_SESSION_TYPE_REGISTRY[_resolve_system(system=system)]
 
 
 def resolve_microcontroller_event_codes(system: str | AcquisitionSystems) -> dict[tuple[int, int], tuple[int, ...]]:
@@ -478,6 +514,7 @@ def _assert_registry_coverage() -> None:
         ("_MICROCONTROLLER_EVENT_CODE_REGISTRY", frozenset(_MICROCONTROLLER_EVENT_CODE_REGISTRY)),
         ("_MICROCONTROLLER_ELIGIBILITY_REGISTRY", frozenset(_MICROCONTROLLER_ELIGIBILITY_REGISTRY)),
         ("_CINDRA_CONFIGURATION_REGISTRY", frozenset(_CINDRA_CONFIGURATION_REGISTRY)),
+        ("_MULTI_RECORDING_SESSION_TYPE_REGISTRY", frozenset(_MULTI_RECORDING_SESSION_TYPE_REGISTRY)),
         ("_FORGING_ADMISSION_REGISTRY", frozenset(_FORGING_ADMISSION_REGISTRY)),
         ("_MICROCONTROLLER_PARSER_REGISTRY", microcontroller_systems),
     ):
@@ -507,6 +544,21 @@ def _assert_registry_coverage() -> None:
                 f"Unable to validate donor-registry coverage for _MICROCONTROLLER_EVENT_CODE_REGISTRY. Every module "
                 f"registered in _MICROCONTROLLER_PARSER_REGISTRY must also declare the event codes its parser reads, "
                 f"but {target_system.name} does not declare codes for the following modules: {module_names}."
+            )
+            console.error(message=message, error=RuntimeError)
+
+    # A system tracks across recordings only the session types it records, so a declaration naming a type outside the
+    # shared assets library's own is a typo or a stale entry rather than a type this library knows more about.
+    for target_system, tracked_types in sorted(
+        _MULTI_RECORDING_SESSION_TYPE_REGISTRY.items(), key=lambda item: item[0].name
+    ):
+        untracked_types = sorted(tracked_types - SYSTEM_SESSION_TYPES[target_system])
+        if untracked_types:
+            type_names = ", ".join(session_type.value for session_type in untracked_types)
+            message = (
+                f"Unable to validate donor-registry coverage for _MULTI_RECORDING_SESSION_TYPE_REGISTRY. Every "
+                f"session type a system tracks across recordings must be a session type that system records, but "
+                f"{target_system.name} declares the following unrecorded type(s): {type_names}."
             )
             console.error(message=message, error=RuntimeError)
 

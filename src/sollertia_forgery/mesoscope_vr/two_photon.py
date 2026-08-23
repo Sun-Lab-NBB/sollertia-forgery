@@ -36,6 +36,17 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 
+MESOSCOPE_MULTI_RECORDING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({SessionTypes.MESOSCOPE_EXPERIMENT})
+"""The Mesoscope-VR session types whose animals are tracked across recordings.
+
+Notes:
+    Cross-recording cell tracking needs calcium imaging, which only an experiment session records, so every other
+    session type resolves no multi-recording configuration. Declaring the set alongside the resolver lets a caller
+    answer whether a dataset needs cross-recording plans at all from the dataset's own recorded session type, without
+    loading a session to be told the same thing.
+"""
+
+
 class _CalciumIndicator(StrEnum):
     """Enumerates the calcium indicators the Mesoscope-VR cindra configurations are tuned for."""
 

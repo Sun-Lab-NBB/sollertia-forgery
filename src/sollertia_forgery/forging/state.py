@@ -18,6 +18,7 @@ from .pipeline import (
     MULTIDAY_EXTRACTION_JOB_NAME,
     forging_tracker_path,
 )
+from ..shared_assets import natural_sort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,8 +110,10 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
 
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         rows = _build_job_rows(dataset=dataset)
-        frame = pl.DataFrame(data=rows, schema=DATASET_STATE_SCHEMA, strict=False).sort(
-            by=["animal", "session", "job_name"], nulls_last=True
+        frame = natural_sort(
+            frame=pl.DataFrame(data=rows, schema=DATASET_STATE_SCHEMA, strict=False),
+            by=["animal", "session", "job_name"],
+            nulls_last=True,
         )
         # Published through a temporary file renamed over the destination, which also creates the destination's
         # parent. A reader of the artifact takes no lock, so an in-place rewrite would let it read a torn file.

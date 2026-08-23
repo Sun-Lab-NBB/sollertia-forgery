@@ -115,7 +115,7 @@ def test_generation_records_one_row_per_session_with_its_pipeline_state(
     frame = read_manifest(project_root=project_root)
     assert dict(frame.schema) == PROJECT_MANIFEST_SCHEMA
     # The rows are ordered by animal, so the experiment animal precedes the training animal.
-    assert frame.get_column("animal").to_list() == [305, 321]
+    assert frame.get_column("animal").to_list() == ["305", "321"]
 
     processed = frame.filter(pl.col("session") == experiment_session.session_name).to_dicts()[0]
     untouched = frame.filter(pl.col("session") == training_session.session_name).to_dicts()[0]
@@ -222,14 +222,14 @@ def test_a_session_type_without_a_descriptor_names_the_supported_types(
         generate_project_manifest(project_directory=project_root)
 
 
-def test_a_non_numeric_animal_identifier_names_itself_rather_than_the_conversion(
+def test_a_non_numeric_animal_identifier_is_recorded_as_the_marker_carries_it(
     project_root: Path,
     training_session: SessionData,
 ) -> None:
-    """The manifest stores the animal identifier as an unsigned integer, and the marker carries it as free text.
+    """The manifest records the animal identifier as text, matching every other artifact that carries one.
 
-    An identifier the acquisition side accepts can therefore reach a conversion the schema requires, so the walk names
-    the offending identifier rather than aborting the whole project on the conversion's own message.
+    The marker holds the identifier as free text, so a project whose animal directories are not plain numbers is
+    snapshotted rather than refused at a conversion the schema no longer needs.
     """
     marker_path = training_session.raw_data_path.joinpath("session_data.yaml")
     recorded = marker_path.read_text()
@@ -237,8 +237,10 @@ def test_a_non_numeric_animal_identifier_names_itself_rather_than_the_conversion
     assert rewritten != recorded
     marker_path.write_text(rewritten)
 
-    with pytest.raises(ValueError, match=r"non-numeric identifier\(s\) \['305-repeat'\]"):
-        generate_project_manifest(project_directory=project_root)
+    generate_project_manifest(project_directory=project_root)
+
+    frame = pl.read_ipc(source=project_manifest_path(project_directory=project_root))
+    assert "305-repeat" in frame.get_column("animal").to_list()
 
 
 def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
@@ -322,7 +324,7 @@ def test_the_reader_reports_how_many_sessions_it_holds(manifest: ProjectManifest
 def test_the_reader_exposes_its_frame_and_its_animals(manifest: ProjectManifest) -> None:
     """The frame is the stored artifact and the animals are its sorted unique subjects."""
     assert manifest.data.height == 2
-    assert manifest.animals == (305, 321)
+    assert manifest.animals == ("305", "321")
 
 
 def test_every_session_is_listed_for_the_whole_project(
@@ -336,7 +338,7 @@ def test_an_animal_filter_narrows_the_listing_to_its_sessions(
     manifest: ProjectManifest, experiment_session: SessionData
 ) -> None:
     """Naming an animal returns only the sessions that animal participated in."""
-    assert manifest.get_sessions(animal=305) == (experiment_session.session_name,)
+    assert manifest.get_sessions(animal="305") == (experiment_session.session_name,)
 
 
 def test_incomplete_sessions_are_excluded_unless_they_are_asked_for(
@@ -358,7 +360,7 @@ def test_incomplete_sessions_are_excluded_unless_they_are_asked_for(
 def test_listing_an_unknown_animal_names_the_available_ones(manifest: ProjectManifest) -> None:
     """A mistyped animal reports the project's roster rather than returning an empty tuple."""
     with pytest.raises(ValueError, match="Unable to filter sessions using animal ID '999'"):
-        manifest.get_sessions(animal=999)
+        manifest.get_sessions(animal="999")
 
 
 def test_a_session_row_carries_every_manifest_column(
@@ -369,14 +371,14 @@ def test_a_session_row_carries_every_manifest_column(
 
     assert row.height == 1
     assert row.columns == list(PROJECT_MANIFEST_SCHEMA)
-    assert row.select("animal").item() == 305
+    assert row.select("animal").item() == "305"
 
 
 def test_a_session_resolves_to_the_animal_that_recorded_it(
     manifest: ProjectManifest, training_session: SessionData
 ) -> None:
     """The manifest is the lookup that maps a session name back to its subject."""
-    assert manifest.get_animal_for_session(session=training_session.session_name) == 321
+    assert manifest.get_animal_for_session(session=training_session.session_name) == "321"
 
 
 def test_an_unknown_session_lookup_names_the_available_sessions(manifest: ProjectManifest) -> None:
@@ -407,7 +409,7 @@ def test_the_summary_counts_what_each_pipeline_finished(
     assert summary["total_sessions"] == 2
     assert summary["total_rows"] == 2
     assert summary["total_animals"] == 2
-    assert summary["animals"] == [305, 321]
+    assert summary["animals"] == ["305", "321"]
     assert summary["complete_count"] == 2
     assert summary["session_types"] == {str(SessionTypes.MESOSCOPE_EXPERIMENT): 1, str(SessionTypes.RUN_TRAINING): 1}
     assert summary["acquisition_systems"] == {training_session.acquisition_system: 2}
@@ -460,7 +462,7 @@ def test_the_summary_view_indexes_sessions_per_animal(
 
 def test_the_summary_view_honors_an_animal_filter(manifest: ProjectManifest, reported_messages: list[str]) -> None:
     """Naming an animal prints that animal's rows alone."""
-    manifest.print_summary(animal=305)
+    manifest.print_summary(animal="305")
 
     printed = reported_messages[0]
     assert "305" in printed
@@ -478,7 +480,7 @@ def test_the_notes_view_reports_the_experimenter_text(manifest: ProjectManifest,
 
 def test_the_notes_view_honors_an_animal_filter(manifest: ProjectManifest, reported_messages: list[str]) -> None:
     """The notes view filters by animal the same way the summary view does."""
-    manifest.print_notes(animal=321)
+    manifest.print_notes(animal="321")
 
     printed = reported_messages[0]
     assert "321" in printed

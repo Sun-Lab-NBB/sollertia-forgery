@@ -28,6 +28,7 @@ from sollertia_shared_assets import (
     SessionData,
     DatasetFiles,
     RawDataFiles,
+    SessionTypes,
     ProcessingTrackers,
 )
 from ataraxis_data_structures import (
@@ -38,7 +39,11 @@ from ataraxis_data_structures import (
 )
 
 from .dataset import resolve_dataset
-from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
+from ..registries import (
+    resolve_forging_assembly_worker,
+    resolve_multi_recording_session_types,
+    resolve_multi_recording_configuration_resolver,
+)
 from ..shared_assets import verify_openmp_runtime, multi_recording_dataset_name
 
 if TYPE_CHECKING:
@@ -124,10 +129,14 @@ def define_forging_dataset(
         session set makes every stage outstanding again. The tracked jobs of a session the animal no longer holds
         fall outside the resulting universe and are discarded when the next pipeline run aligns the tracker.
 
-        The animals this call adds or rebuilds have their multi-recording configuration materialized, alongside any the
-        dataset holds without one on disk. An animal that already carries its configuration is left alone, so extending
-        a dataset reads no source data for it and an animal whose sessions have moved off this machine does not block
-        the growth of a dataset it was already forged into.
+        The animals this call adds or rebuilds have their multi-recording configuration materialized, alongside any
+        the dataset holds without one whose sessions are still on this machine. Whether a configuration is needed at
+        all follows from the dataset's recorded session type, so a dataset of sessions the system tracks nothing
+        across reads no source data here.
+
+        An animal that already carries its configuration is left alone, and one whose sessions have moved off this
+        machine is passed over, so a dataset keeps growing while part of its source data lives elsewhere and a large
+        project is forged in passes.
 
     Args:
         name: The unique name of the dataset.
@@ -173,10 +182,20 @@ def define_forging_dataset(
     # Membership in the dataset marker is not evidence that a configuration was written, because the marker is
     # committed before the configurations are. An animal the marker holds but the disk does not is therefore
     # materialized again, which is what makes a definition that failed partway self-healing on the next identical call.
+    #
+    # Whether an animal needs a configuration at all is a property of the dataset's own recorded session type, so a
+    # dataset the system tracks nothing across backfills nothing and reads no source data. Materializing also reads
+    # the animal's sessions, so the backfill covers the animals whose sessions are still here and leaves an animal
+    # whose data has moved off as it stands, which is what lets a large project be forged in passes.
+    tracked_across_recordings = SessionTypes(dataset.session_type) in resolve_multi_recording_session_types(
+        system=dataset.acquisition_system
+    )
     unconfigured_animals = frozenset(
         dataset_animal.animal
         for dataset_animal in dataset.animals
-        if not dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME).is_file()
+        if tracked_across_recordings
+        and not dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME).is_file()
+        and project_root.joinpath(dataset_animal.animal).is_dir()
     )
     materialize_multiday_plan(
         dataset=dataset,

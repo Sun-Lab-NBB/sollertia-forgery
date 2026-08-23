@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from ataraxis_data_structures import atomic_write
 
+from ..shared_assets import natural_sort
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -71,8 +73,10 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
         The path the artifact was written to.
     """
     jobs_path = project_jobs_path(project_directory=project_directory)
-    frame = pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False).sort(
-        by=["animal", "session", "pipeline", "job_name", "specifier"], nulls_last=True
+    frame = natural_sort(
+        frame=pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False),
+        by=["animal", "session", "pipeline", "job_name", "specifier"],
+        nulls_last=True,
     )
     with atomic_write(file_path=jobs_path, binary=True) as file:
         frame.write_ipc(file=file, compression="uncompressed")

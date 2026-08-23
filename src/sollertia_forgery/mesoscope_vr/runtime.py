@@ -365,9 +365,15 @@ def _decompose_multiple_cue_sequences_into_trials(
     total_cue_length = sum(len(sequence) for sequence in cue_sequences)
     max_trials = total_cue_length // min_motif_length + 1
 
+    # The animal enters each corridor already 'cue_offset_cm' into its first cue, so it completes a trial after
+    # travelling that much less than the trial's corridor length. Opening the accumulator at minus the offset makes
+    # every distance below a distance travelled, which is the frame the encoder reports and the frame the corridor
+    # swap snapshots compared against below are recorded in.
+    cue_offset = float(task_template.vr_environment.cue_offset_cm)
+
     all_trial_indices: list[int] = []
     all_trial_distances: list[float] = []
-    cumulative_distance = 0.0
+    cumulative_distance = -cue_offset
 
     for sequence_index, cue_sequence in enumerate(cue_sequences):
         trial_indices_array, trial_count, failure_position = _decompose_cue_sequence_into_trials(
@@ -404,7 +410,7 @@ def _decompose_multiple_cue_sequences_into_trials(
                         all_trial_indices.append(trial_index)
                         all_trial_distances.append(float(breakpoint_distance))
 
-                    cumulative_distance = breakpoint_distance
+                    cumulative_distance = breakpoint_distance - cue_offset
                     break
 
             all_trial_indices.append(trial_index)
@@ -575,6 +581,10 @@ def _process_trial_sequence(
         trial_geometry = trial_geometries[trial]
         trial_start_distances_list.append(previous_trial_end_distance)
 
+        # Captured before the cue walk below consumes the flag, since the trigger zone is placed against the corridor
+        # this trial was entered into rather than against the one the walk leaves behind.
+        entered_mid_cue = apply_offset_to_next_cue
+
         actual_trial_distance = trial_distances[index] - previous_trial_end_distance
         trial_cue_sequence = trial_geometry.cue_sequence
         distance_within_trial = np.float64(0)
@@ -604,8 +614,11 @@ def _process_trial_sequence(
 
         trigger_start_relative = trial_geometry.stimulus_trigger_zone_start_cm
         trigger_end_relative = trial_geometry.stimulus_trigger_zone_end_cm
-        trigger_start_absolute = previous_trial_end_distance + trigger_start_relative
-        trigger_end_absolute = previous_trial_end_distance + trigger_end_relative
+        # A trial entered partway into its first cue is shorter than its corridor by that offset, so every position
+        # the template declares against the corridor is reached that much earlier in the distance travelled.
+        entry_offset = cue_offset if entered_mid_cue else np.float64(0)
+        trigger_start_absolute = previous_trial_end_distance + trigger_start_relative - entry_offset
+        trigger_end_absolute = previous_trial_end_distance + trigger_end_relative - entry_offset
 
         if trigger_start_absolute <= trial_distances[index]:
             trigger_zone_starts_list.append(trigger_start_absolute)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from dataclasses import field, dataclass
 
-from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus
 
 from .ledger import read_ledger
 from ..server import TERMINAL_JOB_STATUSES
@@ -71,8 +71,9 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
     Notes:
         Two records can show that a job already has an allocation, and they cover different windows. The submission
         ledger names allocations this host submitted, including ones still queued, but it knows nothing about a batch
-        submitted from another machine. A tracker's executor identifier travels with the data and so covers every
-        submitter, but it only appears once the allocation starts running. Both are therefore consulted.
+        submitted from another machine. The executor identifier a job's tracker recorded travels with the data and so
+        covers every submitter, but it only appears once the allocation starts running. Both are therefore consulted,
+        the second through the batch's own descriptors, which preparation filled from the host's state artifact.
 
         Whichever allocation the two sources name is then queried. A job whose allocation has yet to reach a terminal
         state is adopted rather than submitted again. A job is dispatched with its record cleared when its allocation
@@ -100,12 +101,17 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
 
 
 def _resolve_claimed_allocations(jobs: Sequence[GenericPendingJob]) -> dict[tuple[str, str], str]:
-    """Resolves the scheduler allocation already claiming each job, from the ledger and from the trackers.
+    """Resolves the scheduler allocation already claiming each job, from the ledger and from the batch's own records.
 
     Notes:
-        The ledger is consulted first, because it names an allocation from the moment it is submitted while a tracker
-        names one only once it starts. A tracker entry is read for the jobs the ledger does not cover, which is how an
-        allocation submitted from another machine is still found.
+        The executor a job's tracker recorded is read off the job descriptor rather than out of the tracker itself.
+        Preparation regenerates the host's state artifact from its trackers and reads that artifact, so every recorded
+        executor has already crossed into the batch. Opening a tracker here would read the same fact a second time,
+        and for a remote batch it would have to cross the transport while the batch runs.
+
+        Where both sources name an allocation the tracker's wins, since an executor appears only once the allocation
+        starts and therefore describes a later moment than the ledger's record of submitting it. That is what lets an
+        allocation another machine submitted be found, since this host's ledger knows nothing about it.
 
     Args:
         jobs: The jobs to resolve claims for.
@@ -120,16 +126,10 @@ def _resolve_claimed_allocations(jobs: Sequence[GenericPendingJob]) -> dict[tupl
         for submission in batch.submissions
     }
 
-    outstanding = [job for job in jobs if job.dispatch_key not in claimed]
-    trackers = {job.tracker_path for job in outstanding if job.tracker_path.is_file()}
-    recorded = {tracker_path: ProcessingTracker(file_path=tracker_path).snapshot() for tracker_path in trackers}
-
-    for job in outstanding:
-        job_state = recorded.get(job.tracker_path, {}).get(job.job_id)
-        if job_state is None or job_state.status is not ProcessingStatus.RUNNING:
+    for job in jobs:
+        if job.status != ProcessingStatus.RUNNING.name:
             continue
-        executor_id = job_state.executor_id or ""
-        scheme, _, allocation = executor_id.partition(":")
+        scheme, _, allocation = job.executor_id.partition(":")
         if scheme == _SLURM_EXECUTOR_SCHEME and allocation:
             claimed[job.dispatch_key] = allocation
 

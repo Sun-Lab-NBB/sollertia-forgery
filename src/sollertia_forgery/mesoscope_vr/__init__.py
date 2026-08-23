@@ -4,6 +4,7 @@ from .forging import MESOSCOPE_ADMISSION_PIPELINES, assemble_mesoscope_session
 from .runtime import RUNTIME_SOURCE_ID, parse_runtime
 from .metadata import MESOSCOPE_COLUMN_DESCRIPTIONS, DatasetColumn
 from .two_photon import (
+    MESOSCOPE_MULTI_RECORDING_SESSION_TYPES,
     locate_two_photon_data,
     resolve_multi_recording_configuration,
     resolve_single_recording_configuration,
@@ -25,6 +26,7 @@ from .microcontrollers import (
 __all__ = [
     "MESOSCOPE_ADMISSION_PIPELINES",
     "MESOSCOPE_COLUMN_DESCRIPTIONS",
+    "MESOSCOPE_MULTI_RECORDING_SESSION_TYPES",
     "RUNTIME_SOURCE_ID",
     "DatasetColumn",
     "PupilColumn",
