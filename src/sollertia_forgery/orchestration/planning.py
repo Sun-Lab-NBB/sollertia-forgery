@@ -16,7 +16,7 @@ from ataraxis_data_structures import YamlConfig, ProcessingTracker, atomic_write
 
 from ..forging import discover_project_datasets
 from .dispatch import resolve_dispatch, resolve_job_cores
-from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines
+from ..shared_assets import SESSION_PIPELINES, ProcessingPipelines, natural_sort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -279,8 +279,10 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     plan_path = project_plan_path(project_directory=project_directory)
     lock = FileLock(str(plan_path.with_suffix(plan_path.suffix + ".lock")))
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
-        frame = pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False).sort(
-            by=["unit_kind", "animal", "session", "dataset", "pipeline", "job_name", "specifier"], nulls_last=True
+        frame = natural_sort(
+            frame=pl.DataFrame(data=rows, schema=PROJECT_PLAN_SCHEMA, strict=False),
+            by=["unit_kind", "animal", "session", "dataset", "pipeline", "job_name", "specifier"],
+            nulls_last=True,
         )
         # Published through a temporary file renamed over the destination. The lock serializes the writers, while
         # the readers memory-map the projection without taking it, so only the rename keeps them off a torn file.

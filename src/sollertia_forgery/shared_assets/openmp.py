@@ -183,6 +183,14 @@ def resolve_openmp_runtime(
         return _summarize_request(status=OpenMPStatus.UNRESOLVED, reason=reason, searched=candidates)
 
     resolved_link = link_path if link_path is not None else _LINK_DIRECTORY / _OPENMP_LIBRARY_NAME
+    if _link_would_replace_runtime(runtime_path=resolved_runtime, link_path=resolved_link):
+        message = (
+            f"Unable to link the OpenMP runtime at {resolved_runtime}. The runtime already sits where the link would "
+            f"be written, so linking it would replace the runtime itself with a link pointing at nothing, leaving the "
+            f"host with no runtime at all. The runtime is already on the loader's search path, so no link is needed."
+        )
+        console.error(message=message, error=RuntimeError)
+
     if not execute:
         return _summarize_request(
             status=OpenMPStatus.PREVIEWED,
@@ -278,8 +286,34 @@ def _discover_openmp_runtime(candidates: tuple[Path, ...]) -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
+def _link_would_replace_runtime(runtime_path: Path, link_path: Path) -> bool:
+    """Determines whether writing the link would destroy the runtime it is meant to point at.
+
+    Notes:
+        A link path that already holds a symbolic link is one this call replaces, which is the ordinary case of
+        re-pointing a stale link. A link path that holds the runtime file itself is not, since replacing it would
+        remove the only copy and leave a link resolving to nothing.
+
+    Args:
+        runtime_path: The absolute path to the OpenMP runtime the link would point at.
+        link_path: The absolute path the link would be written to.
+
+    Returns:
+        True when the link path holds the runtime itself rather than a link to it, and False otherwise.
+    """
+    if link_path.is_symlink() or not link_path.exists():
+        return False
+    return link_path.samefile(runtime_path)
+
+
 def _link_openmp_runtime(runtime_path: Path, link_path: Path) -> None:
     """Creates the symbolic link that places the OpenMP runtime on the loader's default search path.
+
+    Notes:
+        The link is created under a temporary name in the destination's own directory and renamed onto the
+        destination, which is how this stack publishes every file it replaces. The rename swaps the two in one step,
+        so a failure partway leaves whatever the destination already held rather than removing it first and then
+        failing to write the replacement.
 
     Args:
         runtime_path: The absolute path to the OpenMP runtime the link points at.
@@ -288,11 +322,14 @@ def _link_openmp_runtime(runtime_path: Path, link_path: Path) -> None:
     Raises:
         RuntimeError: If the link directory cannot be created or the link cannot be written.
     """
+    temporary_path = link_path.with_name(f".{link_path.name}.{os.getpid()}.tmp")
     try:
         link_path.parent.mkdir(parents=True, exist_ok=True)
-        link_path.unlink(missing_ok=True)
-        link_path.symlink_to(target=runtime_path)
+        temporary_path.unlink(missing_ok=True)
+        temporary_path.symlink_to(target=runtime_path)
+        temporary_path.replace(target=link_path)
     except OSError as error:
+        temporary_path.unlink(missing_ok=True)
         message = (
             f"Unable to link the OpenMP runtime into {link_path.parent}. Writing the link requires permission to "
             f"modify that directory, which usually means running the command through sudo. The loader reported: "

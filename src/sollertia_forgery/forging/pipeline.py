@@ -7,8 +7,9 @@ from __future__ import annotations
 import shutil
 from typing import TYPE_CHECKING
 from contextlib import nullcontext
+from collections import deque
 from dataclasses import dataclass
-from concurrent.futures import Future, ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 
 from cindra import (
     MULTI_RECORDING_CONFIGURATION_FILENAME,
@@ -27,6 +28,7 @@ from sollertia_shared_assets import (
     SessionData,
     DatasetFiles,
     RawDataFiles,
+    SessionTypes,
     ProcessingTrackers,
 )
 from ataraxis_data_structures import (
@@ -37,7 +39,11 @@ from ataraxis_data_structures import (
 )
 
 from .dataset import resolve_dataset
-from ..registries import resolve_forging_assembly_worker, resolve_multi_recording_configuration_resolver
+from ..registries import (
+    resolve_forging_assembly_worker,
+    resolve_multi_recording_session_types,
+    resolve_multi_recording_configuration_resolver,
+)
 from ..shared_assets import verify_openmp_runtime, multi_recording_dataset_name
 
 if TYPE_CHECKING:
@@ -123,10 +129,14 @@ def define_forging_dataset(
         session set makes every stage outstanding again. The tracked jobs of a session the animal no longer holds
         fall outside the resulting universe and are discarded when the next pipeline run aligns the tracker.
 
-        Only the animals this call adds or rebuilds have their multi-recording configuration materialized, because an
-        animal already in the dataset keeps the configuration written when it was added. Extending a dataset therefore
-        reads no source data for the animals it already holds, so an animal whose sessions have moved off this machine
-        does not block the growth of a dataset it was already forged into.
+        The animals this call adds or rebuilds have their multi-recording configuration materialized, alongside any
+        the dataset holds without one whose sessions are still on this machine. Whether a configuration is needed at
+        all follows from the dataset's recorded session type, so a dataset of sessions the system tracks nothing
+        across reads no source data here.
+
+        An animal that already carries its configuration is left alone, and one whose sessions have moved off this
+        machine is passed over, so a dataset keeps growing while part of its source data lives elsewhere and a large
+        project is forged in passes.
 
     Args:
         name: The unique name of the dataset.
@@ -168,11 +178,30 @@ def define_forging_dataset(
     )
 
     resolved_animals = frozenset(dataset_animal.animal for dataset_animal in dataset.animals)
+
+    # Membership in the dataset marker is not evidence that a configuration was written, because the marker is
+    # committed before the configurations are. An animal the marker holds but the disk does not is therefore
+    # materialized again, which is what makes a definition that failed partway self-healing on the next identical call.
+    #
+    # Whether an animal needs a configuration at all is a property of the dataset's own recorded session type, so a
+    # dataset the system tracks nothing across backfills nothing and reads no source data. Materializing also reads
+    # the animal's sessions, so the backfill covers the animals whose sessions are still here and leaves an animal
+    # whose data has moved off as it stands, which is what lets a large project be forged in passes.
+    tracked_across_recordings = SessionTypes(dataset.session_type) in resolve_multi_recording_session_types(
+        system=dataset.acquisition_system
+    )
+    unconfigured_animals = frozenset(
+        dataset_animal.animal
+        for dataset_animal in dataset.animals
+        if tracked_across_recordings
+        and not dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME).is_file()
+        and project_root.joinpath(dataset_animal.animal).is_dir()
+    )
     materialize_multiday_plan(
         dataset=dataset,
         project_root=project_root,
         display_progress=display_progress,
-        animals=(resolved_animals - existing_animals) | frozenset(recreate_animals),
+        animals=(resolved_animals - existing_animals) | frozenset(recreate_animals) | unconfigured_animals,
     )
 
     if recreate_animals:
@@ -241,6 +270,11 @@ def run_forging_pipeline(
             combined metadata archives, or names recording paths that carry no unique identifying component. It is
             also raised when the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # Every worker count below one means the same thing throughout this library, which is every available core. The
+    # cross-recording stages are dispatched into cindra, which spells that request as -1 and rejects every other
+    # non-positive value, so the argument is normalized once here rather than read two ways by the two stages.
+    workers = workers if workers > 0 else -1
+
     # The cross-recording stages reach a parallelized kernel, so a host whose threading layer has no runtime to load
     # fails here rather than partway through a dataset.
     verify_openmp_runtime()
@@ -855,6 +889,9 @@ def _execute_jobs_parallel(
         Every dispatched job is tracked individually, and in-flight futures are allowed to finish on failure so the
         tracker stays accurate for all of them. The first captured exception is re-raised after all futures resolve.
 
+        A job is marked running as its pool slot opens rather than as the queue is built, so the tracker never reports
+        more jobs running than the pool can execute and a recorded start time is the time the work began.
+
     Args:
         sessions: The ordered list of session names to assemble.
         session_lookup: The mapping from session name to its DatasetSession metadata.
@@ -877,23 +914,31 @@ def _execute_jobs_parallel(
         limit_worker_threads(),
         ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,
     ):
+        queued = deque(sessions)
         future_to_job_id: dict[Future[None], str] = {}
-        for session_name in sessions:
+
+        def _dispatch_next() -> None:
+            """Marks the next queued session's job as running and submits it, doing nothing when none is queued."""
+            if not queued:
+                return
+            session_name = queued.popleft()
             job_id = job_ids[session_name]
             session_metadata = session_lookup[session_name]
-            source_session_path = project_root.joinpath(session_metadata.animal, session_name)
 
             console.echo(message=f"Running '{FORGING_JOB_NAME}' job with specifier '{session_name}' (ID: {job_id})...")
             tracker.start_job(job_id=job_id)
             future = executor.submit(
                 _forge_session,
-                source_session_path=source_session_path,
+                source_session_path=project_root.joinpath(session_metadata.animal, session_name),
                 output_path=session_metadata.data_path,
                 dataset_name=dataset_name,
                 worker=worker,
                 described_columns=described_columns,
             )
             future_to_job_id[future] = job_id
+
+        for _ in range(min(workers, len(sessions))):
+            _dispatch_next()
 
         progress_context = (
             console.progress(total=len(sessions), description="Assembling dataset sessions", unit="session")
@@ -902,17 +947,20 @@ def _execute_jobs_parallel(
         )
 
         with progress_context as progress_bar:
-            for completed_future in as_completed(future_to_job_id):
-                completed_job_id = future_to_job_id[completed_future]
-                try:
-                    completed_future.result()
-                    tracker.complete_job(job_id=completed_job_id)
-                except Exception as exception:
-                    tracker.fail_job(job_id=completed_job_id, error_message=str(exception))
-                    if first_exception is None:
-                        first_exception = exception
-                if progress_bar is not None:
-                    progress_bar.update(1)
+            while future_to_job_id:
+                completed, _ = wait(future_to_job_id, return_when=FIRST_COMPLETED)
+                for completed_future in completed:
+                    completed_job_id = future_to_job_id.pop(completed_future)
+                    try:
+                        completed_future.result()
+                        tracker.complete_job(job_id=completed_job_id)
+                    except Exception as exception:
+                        tracker.fail_job(job_id=completed_job_id, error_message=str(exception))
+                        if first_exception is None:
+                            first_exception = exception
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+                    _dispatch_next()
 
     if first_exception is not None:
         raise first_exception

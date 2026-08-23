@@ -516,7 +516,7 @@ def _parse_ttl_data(event_partition: dict[int, pl.DataFrame], output_file: Path,
 
     if triggers[-1] != 0:
         timestamps = np.append(timestamps, values=timestamps[-1] + 1)
-        triggers = np.append(triggers, values=0)
+        triggers = np.append(triggers, values=np.uint8(0))
 
     result_dataframe = pl.DataFrame({"time_us": timestamps, "ttl_state": triggers})
     result_dataframe.write_ipc(file=output_file, compression="uncompressed")
@@ -618,7 +618,7 @@ def _parse_valve_data(
 
     if tone_states[-1] != 0:
         tone_timestamps = np.append(tone_timestamps, values=tone_timestamps[-1] + 1)
-        tone_states = np.append(tone_states, values=0)
+        tone_states = np.append(tone_states, values=np.uint8(0))
 
     shared_timestamps = np.unique(np.concatenate([tone_timestamps, reward_timestamps]))
 
@@ -682,9 +682,10 @@ def _parse_gas_puff_data(
         values_b=np.zeros(len(closed_timestamps), dtype=np.uint8),
     )
 
-    edges = np.diff(states, prepend=states[0])
+    # Differenced in a signed width, since an unsigned difference wraps a falling edge to 255 and never equals -1.
+    edges = np.diff(states.astype(np.int16), prepend=np.int16(states[0]))
     falling_edges = edges == -1
-    cumulative_puffs: NDArray[np.uint32] = np.cumsum(falling_edges.astype(np.uint32))
+    cumulative_puffs: NDArray[np.uint32] = np.cumsum(falling_edges, dtype=np.uint32)
 
     result_dataframe = pl.DataFrame(
         {"time_us": timestamps, "puff_state": states, "cumulative_puff_count": cumulative_puffs}

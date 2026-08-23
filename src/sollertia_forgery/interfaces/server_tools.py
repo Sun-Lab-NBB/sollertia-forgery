@@ -16,6 +16,11 @@ from ..server import (
 from .responses import ok_response, error_response
 from .mcp_instance import mcp
 
+_MASKED_PASSWORD: str = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
+"""The placeholder every tool substitutes for the stored password when it reports a configuration back. The write tool
+refuses to persist it, since a caller editing what a read returned would otherwise replace the password with this
+literal."""
+
 
 @mcp.tool()
 def read_server_configuration_tool() -> dict[str, Any]:
@@ -30,7 +35,7 @@ def read_server_configuration_tool() -> dict[str, Any]:
     except (OSError, ValueError) as exception:
         return error_response(message=f"Unable to read the server configuration. {exception}")
     serialized = _render_configuration(instance=instance)
-    serialized["password"] = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
+    serialized["password"] = _MASKED_PASSWORD
     return ok_response(data=serialized)
 
 
@@ -45,11 +50,24 @@ def write_server_configuration_tool(
     Args:
         configuration_payload: The complete ServerConfiguration payload. Supply ``username``, ``password``, ``host``,
             ``root``, and ``environment``, since an omitted field is persisted as an empty string rather than rejected.
+            The ``password`` must be the account's real password, since the placeholder the read tool reports in its
+            place is refused rather than stored.
         overwrite: Determines whether to overwrite an existing server configuration file.
 
     Returns:
         A response dict with ``file_path`` and ``data`` containing the validated payload with the password masked.
+        Returns an error when the payload carries the read tool's password placeholder.
     """
+    if configuration_payload.get("password") == _MASKED_PASSWORD:
+        return error_response(
+            message=(
+                f"Unable to write the server configuration. The 'password' field carries the '{_MASKED_PASSWORD}' "
+                f"placeholder that the read tool reports in place of the stored password, so writing it would replace "
+                f"the real password with that literal and leave every later connection unable to authenticate. "
+                f"Supply the account's actual password."
+            )
+        )
+
     try:
         file_path = get_server_configuration_path()
     except FileNotFoundError as exception:
@@ -86,7 +104,7 @@ def write_server_configuration_tool(
         return error_response(message=f"Unable to write the server configuration to '{file_path}'. {exception}")
 
     serialized = _render_configuration(instance=instance)
-    serialized["password"] = "<masked>"  # noqa: S105 - literal masking placeholder, not a real password.
+    serialized["password"] = _MASKED_PASSWORD
     return ok_response(file_path=str(file_path), data=serialized)
 
 

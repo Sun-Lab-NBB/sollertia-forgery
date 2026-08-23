@@ -193,6 +193,55 @@ def test_the_default_link_lands_where_the_loader_searches(
     assert summary.link_path == openmp_module._LINK_DIRECTORY / openmp_module._OPENMP_LIBRARY_NAME
 
 
+def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a runtime already sitting at the link path is left alone rather than replaced by a self-link.
+
+    Unlinking the destination before writing the link would remove the only copy of the runtime and leave a link
+    resolving to nothing, which reports as a successful link while the host loses the runtime entirely.
+    """
+    runtime = tmp_path.joinpath("libomp.dylib")
+    runtime.write_bytes(b"the runtime")
+    monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
+    monkeypatch.setattr(openmp_module, "_openmp_runtime_loadable", lambda: False)
+
+    with pytest.raises(RuntimeError, match="already sits where the link would be written"):
+        resolve_openmp_runtime(runtime_path=runtime, link_path=runtime, execute=True)
+
+    assert runtime.read_bytes() == b"the runtime"
+    assert not runtime.is_symlink()
+
+
+def test_a_failed_link_leaves_the_previous_one_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a link this call cannot write leaves whatever the destination already held.
+
+    The link is published by renaming a temporary onto the destination, so the destination is never empty between the
+    removal of the old link and the arrival of the new one.
+    """
+    runtime = tmp_path.joinpath("libomp.dylib")
+    runtime.write_bytes(b"the runtime")
+    previous_target = tmp_path.joinpath("previous.dylib")
+    previous_target.write_bytes(b"the previous runtime")
+    link = tmp_path.joinpath("link", "libomp.dylib")
+    link.parent.mkdir()
+    link.symlink_to(target=previous_target)
+
+    def _refuse(self: Path, target: Path) -> None:
+        message = "the filesystem refused the link"
+        raise OSError(message)
+
+    monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
+    monkeypatch.setattr(openmp_module, "_openmp_runtime_loadable", lambda: False)
+    monkeypatch.setattr(openmp_module.Path, "symlink_to", _refuse)
+
+    with pytest.raises(RuntimeError, match="Unable to link the OpenMP runtime into"):
+        resolve_openmp_runtime(runtime_path=runtime, link_path=link, execute=True)
+
+    assert link.is_symlink()
+    assert link.resolve() == previous_target
+    # The temporary the publication would have renamed is cleaned up rather than left beside the destination.
+    assert sorted(entry.name for entry in link.parent.iterdir()) == ["libomp.dylib"]
+
+
 def test_linking_replaces_a_stale_link(darwin: None, unloadable: None, tmp_path: Path, monkeypatch) -> None:
     """A rerun repoints an existing link rather than failing on it, so the command stays idempotent."""
     runtime = tmp_path.joinpath(openmp_module._OPENMP_LIBRARY_NAME)

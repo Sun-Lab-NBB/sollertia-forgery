@@ -344,6 +344,22 @@ def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() ->
     assert "#SBATCH --time=08:00:00" in script
 
 
+def test_an_adopted_allocation_seeds_a_dependency_without_being_recorded_or_mutated() -> None:
+    """The caller reads its own adopted map back after the submission to report what was already running, so the
+    submission seeds its dependency map from a copy rather than writing the allocations it just queued into it.
+    """
+    server = StubServer()
+    adopted = {("/data/Project/Animal/Session", "timestamp"): "900"}
+    jobs = [build_descriptor(job_id="rename", job_name="rename", prerequisite_ids=("timestamp",))]
+
+    submissions = submit_batch(server=server, jobs=jobs, batch_id="batch01", adopted=adopted)
+
+    # The adopted allocation is what the dependent waits on, and it is not itself a submission of this batch.
+    assert "#SBATCH --dependency=afterok:900" in server.submitted[0].command_script
+    assert [submission.job_id for submission in submissions] == ["rename"]
+    assert adopted == {("/data/Project/Animal/Session", "timestamp"): "900"}
+
+
 def test_every_allocation_writes_into_the_batch_directory() -> None:
     """One directory per batch holds the scripts and logs, so a submission creates one directory rather than many."""
     server = StubServer()
@@ -1002,6 +1018,12 @@ def test_mirroring_regenerates_the_state_before_it_pulls_it(
     server_project.joinpath("TestProject_manifest.feather").write_text("manifest")
     server_project.joinpath("TestProject_jobs.feather").write_text("jobs")
 
+    # The regeneration rewrites the artifacts on the server, so the mirrored bytes are what tell the two orders apart.
+    # Asserting only that the command was issued passes either way, since the stub records it without running it.
+    stub_ssh_transport.on_command(
+        "bash -lc", lambda: server_project.joinpath("TestProject_jobs.feather").write_text("jobs after the run")
+    )
+
     mirrored = sync_project_state(server=connected_server, project="TestProject", local_directory=tmp_path)
 
     issued = " ".join(stub_ssh_transport.commands)
@@ -1014,6 +1036,7 @@ def test_mirroring_regenerates_the_state_before_it_pulls_it(
         "Dataset/dataset_state.feather",
     ]
     assert tmp_path.joinpath("Dataset", "dataset_state.feather").read_text() == "dataset state"
+    assert tmp_path.joinpath("TestProject_jobs.feather").read_text() == "jobs after the run"
 
 
 def test_a_project_holding_no_dataset_regenerates_its_manifest_alone(

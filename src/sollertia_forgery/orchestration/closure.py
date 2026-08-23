@@ -100,6 +100,13 @@ def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) ->
     """Reads what a batch's jobs recorded out of freshly regenerated project artifacts.
 
     Notes:
+        The rows are read from each artifact where the host holds it, since a host resolves every path it is given
+        against its own filesystem and a delivered copy sits on this machine instead. The delivery is taken separately,
+        so the outcome and the snapshot it cites come from the same regeneration.
+
+        Each artifact is delivered under the directory it sits in on the host, because a dataset batch reads one
+        same-named table per dataset and a shared destination would leave only the last one.
+
         A job absent from the state artifact counts as outstanding rather than missing, since a tracker that lost an
         entry describes a job that never ran.
 
@@ -121,12 +128,21 @@ def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) ->
 
     host.materialize(project_root=project_root, unit_paths=unit_paths, unit_kind=unit_kind, replan=False)
 
+    artifacts = state_artifact_paths(project_root=project_root, unit_paths=unit_paths, unit_kind=unit_kind)
+    recorded = index_rows_by_unit(
+        rows=[row for artifact in artifacts for row in host.read_rows(path=artifact)], key=unit_kind
+    )
+
     snapshots = [
         delivered
-        for artifact in state_artifact_paths(project_root=project_root, unit_paths=unit_paths, unit_kind=unit_kind)
-        if (delivered := host.fetch(path=artifact, destination=batch_directory().joinpath(batch_id))) is not None
+        for artifact in artifacts
+        if (
+            delivered := host.fetch(
+                path=artifact, destination=batch_directory().joinpath(batch_id, artifact.parent.name)
+            )
+        )
+        is not None
     ]
-    recorded = index_rows_by_unit(rows=[row for path in snapshots for row in host.read_rows(path=path)], key=unit_kind)
 
     return _resolve_outcome(document=document, batch_id=batch_id, recorded=recorded, snapshots=snapshots)
 
@@ -160,7 +176,9 @@ def close_settled_batches(
     retired: list[str] = []
     for batch in settled:
         try:
-            outcome = close_batch(host=host, batch_id=batch.batch_id)
+            # One submission may dispatch several prepared batches, and each carries its own document, so each is
+            # snapshotted separately rather than folded into the identifier the ledger is keyed by.
+            outcomes = [close_batch(host=host, batch_id=covered) for covered in batch.covered_batch_ids]
         except Exception as exception:
             console.echo(
                 message=(
@@ -170,8 +188,7 @@ def close_settled_batches(
                 level=LogLevel.WARNING,
             )
             continue
-        if outcome is not None:
-            closed.append(outcome)
+        closed.extend(outcome for outcome in outcomes if outcome is not None)
         retired.append(batch.batch_id)
 
     if retired:

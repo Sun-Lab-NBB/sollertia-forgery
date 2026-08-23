@@ -281,10 +281,11 @@ def _update_dataset(
         recreate_animals: The identifiers of animals to rebuild from the sessions provided for them.
 
     Raises:
-        ValueError: If an animal named for rebuilding is absent from the dataset or has no provided sessions. Also
-            raised when a provided session would widen a frozen animal's session set. An added session whose session
-            type or acquisition system differs from the dataset's raises too. An added session whose type joins no
-            dataset for its acquisition system, or that has a required pipeline still outstanding, raises too.
+        ValueError: If an animal is named for rebuilding more than once, or if one named for rebuilding is absent from
+            the dataset or has no provided sessions. Also raised when a provided session would widen a frozen animal's
+            session set. An added session whose session type or acquisition system differs from the dataset's raises
+            too. An added session whose type joins no dataset for its acquisition system, or that has a required
+            pipeline still outstanding, raises too.
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
         RuntimeError: If a session name resolves to more than one directory under the project root.
     """
@@ -297,6 +298,15 @@ def _update_dataset(
 
     dataset_animals = {dataset_animal.animal for dataset_animal in dataset.animals}
     dataset_sessions = {entry.session for entry in dataset.sessions}
+
+    repeated_animals = natsorted({animal for animal in recreate_animals if recreate_animals.count(animal) > 1})
+    if repeated_animals:
+        message = (
+            f"Unable to rebuild the animal(s) {repeated_animals} in the '{dataset.name}' dataset. Each animal is named "
+            f"for rebuilding at most once, because a rebuild removes the animal before anything is added and a second "
+            f"removal of the same animal finds nothing left to remove."
+        )
+        console.error(message=message, error=ValueError)
 
     unknown_animals = natsorted(set(recreate_animals) - dataset_animals)
     if unknown_animals:

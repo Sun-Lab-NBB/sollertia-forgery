@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from ataraxis_data_structures import atomic_write
 
+from ..shared_assets import natural_sort
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -52,7 +54,9 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
 
     Notes:
         Takes no lock of its own, because the manifest's writer calls this while holding the lock that serializes the
-        whole generation. Writing both artifacts under one lock is what keeps them from disagreeing about a session.
+        whole generation. That lock excludes other writers rather than readers, and the two artifacts are published by
+        two separate renames, so the writer lands this one first and leaves a reader at worst holding job rows for a
+        session the manifest does not list yet.
 
         Stored uncompressed so a reader memory-maps it rather than decoding it, which is what makes a filtered read
         cost the same whether a project holds fifty sessions or eight hundred.
@@ -69,8 +73,10 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
         The path the artifact was written to.
     """
     jobs_path = project_jobs_path(project_directory=project_directory)
-    frame = pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False).sort(
-        by=["animal", "session", "pipeline", "job_name", "specifier"], nulls_last=True
+    frame = natural_sort(
+        frame=pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False),
+        by=["animal", "session", "pipeline", "job_name", "specifier"],
+        nulls_last=True,
     )
     with atomic_write(file_path=jobs_path, binary=True) as file:
         frame.write_ipc(file=file, compression="uncompressed")

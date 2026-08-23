@@ -29,7 +29,7 @@ from ..managing import project_jobs_path, generate_project_manifest
 from .maintenance import reset_tracked_jobs, clean_pipeline_output
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ..server import Server
 
@@ -73,8 +73,8 @@ class ExecutionHost(Protocol):
         """Delivers a stored artifact to this machine durably, returning where it landed, or None when it is absent."""
         ...
 
-    def reset_jobs(self, pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str]) -> None:
-        """Resets the named tracked jobs of several units to the scheduled state, in one operation."""
+    def reset_jobs(self, pipeline: str, job_ids_by_unit: Mapping[Path, Sequence[str]]) -> None:
+        """Resets each unit's own tracked jobs to the scheduled state, in one operation."""
         ...
 
     def clean(self, pipeline: str, unit_paths: Sequence[Path]) -> list[dict[str, Any]]:
@@ -236,18 +236,23 @@ class LocalHost:
         return path if path.is_file() else None
 
     @staticmethod
-    def reset_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str]) -> None:
-        """Resets the named tracked jobs of several units to the scheduled state.
+    def reset_jobs(pipeline: str, job_ids_by_unit: Mapping[Path, Sequence[str]]) -> None:
+        """Resets each unit's own tracked jobs to the scheduled state.
 
         Notes:
             The trackers sit on this machine, so the reset runs in this process rather than over a command line.
 
+            Each unit is reset against its own identifiers alone. A job identifier carries no unit, so two units of one
+            project share the identifier of the same stage, and a flat set applied to both would clear a record the
+            caller never named.
+
         Args:
             pipeline: The pipeline whose jobs to reset.
-            unit_paths: The processing units that record them.
-            job_ids: The identifiers to reset, or empty to reset every job each unit tracks.
+            job_ids_by_unit: The identifiers to reset, keyed by the processing unit that records them. A unit mapped to
+                an empty sequence has every job it tracks reset.
         """
-        reset_tracked_jobs(pipeline=pipeline, unit_paths=unit_paths, job_ids=job_ids)
+        for unit_path, job_ids in job_ids_by_unit.items():
+            reset_tracked_jobs(pipeline=pipeline, unit_paths=[unit_path], job_ids=job_ids)
 
     @staticmethod
     def clean(pipeline: str, unit_paths: Sequence[Path]) -> list[dict[str, Any]]:
@@ -459,27 +464,34 @@ class RemoteHost:
         self._server.pull(local_path=local_path, remote_path=path)
         return local_path
 
-    def reset_jobs(self, pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str]) -> None:
-        """Resets the named tracked jobs of several units to the scheduled state on the server.
+    def reset_jobs(self, pipeline: str, job_ids_by_unit: Mapping[Path, Sequence[str]]) -> None:
+        """Resets each unit's own tracked jobs to the scheduled state on the server.
 
         Notes:
-            One invocation carries every unit and every identifier, because each unit resets only the identifiers it
-            actually tracks. A batch spanning many units therefore costs a single round trip.
+            One invocation is issued per unit, carrying that unit's identifiers alone. A job identifier carries no
+            unit, so two units of one project share the identifier of the same stage, and a flat set applied to both
+            would clear a record the caller never named.
+
+            The invocations are chained into one round trip, so a batch spanning many units still costs a single
+            connection.
 
         Args:
             pipeline: The pipeline whose jobs to reset.
-            unit_paths: The paths, on the server, to the processing units that record them.
-            job_ids: The identifiers to reset, or empty to reset every job each unit tracks.
+            job_ids_by_unit: The identifiers to reset, keyed by the path, on the server, to the processing unit that
+                records them. A unit mapped to an empty sequence has every job it tracks reset.
 
         Raises:
             RuntimeError: If the server-side command fails.
         """
-        if not unit_paths:
+        commands: list[list[str]] = []
+        for unit_path, job_ids in job_ids_by_unit.items():
+            command = ["slf", "reset", "-p", pipeline, *_repeated(flag="-up", values=[unit_path])]
+            for job_id in job_ids:
+                command.extend(("-id", job_id))
+            commands.append(command)
+        if not commands:
             return
-        command = ["slf", "reset", "-p", pipeline, *_repeated(flag="-up", values=unit_paths)]
-        for job_id in job_ids:
-            command.extend(("-id", job_id))
-        self._run(commands=[command])
+        self._run(commands=commands)
 
     def clean(self, pipeline: str, unit_paths: Sequence[Path]) -> list[dict[str, Any]]:
         """Removes a pipeline's output and tracker for the named units, on the server.

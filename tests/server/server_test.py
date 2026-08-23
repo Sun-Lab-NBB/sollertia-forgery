@@ -104,6 +104,7 @@ def unreachable_transport(
     recorder = SimpleNamespace(
         error=OSError("No route to host"),
         attempts=0,
+        closes=0,
         authentication_exception=_AuthenticationError,
     )
 
@@ -117,6 +118,10 @@ def unreachable_transport(
             """Records the attempt and raises the configured failure."""
             recorder.attempts += 1
             raise recorder.error
+
+        def close(self) -> None:
+            """Records that the failed attempt's client was released before the loop replaced it."""
+            recorder.closes += 1
 
     monkeypatch.setattr(
         server_module,
@@ -264,13 +269,16 @@ def test_server_context_manager_closes_the_connection_on_failure(
 def test_server_raises_permission_error_when_credentials_are_rejected(
     unreachable_transport: SimpleNamespace, server_configuration: ServerConfiguration
 ) -> None:
-    """Verifies that a rejected handshake fails immediately rather than retrying."""
+    """Verifies that a rejected handshake fails immediately rather than retrying, releasing the client it opened."""
     unreachable_transport.error = unreachable_transport.authentication_exception("rejected")
 
     with pytest.raises(PermissionError, match=r"Authentication failed when connecting to test\.server\.com"):
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 1
+    # The transport an authenticated-then-rejected handshake leaves running is unreachable through close(), whose
+    # guard never clears, so the constructor has to release it itself.
+    assert unreachable_transport.closes == 1
 
 
 def test_server_raises_connection_error_after_exhausting_retries(
@@ -278,12 +286,16 @@ def test_server_raises_connection_error_after_exhausting_retries(
     instant_retry_timer: list[int],
     server_configuration: ServerConfiguration,
 ) -> None:
-    """Verifies that an unreachable host is retried a fixed number of times before the runtime is aborted."""
+    """Verifies that an unreachable host is retried a fixed number of times before the runtime is aborted, and that
+    every client the loop replaced was released.
+    """
     with pytest.raises(ConnectionError, match=r"Could not connect to test\.server\.com after 30 retries"):
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 31
     assert instant_retry_timer == [2] * 30
+    # Every attempt's client is closed, including the last, so a failed construction leaves no transport behind.
+    assert unreachable_transport.closes == 31
 
 
 # Job submission
@@ -478,7 +490,11 @@ def test_get_blocked_job_ids_keeps_only_permanently_blocked_rows(
         ("CANCELLED by 1234", JobStatus.CANCELLED),
         ("CANCELLED+", JobStatus.CANCELLED),
         ("OUT_OF_MEMORY", JobStatus.OUT_OF_MEMORY),
-        ("PREEMPTED", JobStatus.UNKNOWN),
+        ("PREEMPTED", JobStatus.PREEMPTED),
+        ("BOOT_FAIL", JobStatus.BOOT_FAIL),
+        ("DEADLINE", JobStatus.DEADLINE),
+        ("REVOKED", JobStatus.REVOKED),
+        ("NOT_A_SLURM_STATE", JobStatus.UNKNOWN),
     ],
 )
 def test_parse_job_status_normalizes_decorated_accounting_states(state: str, expected: JobStatus) -> None:
@@ -496,6 +512,10 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
             JobStatus.TIMEOUT,
             JobStatus.NODE_FAIL,
             JobStatus.OUT_OF_MEMORY,
+            JobStatus.BOOT_FAIL,
+            JobStatus.DEADLINE,
+            JobStatus.PREEMPTED,
+            JobStatus.REVOKED,
             JobStatus.BLOCKED,
         }
     )

@@ -554,6 +554,10 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "memory_mb": 4096,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
+        # Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
+        # leaving a later stage to reopen the tracker the state artifact was regenerated from.
+        "status": "SCHEDULED",
+        "executor_id": "",
     }
     assert document.units == [{"unit_path": str(unit), "unit_name": unit.name, "job_count": 1, "blocked_count": 0}]
     assert document.blocked_jobs == []

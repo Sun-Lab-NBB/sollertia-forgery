@@ -20,8 +20,11 @@ def reset_tracked_jobs(pipeline: str, unit_paths: Sequence[Path], job_ids: Seque
     Notes:
         Resolves each tracker from its unit rather than taking a path, so a caller names what it wants to be reset
         without knowing where the record sits. Identifiers a unit does not track are dropped, because a tracker
-        rejects a request naming a job it does not hold and would then reset nothing at all. That dropping is what
-        lets one call carry a whole batch's identifiers and have each unit reset only its own share.
+        rejects a request naming a job it does not hold and would then reset nothing at all.
+
+        Every named identifier is applied to every named unit. A job identifier is derived from the job name and the
+        specifier alone, so two units of one project share the identifier of the same stage, and a caller holding
+        per-unit identifiers passes one unit at a time rather than a flat set.
 
         Naming no identifier resets every job the unit tracks, which is how a caller returns a unit to a clean slate.
 

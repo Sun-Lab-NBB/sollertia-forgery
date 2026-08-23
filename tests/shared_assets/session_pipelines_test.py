@@ -108,6 +108,26 @@ def test_admission_requires_only_pipelines_a_session_records() -> None:
         assert pipelines <= set(SESSION_PIPELINES)
 
 
+def test_admission_pins_every_pipeline_each_session_type_requires() -> None:
+    """Verifies each session type's admission set exactly, since this gate is the only thing holding an unprocessed
+    session out of a forged dataset and a subset assertion cannot tell a dropped requirement from a narrower one.
+    """
+    training_requirement = frozenset(
+        {
+            ProcessingPipelines.CHECKSUM,
+            ProcessingPipelines.RUNTIME,
+            ProcessingPipelines.MICROCONTROLLER,
+            ProcessingPipelines.VIDEO,
+        }
+    )
+
+    assert MESOSCOPE_ADMISSION_PIPELINES[SessionTypes.MESOSCOPE_EXPERIMENT] == (
+        training_requirement | {ProcessingPipelines.TWO_PHOTON}
+    )
+    assert MESOSCOPE_ADMISSION_PIPELINES[SessionTypes.RUN_TRAINING] == training_requirement
+    assert MESOSCOPE_ADMISSION_PIPELINES[SessionTypes.LICK_TRAINING] == training_requirement
+
+
 def test_admission_asks_a_training_session_for_no_imaging() -> None:
     """Verifies that a training session's admission omits the two-photon pipeline an experiment session requires."""
     experiment_requirement = MESOSCOPE_ADMISSION_PIPELINES[SessionTypes.MESOSCOPE_EXPERIMENT]

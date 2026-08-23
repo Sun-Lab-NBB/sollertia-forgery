@@ -82,6 +82,13 @@ class GenericPendingJob(PendingJob):
     project_root: Path | None = None
     """The project root directory, which stays unset while every worker resolves its output location from
     ``unit_path``. A pipeline whose worker needs the root above that path reads it from here."""
+    status: str = ""
+    """The status this job's tracker recorded when preparation last regenerated the host's state artifact, named by its
+    ``ProcessingStatus`` member. Empty for a descriptor built without one."""
+    executor_id: str = ""
+    """The executor the same record named, which is a scheme-tagged identifier such as a scheduler allocation. Carried
+    so reconciliation resolves a running job's allocation from the batch rather than from a tracker it would have to
+    open, which on a remote host would mean reading one across the transport mid-run."""
     options: dict[str, Any] = field(default_factory=dict)
     """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
     The mapping is carried through to the pipeline's own worker, which interprets whichever keys it declares. A
@@ -221,7 +228,7 @@ def build_job_descriptor(
     """Renders one job as the descriptor both backends dispatch.
 
     Args:
-        state_row: The job's row in the state table.
+        state_row: The job's row in the state table, carrying the status and the executor its tracker recorded.
         plan_row: The job's row in the plan table.
         unit_path: The path to the unit the job operates on.
         unit_name: The name of that unit.
@@ -237,6 +244,10 @@ def build_job_descriptor(
         "job_id": state_row["job_id"],
         "job_name": state_row["job_name"],
         "specifier": state_row["specifier"] or "",
+        # Carried from the state artifact preparation regenerated on the host, so reconciliation reads what a job's
+        # tracker recorded without opening that tracker while the batch runs.
+        "status": state_row["status"],
+        "executor_id": state_row.get("executor_id") or "",
         "unit_path": str(unit_path),
         "unit_name": unit_name,
         "pipeline": pipeline,
@@ -425,8 +436,8 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
 
     Args:
         job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, and ``memory_mb``, and optionally
-            ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``, and
-            ``options``.
+            ``tracker_path``, ``job_name``, ``unit_name``, ``specifier``, ``pipeline``, ``prerequisite_ids``,
+            ``options``, ``status``, and ``executor_id``.
 
     Returns:
         The pending job.
@@ -446,6 +457,8 @@ def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
         memory_mb=int(job["memory_mb"]),
         prerequisite_ids=tuple(job.get("prerequisite_ids", ())),
         options=dict(job.get("options") or {}),
+        status=job.get("status") or "",
+        executor_id=job.get("executor_id") or "",
     )
 
 

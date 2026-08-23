@@ -323,6 +323,29 @@ def test_parse_runtime_writes_only_state_feathers_for_training_session(
     assert _read_feather(directory, BehaviorDataFiles.RUNTIME_STATE)["runtime_state"].to_list() == [1]
 
 
+def test_parse_runtime_discards_a_cue_sequence_a_training_session_does_not_collect(
+    training_session: SessionData, tmp_path: Path
+) -> None:
+    """Verifies that a wall cue sequence is consumed by its length alone, whether or not the session collects it.
+
+    A training session collects no corridor, and the payload's leading byte is a wall cue code rather than a message
+    code, so a long payload reaching the state-code chain would be recorded as a fabricated state transition.
+    """
+    directory = tmp_path.joinpath("training_runtime_data")
+    # The first two cue codes are the system-state code and the value that code would carry.
+    corridor = _cue_payload([_SYSTEM_STATE_CODE, 2] * 300)
+
+    parse_runtime(
+        decoded_messages=_decoded_messages([(100, corridor), (200, _state_payload(_SYSTEM_STATE_CODE, 0))]),
+        output_directory=directory,
+        session=training_session,
+    )
+
+    system_states = _read_feather(directory, BehaviorDataFiles.SYSTEM_STATE)
+    assert system_states["system_state"].to_list() == [0]
+    assert system_states["time_us"].to_list() == [200]
+
+
 def test_parse_runtime_omits_guidance_feathers_when_unrecorded(experiment_session: SessionData, tmp_path: Path) -> None:
     """Verifies that the guidance feathers stay unwritten when the session recorded no guidance transition."""
     directory = tmp_path.joinpath("runtime_data")
@@ -519,6 +542,49 @@ def test_decompose_drops_the_trial_starting_at_a_distance_breakpoint() -> None:
     assert trial_distances.tolist() == [60.0, 120.0, 180.0, 240.0]
 
 
+def test_every_distance_stream_shares_the_travelled_frame_under_a_cue_offset() -> None:
+    """Verifies the four distance streams agree with each other when the animal starts partway into its first cue.
+
+    The assembled dataset matches all four against one axis interpolated from the encoder's travelled distance, so a
+    stream carrying corridor positions instead would place its column a fixed offset away from the cue column on the
+    very same rows.
+    """
+    cues, cue_distances, trigger_starts, trigger_ends, trial_starts = _process_trial_sequence(
+        experiment_configuration=_build_experiment_configuration(["reward_trial"]),
+        task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
+        trial_types=np.array([0, 0, 0], dtype=np.int32),
+        # Trial 0 is entered 10 cm in, so it completes after 50 cm travelled; each later trial takes its full 60.
+        trial_distances=np.array([50.0, 110.0, 170.0], dtype=np.float64),
+    )
+
+    # A trial begins exactly where its own first cue does, which is the invariant the two frames disagreed on.
+    assert trial_starts.tolist() == [0.0, 50.0, 110.0]
+    assert [cue_distances[index] for index in (0, 2, 4)] == trial_starts.tolist()
+    assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE] * 3
+
+    # The trigger zone sits 30 cm into the corridor, which the first trial reaches after travelling only 20.
+    assert trigger_starts.tolist() == [20.0, 80.0, 140.0]
+    assert trigger_ends.tolist() == [35.0, 95.0, 155.0]
+
+
+def test_decomposition_reports_trial_ends_as_distances_travelled() -> None:
+    """Verifies the decomposition reports how far the animal ran rather than how long the corridor was.
+
+    The trial ends it returns become the coordinate the assembled dataset interpolates the trial columns against, and
+    that coordinate is the encoder's travelled distance, so a corridor length would place every boundary too late.
+    """
+    trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
+        experiment_configuration=_build_experiment_configuration(["reward_trial"]),
+        task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
+        cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 3), dtype=np.uint8)],
+        distance_breakpoints=[],
+    )
+
+    assert trial_types.tolist() == [0, 0, 0]
+    # Each trial spans 60 cm of corridor, and the animal enters the first one 10 cm along.
+    assert trial_distances.tolist() == [50.0, 110.0, 170.0]
+
+
 def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_trials() -> None:
     """Verifies the cue, trigger zone, and trial start series a partially truncated trial sequence produces."""
     cues, distances, trigger_starts, trigger_ends, trial_starts = _process_trial_sequence(
@@ -530,8 +596,11 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
 
     assert cues.tolist() == [1, 2, 1, 1, 2, 1, 2]
     assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 100.0, 130.0, 160.0]
-    assert trigger_starts.tolist() == [30.0, 110.0, 180.0]
-    assert trigger_ends.tolist() == [45.0, 125.0, 190.0]
+    # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches the corridor position its trigger
+    # zone is declared at after travelling 10 cm less. Trials 1 and 3 follow a truncation, which re-enters the
+    # corridor, so the same offset applies to them.
+    assert trigger_starts.tolist() == [20.0, 100.0, 180.0]
+    assert trigger_ends.tolist() == [35.0, 115.0, 190.0]
     assert trial_starts.tolist() == [0.0, 60.0, 80.0, 150.0]
 
 

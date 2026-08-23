@@ -262,6 +262,9 @@ def test_assemble_behavior_dataset_emits_only_the_mandatory_columns(tmp_path: Pa
     assert behavior_data.schema["system_state"] == pl.Enum(["idle", "rest", "run"])
     assert behavior_data.schema["reward"] == pl.Enum(["no", "tone", "yes"])
     assert behavior_data.schema["water_uL"] == pl.Float32
+    # This assembler is the sole producer of the column for a training session, while the fluorescence assembler
+    # produces it for an experiment session, so both are pinned to the same width or one dataset carries two.
+    assert behavior_data.schema["elapsed_minutes"] == pl.Float32
 
 
 def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) -> None:

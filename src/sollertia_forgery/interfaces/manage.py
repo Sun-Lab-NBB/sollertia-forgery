@@ -95,7 +95,7 @@ def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> 
 @click.option(
     "-a",
     "--animal",
-    type=int,
+    type=str,
     required=False,
     help=(
         "The identifier of the animal for which to print the manifest data. If not provided, this command prints "
@@ -128,7 +128,7 @@ def create_manifest(shared: _SharedManifestParameters, *, no_progress: bool) -> 
 def print_project_manifest_data(
     shared: _SharedManifestParameters,
     *,
-    animal: int | None,
+    animal: str | None,
     notes: bool,
     summary: bool,
 ) -> None:

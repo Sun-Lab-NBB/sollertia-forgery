@@ -24,6 +24,7 @@ from sollertia_forgery.registries import (
     resolve_forging_admission_pipelines,
     resolve_forging_column_descriptions,
     resolve_microcontroller_event_codes,
+    resolve_multi_recording_session_types,
     resolve_eligible_microcontroller_modules,
     resolve_multi_recording_configuration_resolver,
     resolve_single_recording_configuration_resolver,
@@ -107,6 +108,33 @@ def test_admitting_a_session_type_the_system_does_not_record_fails_the_check(mon
     )
     with pytest.raises(RuntimeError, match=unrecorded):
         _assert_registry_coverage()
+
+
+def test_tracking_a_session_type_the_system_does_not_record_fails_the_check(monkeypatch):
+    """The cross-recording declaration answers whether a dataset needs multi-day plans without loading a session, so a
+    type outside the shared assets library's own declaration would quietly change what a dataset is planned for."""
+    monkeypatch.setattr(
+        "sollertia_forgery.registries._MULTI_RECORDING_SESSION_TYPE_REGISTRY",
+        {AcquisitionSystems.MESOSCOPE_VR: frozenset({SessionTypes.WINDOW_CHECKING})},
+    )
+    monkeypatch.setattr(
+        "sollertia_forgery.registries.SYSTEM_SESSION_TYPES",
+        {AcquisitionSystems.MESOSCOPE_VR: frozenset({SessionTypes.MESOSCOPE_EXPERIMENT})},
+    )
+
+    unrecorded = r"MESOSCOPE_VR declares the following unrecorded\s+type\(s\): window checking"
+    with pytest.raises(RuntimeError, match=unrecorded):
+        _assert_registry_coverage()
+
+
+def test_every_cross_recording_session_type_is_one_the_system_records():
+    """A dataset's recorded session type is matched against this set, so a type the system never records would make
+    the answer unreachable rather than merely wrong."""
+    tracked = resolve_multi_recording_session_types(system=AcquisitionSystems.MESOSCOPE_VR)
+
+    assert tracked <= SYSTEM_SESSION_TYPES[AcquisitionSystems.MESOSCOPE_VR]
+    # Cross-recording tracking needs calcium imaging, which only an experiment session records.
+    assert tracked == frozenset({SessionTypes.MESOSCOPE_EXPERIMENT})
 
 
 def test_every_admitted_session_type_is_one_the_system_records():

@@ -605,6 +605,32 @@ def test_resolve_dataset_rejects_rebuilding_an_animal_absent_from_the_dataset(
         )
 
 
+def test_resolve_dataset_rejects_naming_one_animal_for_rebuilding_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a repeated rebuild entry is refused before the hierarchy is touched.
+
+    A rebuild removes the animal before anything is added, so a second removal of the same animal would raise after
+    the first had already deleted its forged outputs and dropped it from the dataset.
+    """
+    project_root = _install_project(
+        tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
+    )
+    resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
+
+    with pytest.raises(ValueError, match="named for rebuilding at most"):
+        resolve_dataset(
+            name=_DATASET_NAME,
+            session_names=("session_1",),
+            project_root=project_root,
+            recreate_animals=("animal_a", "animal_a"),
+        )
+
+    # The refusal leaves the dataset exactly as it stood, holding both of the animal's forged sessions.
+    dataset = DatasetData.load(dataset_path=project_root.joinpath(_DATASET_NAME))
+    assert sorted(entry.session for entry in dataset.sessions) == ["session_1", "session_2"]
+
+
 def test_resolve_dataset_rejects_rebuilding_an_animal_without_its_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

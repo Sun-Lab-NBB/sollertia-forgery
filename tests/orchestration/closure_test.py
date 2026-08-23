@@ -10,6 +10,7 @@ import pytest
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
     BatchDocument,
+    close_batch,
     read_ledger,
     resolve_batches,
     read_batch_outcome,
@@ -111,6 +112,88 @@ class _StubHost:
         return self._rows
 
 
+class _DatasetStubHost:
+    """Stands in for a remote host holding one state table per dataset, answering each by the directory it sits in.
+
+    Args:
+        rows_by_dataset: The state rows each dataset's table holds, keyed by the dataset directory name.
+
+    Attributes:
+        _rows_by_dataset: Cached per-dataset state rows.
+        read_paths: The artifact paths this host was asked to read, in order.
+        delivered: The local paths this host delivered its artifacts to, in order.
+    """
+
+    def __init__(self, rows_by_dataset: dict[str, list[dict[str, Any]]]) -> None:
+        self._rows_by_dataset: dict[str, list[dict[str, Any]]] = rows_by_dataset
+        self.read_paths: list[Path] = []
+        self.delivered: list[Path] = []
+
+    @property
+    def label(self) -> str:
+        """Returns the name this host is reported under."""
+        return "remote"
+
+    def materialize(
+        self,
+        project_root: Path,
+        unit_paths: Sequence[Path],
+        unit_kind: str,
+        *,
+        replan: bool,
+    ) -> None:
+        """Accepts the regeneration request without rewriting anything."""
+
+    def fetch(self, path: Path, destination: Path) -> Path | None:
+        """Delivers a stand-in snapshot and records where it landed.
+
+        Args:
+            path: The artifact the host was asked to deliver.
+            destination: The directory the artifact is delivered into.
+
+        Returns:
+            The path to the delivered snapshot.
+        """
+        destination.mkdir(parents=True, exist_ok=True)
+        delivered = destination.joinpath(path.name)
+        delivered.write_text("snapshot")
+        self.delivered.append(delivered)
+        return delivered
+
+    def read_rows(self, path: Path) -> list[dict[str, Any]]:
+        """Answers the rows the named dataset's table holds, recording the path this host was given.
+
+        Args:
+            path: The artifact the rows are read from.
+
+        Returns:
+            The state rows that dataset recorded, empty for a path naming no dataset this host holds.
+        """
+        self.read_paths.append(path)
+        return self._rows_by_dataset.get(path.parent.name, [])
+
+
+def _make_dataset_job(job_id: str, unit_path: str) -> dict[str, Any]:
+    """Builds one dispatched forging job descriptor.
+
+    Args:
+        job_id: The identifier the descriptor is built under.
+        unit_path: The dataset root the job runs against.
+
+    Returns:
+        The job descriptor.
+    """
+    return {
+        "job_id": job_id,
+        "job_name": "session_data_assembly",
+        "specifier": job_id,
+        "unit_path": unit_path,
+        "unit_name": Path(unit_path).name,
+        "pipeline": "forging",
+        "prerequisite_ids": [],
+    }
+
+
 def _make_job(job_id: str, prerequisites: tuple[str, ...] = ()) -> dict[str, Any]:
     """Builds one dispatched job descriptor.
 
@@ -190,6 +273,43 @@ def _record_settled_batch(unit_path: str = _UNIT_PATH, slurm_job_id: str = "7") 
     )
     record_batch(batch=batch)
     return batch
+
+
+def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatched() -> None:
+    """A dataset batch reads one same-named state table per dataset, unlike a session batch's single project table.
+
+    Each table therefore has to be read where the host holds it rather than from a delivered copy, and delivered
+    somewhere it cannot overwrite the table another dataset already delivered under the same filename.
+    """
+    alpha, beta = "/data/Project/alpha", "/data/Project/beta"
+    batch_id = record_prepared_batch(
+        document=BatchDocument(
+            pipeline="forging",
+            host="remote",
+            jobs=[_make_dataset_job(job_id="a", unit_path=alpha), _make_dataset_job(job_id="b", unit_path=beta)],
+            units=[
+                {"unit_path": alpha, "unit_name": "alpha", "job_count": 1},
+                {"unit_path": beta, "unit_name": "beta", "job_count": 1},
+            ],
+        )
+    )
+    host = _DatasetStubHost(
+        rows_by_dataset={
+            "alpha": [{"job_id": "a", "status": "SUCCEEDED", "error_message": None, "dataset": "alpha"}],
+            "beta": [{"job_id": "b", "status": "SUCCEEDED", "error_message": None, "dataset": "beta"}],
+        }
+    )
+
+    outcome = close_batch(host=host, batch_id=batch_id)
+
+    assert outcome is not None
+    assert (outcome.succeeded, outcome.outstanding, outcome.failed) == (2, 0, 0)
+    assert outcome.complete
+    # Every table is read from the dataset directory the host holds it in, so a remote host resolves a path it owns.
+    assert [path.parent.name for path in host.read_paths] == ["alpha", "beta"]
+    # The two tables share a filename, so one destination for both would leave only the second on this machine.
+    assert len(set(host.delivered)) == 2
+    assert len(set(outcome.snapshot_paths)) == 2
 
 
 def test_a_batch_whose_jobs_all_succeeded_reports_complete() -> None:

@@ -72,6 +72,14 @@ class JobStatus(StrEnum):
     """The job terminated due to node failure."""
     OUT_OF_MEMORY = "OUT_OF_MEMORY"
     """The job was terminated for exceeding memory limits."""
+    BOOT_FAIL = "BOOT_FAIL"
+    """The job terminated because a node allocated to it failed to boot."""
+    DEADLINE = "DEADLINE"
+    """The job was terminated on reaching the deadline its partition enforces."""
+    PREEMPTED = "PREEMPTED"
+    """The job was terminated to release its resources to a higher-priority allocation."""
+    REVOKED = "REVOKED"
+    """The job's allocation was revoked, which a federated scheduler does once a sibling cluster starts the job."""
     BLOCKED = "BLOCKED"
     """The job is queued behind a dependency that can no longer be satisfied, so it will never run. Resolved from the
     queue's reason field rather than from accounting, which still reports such a job as pending."""
@@ -87,6 +95,10 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
         JobStatus.TIMEOUT,
         JobStatus.NODE_FAIL,
         JobStatus.OUT_OF_MEMORY,
+        JobStatus.BOOT_FAIL,
+        JobStatus.DEADLINE,
+        JobStatus.PREEMPTED,
+        JobStatus.REVOKED,
         JobStatus.BLOCKED,
     }
 )
@@ -135,10 +147,15 @@ class Server:
                 ),
                 level=LogLevel.INFO,
             )
+            # Built into a local until both handles are open, because an attempt that authenticates and then fails
+            # leaves a live transport thread behind. Binding it to the instance first would hide that transport from
+            # close(), whose guard only clears once this loop has succeeded.
+            client = paramiko.SSHClient()
             try:
-                self._client: SSHClient = paramiko.SSHClient()
-                self._client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                self._client.connect(
+                # The compute server is named by the operator's own configuration file, and prompting for an unknown
+                # host key would hang a headless job, so an unrecognized key is accepted.
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())  # noqa: S507
+                client.connect(
                     hostname=self._configuration.host,
                     username=self._configuration.username,
                     password=self._configuration.password,
@@ -147,17 +164,16 @@ class Server:
 
                 # Initializes the SFTP client using the established SSH connection. This client is reused for all
                 # file transfer operations during the lifetime of the Server instance.
-                self._sftp: SFTPClient = self._client.open_sftp()
-
-                self._open = True
-                break
+                sftp: SFTPClient = client.open_sftp()
             except paramiko.AuthenticationException:
+                client.close()
                 message = (
                     f"Authentication failed when connecting to {self._configuration.host} using "
                     f"{self._configuration.username} user."
                 )
                 console.error(message=message, error=PermissionError)
             except Exception:
+                client.close()
                 if attempt == _MAXIMUM_CONNECTION_RETRIES:
                     message = (
                         f"Could not connect to {self._configuration.host} after {_MAXIMUM_CONNECTION_RETRIES} "
@@ -171,6 +187,11 @@ class Server:
                 )
                 attempt += 1
                 timer.delay(delay=2, allow_sleep=True, block=False)
+            else:
+                self._client: SSHClient = client
+                self._sftp: SFTPClient = sftp
+                self._open = True
+                break
 
     def __del__(self) -> None:
         """Terminates an open connection to the server before the instance is destroyed."""
