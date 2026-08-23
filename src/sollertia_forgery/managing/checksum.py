@@ -62,21 +62,28 @@ def run_checksum_processing_pipeline(
     Raises:
         FileNotFoundError: If the source path does not contain a valid session data hierarchy, or if verification is
             requested for a session that stores no checksum value.
-        ValueError: If the session's raw_data directory holds no file the checksum covers, which leaves the
-            pipeline's job unregistered on the tracker.
+        ValueError: If the session's raw_data directory holds no file the checksum covers, which is refused before the
+            tracker is touched so the session's last recorded verdict survives.
         OSError: If any directory or file under the session's raw_data directory cannot be read, which the pipeline
             records as a job failure before re-raising.
     """
     session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
+    # A session holding nothing the checksum covers is refused before the tracker is touched, so its last recorded
+    # integrity verdict survives. Leaving the refusal to start_job would rest it on the tracker not yet holding the
+    # job, which stops being true the moment a previous run registered it.
+    if not possible:
+        message = (
+            f"Unable to resolve the data integrity checksum for the session '{session.session_name}'. The session's "
+            f"raw_data directory holds no file the checksum covers, so there is nothing to verify or to record."
+        )
+        console.error(message=message, error=ValueError)
+
     # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
     # universe discards foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
-    # An unchecksummable session leaves nothing to align, and the tracker rejects an empty request, so the alignment
-    # is skipped and the job stays unregistered for start_job below to reject.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
-    if possible:
-        tracker.align_jobs(jobs=possible, universe=universe)
+    tracker.align_jobs(jobs=possible, universe=universe)
 
     checksum_path = session.raw_data.checksum_path
 

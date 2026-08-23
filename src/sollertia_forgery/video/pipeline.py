@@ -11,6 +11,7 @@ from contextlib import ExitStack
 from concurrent.futures import ProcessPoolExecutor
 
 import polars as pl
+from natsort import natsorted
 from ataraxis_video_system import (
     CAMERA_MANIFEST_FILENAME,
     CAMERA_EXTRACTION_JOB_NAME,
@@ -509,6 +510,7 @@ def _link_parsed_timestamps(
         tracker: The video ProcessingTracker instance for recording job state transitions.
     """
     with tracker.run_job(job_id=job_id):
+        _verify_canonical_names(video_data_directory=video_data_directory, camera_names=camera_names)
         published = 0
         for source_id, camera_name in camera_names.items():
             # The parsing job (ataraxis-video-system extraction binding) writes each camera's feather under the name
@@ -537,6 +539,63 @@ def _link_parsed_timestamps(
             message=f"Renamed {published} parsed camera timestamp feather(s) to their canonical names.",
             level=LogLevel.SUCCESS,
         )
+
+
+def _verify_canonical_names(video_data_directory: Path, camera_names: dict[str, str]) -> None:
+    """Verifies that every camera's canonical timestamp filename names that camera and no other.
+
+    Notes:
+        A manifest name is a free-form operator string that nothing upstream constrains, so two cameras may carry one
+        name and a camera may carry the name the parsed feather of another camera already occupies. Publishing either
+        would overwrite one camera's timestamps with another's, so the whole job is refused before it links anything.
+
+    Args:
+        video_data_directory: The processed video-data directory the canonical names are published into.
+        camera_names: The mapping of camera source IDs to their colloquial manifest names.
+
+    Raises:
+        ValueError: If two cameras resolve the same canonical filename, or if one camera's canonical filename is
+            another camera's parsed feather.
+    """
+    canonical_paths = {
+        source_id: video_data_directory.joinpath(
+            f"{camera_name}{OutputLayout.TIMESTAMPS_INFIX}{OutputLayout.FILE_SUFFIX}"
+        )
+        for source_id, camera_name in camera_names.items()
+    }
+    parsed_paths = {
+        source_id: resolve_timestamps_path(output_directory=video_data_directory, source_id=source_id)
+        for source_id in camera_names
+    }
+
+    shared_names = natsorted(
+        {
+            camera_names[source_id]
+            for source_id, canonical_path in canonical_paths.items()
+            if list(canonical_paths.values()).count(canonical_path) > 1
+        }
+    )
+    if shared_names:
+        message = (
+            f"Unable to publish the parsed camera timestamp feathers under their canonical names. The camera manifest "
+            f"records the name(s) {shared_names} for more than one camera, so their canonical filenames collide and "
+            f"one camera's timestamps would be published under a name the other also answers to. Give every camera a "
+            f"distinct name in the manifest."
+        )
+        console.error(message=message, error=ValueError)
+
+    borrowed_names = natsorted(
+        camera_names[source_id]
+        for source_id, canonical_path in canonical_paths.items()
+        if any(canonical_path == parsed for other_id, parsed in parsed_paths.items() if other_id != source_id)
+    )
+    if borrowed_names:
+        message = (
+            f"Unable to publish the parsed camera timestamp feathers under their canonical names. The canonical "
+            f"filename of the camera(s) named {borrowed_names} is the parsed feather of a different camera, so "
+            f"publishing it would destroy that camera's timestamps. Rename the camera(s) in the manifest."
+        )
+        console.error(message=message, error=ValueError)
 
 
 def _run_pose_tracking(

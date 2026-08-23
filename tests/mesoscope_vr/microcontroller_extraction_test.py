@@ -476,9 +476,8 @@ def test_parse_gas_puff_writes_the_puff_state_train(experiment_session: SessionD
     result = _read(output_directory, BehaviorDataFiles.GAS_PUFF)
     assert result["time_us"].to_list() == [10, 20, 30, 40]
     assert result["puff_state"].to_list() == [1, 0, 1, 0]
-    # The falling-edge comparison runs on the unsigned state differences, which never equal -1, so the counter stays
-    # flat across both delivered puffs. This is the defect reported alongside these tests.
-    assert result["cumulative_puff_count"].to_list() == [0, 0, 0, 0]
+    assert result["cumulative_puff_count"].to_list() == [0, 1, 1, 2]
+    assert result.schema["cumulative_puff_count"] == pl.UInt32
 
 
 def test_parse_gas_puff_writes_a_single_row_when_no_puff_was_delivered(

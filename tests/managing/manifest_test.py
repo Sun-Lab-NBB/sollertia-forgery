@@ -222,6 +222,25 @@ def test_a_session_type_without_a_descriptor_names_the_supported_types(
         generate_project_manifest(project_directory=project_root)
 
 
+def test_a_non_numeric_animal_identifier_names_itself_rather_than_the_conversion(
+    project_root: Path,
+    training_session: SessionData,
+) -> None:
+    """The manifest stores the animal identifier as an unsigned integer, and the marker carries it as free text.
+
+    An identifier the acquisition side accepts can therefore reach a conversion the schema requires, so the walk names
+    the offending identifier rather than aborting the whole project on the conversion's own message.
+    """
+    marker_path = training_session.raw_data_path.joinpath("session_data.yaml")
+    recorded = marker_path.read_text()
+    rewritten = recorded.replace(f"animal_id: '{training_session.animal_id}'", "animal_id: '305-repeat'")
+    assert rewritten != recorded
+    marker_path.write_text(rewritten)
+
+    with pytest.raises(ValueError, match=r"non-numeric identifier\(s\) \['305-repeat'\]"):
+        generate_project_manifest(project_directory=project_root)
+
+
 def test_a_session_emptied_after_discovery_is_left_out_of_the_manifest(
     project_root: Path,
     experiment_session: SessionData,

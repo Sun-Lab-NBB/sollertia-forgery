@@ -323,6 +323,29 @@ def test_parse_runtime_writes_only_state_feathers_for_training_session(
     assert _read_feather(directory, BehaviorDataFiles.RUNTIME_STATE)["runtime_state"].to_list() == [1]
 
 
+def test_parse_runtime_discards_a_cue_sequence_a_training_session_does_not_collect(
+    training_session: SessionData, tmp_path: Path
+) -> None:
+    """Verifies that a wall cue sequence is consumed by its length alone, whether or not the session collects it.
+
+    A training session collects no corridor, and the payload's leading byte is a wall cue code rather than a message
+    code, so a long payload reaching the state-code chain would be recorded as a fabricated state transition.
+    """
+    directory = tmp_path.joinpath("training_runtime_data")
+    # The first two cue codes are the system-state code and the value that code would carry.
+    corridor = _cue_payload([_SYSTEM_STATE_CODE, 2] * 300)
+
+    parse_runtime(
+        decoded_messages=_decoded_messages([(100, corridor), (200, _state_payload(_SYSTEM_STATE_CODE, 0))]),
+        output_directory=directory,
+        session=training_session,
+    )
+
+    system_states = _read_feather(directory, BehaviorDataFiles.SYSTEM_STATE)
+    assert system_states["system_state"].to_list() == [0]
+    assert system_states["time_us"].to_list() == [200]
+
+
 def test_parse_runtime_omits_guidance_feathers_when_unrecorded(experiment_session: SessionData, tmp_path: Path) -> None:
     """Verifies that the guidance feathers stay unwritten when the session recorded no guidance transition."""
     directory = tmp_path.joinpath("runtime_data")

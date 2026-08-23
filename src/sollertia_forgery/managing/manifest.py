@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from collections import Counter
 
 import polars as pl
+from natsort import natsorted
 from filelock import FileLock
 from ataraxis_base_utilities import LogLevel, console
 from sollertia_shared_assets import (
@@ -104,7 +105,8 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
     Raises:
         FileNotFoundError: If the project directory does not exist, contains no session data, or contains a session
             without its descriptor file.
-        ValueError: If an unsupported session type is encountered.
+        ValueError: If an unsupported session type is encountered, or if a session names an animal identifier that is
+            not an unsigned integer.
         Timeout: If the manifest .feather file lock cannot be acquired within 20 seconds.
     """
     if not project_directory.exists():
@@ -197,6 +199,17 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 # row, so a reader pages it one job at a time.
                 job_rows.extend(session_jobs)
 
+            # The manifest stores the animal identifier as an unsigned integer, so a non-numeric one is named here
+            # rather than left to abort the whole generation through the conversion's own message.
+            non_numeric_animals = natsorted({str(animal) for animal in manifest["animal"] if not str(animal).isdigit()})
+            if non_numeric_animals:
+                message = (
+                    f"Unable to generate the project manifest file for the '{project_directory.stem}' project. The "
+                    f"manifest records every animal identifier as an unsigned integer, but the project holds the "
+                    f"non-numeric identifier(s) {non_numeric_animals}."
+                )
+                console.error(message=message, error=ValueError)
+
             # Converts animal IDs from strings to integers for proper numeric sorting.
             manifest["animal"] = [int(animal) for animal in manifest["animal"]]
 
@@ -207,15 +220,18 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
             # chronologically within each animal group.
             sorted_manifest = manifest_frame.sort(by=["animal", "session"])
 
+            # The job artifact is published first, because the two renames are ordered rather than simultaneous and a
+            # reader takes no lock. Landing the detail before the summary leaves the reader at worst holding job rows
+            # for a session the manifest does not list yet, which a join on the documented key drops. The reverse
+            # order would show a manifest row whose jobs are absent, which reads as a session nothing has processed.
+            write_project_jobs(project_directory=project_directory, job_rows=job_rows)
+
             # Saves the generated manifest to the project-specific uncompressed .feather file to allow
             # memory-mapped reads. Published through a temporary file renamed over the destination, so a reader
             # that memory-maps the artifact without taking this lock observes either the previous manifest or the
             # complete new one, never a partially rewritten file.
             with atomic_write(file_path=manifest_path, binary=True) as file:
                 sorted_manifest.write_ipc(file=file, compression="uncompressed")
-
-            # Written while this lock is held, so a reader never sees one artifact refreshed without the other.
-            write_project_jobs(project_directory=project_directory, job_rows=job_rows)
 
             tracker.complete_job(job_id=job_id)
 

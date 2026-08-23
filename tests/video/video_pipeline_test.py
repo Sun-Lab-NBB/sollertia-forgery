@@ -486,6 +486,55 @@ def test_rename_job_preserves_a_feather_already_named_canonically(
     assert _job_status(experiment_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
 
 
+def test_rename_job_refuses_a_manifest_naming_two_cameras_alike(
+    experiment_session: SessionData,
+    write_frame_archive: Callable[..., Path],
+) -> None:
+    """Verifies two cameras sharing one manifest name are refused rather than published over each other.
+
+    Both resolve the same canonical filename, so whichever ran last would answer for both cameras and the other
+    camera's timestamps would never be published under a name of their own.
+    """
+    _write_manifest(
+        experiment_session.raw_data.behavior_data_path,
+        {_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
+    )
+    write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
+    write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
+
+    with pytest.raises(ValueError, match="for more than one camera"):
+        run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
+
+    assert _job_status(experiment_session, RENAME_JOB_NAME, "") == ProcessingStatus.FAILED
+
+
+def test_rename_job_refuses_a_camera_named_after_another_cameras_parsed_feather(
+    experiment_session: SessionData,
+    write_frame_archive: Callable[..., Path],
+) -> None:
+    """Verifies a camera whose canonical filename is another camera's parsed feather is refused.
+
+    Publishing it would unlink that camera's only copy of its timestamps and re-point the name at this camera's data,
+    which the job would then report as a success.
+    """
+    _write_manifest(
+        experiment_session.raw_data.behavior_data_path,
+        {_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
+    )
+    write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
+    write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
+
+    with pytest.raises(ValueError, match="is the parsed feather of a different camera"):
+        run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
+
+    # The refusal precedes every unlink, so both cameras keep the feathers their parse jobs wrote.
+    video_directory = _video_directory(experiment_session)
+    for source_id in (_FACE_SOURCE_ID, _BODY_SOURCE_ID):
+        assert pl.read_ipc(video_directory.joinpath(f"camera_{source_id}_timestamps.feather")).height == (
+            _RECORDING_FRAMES
+        )
+
+
 def test_rename_job_copies_when_hardlinking_is_unavailable(
     experiment_session: SessionData,
     write_frame_archive: Callable[..., Path],

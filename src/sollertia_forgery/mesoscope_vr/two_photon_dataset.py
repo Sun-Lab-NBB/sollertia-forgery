@@ -463,13 +463,19 @@ def _align_pulses_to_scanimage(
         console.error(message=message, error=ValueError)
 
     # ScanImage writes its per-frame metadata in TIFF-page-concatenation order, which interleaves frames across
-    # stack files. Sorting by the per-frame frame counter restores chronological order before the timestamps can be
-    # matched against TTL rising edges. NPZ archives do not support memory mapping, so the context manager is used
-    # to keep the archive open only long enough to copy the two arrays.
+    # stack files. Sorting restores chronological order before the timestamps can be matched against TTL rising
+    # edges. The frame counter restarts at one for each further acquisition, so it orders frames within an
+    # acquisition and the acquisition number orders the acquisitions against each other. NPZ archives do not support
+    # memory mapping, so the context manager is used to keep the archive open only long enough to copy the arrays.
     with np.load(file=metadata_path) as metadata:
         frame_numbers = np.asarray(metadata[_SCANIMAGE_FRAME_NUMBER_KEY])
         frame_seconds = np.asarray(metadata[_SCANIMAGE_FRAME_TIMESTAMP_KEY])
-    chronological_order = np.argsort(frame_numbers, kind="stable")
+        acquisitions = (
+            np.asarray(metadata[_SCANIMAGE_ACQUISITION_NUMBER_KEY])
+            if _SCANIMAGE_ACQUISITION_NUMBER_KEY in metadata
+            else np.zeros_like(frame_numbers)
+        )
+    chronological_order = np.lexsort((frame_numbers, acquisitions))
     scanimage_microseconds = (frame_seconds[chronological_order] * _MICROSECONDS_PER_SECOND).astype(np.int64)
 
     # The ScanImage archive must contain exactly as many entries as cindra's frame count. If it does not, the
@@ -544,7 +550,9 @@ def _align_pulses_to_scanimage(
     return pl.DataFrame(
         {
             "frame": pulse_ids[keep_indices],
-            "time_us": pulse_microseconds[keep_indices],
+            # Restored to the width the primary path emits, so the forged feather's timestamp column carries one dtype
+            # whichever path aligned the session.
+            "time_us": pulse_microseconds[keep_indices].astype(np.uint64),
         }
     ).sort("frame")
 

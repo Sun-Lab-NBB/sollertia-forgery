@@ -618,7 +618,7 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     experiment_session: SessionData,
 ) -> None:
     """A session carrying no camera directory reports no frame, which leaves motion energy on the per-core decoder
-    and child cost its model charges whatever the recording holds, while pose tracking is refused outright.
+    and child cost its model charges whatever the recording holds, and pose tracking on one worker.
     """
     estimates = size_session_jobs(
         pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(ENERGY_JOB_NAME, "51", 16)]
@@ -629,11 +629,12 @@ def test_a_video_estimate_charges_the_decoders_when_the_session_recorded_no_came
     assert energy.memory_mb == _apply_tolerance(
         memory_mb=WORKER_MEMORY_MB + 16 * (_DECODER_BUFFER_MEMORY_MB + SPAWNED_CHILD_MEMORY_MB)
     )
-    # Pose tracking reads a prediction file written upstream, and a session holding none names no figure at all.
-    with pytest.raises(FileNotFoundError):
-        size_session_jobs(
-            pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(TRACKING_JOB_NAME, "51", 1)]
-        )
+    # The predictions are written outside this platform, so a session holding none is charged one worker rather than
+    # refused. Refusing would drop the whole video pipeline out of the session's plan.
+    tracking = size_session_jobs(
+        pipeline=ProcessingPipelines.VIDEO, session=experiment_session, jobs=[(TRACKING_JOB_NAME, "51", 1)]
+    )
+    assert tracking[TRACKING_JOB_NAME, "51"].memory_mb == _apply_tolerance(memory_mb=WORKER_MEMORY_MB)
 
 
 def test_a_camera_directory_holding_no_recording_reports_no_frame(experiment_session: SessionData) -> None:

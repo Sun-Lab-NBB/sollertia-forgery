@@ -13,7 +13,7 @@ from sollertia_forgery.orchestration import GenericPendingJob
 from sollertia_forgery.interfaces.processing_tools import _execute_local_batch
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 MEMORY_BUDGET_MB: int = 16_384
 """The memory budget every staged batch runs against, kept far above what its jobs ask for so the core terms alone
@@ -45,21 +45,22 @@ class RecordingHost:
     """Stands in for the host holding the trackers, recording the reset each staged batch applies through it.
 
     Attributes:
-        reset_calls: One entry per reset, carrying the pipeline, the unit paths, and the job identifiers it cleared.
+        reset_calls: One entry per reset, carrying the pipeline and the identifiers it cleared on each unit.
     """
 
     def __init__(self) -> None:
-        self.reset_calls: list[tuple[str, list[str], list[str]]] = []
+        self.reset_calls: list[tuple[str, dict[str, list[str]]]] = []
 
-    def reset_jobs(self, pipeline: str, unit_paths: Sequence[Path], job_ids: Sequence[str]) -> None:
+    def reset_jobs(self, pipeline: str, job_ids_by_unit: Mapping[Path, Sequence[str]]) -> None:
         """Records one reset rather than rewriting any tracker.
 
         Args:
             pipeline: The pipeline whose jobs are cleared.
-            unit_paths: The units whose trackers hold them.
-            job_ids: The identifiers of the cleared jobs.
+            job_ids_by_unit: The identifiers of the cleared jobs, keyed by the unit whose tracker holds them.
         """
-        self.reset_calls.append((pipeline, [str(path) for path in unit_paths], list(job_ids)))
+        self.reset_calls.append(
+            (pipeline, {str(unit_path): list(job_ids) for unit_path, job_ids in job_ids_by_unit.items()})
+        )
 
 
 def make_job(job_id: str, cores: int, job_name: str = CAMERA_EXTRACTION_JOB_NAME) -> GenericPendingJob:

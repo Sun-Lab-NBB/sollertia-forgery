@@ -52,7 +52,9 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
 
     Notes:
         Takes no lock of its own, because the manifest's writer calls this while holding the lock that serializes the
-        whole generation. Writing both artifacts under one lock is what keeps them from disagreeing about a session.
+        whole generation. That lock excludes other writers rather than readers, and the two artifacts are published by
+        two separate renames, so the writer lands this one first and leaves a reader at worst holding job rows for a
+        session the manifest does not list yet.
 
         Stored uncompressed so a reader memory-maps it rather than decoding it, which is what makes a filtered read
         cost the same whether a project holds fifty sessions or eight hundred.

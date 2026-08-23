@@ -122,8 +122,12 @@ def _export_runtime_data(
     for timestamp, payload in messages:
         # Long payloads (> _CUE_SEQUENCE_MIN_LENGTH bytes) are VR wall cue sequences, collected only for experiment
         # sessions.
-        if len(payload) > _CUE_SEQUENCE_MIN_LENGTH and experiment_configuration is not None:
-            cue_sequences.append(payload.astype(np.uint8))
+        # The length alone classifies the message, so a long payload is consumed here whether or not the session
+        # collects it. Testing the session type alongside the length would let a wall cue sequence fall into the
+        # state-code chain below, where its first two cue codes read as a state transition.
+        if len(payload) > _CUE_SEQUENCE_MIN_LENGTH:
+            if experiment_configuration is not None:
+                cue_sequences.append(payload.astype(np.uint8))
 
         elif payload[0] == _SYSTEM_STATE_CODE:
             system_states.append(np.uint8(payload[1]))
@@ -415,7 +419,7 @@ def _decompose_multiple_cue_sequences_into_trials(
 
 def _prepare_motif_data(
     trial_motifs: list[NDArray[np.uint8]], trial_distances: list[float]
-) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.int32], NDArray[np.int32], NDArray[np.int32], NDArray[np.float64]]:
     """Prepares the flattened motif data for faster cue sequence-to-trial decomposition.
 
     Args:
@@ -451,7 +455,9 @@ def _prepare_motif_data(
         motif_indices[index] = original_index
         current_position += length
 
-    distances_array: NDArray[np.float32] = np.array(trial_distances, dtype=np.float32)
+    # Held at the width the cumulative trial distance is declared and persisted at, since the accumulator that sums
+    # these lengths adopts their dtype and a narrower one drifts off the recorded value over a session's trials.
+    distances_array: NDArray[np.float64] = np.array(trial_distances, dtype=np.float64)
 
     return motifs_flat, motif_starts, motif_lengths, motif_indices, distances_array
 

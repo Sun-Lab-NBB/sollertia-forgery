@@ -46,6 +46,7 @@ from ..orchestration import (
     read_batch_outcome,
     resolve_batch_host,
     reconcile_local_jobs,
+    close_settled_batches,
     group_jobs_by_tracker,
     job_execution_manager,
     read_prepared_batches,
@@ -254,11 +255,12 @@ def inspect_job_resources_tool(
             parameters they would run with.
 
     Returns:
-        A response dict with the host's ``total_memory_mb`` and the batch-available ``total_cores`` left after the
-        reserved system cores. Carries a ``totals`` summary giving ``jobs``, ``widest_job_cores``,
-        ``largest_job_memory_mb``, and ``summed_memory_mb``. Carries a ``breakdown`` per job type
-        and a ``units`` list naming each session and how many jobs it resolved. Carries a ``jobs`` list with ``rows``,
-        ``matched_rows``, ``start_row``, and ``next_start_row`` whenever a filter is named or the listing is requested.
+        A response dict with a ``totals`` summary giving ``jobs``, ``widest_job_cores``, ``largest_job_memory_mb``,
+        and ``summed_memory_mb``. Carries a ``breakdown`` per job type and a ``units`` list naming each session and how
+        many jobs it resolved. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and
+        ``next_start_row`` whenever a filter is named or the listing is requested. For ``local`` it also carries this
+        machine's ``total_memory_mb`` and the batch-available ``total_cores`` left after the reserved system cores;
+        both are absent for ``remote``, where the scheduler holds the budgets and the caller names what a job requests.
     """
     prepared = prepare_batch_tool(
         pipeline=pipeline, session_paths=session_paths, options=options, host=host, include_job_descriptors=True
@@ -270,10 +272,9 @@ def inspect_job_resources_tool(
     units = prepared["units"]
     response = ok_response(
         pipeline=prepared["pipeline"],
+        host=host,
         units=units,
         total_units=len(units),
-        total_cores=resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES),
-        total_memory_mb=resolve_host_memory_mb(),
         totals={
             "jobs": len(jobs),
             "widest_job_cores": max((int(job["cores"]) for job in jobs), default=0),
@@ -282,6 +283,13 @@ def inspect_job_resources_tool(
         },
         breakdown={"job_name": count_values(values=[job["job_name"] for job in jobs])},
     )
+
+    # Both figures read the machine this process runs on, so they describe the host only when the data sits here. A
+    # remote batch is submitted with the budgets its caller names and the scheduler enforces its own limits, so
+    # reporting this workstation's cores and memory against a server project would describe the wrong machine.
+    if host == LOCAL_HOST_LABEL:
+        response["total_cores"] = resolve_worker_count(requested_workers=-1, reserved_cores=RESERVED_CORES)
+        response["total_memory_mb"] = resolve_host_memory_mb()
 
     if job_names is None and not include_items:
         return response
@@ -378,7 +386,7 @@ def execute_jobs_tool(
         return response
 
     if host == REMOTE_HOST_LABEL:
-        response = _execute_remote_batch(pending=pending, batch_id=batch_ids[0], walltime_minutes=walltime_minutes)
+        response = _execute_remote_batch(pending=pending, batch_ids=batch_ids, walltime_minutes=walltime_minutes)
     else:
         response = _execute_local_batch(
             host=LocalHost(),
@@ -599,7 +607,7 @@ def reset_processing_jobs_tool(
     units = [Path(path) for path in unit_paths]
     try:
         with resolve_execution_host(host=host) as execution_host:
-            execution_host.reset_jobs(pipeline=pipeline, unit_paths=units, job_ids=job_ids or ())
+            execution_host.reset_jobs(pipeline=pipeline, job_ids_by_unit=dict.fromkeys(units, tuple(job_ids or ())))
     except Exception as exception:
         return error_response(message=f"Unable to reset the {host} '{pipeline}' jobs. {exception}")
 
@@ -672,25 +680,25 @@ def _reset_batch_jobs(host: ExecutionHost, jobs: list[GenericPendingJob]) -> Non
     """Clears the recorded state of every job about to be dispatched, on the host that records it.
 
     Notes:
-        Jobs are grouped by pipeline rather than by unit, so one operation carries every unit of a pipeline. Each unit
-        resets only the identifiers it actually tracks, which is what lets the whole group ship as a single call and
-        keeps a batch spanning many units to one round trip per pipeline.
+        Each unit carries the identifiers of its own dispatched jobs alone. A job identifier is derived from the job
+        name and the specifier alone, so two units of one project share the identifier of the same stage, and a flat
+        set applied to both would clear a succeeded record this batch never dispatched.
+
+        Jobs are still grouped by pipeline, so one operation carries every unit of a pipeline and a batch spanning many
+        units stays at one round trip per pipeline.
 
     Args:
         host: The host holding the trackers.
         jobs: The jobs whose records to clear.
     """
-    grouped: dict[str, tuple[set[str], set[str]]] = {}
+    grouped: dict[str, dict[Path, set[str]]] = {}
     for job in jobs:
-        units, identifiers = grouped.setdefault(job.pipeline, (set(), set()))
-        units.add(str(job.unit_path))
-        identifiers.add(job.job_id)
+        grouped.setdefault(job.pipeline, {}).setdefault(job.unit_path, set()).add(job.job_id)
 
-    for pipeline, (units, identifiers) in grouped.items():
+    for pipeline, identifiers_by_unit in grouped.items():
         host.reset_jobs(
             pipeline=pipeline,
-            unit_paths=[Path(unit) for unit in sorted(units)],
-            job_ids=sorted(identifiers),
+            job_ids_by_unit={unit_path: sorted(identifiers) for unit_path, identifiers in identifiers_by_unit.items()},
         )
 
 
@@ -829,22 +837,27 @@ def _execute_local_batch(
     )
 
 
-def _execute_remote_batch(pending: list[GenericPendingJob], batch_id: str, walltime_minutes: int) -> dict[str, Any]:
+def _execute_remote_batch(
+    pending: list[GenericPendingJob], batch_ids: list[str], walltime_minutes: int
+) -> dict[str, Any]:
     """Reconciles a remote batch and submits it to the server's scheduler as a dependency graph.
 
     Notes:
         A submission spanning several batches writes the scripts and logs of them all into one directory, named after
-        the first batch.
+        the first batch. Every batch it dispatched is recorded on the ledger entry, so closure snapshots an outcome for
+        each rather than for the first alone.
 
     Args:
         pending: The batch's jobs.
-        batch_id: The identifier naming the directory the scripts and logs are written into.
+        batch_ids: The prepared batches being dispatched. The first names the directory the scripts and logs are
+            written into.
         walltime_minutes: The wall-time every allocation requests, or a non-positive value to take the shared default.
 
     Returns:
         The response dict the calling tool returns.
     """
     walltime = walltime_minutes if walltime_minutes > 0 else REMOTE_JOB_WALLTIME_MINUTES
+    batch_id = batch_ids[0]
     try:
         with connect_to_server() as server:
             reconciliation = reconcile_remote_jobs(server=server, jobs=pending)
@@ -856,15 +869,19 @@ def _execute_remote_batch(pending: list[GenericPendingJob], batch_id: str, wallt
                 jobs=descriptors,
                 batch_id=batch_id,
                 adopted=reconciliation.adopted,
+                covered_batch_ids=batch_ids,
                 walltime_minutes=walltime,
             )
             batch_directory = str(remote_batch_directory(server=server, batch_id=batch_id))
 
-            # Retires the earlier batches that finished while this one was prepared, so the ledger sheds them without
-            # waiting for a status read that may never come.
-            outstanding = [submission for batch in read_ledger().batches for submission in batch.submissions]
+            # Closes the earlier batches that finished while this one was prepared, so the ledger sheds them without
+            # waiting for a status read that may never come. Observing a state does not retire it, so the closure
+            # step has to follow the query.
+            ledger = read_ledger()
+            outstanding = [submission for batch in ledger.batches for submission in batch.submissions]
             if outstanding:
-                query_submissions(server=server, submissions=outstanding)
+                statuses = query_submissions(server=server, submissions=outstanding)
+                close_settled_batches(host=RemoteHost(server=server), batches=ledger.batches, statuses=statuses)
     except Exception as exception:
         return error_response(message=f"Unable to submit the remote batch. {exception}")
 
@@ -872,6 +889,7 @@ def _execute_remote_batch(pending: list[GenericPendingJob], batch_id: str, wallt
         started=True,
         host=REMOTE_HOST_LABEL,
         batch_id=batch_id,
+        batch_ids=batch_ids,
         total_jobs=len(submissions),
         walltime_minutes=walltime,
         pipelines=sorted({submission.pipeline for submission in submissions}),

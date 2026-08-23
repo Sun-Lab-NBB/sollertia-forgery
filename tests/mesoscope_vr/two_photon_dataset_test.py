@@ -262,6 +262,7 @@ def test_assemble_cindra_dataset_matches_pulse_count_exactly(layout: _Layout) ->
     assert dataset["frame"].to_list() == [1, 2, 3, 4, 5]
     assert dataset["frame"].dtype == pl.UInt32
     assert dataset["time_us"].to_list() == [1_000_000, 1_100_000, 1_200_000, 1_300_000, 1_400_000]
+    assert dataset["time_us"].dtype == pl.UInt64
     assert dataset.columns == [
         "frame",
         "time_us",
@@ -286,6 +287,11 @@ def test_assemble_cindra_dataset_matches_pulse_count_exactly(layout: _Layout) ->
     multi_day = dataset[DatasetColumn.MULTI_DAY_SPIKES].to_numpy()
     assert multi_day.shape == (5, 2)
     assert np.array_equal(multi_day, np.arange(10, dtype=np.float32).reshape(2, 5).T + 1003.0)
+
+    # The fluorescence columns are the dataset's largest, and every fixture value here is exact in both widths, so the
+    # stored width is pinned directly rather than left to the value comparisons above.
+    assert dataset.schema[DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE] == pl.Array(pl.Float32, 3)
+    assert dataset.schema[DatasetColumn.MULTI_DAY_SPIKES] == pl.Array(pl.Float32, 2)
 
 
 def test_assemble_cindra_dataset_records_elapsed_minutes(layout: _Layout) -> None:

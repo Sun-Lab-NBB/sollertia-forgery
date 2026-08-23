@@ -126,23 +126,29 @@ def build_stub_dispatch(tracker_file: Path) -> Any:
 
 
 def test_a_batched_remote_reset_costs_one_invocation() -> None:
-    """Each unit resets only the identifiers it tracks, so one command carries a whole batch."""
+    """Each unit is reset against its own identifiers, and the per-unit commands chain into one round trip."""
     host, server = build_remote_host()
 
-    host.reset_jobs(pipeline="video", unit_paths=[Path("/data/P/305/a"), Path("/data/P/305/b")], job_ids=["j1", "j2"])
+    host.reset_jobs(
+        pipeline="video",
+        job_ids_by_unit={Path("/data/P/305/a"): ["j1"], Path("/data/P/305/b"): ["j2"]},
+    )
 
     assert len(server.commands) == 1
     issued = server.commands[0]
-    assert "slf reset -p video" in issued
+    assert issued.count("slf reset -p video") == 2
     assert issued.count("-up") == 2
     assert issued.count("-id") == 2
+    # A unit's own identifier travels with that unit alone, so neither command names the other unit's job.
+    assert "/data/P/305/a -id j1" in issued
+    assert "/data/P/305/b -id j2" in issued
 
 
 def test_a_remote_reset_naming_no_unit_issues_nothing() -> None:
     """A reset covering no unit has nothing to do, so it never reaches the server."""
     host, server = build_remote_host()
 
-    host.reset_jobs(pipeline="video", unit_paths=[], job_ids=["j1"])
+    host.reset_jobs(pipeline="video", job_ids_by_unit={})
 
     assert not server.commands
 
@@ -199,7 +205,7 @@ def test_a_failing_remote_operation_reports_the_invocation_it_ran() -> None:
     host, _server = build_remote_host(return_code=1)
 
     with pytest.raises(RuntimeError, match=r"'slf reset -p video -up .+' exited with code 1"):
-        host.reset_jobs(pipeline="video", unit_paths=[Path("/data/P/305/a")], job_ids=["j1"])
+        host.reset_jobs(pipeline="video", job_ids_by_unit={Path("/data/P/305/a"): ["j1"]})
 
 
 def test_chained_commands_stop_at_the_first_failure() -> None:
@@ -444,7 +450,7 @@ def test_the_protocol_declares_the_operations_preparation_runs_against_a_host() 
     assert ExecutionHost.generate_state(host, Path("/p"), [], SESSION_UNIT) is None
     assert ExecutionHost.read_rows(host, Path("/p")) is None
     assert ExecutionHost.fetch(host, Path("/p"), Path("/d")) is None
-    assert ExecutionHost.reset_jobs(host, "video", [], []) is None
+    assert ExecutionHost.reset_jobs(host, "video", {}) is None
     assert ExecutionHost.clean(host, "video", []) is None
     assert ExecutionHost.define_dataset(host, Path("/p"), "ds", [], [], force_recreate=False) is None
     assert ExecutionHost.resolve_tracker_paths(host, "video", []) is None
@@ -564,7 +570,7 @@ def test_a_local_reset_returns_the_units_tracked_jobs_to_the_scheduled_state(
     tracker.start_job(job_id=job_id)
     tracker.complete_job(job_id=job_id)
 
-    LocalHost.reset_jobs(pipeline="runtime", unit_paths=[experiment_session.raw_data_path.parent], job_ids=[])
+    LocalHost.reset_jobs(pipeline="runtime", job_ids_by_unit={experiment_session.raw_data_path.parent: []})
 
     assert ProcessingTracker(file_path=tracker_path).snapshot()[job_id].status is ProcessingStatus.SCHEDULED
 

@@ -13,7 +13,7 @@ from sollertia_shared_assets import DATASET_MARKER_FILENAME, ProcessingTrackers
 
 from .graph import build_pending_job, resolve_submission_order
 from .hosts import RemoteHost, environment_command
-from .ledger import SubmissionBatch, RemoteSubmission, record_batch, current_timestamp
+from .ledger import SubmissionBatch, RemoteSubmission, read_ledger, record_batch, current_timestamp
 from ..server import Job, Server, discover_project_markers, get_server_configuration
 from ..forging import DATASET_STATE_FILENAME
 from .dispatch import resolve_job_command
@@ -92,6 +92,7 @@ def submit_batch(
     jobs: Sequence[dict[str, Any]],
     batch_id: str,
     adopted: dict[tuple[str, str], str] | None = None,
+    covered_batch_ids: Sequence[str] = (),
     *,
     walltime_minutes: int = REMOTE_JOB_WALLTIME_MINUTES,
     verbose: bool = False,
@@ -103,6 +104,10 @@ def submit_batch(
 
         Every accepted allocation is recorded in the submission ledger, including when the scheduler rejects a later
         job of the same batch, since the allocations it already accepted stay queued.
+
+        The record is merged into whatever the ledger already holds for this batch, so re-running a batch the scheduler
+        accepted only part of keeps the allocations the first attempt queued. An entry this call re-submitted is
+        replaced rather than duplicated.
 
         An adopted job's allocation seeds the dependency map before anything is submitted, so a dependent of a job that
         is already running waits on the allocation running it rather than on a second one.
@@ -116,6 +121,8 @@ def submit_batch(
         batch_id: The identifier of the batch, which names the directory the scripts and logs are written into.
         adopted: The allocation already running each adopted job, keyed by dispatch key. These jobs are not submitted,
             and their allocations are what their dependents wait on.
+        covered_batch_ids: Every prepared batch this submission dispatches, which closure snapshots an outcome for.
+            Leave empty for a submission covering the batch ``batch_id`` names alone.
         walltime_minutes: The wall-time every allocation requests.
         verbose: Determines whether to report each submission as it is accepted.
 
@@ -145,13 +152,21 @@ def submit_batch(
         )
     finally:
         if submissions:
+            resubmitted = {(entry.unit_path, entry.job_id) for entry in submissions}
+            already_recorded = read_ledger().resolve_batch(batch_id=batch_id)
+            carried = (
+                [entry for entry in already_recorded.submissions if (entry.unit_path, entry.job_id) not in resubmitted]
+                if already_recorded is not None
+                else []
+            )
             record_batch(
                 batch=SubmissionBatch(
                     batch_id=batch_id,
+                    batch_ids=list(covered_batch_ids) if covered_batch_ids else [batch_id],
                     batch_directory=str(batch_directory),
                     submitted_at=current_timestamp(),
                     walltime_minutes=walltime_minutes,
-                    submissions=list(submissions),
+                    submissions=[*carried, *submissions],
                 )
             )
 

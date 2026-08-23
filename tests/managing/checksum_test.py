@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from ataraxis_base_utilities import console
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.managing import (
     CHECKSUM_JOB_NAME,
@@ -158,20 +158,42 @@ def test_every_checksum_job_declares_no_prerequisite(training_session: SessionDa
     }
 
 
-def test_a_session_with_nothing_to_checksum_leaves_its_job_unregistered(
+def test_a_session_with_nothing_to_checksum_is_refused_before_the_tracker_is_touched(
     training_session: SessionData, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session whose raw data never arrived makes no job possible, so the tracker is left unaligned and the run
-    stops on the job it was never given.
+    """A session whose raw data never arrived makes no job possible, so the run is refused by name and the tracker is
+    left exactly as it was found.
     """
     monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
 
-    with pytest.raises(ValueError, match="instance is not configured to track it"):
+    with pytest.raises(ValueError, match="holds no file the checksum covers"):
         run_checksum_processing_pipeline(
             session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
         )
 
     assert ProcessingTracker(file_path=training_session.raw_data.checksum_tracker_path).snapshot() == {}
+
+
+def test_a_session_that_lost_its_raw_data_keeps_its_recorded_verdict(
+    training_session: SessionData, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session whose tracker already records a verdict keeps it when its raw data is later archived off, since the
+    refusal is decided from the data rather than from the tracker's ignorance of the job.
+    """
+    run_checksum_processing_pipeline(
+        session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
+    )
+    tracker_path = training_session.raw_data.checksum_tracker_path
+    recorded = ProcessingTracker(file_path=tracker_path).snapshot()
+    assert all(state.status is ProcessingStatus.SUCCEEDED for state in recorded.values())
+
+    monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
+    with pytest.raises(ValueError, match="holds no file the checksum covers"):
+        run_checksum_processing_pipeline(
+            session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
+        )
+
+    assert ProcessingTracker(file_path=tracker_path).snapshot() == recorded
 
 
 def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_path: Path) -> None:

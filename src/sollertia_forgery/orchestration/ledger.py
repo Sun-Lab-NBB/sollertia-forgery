@@ -65,6 +65,9 @@ class SubmissionBatch:
 
     batch_id: str = ""
     """The identifier the preparation issued, which also names the batch's directory on the server."""
+    batch_ids: list[str] = field(default_factory=list)
+    """Every prepared batch this submission dispatched, since one submission may span several. Empty for a record
+    written before the field existed, which covers the single batch ``batch_id`` names."""
     batch_directory: str = ""
     """The path, on the server, to the directory holding this batch's scripts and logs."""
     submitted_at: int = 0
@@ -78,6 +81,11 @@ class SubmissionBatch:
     def pipelines(self) -> list[str]:
         """Returns the pipelines this batch holds jobs for."""
         return sorted({submission.pipeline for submission in self.submissions})
+
+    @property
+    def covered_batch_ids(self) -> list[str]:
+        """Returns every prepared batch this submission dispatched, which is what closure snapshots an outcome for."""
+        return list(self.batch_ids) if self.batch_ids else [self.batch_id]
 
 
 @dataclass

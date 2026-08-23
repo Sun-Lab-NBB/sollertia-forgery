@@ -681,18 +681,22 @@ def _size_pose_tracking_job(camera_directory: Path, cores: int) -> JobFootprint:
         it reads. The stage is this package's own and its own fan-out is fixed, so it runs at the allocation its type
         declared.
 
+        A session holding no prediction is charged one worker rather than refused. The predictions are produced
+        outside this platform, so their absence is the ordinary state of a session before that step runs, and the
+        stage completes with no output for it. Refusing to size the job would drop the whole video pipeline out of
+        that session's plan and hold back its timestamp, rename, and motion-energy jobs, whose inputs are present.
+
     Args:
         camera_directory: The raw camera directory holding the session's prediction files.
         cores: The cores the job is allocated, which its type declares.
 
     Returns:
-        The job's footprint, holding the declared width and the memory the widest prediction file implies.
-
-    Raises:
-        FileNotFoundError: If the session recorded no prediction file, in which case the job that reads one cannot
-            run either.
+        The job's footprint, holding the declared width and the memory the widest prediction file implies, or one
+        worker's memory when the session holds no prediction.
     """
     predictions = sorted(camera_directory.glob(_POSE_PREDICTION_PATTERN)) if camera_directory.is_dir() else []
+    if not predictions:
+        return JobFootprint(cores=cores, memory_mb=_apply_tolerance(memory_mb=WORKER_MEMORY_MB))
     return JobFootprint(
         cores=cores,
         memory_mb=_widest_file_memory_mb(

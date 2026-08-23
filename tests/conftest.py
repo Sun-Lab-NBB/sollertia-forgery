@@ -654,7 +654,20 @@ class StubSSHTransport:
         self.connections: list[tuple[str, str]] = []
         self.closed: bool = False
         self._responses: dict[str, tuple[str, str, int]] = {}
+        self._side_effects: dict[str, Callable[[], None]] = {}
         self._next_job_id: int = _SLURM_FIRST_JOB_ID
+
+    def on_command(self, prefix: str, effect: Callable[[], None]) -> None:
+        """Registers a change the server-side filesystem undergoes whenever a matching invocation is issued.
+
+        Lets a test tell the order of two operations apart, since a command that rewrites what a later step reads is
+        indistinguishable from one that does not when the stub only records the invocation.
+
+        Args:
+            prefix: The leading text of the invocations this effect answers.
+            effect: The callable standing in for what the real command changes on the server.
+        """
+        self._side_effects[prefix] = effect
 
     def respond(self, prefix: str, *, stdout: str = "", stderr: str = "", return_code: int = 0) -> None:
         """Registers the result answered for every invocation starting with the given text.
@@ -690,6 +703,10 @@ class StubSSHTransport:
             A tuple of the standard output, the standard error, and the exit code.
         """
         self.commands.append(command)
+
+        for prefix, effect in self._side_effects.items():
+            if command.startswith(prefix):
+                effect()
 
         for prefix, response in self._responses.items():
             if command.startswith(prefix):
