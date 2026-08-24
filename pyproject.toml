@@ -264,13 +264,28 @@ addopts = "--import-mode=importlib"
 # entry from shadowing the installed distribution the tests measure coverage against.
 pythonpath = ["."]
 
-# Configures the coverage data the '{py}-test' tox task collects. The interface layer is excluded from measurement in
-# full, as its modules (the Click CLI, the MCP server, and the MCP tool groups) only run inside a live CLI invocation
-# or MCP session, so they require external infrastructure to exercise.
+# Configures the coverage data the '{py}-test' tox task collects. Most of the interface layer is excluded from
+# measurement, as the Click commands, the MCP server, and the remote halves of the MCP tool groups only run inside a
+# live CLI invocation or MCP session. The exclusions are listed per module rather than as a directory glob, so that a
+# module added to the layer is measured by default and exempting it stays a deliberate edit. The modules absent from
+# this list carry no infrastructure coupling and the test suite already exercises them directly.
 [tool.coverage.run]
 branch = true  # Reports a conditional or loop whose alternate path no test takes as a gap
 omit = [
-    "*/sollertia_forgery/interfaces/*",
+    "*/sollertia_forgery/interfaces/entry_points.py",
+    "*/sollertia_forgery/interfaces/forge.py",
+    "*/sollertia_forgery/interfaces/forging_tools.py",
+    "*/sollertia_forgery/interfaces/host_resolution.py",
+    "*/sollertia_forgery/interfaces/manage.py",
+    "*/sollertia_forgery/interfaces/management_tools.py",
+    "*/sollertia_forgery/interfaces/mcp_server.py",
+    "*/sollertia_forgery/interfaces/plan.py",
+    "*/sollertia_forgery/interfaces/planning_tools.py",
+    "*/sollertia_forgery/interfaces/process.py",
+    "*/sollertia_forgery/interfaces/processing_tools.py",
+    "*/sollertia_forgery/interfaces/remote_tools.py",
+    "*/sollertia_forgery/interfaces/server.py",
+    "*/sollertia_forgery/interfaces/server_tools.py",
 ]
 
 # Used by the 'coverage' tox task to merge the coverage data files the '{py}-test' tasks produce.

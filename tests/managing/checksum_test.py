@@ -212,3 +212,18 @@ def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_
 def test_an_absent_raw_data_directory_has_nothing_to_checksum(tmp_path: Path) -> None:
     """A session whose acquired data never arrived carries no coverable file at all."""
     assert not _has_checksummable_data(raw_data_path=tmp_path.joinpath("never_acquired"))
+
+
+def test_a_file_stored_below_the_raw_data_root_is_still_covered_by_the_checksum(tmp_path: Path) -> None:
+    """Acquired data lands in per-source subdirectories, so coverage is decided by the full walk the checksum runs.
+
+    A subdirectory is not itself a coverable file, so a raw data directory holding only empty subdirectories is as
+    unprocessable as an empty one.
+    """
+    raw_data = tmp_path.joinpath("raw_data")
+    raw_data.joinpath("camera_frames").mkdir(parents=True)
+
+    assert not _has_checksummable_data(raw_data_path=raw_data)
+
+    raw_data.joinpath("camera_frames", "acquired.bin").write_bytes(b"data")
+    assert _has_checksummable_data(raw_data_path=raw_data)

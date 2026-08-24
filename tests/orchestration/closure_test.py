@@ -400,6 +400,38 @@ def test_a_settled_batch_is_snapshotted_before_it_leaves_the_ledger() -> None:
     assert not read_ledger().batches, "a closed batch stays outstanding"
 
 
+def test_a_submission_dispatching_several_prepared_batches_snapshots_each_one_it_covered() -> None:
+    """One submission may dispatch several prepared batches, and each carries its own document, so closing the
+    submission has to snapshot every batch it covered rather than the one its ledger entry is keyed by.
+    """
+    covered = [
+        record_prepared_batch(
+            document=BatchDocument(
+                pipeline="video",
+                host="remote",
+                jobs=[_make_job(job_id=job_id)],
+                units=[{"unit_path": _UNIT_PATH, "unit_name": _UNIT_NAME, "job_count": 1}],
+            )
+        )
+        for job_id in ("a", "b")
+    ]
+    batch = SubmissionBatch(
+        batch_id=covered[0],
+        batch_ids=covered,
+        submissions=[RemoteSubmission(job_id="a", slurm_job_id="7", unit_path=_UNIT_PATH)],
+    )
+    record_batch(batch=batch)
+    host = _StubHost(rows=[_make_state_row(job_id=job_id, status="SUCCEEDED") for job_id in ("a", "b")])
+
+    closed = close_settled_batches(host=host, batches=[batch], statuses={"7": JobStatus.COMPLETED})
+
+    assert [outcome.batch_id for outcome in closed] == covered
+    # The second batch is the one a closure keyed by the ledger entry alone would leave open forever, since retiring
+    # the entry drops the only record naming it.
+    assert read_batch_outcome(batch_id=covered[1])["complete"]
+    assert not read_ledger().batches
+
+
 def test_a_batch_that_cannot_be_closed_stays_outstanding() -> None:
     """Verifies that a batch this host cannot snapshot stays in the ledger."""
     batch = _record_settled_batch()

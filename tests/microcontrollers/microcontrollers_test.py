@@ -118,15 +118,21 @@ def _patch_parser_map(monkeypatch: pytest.MonkeyPatch, parsers: dict[tuple[int, 
     monkeypatch.setattr(pipeline_module, "resolve_microcontroller_parsers", lambda system: dict(parsers))  # noqa: ARG005
 
 
-def _make_session(tmp_path: Path) -> SimpleNamespace:
-    """Builds a lightweight stand-in for SessionData exposing only the attributes the pipeline reads."""
+def _make_session(tmp_path: Path, **hardware_overrides: object) -> SimpleNamespace:
+    """Builds a lightweight stand-in for SessionData exposing only the attributes the pipeline reads.
+
+    Args:
+        tmp_path: The temporary directory the session's raw and processed hierarchies are built under.
+        hardware_overrides: The hardware state field values recorded in place of the all-modules-used defaults, so a
+            test can stage a session that did not use one of the modules its manifest declares.
+    """
     raw_behavior = tmp_path / "raw_data" / "behavior_data"
     raw_behavior.mkdir(parents=True)
 
     # Job discovery narrows the extraction filter to the modules the session configured, so the stand-in carries a
     # hardware state that marks every module the tests exercise as used.
     hardware_state_path = tmp_path / "raw_data" / "hardware_state.yaml"
-    _make_hardware_state().to_yaml(file_path=hardware_state_path)
+    _make_hardware_state(**hardware_overrides).to_yaml(file_path=hardware_state_path)
 
     return SimpleNamespace(
         session_name="test_session",
@@ -138,9 +144,13 @@ def _make_session(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-def _make_hardware_state() -> MesoscopeHardwareState:
-    """Builds a hardware state marking every module the microcontroller tests exercise as configured and used."""
-    return MesoscopeHardwareState(
+def _make_hardware_state(**overrides: object) -> MesoscopeHardwareState:
+    """Builds a hardware state marking every module the microcontroller tests exercise as configured and used.
+
+    Args:
+        overrides: The hardware state field values recorded in place of the defaults.
+    """
+    state = MesoscopeHardwareState(
         cm_per_pulse=0.0057652,
         maximum_brake_strength=11.30234233,
         minimum_brake_strength=0.42383811,
@@ -152,6 +162,9 @@ def _make_hardware_state() -> MesoscopeHardwareState:
         recorded_mesoscope_ttl=True,
         delivered_gas_puffs=True,
     )
+    for name, value in overrides.items():
+        setattr(state, name, value)
+    return state
 
 
 def _write_inputs(
@@ -204,6 +217,27 @@ def _write_manifest(directory: Path, controllers: dict[int, tuple[tuple[int, int
         ]
     )
     manifest.to_yaml(file_path=directory / MICROCONTROLLER_MANIFEST_FILENAME)
+
+
+def _stage_controllers(
+    session: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+    controllers: dict[int, tuple[tuple[int, int], ...]],
+    archives: tuple[int, ...],
+) -> None:
+    """Writes a multi-controller manifest, stages the named archives, and binds the stubbed loader onto the pipeline.
+
+    Args:
+        session: The session stand-in whose raw behavior data directory receives the manifest and the archives.
+        monkeypatch: The patching fixture the stubbed session loader is registered on.
+        controllers: The declared ``(module_type, module_id)`` pairs, keyed by controller identifier.
+        archives: The identifiers of the controllers whose log archive is staged beside the manifest.
+    """
+    behavior = session.raw_data.behavior_data_path
+    _write_manifest(directory=behavior, controllers=controllers)
+    for controller_id in archives:
+        (behavior / f"{controller_id}_log.npz").touch()
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
 
 
 def _module_state_payload(module_type: int, module_id: int, event_code: int) -> bytes:
@@ -457,6 +491,31 @@ def test_resolve_controllers_requires_manifest(tmp_path: Path) -> None:
         )
 
 
+def test_materialize_extraction_config_writes_every_derived_controller(tmp_path: Path) -> None:
+    """Verifies that the materialized extraction configuration carries every controller the manifest derived.
+
+    Every extraction job, local or remotely dispatched into a fresh process, reads its own targets out of this one
+    file, so a controller the file omits cannot be extracted at all.
+    """
+    controllers = {
+        "101": ControllerExtractionConfig(
+            controller_id=101,
+            modules=(ModuleExtractionConfig(module_type=2, module_id=1, event_codes=(51,)),),
+            kernel=None,
+        ),
+        "102": ControllerExtractionConfig(
+            controller_id=102,
+            modules=(ModuleExtractionConfig(module_type=4, module_id=1, event_codes=(51,)),),
+            kernel=None,
+        ),
+    }
+
+    config_path = pipeline_module._materialize_extraction_config(controllers=controllers, output_directory=tmp_path)
+
+    written = ExtractionConfig.from_yaml(file_path=config_path)
+    assert [entry.controller_id for entry in written.controllers] == [101, 102]
+
+
 def test_discover_jobs_filters_by_eligibility_and_presence(tmp_path: Path) -> None:
     """Verifies that _discover_jobs requests only parseable modules whose controller archive is present."""
     # The acquisition library resolves the registered controllers and their archives from the manifest, so the
@@ -562,6 +621,109 @@ def test_local_pipeline_runs_both_stages(
     assert counts[ProcessingStatus.SUCCEEDED] == 3
 
 
+def test_local_pipeline_tracks_only_the_jobs_a_staged_archive_supports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a manifest controller that staged no log archive contributes no processing tracker entry.
+
+    A job this unit cannot run must never reach the tracker, since its absence from the state artifact is what stops
+    the orchestration layer from dispatching an allocation for an archive that is not on disk.
+    """
+    session = _make_session(tmp_path)
+    # Controller 101 staged its archive and controller 102 did not, so only 101's three jobs may be dispatched.
+    _stage_controllers(
+        session=session,
+        monkeypatch=monkeypatch,
+        controllers={101: ((2, 1), (4, 1)), 102: ((6, 1),)},
+        archives=(101,),
+    )
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1), (6, 1)})
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    counts = _count_by_status(session.processed_data.microcontroller_data_path / ProcessingTrackers.MICROCONTROLLER)
+    # Controller 102's extraction and parse jobs belong to the universe, but neither is registered on the tracker.
+    assert sum(counts.values()) == 3
+    assert counts[ProcessingStatus.SUCCEEDED] == 3
+    assert counts[ProcessingStatus.SCHEDULED] == 0
+
+
+def test_local_pipeline_records_each_controller_extraction_under_its_own_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a session with several controllers records every extraction against its own tracker entry."""
+    session = _make_session(tmp_path)
+    _stage_controllers(
+        session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1),), 102: ((4, 1),)}, archives=(101, 102)
+    )
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    tracker_path = session.processed_data.microcontroller_data_path / ProcessingTrackers.MICROCONTROLLER
+    assert _status(tracker_path=tracker_path, job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="101") == (
+        ProcessingStatus.SUCCEEDED
+    )
+    assert _status(tracker_path=tracker_path, job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="102") == (
+        ProcessingStatus.SUCCEEDED
+    )
+    assert _count_by_status(tracker_path)[ProcessingStatus.SUCCEEDED] == 4
+
+
+def test_a_rerun_preserves_the_outcome_of_a_controller_whose_archive_no_longer_resolves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a second run keeps the recorded outcome of a controller it can no longer dispatch.
+
+    Foreign entries are detected against every job the manifest could produce rather than against the subset one
+    invocation can run, so a controller whose archive was moved away keeps the outcome it already recorded instead
+    of being discarded from the state artifact.
+    """
+    session = _make_session(tmp_path)
+    _stage_controllers(
+        session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1),), 102: ((4, 1),)}, archives=(101, 102)
+    )
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+    (session.raw_data.behavior_data_path / "102_log.npz").unlink()
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    tracker_path = session.processed_data.microcontroller_data_path / ProcessingTrackers.MICROCONTROLLER
+    assert _count_by_status(tracker_path)[ProcessingStatus.SUCCEEDED] == 4
+    assert _status(tracker_path=tracker_path, job_name=CONTROLLER_EXTRACTION_JOB_NAME, specifier="102") == (
+        ProcessingStatus.SUCCEEDED
+    )
+    assert _status(tracker_path=tracker_path, job_name=PARSE_JOB_NAME, specifier="102-4-1") == (
+        ProcessingStatus.SUCCEEDED
+    )
+
+
+def test_a_module_the_session_did_not_use_is_left_out_of_the_extraction_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the materialized configuration lists only the modules the session's hardware state marks used.
+
+    The gas puff valve is registered for the acquisition system, but this session delivered no gas puffs, so
+    extracting it would write an intermediate feather nothing consumes and add a parse job the run path never lists.
+    """
+    session = _make_session(tmp_path, delivered_gas_puffs=False)
+    _stage_controllers(session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1), (5, 2))}, archives=(101,))
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1)})
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fake_extract_factory())
+
+    run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
+
+    controller_config = _read_controller_config(
+        config_path=session.processed_data.microcontroller_data_path / EXTRACTION_CONFIGURATION_FILENAME,
+        controller_id="101",
+    )
+    assert [(module.module_type, module.module_id) for module in controller_config.modules] == [(2, 1)]
+
+
 def test_unregistered_module_produces_no_parse_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_session: SimpleNamespace
 ) -> None:
@@ -653,6 +815,11 @@ def test_remote_parse_runs_single_module(
     assert _status(tracker_path=tracker_path, job_name=PARSE_JOB_NAME, specifier="101-2-1") == (
         ProcessingStatus.SUCCEEDED
     )
+    # Marking the job as running is the only writer of the executor identity and the start timestamp, which is what
+    # lets the reconciliation layer recognize the allocation running a job it did not submit itself.
+    job_info = ProcessingTracker(file_path=tracker_path).get_job_info(job_id=parse_job_id)
+    assert job_info.started_at is not None
+    assert job_info.executor_id is not None
 
 
 @pytest.mark.usefixtures("staged_session")
@@ -723,6 +890,26 @@ def test_a_manifest_controller_the_system_does_not_extract_contributes_no_job(
     assert set(requested) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
 
 
+def test_a_module_the_session_did_not_use_contributes_no_discovered_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a registered module the session's hardware state marks unused is reported by neither set.
+
+    Discovery is what the scheduler dispatches from, so a job it reports that the pipeline's own run path would
+    never list aborts on arrival instead of processing anything.
+    """
+    session = _make_session(tmp_path, delivered_gas_puffs=False)
+    _stage_controllers(session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1), (5, 2))}, archives=(101,))
+    # Discovery never invokes a parser, so the gas puff valve borrows a stub. Registering it is what makes the
+    # session's own usage flag, rather than a missing parser, the only rule that can drop the module.
+    _patch_parser_map(monkeypatch=monkeypatch, parsers={(2, 1): _stub_parse_2_1, (5, 2): _stub_parse_2_1})
+
+    _loaded, universe, requested = discover_microcontroller_jobs(session_path=tmp_path)
+
+    assert set(universe) == {(CONTROLLER_EXTRACTION_JOB_NAME, "101"), (PARSE_JOB_NAME, "101-2-1")}
+    assert set(requested) == set(universe)
+
+
 def test_microcontroller_job_prerequisites_orders_parses_after_their_extraction() -> None:
     """Verifies that each parse job declares its controller's extraction job as its only prerequisite."""
     universe = [
@@ -740,6 +927,44 @@ def test_microcontroller_job_prerequisites_orders_parses_after_their_extraction(
         (CONTROLLER_EXTRACTION_JOB_NAME, "102"): (),
         (PARSE_JOB_NAME, "102-6-1"): ((CONTROLLER_EXTRACTION_JOB_NAME, "102"),),
     }
+
+
+# Manifest validation.
+
+
+def test_a_malformed_microcontroller_manifest_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that a session whose microcontroller manifest is malformed is rejected rather than read past.
+
+    Both entry points share the single manifest read, and the rejection they document is raised by the acquisition
+    library that performs it, so this pins that the failure reaches the caller instead of being swallowed.
+    """
+    session = _make_session(tmp_path)
+    manifest_path = session.raw_data.behavior_data_path / MICROCONTROLLER_MANIFEST_FILENAME
+    manifest_path.write_text("controllers: 101\n", encoding="utf-8")
+    monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
+
+    with pytest.raises(ValueError, match=r"'controllers' field must store a list"):
+        discover_microcontroller_jobs(session_path=tmp_path)
+
+
+def test_a_second_microcontroller_manifest_in_the_tree_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a raw behavior data tree holding more than one microcontroller manifest is rejected.
+
+    One recording writes one manifest beside its archives, so a second manifest under the same tree belongs to
+    another recording and makes every controller name in it ambiguous rather than redundant.
+    """
+    session = _make_session(tmp_path)
+    _stage_controllers(session=session, monkeypatch=monkeypatch, controllers={101: ((2, 1),)}, archives=(101,))
+    nested = session.raw_data.behavior_data_path / "nested"
+    nested.mkdir()
+    _write_manifest(directory=nested, controllers={102: ((4, 1),)})
+    _patch_parsers(monkeypatch=monkeypatch, eligible={(2, 1), (4, 1)})
+    monkeypatch.setattr(pipeline_module, "_extract_controller", _fail_if_called)
+
+    with pytest.raises(ValueError, match=r"tree holds 2\s+microcontroller_manifest"):
+        run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
 
 # Stage helpers with nothing to run.

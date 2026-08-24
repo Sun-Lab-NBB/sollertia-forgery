@@ -400,20 +400,30 @@ def test_pipeline_dispatches_a_single_energy_job_by_id(tmp_path: Path, patched_s
 def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patched_session: SimpleNamespace) -> None:
     """Verifies every registered camera contributes an energy job to the tracker-alignment universe.
 
-    The universe must cover every registered camera rather than only those that ran, so that a partial invocation
-    never wipes a sibling job from the shared video tracker.
+    The universe must cover every registered camera rather than only those the invocation runs, so that a partial
+    invocation aligns the tracker without wiping the sibling job an earlier run already completed.
     """
     frames = np.zeros((20, _FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
-    _record_cameras(session=patched_session, names=("face_camera",), frames=frames)
-
+    _record_cameras(session=patched_session, names=("face_camera", "body_camera"), frames=frames)
     run_video_processing_pipeline(session_path=tmp_path, energy=True, workers=1)
+
+    # Re-runs the stage for one camera alone, which dispatches a single job while aligning the tracker against the
+    # full universe the manifest defines.
+    run_video_processing_pipeline(session_path=tmp_path, energy=True, target_camera=51, workers=1)
 
     tracker = ProcessingTracker(
         file_path=patched_session.processed_data.video_data_path.joinpath(ProcessingTrackers.VIDEO)
     )
-    for source_id in (51, 62):
-        job_id = ProcessingTracker.generate_job_id(job_name=ENERGY_JOB_NAME, specifier=str(source_id))
-        assert tracker.get_job_status(job_id=job_id) is not None
+    energy_jobs = [
+        ProcessingTracker.generate_job_id(job_name=ENERGY_JOB_NAME, specifier=str(source_id)) for source_id in (51, 62)
+    ]
+    # The camera the second invocation passed over keeps its completed record, rather than losing it or falling back
+    # to a scheduled one.
+    for job_id in energy_jobs:
+        assert tracker.get_job_status(job_id=job_id) == ProcessingStatus.SUCCEEDED
+    # Neither invocation registers a job it did not dispatch, which would leave the session reporting scheduled work
+    # against the stage flags it was never given.
+    assert set(tracker.snapshot()) == set(energy_jobs)
 
 
 def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:

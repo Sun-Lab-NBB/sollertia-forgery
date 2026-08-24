@@ -94,7 +94,7 @@ def configure_server(
     host: str,
     root: str,
     environment: str,
-) -> None:  # pragma: no cover
+) -> None:
     """Creates the remote compute server configuration file in the Sollertia platform working directory."""
     create_server_configuration_file(
         username=username,

@@ -286,6 +286,18 @@ def test_resolve_slowest_camera_clock_rejects_a_clock_spanning_no_duration(
         resolve_slowest_camera_clock(video_data_path=video_data_path)
 
 
+def test_resolve_slowest_camera_clock_rejects_a_clock_whose_frames_run_backwards(
+    video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
+) -> None:
+    # The timestamps are unsigned, so an out-of-order feather's endpoint difference wraps to a span of roughly six
+    # hundred thousand years. That reads as the slowest camera in the session and would be handed back as the
+    # reference clock every other data source is interpolated onto, so the span is measured in floating point.
+    write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(5000, 1000))
+
+    with pytest.raises(FileNotFoundError, match=re.escape("spanning a positive duration")):
+        resolve_slowest_camera_clock(video_data_path=video_data_path)
+
+
 def test_resolve_slowest_camera_clock_returns_the_body_camera_when_it_records_the_fewest_frames(
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:

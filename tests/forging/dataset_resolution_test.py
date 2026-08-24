@@ -209,6 +209,43 @@ def test_resolve_dataset_forges_without_optional_surgery_metadata(
     assert not project_root.joinpath(_DATASET_NAME, "animal_a", _SURGERY_FILENAME).exists()
 
 
+def test_resolve_dataset_copies_the_surgery_snapshot_of_every_covered_animal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a dataset created over several animals receives each animal's own surgery metadata snapshot.
+
+    The snapshot is per-animal provenance, and an animal whose source file is missing is only reported as a warning,
+    so an animal never visited at all would leave the dataset silently.
+    """
+    project_root = _install_project(
+        tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]}
+    )
+
+    resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
+
+    assert project_root.joinpath(_DATASET_NAME, "animal_a", _SURGERY_FILENAME).read_text() == "animal: animal_a"
+    assert project_root.joinpath(_DATASET_NAME, "animal_b", _SURGERY_FILENAME).read_text() == "animal: animal_b"
+
+
+def test_resolve_dataset_copies_the_surgery_snapshot_of_an_animals_latest_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that an animal's snapshot is taken from its most recent source session rather than its earliest.
+
+    Session names are timestamped, so the last of an animal's sessions in natural order is the most recent one and
+    carries the surgery record closest to the sessions the dataset is forged over.
+    """
+    project_root = _install_project(
+        tmp_path=tmp_path, monkeypatch=monkeypatch, sessions={"animal_a": ["session_1", "session_2"]}
+    )
+    for session_name in ("session_1", "session_2"):
+        project_root.joinpath("animal_a", session_name, _SURGERY_FILENAME).write_text(f"session: {session_name}")
+
+    resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
+
+    assert project_root.joinpath(_DATASET_NAME, "animal_a", _SURGERY_FILENAME).read_text() == "session: session_2"
+
+
 def test_resolve_dataset_appends_sessions_of_a_new_animal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that sessions of an animal the dataset does not hold are appended to it."""
     project_root = _install_project(
@@ -273,6 +310,28 @@ def test_resolve_dataset_rejects_an_unprocessed_session(tmp_path: Path, monkeypa
     assert not project_root.joinpath(_DATASET_NAME).exists()
 
 
+def test_resolve_dataset_rejects_an_unprocessed_session_the_list_does_not_begin_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that every session a dataset is created from is screened, not only the one its metadata comes from.
+
+    The admission gate is the only thing standing between an unfinished pipeline and a forged dataset, so a session
+    named after the first has to hold the whole definition out just as the first one does.
+    """
+    project_root = _install_project(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        sessions={"animal_a": ["session_1"], "animal_b": ["session_2"]},
+        unprocessed=frozenset({"session_2"}),
+    )
+
+    with pytest.raises(ValueError, match="Unable to admit session"):
+        resolve_dataset(name=_DATASET_NAME, session_names=("session_1", "session_2"), project_root=project_root)
+
+    # Rejection precedes hierarchy creation, so a refused definition leaves nothing behind.
+    assert not project_root.joinpath(_DATASET_NAME).exists()
+
+
 def test_resolve_dataset_rejects_a_session_whose_pipeline_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,6 +379,36 @@ def test_resolve_dataset_rejects_a_session_of_a_differing_type(tmp_path: Path, m
 
     with pytest.raises(ValueError, match="must share the same session"):
         resolve_dataset(name=_DATASET_NAME, session_names=("session_2",), project_root=project_root)
+
+
+@pytest.mark.parametrize(
+    ("installation", "message"),
+    [
+        ({"session_types": {"session_3": SessionTypes.RUN_TRAINING}}, r"must\s+share\s+the\s+same\s+session\s+type"),
+        ({"unprocessed": frozenset({"session_3"})}, r"Unable\s+to\s+admit\s+session"),
+    ],
+)
+def test_resolve_dataset_screens_every_added_session_rather_than_the_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installation: dict[str, Any], message: str
+) -> None:
+    """Verifies that an extension naming several sessions screens each of them against the dataset it joins.
+
+    The dataset marker keeps claiming one session type and one acquisition system, so a second added session the
+    check never reaches leaves the membership mixed while the marker still reads as uniform.
+    """
+    project_root = _install_project(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        sessions={"animal_a": ["session_1"], "animal_b": ["session_2", "session_3"]},
+        **installation,
+    )
+    resolve_dataset(name=_DATASET_NAME, session_names=("session_1",), project_root=project_root)
+
+    with pytest.raises(ValueError, match=message):
+        resolve_dataset(name=_DATASET_NAME, session_names=("session_2", "session_3"), project_root=project_root)
+
+    reloaded = DatasetData.load(dataset_path=project_root.joinpath(_DATASET_NAME))
+    assert _group_sessions_by_animal(reloaded) == {"animal_a": {"session_1"}}
 
 
 def test_resolve_dataset_errors_when_absent_without_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -124,6 +124,27 @@ def test_the_written_artifact_groups_rows_by_subject_then_pipeline(tmp_path: Pat
     assert frame.get_column("specifier").to_list() == [None, "body", "", "face"]
 
 
+def test_the_written_rows_order_every_identifier_the_way_it_is_written(tmp_path: Path) -> None:
+    """Verifies that the rows place animal 2 ahead of animal 10 and specifier 2 ahead of specifier 10.
+
+    Every identifier the artifact orders on is a number held as text, so ordering the rows as plain text would put 10
+    ahead of 2 and leave this artifact disagreeing with the manifest a reader joins it against.
+    """
+    rows: list[dict[str, str | None]] = [
+        {"animal": "10", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},
+        {"animal": "2", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},
+        {"animal": "2", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "2"},
+    ]
+
+    frame = pl.read_ipc(source=write_project_jobs(project_directory=tmp_path, job_rows=rows), memory_map=True)
+
+    assert list(zip(frame.get_column("animal"), frame.get_column("specifier"), strict=True)) == [
+        ("2", "2"),
+        ("2", "10"),
+        ("10", "10"),
+    ]
+
+
 def test_a_project_that_recorded_no_job_still_gets_its_artifact(tmp_path: Path) -> None:
     """Verifies that a project holding no job still writes an empty artifact carrying the full schema."""
     frame = pl.read_ipc(source=write_project_jobs(project_directory=tmp_path, job_rows=[]), memory_map=True)

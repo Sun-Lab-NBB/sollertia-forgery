@@ -194,12 +194,18 @@ def test_process_mesoscope_video_tracking_writes_every_pupil_column(
     assert written.schema[PupilColumn.BLINKING_STATE] == pl.Boolean
     assert written[PupilColumn.PUPIL_DIAMETER_PX].to_list() == pytest.approx([20.0, 20.0], abs=1e-3)
     assert written[PupilColumn.PUPIL_AREA_PX2].to_list() == pytest.approx([np.pi * 100.0] * 2, rel=1e-5)
+    # Each center column carries its own coordinate, so the horizontal and vertical components never swap places.
+    assert written[PupilColumn.PUPIL_CENTER_X_PX].to_list() == pytest.approx([100.0, 100.0], abs=1e-3)
+    assert written[PupilColumn.PUPIL_CENTER_Y_PX].to_list() == pytest.approx([80.0, 80.0], abs=1e-3)
+    assert written[PupilColumn.EYE_CENTER_X_PX].to_list() == pytest.approx([104.0, 104.0], abs=1e-3)
+    assert written[PupilColumn.EYE_CENTER_Y_PX].to_list() == pytest.approx([82.0, 82.0], abs=1e-3)
     assert written[PupilColumn.EYE_WIDTH_PX].to_list() == pytest.approx([80.0, 80.0], abs=1e-3)
     assert written[PupilColumn.EYE_HEIGHT_PX].to_list() == pytest.approx([20.0, 20.0], abs=1e-3)
     assert written[PupilColumn.EYE_OPENNESS].to_list() == pytest.approx([0.25, 0.25], abs=1e-5)
     assert written[PupilColumn.BLINKING_STATE].to_list() == [False, False]
     assert written[PupilColumn.DILATION_STATE].to_list() == [False, False]
     assert written[PupilColumn.REFLECTION_X_PX].to_list() == pytest.approx([97.0, 97.0], abs=1e-3)
+    assert written[PupilColumn.REFLECTION_Y_PX].to_list() == pytest.approx([77.0, 77.0], abs=1e-3)
     assert written[PupilColumn.PUPIL_REFLECTION_OFFSET_X_PX].to_list() == pytest.approx([3.0, 3.0], abs=1e-3)
     assert written[PupilColumn.PUPIL_REFLECTION_OFFSET_Y_PX].to_list() == pytest.approx([3.0, 3.0], abs=1e-3)
     # The pupil center sits four pixels left of and two pixels above the eye center, whose semi-axes are forty by ten.
@@ -258,6 +264,18 @@ def test_read_points_from_h5_returns_rows_in_ascending_frame_order(
     assert points[_REFLECTION_POINT][:, 0].tolist() == [1.0, 2.0, 3.0]
 
 
+def test_compute_pupil_metrics_measures_a_tilted_pupil_by_its_semi_diameter_cross_product() -> None:
+    # The two semi-diameters are perpendicular, eight and twelve pixels long, and tilted off both image axes, so the
+    # ellipse area is pi times the magnitude of their cross product, pi * 96, and no sum of products can stand in
+    # for it the way it can for the axis-aligned circle every other synthetic frame carries.
+    tilted = _frame_specification(pupil_semi_a=(-4.8, 6.4), pupil_semi_b=(9.6, 7.2))
+
+    metrics = _compute_pupil_metrics(points=_build_points([tilted]))
+
+    assert metrics[PupilColumn.PUPIL_AREA_PX2][0] == pytest.approx(np.pi * 96.0, rel=1e-5)
+    assert metrics[PupilColumn.PUPIL_DIAMETER_PX][0] == pytest.approx(20.0, abs=1e-3)
+
+
 def test_compute_pupil_metrics_keeps_a_lost_eye_ring_open_while_the_pupil_resolves() -> None:
     points = _build_points([_frame_specification(), _frame_specification(eye_confident=(0, 1))])
 
@@ -309,6 +327,12 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_closes_below_half_its_
     assert metrics[PupilColumn.BLINKING_STATE].tolist() == [False, False, False, False, True]
     assert metrics[PupilColumn.EYE_OPENNESS][4] == pytest.approx(0.025)
     assert np.isnan(metrics[PupilColumn.PUPIL_CENTER_X_PX][4])
+    # Every pupil column answers to the blink, so the motion-robust offset and the normalized in-eye position drop
+    # with the geometry rather than reporting a pupil read through a closing lid.
+    assert np.isnan(metrics[PupilColumn.PUPIL_REFLECTION_OFFSET_X_PX][4])
+    assert np.isnan(metrics[PupilColumn.PUPIL_REFLECTION_OFFSET_Y_PX][4])
+    assert np.isnan(metrics[PupilColumn.PUPIL_IN_EYE_X][4])
+    assert np.isnan(metrics[PupilColumn.PUPIL_IN_EYE_Y][4])
 
 
 def test_compute_pupil_metrics_flags_dilation_when_the_pupil_is_lost_under_an_open_eye() -> None:
@@ -358,7 +382,9 @@ def test_compute_pupil_metrics_reports_a_residual_only_for_an_overdetermined_pup
 
     metrics = _compute_pupil_metrics(points=points)
 
-    assert metrics[PupilColumn.PUPIL_FIT_RESIDUAL_PX][0] > 0.0
+    # Over eight evenly spaced ring points the [1, cos, sin] design columns are orthogonal, so every point carries a
+    # leverage of 1/8 + 1/4, and a single four-pixel displacement leaves a root-mean-square deviation of sqrt(1.25).
+    assert metrics[PupilColumn.PUPIL_FIT_RESIDUAL_PX][0] == pytest.approx(np.sqrt(1.25), abs=1e-5)
     assert np.isnan(metrics[PupilColumn.PUPIL_FIT_RESIDUAL_PX][1])
     assert metrics[PupilColumn.PUPIL_FIT_CONDITION][0] == pytest.approx(np.sqrt(2.0))
     assert metrics[PupilColumn.PUPIL_FIT_CONDITION][1] == pytest.approx(np.sqrt(2.0) + 1.0)

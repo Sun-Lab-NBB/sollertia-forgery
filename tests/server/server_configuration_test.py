@@ -123,6 +123,30 @@ def test_get_server_configuration_raises_error_if_missing(
         get_server_configuration()
 
 
+@pytest.mark.parametrize("blank_field", ["username", "password", "host", "root", "environment"])
+def test_get_server_configuration_rejects_a_configuration_missing_one_field(
+    isolated_working_directory: Path, blank_field: str
+) -> None:
+    """Verifies that a configuration filling in every field but one is refused rather than partially used.
+
+    A blank root builds every server-side path relative to the login account's home directory, and a blank
+    environment runs every allocation under whatever the login shell defaults to, so a configuration missing one
+    field is as unusable as one missing all of them.
+    """
+    fields = {
+        "username": "test_user",
+        "password": "test_pass",
+        "host": "test.server.com",
+        "root": "/remote/sollertia/root",
+        "environment": "forge",
+    }
+    fields[blank_field] = ""
+    ServerConfiguration(**fields).to_yaml(file_path=isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH))
+
+    with pytest.raises(ValueError, match=r"(?i)unconfigured"):
+        get_server_configuration()
+
+
 def test_get_server_configuration_raises_error_if_unconfigured(isolated_working_directory: Path) -> None:
     """Verifies that get_server_configuration raises ValueError for a YAML with placeholder credentials."""
     config_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)

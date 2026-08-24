@@ -211,6 +211,29 @@ def test_naming_the_link_path_as_the_runtime_is_refused(tmp_path: Path, monkeypa
     assert not runtime.is_symlink()
 
 
+def test_naming_the_runtime_by_a_second_route_to_the_same_file_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that a runtime reached by another spelling of its path is still recognized as sitting at the link.
+
+    Neither the command's arguments nor the discovery resolve the paths they are given, so an operator naming the
+    runtime relative to the link's own directory spells one file two ways. Comparing the spellings rather than the
+    files they name would miss that and replace the host's only runtime with a link pointing at itself.
+    """
+    runtime = tmp_path.joinpath("lib", "libomp.dylib")
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"the runtime")
+    second_route = tmp_path.joinpath("lib", "..", "lib", "libomp.dylib")
+    monkeypatch.setattr(openmp_module.sys, "platform", "darwin")
+    monkeypatch.setattr(openmp_module, "_openmp_runtime_loadable", lambda: False)
+
+    with pytest.raises(RuntimeError, match="already sits where the link would be written"):
+        resolve_openmp_runtime(runtime_path=second_route, link_path=runtime, execute=True)
+
+    assert runtime.read_bytes() == b"the runtime"
+    assert not runtime.is_symlink()
+
+
 def test_a_failed_link_leaves_the_previous_one_in_place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that a link this call cannot write leaves whatever the destination already held.
 

@@ -416,6 +416,29 @@ def test_remote_mode_runs_the_rename_job(
     assert _job_status(camera_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
 
 
+def test_remote_mode_keeps_the_job_records_earlier_invocations_left(
+    camera_session: SessionData,
+    write_frame_archive: Callable[..., Path],
+) -> None:
+    """Verifies a remote invocation registers its own job without deleting the entries its siblings already hold.
+
+    A scheduler dispatches one session's jobs as separate invocations, so an invocation that aligned the tracker
+    against itself alone rather than against the full job universe would wipe every sibling's recorded state. The
+    session would then report unprocessed and its already-completed jobs would be dispatched a second time.
+    """
+    behavior_directory = camera_session.raw_data.behavior_data_path
+    write_frame_archive(behavior_directory, _FACE_SOURCE_ID)
+    write_frame_archive(behavior_directory, _BODY_SOURCE_ID)
+    face_job = ProcessingTracker.generate_job_id(job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(_FACE_SOURCE_ID))
+    body_job = ProcessingTracker.generate_job_id(job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(_BODY_SOURCE_ID))
+    run_video_processing_pipeline(session_path=_session_path(camera_session), job_id=face_job, workers=1)
+
+    run_video_processing_pipeline(session_path=_session_path(camera_session), job_id=body_job, workers=1)
+
+    assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_FACE_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
+    assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
+
+
 def test_remote_mode_rejects_an_unknown_job_id(camera_session: SessionData) -> None:
     """Verifies an identifier outside the session's job universe errors and names the valid identifiers."""
     with pytest.raises(ValueError, match="must name a job the pipeline could produce"):

@@ -10,7 +10,7 @@ import numpy as np
 import polars as pl
 import pytest
 from sollertia_shared_assets import DatasetData, SessionData, SessionTypes, DatasetSession
-from ataraxis_data_structures import ProcessingTracker
+from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.runtime import RUNTIME_JOB_NAME
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
@@ -43,6 +43,7 @@ from sollertia_forgery.orchestration.footprints import JobFootprint
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from collections.abc import Callable
 
 _CHECKSUM_JOBS: list[tuple[str, str]] = [(CHECKSUM_JOB_NAME, "")]
 """A single-job universe standing in for the checksum pipeline."""
@@ -121,12 +122,12 @@ def refuse_to_size(_unit: Any, _jobs: list[tuple[str, str, int]]) -> dict[tuple[
     raise FileNotFoundError(message)
 
 
-def make_session(root: Path) -> SimpleNamespace:
+def make_session(root: Path, animal_id: str = "305") -> SimpleNamespace:
     """Builds a stand-in session exposing the attributes the planner and the projection read."""
     processed = root.joinpath("processed_data")
     processed.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
-        session_name=root.name, animal_id="305", processed_data_path=processed, unit_kind=SESSION_UNIT
+        session_name=root.name, animal_id=animal_id, processed_data_path=processed, unit_kind=SESSION_UNIT
     )
 
 
@@ -280,6 +281,30 @@ def test_recorded_figures_are_frozen_across_replanning(tmp_path: Path) -> None:
     assert replanned.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].memory_mb == 3200
 
 
+def test_replanning_never_re_reads_the_input_of_a_job_the_plan_already_holds(tmp_path: Path) -> None:
+    """Verifies that a replan sizes the outstanding jobs alone, leaving the recorded ones' inputs unread.
+
+    A recorded figure is frozen whatever a second pass would report, so re-reading the raw data it was modeled from
+    buys nothing and costs a full pass over every container the pipeline opens. It also breaks the replan outright
+    once that raw data has been archived, since a refused sizing pass drops the whole pipeline out of the plan and a
+    unit left with no pipeline is rejected.
+    """
+    session = make_session(root=tmp_path.joinpath("session"))
+    plan_session(
+        unit=session,
+        dispatches=[
+            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200)
+        ],
+    )
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
+    # Stands in for the job's raw input having been archived since the figure was recorded.
+    dispatch = replace(dispatch, size_jobs=refuse_to_size)
+
+    replanned = plan_session(unit=session, dispatches=[dispatch])
+
+    assert replanned.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].memory_mb == 3200
+
+
 def test_forcing_re_estimates_recorded_figures(tmp_path: Path) -> None:
     """Verifies that forcing re-estimates a recorded figure, which is how a deliberate retune is adopted."""
     session = make_session(root=tmp_path.joinpath("session"))
@@ -402,15 +427,24 @@ def test_a_unit_no_pipeline_can_size_stops_the_plan(tmp_path: Path) -> None:
 def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that the projection reads the caches of both unit kinds into one table matching the layout."""
+    """Verifies that the projection reads the caches of both unit kinds into one table matching the layout.
+
+    Every column of a session row is checked whole, since a scheduler joins this table against the recorded state on
+    the hashed job identifier and resolves each job's upstream stages from the ordering carried beside it. A row per
+    planned job is what makes that join cover the unit, so a session holding several jobs contributes several rows.
+    """
     project = tmp_path.joinpath("Project")
     session = make_session(root=project.joinpath("305", "2026-01-02-03-04-05-000006"))
     dataset = make_dataset(root=project.joinpath("ds_a"))
+    universe = [(CHECKSUM_JOB_NAME, "upstream"), (CHECKSUM_JOB_NAME, "downstream")]
 
     plan_session(
         unit=session,
         dispatches=[
-            make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200)
+            replace(
+                make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe, memory_mb=3200),
+                prerequisites=lambda _unit, jobs: {jobs[1]: (jobs[0],)},
+            )
         ],
     )
     plan_unit(
@@ -438,13 +472,77 @@ def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
     assert written == project_plan_path(project_directory=project)
     assert dict(frame.schema) == PROJECT_PLAN_SCHEMA
     assert set(frame["unit_kind"].to_list()) == {SESSION_UNIT, DATASET_UNIT}
-    session_row = frame.filter(pl.col("unit_kind") == SESSION_UNIT).to_dicts()[0]
-    assert session_row["animal"] == "305"
-    assert session_row["dataset"] is None
-    assert session_row["memory_mb"] == 3200
+    # Every job the session's cache holds carries its own row, so the join covers the whole unit rather than one job.
+    session_rows = frame.filter(pl.col("unit_kind") == SESSION_UNIT).sort(by="specifier").to_dicts()
+    upstream_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier="upstream")
+    assert session_rows == [
+        {
+            "unit_kind": SESSION_UNIT,
+            "animal": "305",
+            "session": session.session_name,
+            "dataset": None,
+            "pipeline": ProcessingPipelines.CHECKSUM.value,
+            "job_id": ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier="downstream"),
+            "job_name": CHECKSUM_JOB_NAME,
+            "specifier": "downstream",
+            "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
+            "memory_mb": 3200,
+            "prerequisite_ids": [upstream_id],
+        },
+        {
+            "unit_kind": SESSION_UNIT,
+            "animal": "305",
+            "session": session.session_name,
+            "dataset": None,
+            "pipeline": ProcessingPipelines.CHECKSUM.value,
+            "job_id": upstream_id,
+            "job_name": CHECKSUM_JOB_NAME,
+            "specifier": "upstream",
+            "cores": _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME],
+            "memory_mb": 3200,
+            "prerequisite_ids": [],
+        },
+    ]
     dataset_row = frame.filter(pl.col("unit_kind") == DATASET_UNIT).to_dicts()[0]
     assert dataset_row["dataset"] == "ds_a"
     assert dataset_row["session"] is None
+
+
+def test_the_projection_orders_its_animals_the_way_their_identifiers_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifies that the projection orders animal 2 ahead of animal 10 rather than behind it.
+
+    Every identifier this table sorts on embeds a number in text, so ordering the rows as plain text disagrees with
+    the order the same animals are read and written in everywhere else in the project.
+    """
+    project = tmp_path.joinpath("Project")
+    early = make_session(root=project.joinpath("2", "2026-01-02-03-04-05-000006"), animal_id="2")
+    late = make_session(root=project.joinpath("10", "2026-01-02-03-04-05-000007"), animal_id="10")
+    for session in (early, late):
+        plan_session(
+            unit=session,
+            dispatches=[
+                make_dispatch(
+                    pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS, memory_mb=3200
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        target=planning_module,
+        name="iterate_sessions",
+        value=lambda root_path: [late, early],  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        target=planning_module,
+        name="discover_project_datasets",
+        value=lambda project_root: [],  # noqa: ARG005
+    )
+
+    frame = pl.read_ipc(source=generate_project_plan(project_directory=project), memory_map=True)
+
+    assert frame["animal"].to_list() == ["2", "10"]
 
 
 def test_an_unplanned_unit_contributes_no_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -550,6 +648,30 @@ def test_a_job_the_unit_cannot_run_never_reaches_the_tracker(tmp_path: Path) -> 
     assert len(plan.entries) == len(universe)
 
 
+def test_replanning_keeps_the_recorded_state_of_a_job_the_unit_cannot_run_this_time(
+    tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
+) -> None:
+    """Verifies that a job outside this run's possible subset keeps the state its tracker already recorded.
+
+    Alignment discards every registry entry outside the universe it is handed, treating it as a job the pipeline's
+    definition no longer defines. Declaring the possible subset as that universe would therefore delete the record of
+    a job that has already succeeded, the moment its input is temporarily out of reach, and the deleted work would be
+    run again.
+    """
+    session = make_session(root=tmp_path.joinpath("2024_11_04"))
+    universe = [(CHECKSUM_JOB_NAME, ""), (CHECKSUM_JOB_NAME, "unreachable")]
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=universe)
+    write_tracker(path=dispatch.tracker_path(session), jobs=universe, succeeded=[universe[1]])
+    # Narrows the possible subset to the first job, as a resolver does while the second job's input is out of reach.
+    dispatch = replace(dispatch, discover=lambda _path: (session, universe, [universe[0]]))
+
+    plan_unit(unit_path=tmp_path.joinpath("2024_11_04"), unit_kind=SESSION_UNIT, dispatches=[dispatch])
+
+    recorded = ProcessingTracker(file_path=dispatch.tracker_path(session)).snapshot()
+    finished = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier="unreachable")
+    assert recorded[finished].status == ProcessingStatus.SUCCEEDED
+
+
 def test_a_pipeline_supporting_no_job_records_its_figures_without_writing_a_tracker(tmp_path: Path) -> None:
     """Verifies that a pipeline resolving a universe but no runnable job is still planned, and writes no tracker.
 
@@ -567,6 +689,25 @@ def test_a_pipeline_supporting_no_job_records_its_figures_without_writing_a_trac
 
     assert not dispatch.tracker_path(session).exists()
     assert {entry.specifier for entry in plan.entries} == {"", "unreachable"}
+
+
+def test_priming_is_handed_the_unit_root_rather_than_the_directory_holding_it(tmp_path: Path) -> None:
+    """Verifies that a pipeline whose job model lives in state a dependency writes is primed against the unit itself.
+
+    Priming loads the unit from the path it is handed, so any other path raises. Both priming and resolution run
+    inside the same guard, which swallows that refusal into the skip report and takes the whole pipeline out of the
+    plan, so the wrong path is silent rather than loud.
+    """
+    root = tmp_path.joinpath("2024_11_04")
+    session = make_session(root=root)
+    primed: list[Path] = []
+    dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
+    dispatch = replace(dispatch, prime=primed.append)
+
+    plan = plan_unit(unit_path=root, unit_kind=SESSION_UNIT, dispatches=[dispatch])
+
+    assert primed == [root]
+    assert {entry.pipeline for entry in plan.entries} == {ProcessingPipelines.CHECKSUM.value}
 
 
 def test_the_plan_records_the_ordering_a_scheduler_builds_its_graph_from(tmp_path: Path) -> None:

@@ -178,6 +178,12 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
     tracker = write_tracker(tracker_path, [("checksum", "")])
     lock_path = Path(tracker.lock_path)
     descriptor_path = experiment_session.raw_data.session_descriptor_path
+    # Another pipeline's output directory sits beside the checksum tracker, so a cleanup scoped to checksum has to
+    # leave it standing rather than take the directory some other pipeline owns.
+    runtime_directory = experiment_session.processed_data.runtime_data_path
+    runtime_directory.mkdir(parents=True, exist_ok=True)
+    runtime_output = runtime_directory.joinpath("runtime_data.feather")
+    runtime_output.write_bytes(b"runtime")
 
     assert lock_path.is_file(), "the tracker did not leave the lock file the cleanup is expected to remove"
 
@@ -188,6 +194,7 @@ def test_a_pipeline_that_owns_no_directory_removes_its_tracker_alone(
     # The lock is bookkeeping beside the tracker, so it goes with it rather than outliving the record it guarded.
     assert not lock_path.exists()
     assert descriptor_path.is_file(), "cleaning the checksum pipeline removed acquired data"
+    assert runtime_output.is_file(), "cleaning the checksum pipeline removed another pipeline's output"
 
 
 def test_a_unit_with_nothing_recorded_removes_nothing(experiment_session: SessionData) -> None:

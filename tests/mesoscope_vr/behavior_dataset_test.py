@@ -186,13 +186,17 @@ def write_screen_feather(microcontroller_data_path: Path) -> None:
 def write_brake_feather(microcontroller_data_path: Path) -> None:
     """Writes the brake feather, releasing the brake across the run samples and re-engaging it during rest.
 
+    The released samples carry exactly the brake threshold, since the module parser fills every disengagement with
+    the hardware state's minimum brake strength rather than with zero: a released brake still drags through its
+    mechanical coupling.
+
     Args:
         microcontroller_data_path: The directory receiving the brake feather.
     """
     pl.DataFrame(
         {
             "time_us": np.array([sample_time(0), sample_time(3), sample_time(7)], dtype=np.uint64),
-            "brake_torque_N_cm": np.array([5.0, 0.0, 5.0], dtype=np.float64),
+            "brake_torque_N_cm": np.array([5.0, MINIMUM_BRAKE_STRENGTH, 5.0], dtype=np.float64),
         }
     ).write_ipc(file=microcontroller_data_path.joinpath(BehaviorDataFiles.BRAKE))
 
@@ -316,6 +320,83 @@ def test_assemble_behavior_dataset_aligns_every_optional_source(tmp_path: Path) 
     assert behavior_data.schema["brake"] == pl.UInt8
     assert behavior_data.schema["torque_N_cm"] == pl.Float32
     assert behavior_data.schema["speed_cm_s"] == pl.Float32
+
+
+def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_path: Path) -> None:
+    """Verifies that the cumulative water total is held forward between valve events rather than ramped across them.
+
+    A real reference clock is the mesoscope frame clock and never lands on a valve event, so nearly every sample falls
+    between two deliveries. Blending them would report a fractional volume that was never dispensed, which the
+    power-law dispensing function makes wrong in any case. The encoder distance beside it does blend, so this pins the
+    two sources to their different interpolation modes rather than to a reference clock that hides the difference.
+    """
+    microcontroller_data_path, runtime_data_path, raw_data_path = make_input_directories(tmp_path=tmp_path)
+    write_hardware_state(raw_data_path=raw_data_path)
+    write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
+    write_encoder_feather(microcontroller_data_path=microcontroller_data_path)
+    # Shifts the reference clock half a sampling interval off every feather timestamp, so the fifth sample sits
+    # exactly midway between the dry valve event at sample four and the five-microliter delivery at sample five.
+    off_grid_time = reference_time_vector() + SAMPLE_INTERVAL_US // 2
+
+    behavior_data = assemble_behavior_dataset(
+        microcontroller_data_path=microcontroller_data_path,
+        runtime_data_path=runtime_data_path,
+        raw_data_path=raw_data_path,
+        reference_time=off_grid_time,
+    )
+
+    assert behavior_data["water_uL"].to_list() == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0])
+    # The encoder is interpolated linearly, so its off-grid samples do blend their bracketing readings: sample five
+    # sits three seconds past the 6.5 cm reading and 2.95 seconds short of the following 12.0 cm one.
+    blend = (SAMPLE_INTERVAL_US // 2) / (SAMPLE_INTERVAL_US - ENCODER_PAIR_OFFSET_US)
+    assert behavior_data["distance_cm"][4] == pytest.approx(6.5 + blend * 5.5)
+
+
+def test_assemble_behavior_dataset_holds_the_traveled_distance_across_a_paused_run(tmp_path: Path) -> None:
+    """Verifies that the zero anchor applies to the leading idle span alone and never to a later one.
+
+    A paused session returns to idle mid-run, and the encoder is disabled outside the run state, so the samples of
+    that later idle span hold the last run readout forward. Anchoring them at zero instead would make the cumulative
+    traveled distance drop back to the session start and then jump forward again on the next run sample.
+    """
+    microcontroller_data_path, runtime_data_path, raw_data_path = make_input_directories(tmp_path=tmp_path)
+    write_hardware_state(raw_data_path=raw_data_path)
+    write_required_feathers(microcontroller_data_path=microcontroller_data_path, runtime_data_path=runtime_data_path)
+    write_encoder_feather(microcontroller_data_path=microcontroller_data_path)
+    # Replaces the monotone idle-run-rest walk with one that pauses back into idle at the seventh sample.
+    pl.DataFrame(
+        {
+            "time_us": np.array([sample_time(0), sample_time(3), sample_time(6), sample_time(8)], dtype=np.uint64),
+            "system_state": np.array([0, 2, 0, 2], dtype=np.uint8),
+        }
+    ).write_ipc(file=runtime_data_path.joinpath(BehaviorDataFiles.SYSTEM_STATE))
+
+    behavior_data = assemble_behavior_dataset(
+        microcontroller_data_path=microcontroller_data_path,
+        runtime_data_path=runtime_data_path,
+        raw_data_path=raw_data_path,
+        reference_time=reference_time_vector(),
+    )
+
+    assert behavior_data["system_state"].to_list() == [
+        "idle",
+        "idle",
+        "idle",
+        "run",
+        "run",
+        "run",
+        "idle",
+        "idle",
+        "run",
+        "run",
+    ]
+    # The leading idle span reads zero, the paused samples six and seven hold the 14 cm reached by sample five, and
+    # the cumulative trace never steps backwards.
+    assert behavior_data["distance_cm"].to_list() == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0, 6.5, 14.0, 14.0, 14.0, 26.0, 26.0]
+    )
+    # The speed gate answers to the run state alone, so the paused samples report no motion.
+    assert behavior_data["speed_cm_s"].to_list() == pytest.approx([0.0, 0.0, 0.0, 20.0, 30.0, 40.0, 0.0, 0.0, 0.0, 0.0])
 
 
 def test_assemble_behavior_dataset_drops_the_time_columns_on_request(tmp_path: Path) -> None:

@@ -22,7 +22,7 @@ from sollertia_forgery.managing import (
     project_manifest_path,
     generate_project_manifest,
 )
-from sollertia_forgery.shared_assets import ProcessingPipelines
+from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session_tracker_path
 from sollertia_forgery.managing.manifest import (
     PIPELINE_STATUS_COLUMNS,
     PROJECT_MANIFEST_SCHEMA,
@@ -67,6 +67,24 @@ def manifest(project_manifest: Path) -> ProjectManifest:
     return ProjectManifest(manifest_file=project_manifest)
 
 
+@pytest.fixture
+def numbered_animal_manifest(project_root: Path, session_factory: Callable[..., SessionData]) -> ProjectManifest:
+    """Generates the manifest of a project whose animal identifiers order differently as text than as numbers.
+
+    Args:
+        project_root: The project the manifest is generated for.
+        session_factory: The builder that creates one acquired session for each of the two animals.
+
+    Returns:
+        The manifest reader bound to the generated artifact.
+    """
+    for animal_id in ("10", "2"):
+        session_factory(animal_id=animal_id, session_type=SessionTypes.RUN_TRAINING)
+
+    generate_project_manifest(project_directory=project_root)
+    return ProjectManifest(manifest_file=project_manifest_path(project_directory=project_root))
+
+
 def read_manifest(project_root: Path) -> pl.DataFrame:
     """Reads the manifest artifact of one project into a frame.
 
@@ -77,6 +95,20 @@ def read_manifest(project_root: Path) -> pl.DataFrame:
         The manifest contents, one row per recorded session.
     """
     return pl.read_ipc(source=project_manifest_path(project_directory=project_root), memory_map=True)
+
+
+def printed_animals(printed: str) -> list[str]:
+    """Reads the animal identifier of each data row out of a printed manifest view, in the order it was printed.
+
+    Args:
+        printed: The table one of the printed views echoed.
+
+    Returns:
+        The animal identifier of every printed data row, in printed order.
+    """
+    rows = [line for line in printed.splitlines() if line.startswith("│")]
+    # The first bordered row is the header, and every printed view leads with the animal column.
+    return [row.split("┆")[0].strip("│ ") for row in rows[1:]]
 
 
 def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -> None:
@@ -127,6 +159,46 @@ def test_generation_records_one_row_per_session_with_its_pipeline_state(
     assert processed["complete"] == 1
     assert [processed[column] for column in PIPELINE_STATUS_COLUMNS.values()] == [1, 1, 1, 1, 1]
     assert [untouched[column] for column in PIPELINE_STATUS_COLUMNS.values()] == [0, 0, 0, 0, 0]
+
+
+def test_a_pipeline_holding_a_failed_or_a_running_job_is_not_recorded_as_finished(
+    project_root: Path,
+    experiment_session: SessionData,
+    mark_session_processed: Callable[[SessionData], None],
+    write_tracker: Callable[..., ProcessingTracker],
+) -> None:
+    """A pipeline column reports 1 only when every one of that pipeline's jobs succeeded.
+
+    A crashed pipeline and a pipeline still running both leave work to be done, so recording either as finished would
+    read as a session nothing needs re-running.
+    """
+    mark_session_processed(experiment_session)
+    failed_job = (f"{ProcessingPipelines.VIDEO.value}_stage", "")
+    running_job = (f"{ProcessingPipelines.RUNTIME.value}_stage", "")
+    write_tracker(
+        path=resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO),
+        jobs=[failed_job],
+        failed={failed_job: "motion energy failed"},
+    )
+    write_tracker(
+        path=resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.RUNTIME),
+        jobs=[running_job],
+        running=[running_job],
+    )
+
+    generate_project_manifest(project_directory=project_root)
+
+    frame = read_manifest(project_root=project_root)
+    row = frame.filter(pl.col("session") == experiment_session.session_name).to_dicts()[0]
+
+    assert row[PIPELINE_STATUS_COLUMNS[ProcessingPipelines.VIDEO]] == 0
+    assert row[PIPELINE_STATUS_COLUMNS[ProcessingPipelines.RUNTIME]] == 0
+    untouched_pipelines = (
+        ProcessingPipelines.CHECKSUM,
+        ProcessingPipelines.MICROCONTROLLER,
+        ProcessingPipelines.TWO_PHOTON,
+    )
+    assert [row[PIPELINE_STATUS_COLUMNS[pipeline]] for pipeline in untouched_pipelines] == [1, 1, 1]
 
 
 def test_the_recorded_date_is_the_session_name_read_as_utc(project_root: Path, training_session: SessionData) -> None:
@@ -327,6 +399,17 @@ def test_the_reader_exposes_its_frame_and_its_animals(manifest: ProjectManifest)
     assert manifest.animals == ("305", "321")
 
 
+def test_the_animal_roster_is_ordered_the_way_the_identifiers_are_written(
+    numbered_animal_manifest: ProjectManifest,
+) -> None:
+    """Animal identifiers are numbers held as text, so the roster reports animal 2 before animal 10.
+
+    Ordering them as plain text puts 10 first, which disagrees with the order the same identifiers are read and
+    written in everywhere else.
+    """
+    assert numbered_animal_manifest.animals == ("2", "10")
+
+
 def test_every_session_is_listed_for_the_whole_project(
     manifest: ProjectManifest, experiment_session: SessionData, training_session: SessionData
 ) -> None:
@@ -467,6 +550,15 @@ def test_the_summary_view_honors_an_animal_filter(manifest: ProjectManifest, rep
     printed = reported_messages[0]
     assert "305" in printed
     assert "321" not in printed
+
+
+def test_the_summary_view_prints_the_animals_in_natural_order(
+    numbered_animal_manifest: ProjectManifest, reported_messages: list[str]
+) -> None:
+    """The printed rows are grouped by animal in the order an operator reads the identifiers, so 2 precedes 10."""
+    numbered_animal_manifest.print_summary()
+
+    assert printed_animals(reported_messages[0]) == ["2", "10"]
 
 
 def test_the_notes_view_reports_the_experimenter_text(manifest: ProjectManifest, reported_messages: list[str]) -> None:

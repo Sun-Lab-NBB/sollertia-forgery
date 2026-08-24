@@ -206,6 +206,21 @@ def test_merge_event_streams_keeps_first_stream_ahead_on_ties() -> None:
     assert values.tolist() == [1.0, 2.0]
 
 
+def test_merge_event_streams_preserves_the_full_microsecond_key_width() -> None:
+    # The merged keys are microseconds since runtime onset, so narrowing them to 32 bits wraps every event past
+    # roughly the seventy-second minute of a session and sorts it ahead of the events that truly preceded it.
+    timestamps, values = merge_event_streams(
+        timestamps_a=np.array([100, 4_294_967_396], dtype=np.uint64),
+        values_a=np.array([1.0, 3.0], dtype=np.float64),
+        timestamps_b=np.array([200], dtype=np.uint64),
+        values_b=np.array([2.0], dtype=np.float64),
+    )
+
+    assert timestamps.dtype == np.uint64
+    assert timestamps.tolist() == [100, 200, 4_294_967_396]
+    assert values.tolist() == [1.0, 2.0, 3.0]
+
+
 # Module eligibility
 
 
@@ -340,6 +355,9 @@ def test_parse_mesoscope_frame_appends_a_trailing_low_sample(
     result = _read(output_directory, BehaviorDataFiles.MESOSCOPE_FRAME)
     assert result["time_us"].to_list() == [10, 20, 30, 31]
     assert result["ttl_state"].to_list() == [1, 0, 1, 0]
+    # The appended sample has to carry the state column's own width, or the whole column widens to a signed 64-bit
+    # integer and the feather no longer matches the schema the pulse train is written with when it ends low.
+    assert result.schema["ttl_state"] == pl.UInt8
 
 
 def test_parse_mesoscope_frame_requires_falling_edges(experiment_session: SessionData, output_directory: Path) -> None:
@@ -440,6 +458,10 @@ def test_parse_valve_appends_a_trailing_tone_off_sample(
     assert result["time_us"].to_list() == [5, 15, 16, 20]
     assert result["tone_state"].to_list() == [1, 1, 0, 0]
     assert result["dispensed_water_volume_uL"].to_list() == [0.0, 0.0, 0.0, pulse_volume]
+    # The appended closing sample has to carry the tone column's own width, or the whole column widens to a signed
+    # 64-bit integer and the feather no longer matches the schema a session whose tone ended on its own is written
+    # with.
+    assert result.schema["tone_state"] == pl.UInt8
 
 
 def test_parse_valve_writes_a_single_row_when_the_valve_never_opened(
@@ -480,6 +502,21 @@ def test_parse_gas_puff_writes_the_puff_state_train(experiment_session: SessionD
     assert result.schema["cumulative_puff_count"] == pl.UInt32
 
 
+def test_parse_gas_puff_writes_both_edges_of_a_single_delivered_puff(
+    experiment_session: SessionData, output_directory: Path
+) -> None:
+    # A session that delivered exactly one puff still carries a genuine open and close pair, so it must not be
+    # mistaken for the never-delivered case, which would report the puff as never having happened.
+    partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]), _state_rows(_SECONDARY_EVENT_CODE, [20]))
+
+    parse_gas_puff(event_partition=partition, output_directory=output_directory, session=experiment_session)
+
+    result = _read(output_directory, BehaviorDataFiles.GAS_PUFF)
+    assert result["time_us"].to_list() == [10, 20]
+    assert result["puff_state"].to_list() == [1, 0]
+    assert result["cumulative_puff_count"].to_list() == [0, 1]
+
+
 def test_parse_gas_puff_writes_a_single_row_when_no_puff_was_delivered(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
@@ -504,16 +541,19 @@ def test_parse_gas_puff_skips_an_unused_module(experiment_session: SessionData, 
 
 
 def test_parse_lick_thresholds_the_sensor_voltage(experiment_session: SessionData, output_directory: Path) -> None:
-    partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [30, 10, 20], [100, 700, 650], "uint16"))
+    partition = _partition(
+        _data_rows(_PRIMARY_EVENT_CODE, [30, 10, 20, 40], [100, 700, 650, _LICK_THRESHOLD], "uint16")
+    )
 
     parse_lick(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
     result = _read(output_directory, BehaviorDataFiles.LICK)
     # The partition is written chronologically, so the voltages follow their timestamps rather than the input order.
-    assert result["time_us"].to_list() == [10, 20, 30]
-    assert result["voltage_12_bit_adc"].to_list() == [700, 650, 100]
-    assert result["lick_state"].to_list() == [1, 1, 0]
-    assert _LICK_THRESHOLD == 600
+    assert result["time_us"].to_list() == [10, 20, 30, 40]
+    assert result["voltage_12_bit_adc"].to_list() == [700, 650, 100, _LICK_THRESHOLD]
+    # The sensor reports integer ADC counts against an integer threshold, so a reading landing exactly on the
+    # calibrated threshold is a routine contact and counts as a lick rather than as a gap in one.
+    assert result["lick_state"].to_list() == [1, 1, 0, 1]
 
 
 def test_parse_lick_data_rejects_an_unset_threshold(output_directory: Path) -> None:
@@ -652,6 +692,20 @@ def test_parse_screen_writes_a_single_row_without_toggles(
 
     result = _read(output_directory, BehaviorDataFiles.SCREEN)
     assert result.to_dicts() == [{"time_us": 10, "screen_state": 0}]
+
+
+def test_parse_screen_carries_the_recorded_initial_state_into_the_single_row_without_toggles(
+    experiment_session: SessionData, output_directory: Path
+) -> None:
+    # Toggle pulses carry no absolute state, so this branch is the only route by which a session that ran with the
+    # screens on and never toggled them reports them as on.
+    _configure_hardware_state(experiment_session, screens_initially_on=True)
+    partition = _partition(_state_rows(_SECONDARY_EVENT_CODE, [10, 20]))
+
+    parse_screen(event_partition=partition, output_directory=output_directory, session=experiment_session)
+
+    result = _read(output_directory, BehaviorDataFiles.SCREEN)
+    assert result.to_dicts() == [{"time_us": 10, "screen_state": 1}]
 
 
 def test_parse_screen_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:

@@ -23,11 +23,14 @@ from sollertia_forgery.forging import (
 )
 from sollertia_forgery.managing import CHECKSUM_JOB_NAME
 from sollertia_forgery.orchestration import (
+    SESSION_UNIT,
     BATCH_PIPELINES,
     JobExecutionState,
+    prepare_batch,
     resolve_dispatch,
     build_pending_job,
     index_rows_by_unit,
+    plan_artifact_path,
     build_batch_document,
     partition_blocked_jobs,
     resolve_host_memory_mb,
@@ -51,7 +54,7 @@ from sollertia_forgery.orchestration.footprints import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 _BYTES_PER_MEGABYTE: int = 1024 * 1024
 """The divisor that converts the byte figure the host reports into the megabytes the probe answers with."""
@@ -73,6 +76,9 @@ _UNIT: Path = Path("/nonexistent/session")
 
 _OTHER_UNIT: Path = Path("/nonexistent/other_session")
 """A second processing unit, used where a test must show that two units' identical identifiers stay separate."""
+
+_PREPARED_PROJECT_ROOT: Path = Path("/nonexistent/project")
+"""The project root the preparation tests resolve their units against, which is where their artifacts are read from."""
 
 
 @dataclass
@@ -563,6 +569,33 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
     assert document.blocked_jobs == []
 
 
+def test_a_job_whose_upstream_stage_already_succeeded_is_dispatched_rather_than_blocked() -> None:
+    """Verifies that a stage succeeding in an earlier run satisfies its dependents when the unit is prepared again.
+
+    That is the ordinary resume path: the succeeded stage is left out of the batch while the job waiting on it is
+    dispatched. Reading the recorded successes as empty would report every dependent blocked and stall the unit.
+    """
+    unit = Path("/nonexistent/project/305/a_session")
+    document = build_batch_document(
+        pipeline=_PIPELINE,
+        host="workstation",
+        unit_column="session",
+        plan_rows=[
+            plan_row(unit=unit.name, job_name="hash", specifier="a"),
+            plan_row(unit=unit.name, job_name="hash", specifier="b", prerequisites=(("hash", "a"),)),
+        ],
+        state_rows=[
+            state_row(unit=unit.name, job_name="hash", specifier="a", status=ProcessingStatus.SUCCEEDED.name),
+            state_row(unit=unit.name, job_name="hash", specifier="b"),
+        ],
+        unit_paths=[unit],
+        options={},
+    )
+
+    assert [job["job_id"] for job in document.jobs] == [identifier(job_name="hash", specifier="b")]
+    assert document.blocked_jobs == []
+
+
 def test_a_state_row_naming_no_pipeline_is_read_as_the_prepared_ones() -> None:
     """Verifies that a state table recording no pipeline column belongs wholly to the pipeline being prepared."""
     unit = Path("/nonexistent/project/305/a_session")
@@ -582,7 +615,11 @@ def test_a_state_row_naming_no_pipeline_is_read_as_the_prepared_ones() -> None:
 
 
 def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
-    """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it."""
+    """Verifies that a prerequisite the unit can never produce is dropped rather than left waiting on it.
+
+    The planned figures cover the whole universe of a pipeline's jobs while a tracker registers only the subset the
+    unit can actually produce, so a stage that is planned but untracked is exactly the shape this drop exists for.
+    """
     unit = Path("/nonexistent/project/305/a_session")
     document = build_batch_document(
         pipeline=_PIPELINE,
@@ -596,6 +633,7 @@ def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
                 specifier="b",
                 prerequisites=(("hash", "a"), ("hash", "never_possible")),
             ),
+            plan_row(unit=unit.name, job_name="hash", specifier="never_possible"),
         ],
         state_rows=[
             state_row(unit=unit.name, job_name="hash", specifier="a"),
@@ -605,6 +643,9 @@ def test_a_recorded_edge_naming_an_untracked_stage_is_dropped() -> None:
         options={},
     )
 
+    # Keeping the edge would leave the downstream stage waiting on an outcome that can never be recorded, which the
+    # batch reports as blocked rather than dispatching.
+    assert document.blocked_jobs == []
     downstream = next(job for job in document.jobs if job["specifier"] == "b")
     assert downstream["prerequisite_ids"] == [identifier(job_name="hash", specifier="a")]
 
@@ -698,6 +739,102 @@ def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
 
     assert [job["job_id"] for job in dispatchable] == ["downstream"]
     assert blocked == []
+
+
+# Batch preparation
+
+
+class _StubPreparationHost:
+    """Stands in for an execution host holding one project's tables and its units' trackers.
+
+    Args:
+        plan_rows: The rows the project's plan table holds.
+        state_rows: The rows the project's state table holds.
+
+    Attributes:
+        _plan_rows: The rows the project's plan table holds.
+        _state_rows: The rows the project's state table holds.
+        materialized: The project root, unit kind, and replan choice of every materialization this host was asked for.
+    """
+
+    def __init__(self, plan_rows: list[dict[str, Any]], state_rows: list[dict[str, Any]]) -> None:
+        self._plan_rows: list[dict[str, Any]] = plan_rows
+        self._state_rows: list[dict[str, Any]] = state_rows
+        self.materialized: list[tuple[Path, str, bool]] = []
+
+    @property
+    def label(self) -> str:
+        """Returns the name this host is reported under."""
+        return "workstation"
+
+    def materialize(
+        self,
+        project_root: Path,
+        unit_paths: Sequence[Path],  # noqa: ARG002
+        unit_kind: str,
+        *,
+        replan: bool,
+    ) -> None:
+        """Records what the batch asked to be rewritten, since this stub's tables already hold their rows.
+
+        Args:
+            project_root: The project the artifacts are rewritten for.
+            unit_paths: The processing units the artifacts are rewritten for.
+            unit_kind: The kind of processing unit the paths name.
+            replan: Determines whether the recorded figures are re-estimated.
+        """
+        self.materialized.append((project_root, unit_kind, replan))
+
+    def read_rows(self, path: Path) -> list[dict[str, Any]]:
+        """Answers the plan table for the project's plan artifact and the state table for every other path.
+
+        Args:
+            path: The artifact the rows are read from.
+
+        Returns:
+            The rows that artifact holds.
+        """
+        return self._plan_rows if path == plan_artifact_path(project_root=_PREPARED_PROJECT_ROOT) else self._state_rows
+
+    @staticmethod
+    def resolve_tracker_paths(pipeline: str, unit_paths: Sequence[Path]) -> dict[str, str]:
+        """Resolves one tracker per unit, the way a host whose engine opens those files directly does.
+
+        Args:
+            pipeline: The pipeline whose tracker is located.
+            unit_paths: The unit root directories to locate trackers for.
+
+        Returns:
+            The tracker path of each unit, keyed by the unit path as a string.
+        """
+        return {str(unit_path): str(unit_path.joinpath(f"{pipeline}_tracker.yaml")) for unit_path in unit_paths}
+
+
+def test_a_prepared_batch_carries_the_tracker_location_the_host_resolved_for_each_unit() -> None:
+    """Verifies that preparation stamps each unit's own tracker location onto the descriptors it hands the engine.
+
+    The local engine opens those files directly to seed and extend its recorded outcomes, so descriptors carrying no
+    location would leave every prerequisite unsatisfied and a multi-stage batch would report its later stages blocked.
+    """
+    unit = _PREPARED_PROJECT_ROOT.joinpath("305", "a_session")
+    host = _StubPreparationHost(
+        plan_rows=[plan_row(unit=unit.name, job_name="hash", specifier="a")],
+        state_rows=[state_row(unit=unit.name, job_name="hash", specifier="a")],
+    )
+
+    document = prepare_batch(
+        host=host,  # type: ignore[arg-type]
+        pipeline=_PIPELINE,
+        unit_paths=[str(unit)],
+        options={"regenerate_checksum": True},
+        replan=True,
+    )
+
+    assert document.jobs[0]["tracker_path"] == str(unit.joinpath(f"{_PIPELINE}_tracker.yaml"))
+    assert document.jobs[0]["options"] == {"regenerate_checksum": True}
+    assert document.host == "workstation"
+    # A session pipeline materializes its whole project, and the caller's own replan choice reaches the host.
+    assert host.materialized == [(_PREPARED_PROJECT_ROOT, SESSION_UNIT, True)]
 
 
 # Dispatch ordering
