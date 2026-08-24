@@ -35,6 +35,7 @@ from sollertia_forgery.orchestration import (
     environment_command,
     resolve_job_command,
     prepare_remote_batch,
+    remote_batch_directory,
     retire_settled_batches,
 )
 from sollertia_forgery.server.server import _parse_job_status
@@ -330,6 +331,25 @@ def test_a_submission_names_the_allocations_of_the_upstream_jobs_the_batch_holds
     assert "--dependency" not in server.submitted[0].command_script
 
 
+def test_a_submission_waits_on_every_upstream_allocation_rather_than_the_first_of_them() -> None:
+    """A stage assembled from several upstream stages has to name them all, since starting once the first finishes
+    reads an input another prerequisite is still writing.
+    """
+    server = StubServer()
+    jobs = [
+        build_descriptor(job_id="binarize", job_name="binarize"),
+        build_descriptor(job_id="timestamp", job_name="timestamp", specifier="1"),
+        build_descriptor(job_id="combine", job_name="combine", prerequisite_ids=("binarize", "timestamp")),
+    ]
+
+    submit_batch(server=server, jobs=jobs, batch_id="batch01")
+
+    directive = next(
+        line for line in server.submitted[2].command_script.splitlines() if line.startswith("#SBATCH --dependency=")
+    )
+    assert sorted(directive.removeprefix("#SBATCH --dependency=afterok:").split(":")) == ["1000", "1001"]
+
+
 def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() -> None:
     """Sizing each allocation from its own estimate is what keeps one large job from reserving its footprint for all."""
     server = StubServer()
@@ -342,6 +362,21 @@ def test_a_submission_requests_the_cores_and_memory_the_job_was_prepared_at() ->
     # 5000 megabytes rounds up to five gigabytes, since understating a request kills the allocation outright.
     assert "#SBATCH --mem=5G" in script
     assert "#SBATCH --time=08:00:00" in script
+
+
+def test_a_submission_requests_the_wall_time_the_caller_asked_for() -> None:
+    """The wall-time is the caller's own knob for a batch of long jobs, so the scheduler and the record both have to
+    carry the figure it named rather than the default the caller raised it above.
+    """
+    server = StubServer()
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+
+    submit_batch(server=server, jobs=jobs, batch_id="batch01", walltime_minutes=720)
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert "#SBATCH --time=12:00:00" in server.submitted[0].command_script
+    assert recorded is not None
+    assert recorded.walltime_minutes == 720
 
 
 def test_an_adopted_allocation_seeds_a_dependency_without_being_recorded_or_mutated() -> None:
@@ -404,7 +439,18 @@ def test_the_checksum_command_carries_the_mode_the_job_was_prepared_with() -> No
     prepared = build_descriptor(job_id="job", job_name="checksum", pipeline="checksum")
     prepared["options"] = {"regenerate_checksum": True}
 
-    assert "-rc" in resolve_job_command(job=build_pending_job(job=prepared))
+    # The remote backend shell-joins this vector into the batch script, so the mode has to be a trailing option of the
+    # command rather than a token anywhere in it.
+    assert resolve_job_command(job=build_pending_job(job=prepared)) == (
+        "slf",
+        "checksum",
+        "-sp",
+        "/data/Project/Animal/Session",
+        "-w",
+        "2",
+        "-np",
+        "-rc",
+    )
 
 
 def test_the_forging_command_names_the_dataset_and_its_project_root() -> None:
@@ -524,6 +570,52 @@ def test_a_submitted_batch_is_recorded_so_it_outlives_the_process_that_submitted
     assert recorded.batch_directory == "/server/root/processing_batches/batch01"
 
 
+def test_a_recorded_submission_describes_the_job_it_was_submitted_for() -> None:
+    """The record is the only description of a queued allocation this host keeps, and a later dispatch matches an
+    already-queued job by the unit and job the record names, so every field has to describe that job rather than a
+    neighboring one.
+    """
+    server = StubServer()
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1", cores=16, memory_mb=4096)]
+
+    submit_batch(server=server, jobs=jobs, batch_id="batch01")
+
+    batch_directory = server.root.joinpath("processing_batches", "batch01")
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    assert recorded.submissions == [
+        RemoteSubmission(
+            job_id="energy",
+            slurm_job_id="1000",
+            slurm_job_name="0000-Session-motion_energy-1",
+            pipeline="video",
+            job_name="motion_energy",
+            specifier="1",
+            unit_path="/data/Project/Animal/Session",
+            unit_name="Session",
+            cores=16,
+            memory_mb=4096,
+            output_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.out")),
+            error_log=str(batch_directory.joinpath("0000-Session-motion_energy-1.err")),
+        )
+    ]
+
+
+def test_a_submission_records_every_prepared_batch_it_dispatched() -> None:
+    """One submission may merge several prepared batches into the directory the first of them names, and closure
+    snapshots an outcome for each batch the record lists, so a record naming the directory's batch alone leaves the
+    others open once the record is retired.
+    """
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+
+    submit_batch(server=StubServer(), jobs=jobs, batch_id="batch01", covered_batch_ids=["batch01", "batch02"])
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    assert recorded.batch_ids == ["batch01", "batch02"]
+    assert recorded.covered_batch_ids == ["batch01", "batch02"]
+
+
 def test_allocations_accepted_before_a_rejection_are_still_recorded() -> None:
     """A rejection leaves the earlier allocations queued, so recording only on a clean pass would orphan them."""
 
@@ -549,6 +641,33 @@ def test_allocations_accepted_before_a_rejection_are_still_recorded() -> None:
     recorded = read_ledger().resolve_batch(batch_id="batch01")
     assert recorded is not None
     assert [entry.slurm_job_id for entry in recorded.submissions] == ["1000", "1001"]
+
+
+def test_re_submitting_a_batch_keeps_the_allocations_its_first_attempt_queued() -> None:
+    """The allocations a rejected attempt already queued stay queued, so re-running the batch merges into the record
+    rather than replacing it. An allocation dropped from the record is reachable by no status read, no cancellation
+    and no closure, and runs to completion unobserved.
+    """
+    record_batch(
+        batch=build_batch(
+            batch_id="batch01",
+            submissions=[
+                build_submission(slurm_job_id="900", job_id="rename"),
+                build_submission(slurm_job_id="901", job_id="energy"),
+            ],
+        )
+    )
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+
+    submit_batch(server=StubServer(), jobs=jobs, batch_id="batch01")
+
+    recorded = read_ledger().resolve_batch(batch_id="batch01")
+    assert recorded is not None
+    # The job this attempt re-submitted is replaced rather than duplicated, and the one it did not cover is carried.
+    assert [(entry.job_id, entry.slurm_job_id) for entry in recorded.submissions] == [
+        ("rename", "900"),
+        ("energy", "1000"),
+    ]
 
 
 def test_recording_a_batch_preserves_the_batches_already_in_the_ledger() -> None:
@@ -949,6 +1068,22 @@ def test_a_batch_that_queued_nothing_is_never_recorded(connected_server: Server)
     assert read_ledger().batches == []
 
 
+def test_a_submission_writes_each_job_script_into_the_batch_directory_it_created(
+    connected_server: Server, stub_ssh_transport: Any
+) -> None:
+    """The batch path takes one script and one log pair per job as its children, so it is created as a directory. A
+    path created as an empty file instead accepts no child at all, and every upload of the batch fails on it.
+    """
+    jobs = [build_descriptor(job_id="energy", job_name="motion_energy", specifier="1")]
+
+    submissions = submit_batch(server=connected_server, jobs=jobs, batch_id="batch01")
+
+    batch_directory = remote_batch_directory(server=connected_server, batch_id="batch01")
+    script = batch_directory.joinpath(f"{submissions[0].slurm_job_name}.sh")
+    assert stub_ssh_transport.local_path(batch_directory).is_dir()
+    assert stub_ssh_transport.local_path(script).is_file()
+
+
 def test_the_scheduler_reports_the_state_of_every_submitted_allocation(
     connected_server: Server, stub_ssh_transport: Any
 ) -> None:
@@ -1037,6 +1172,38 @@ def test_mirroring_regenerates_the_state_before_it_pulls_it(
     ]
     assert tmp_path.joinpath("Dataset", "dataset_state.feather").read_text() == "dataset state"
     assert tmp_path.joinpath("TestProject_jobs.feather").read_text() == "jobs after the run"
+
+
+def test_mirroring_covers_every_dataset_the_project_holds(
+    connected_server: Server, stub_ssh_transport: Any, tmp_path: Path
+) -> None:
+    """A read tool resolves a dataset from its mirrored marker and its jobs from its mirrored state table, so a
+    project's every dataset has to be regenerated and pulled rather than one of them, which would leave the rest
+    reported as unforged and carrying no job.
+    """
+    server_project = stub_ssh_transport.local_path(SERVER_PROJECT_ROOT)
+    for name in ("Alpha", "Beta"):
+        dataset = server_project.joinpath(name)
+        dataset.mkdir(parents=True)
+        dataset.joinpath(DATASET_MARKER_FILENAME).write_text(f"{name} marker")
+        dataset.joinpath(DATASET_STATE_FILENAME).write_text(f"{name} state")
+
+    mirrored = sync_project_state(server=connected_server, project="TestProject", local_directory=tmp_path)
+
+    issued = " ".join(stub_ssh_transport.commands)
+    assert (
+        f"slf dataset-state -dp {SERVER_PROJECT_ROOT.joinpath('Alpha')} -dp {SERVER_PROJECT_ROOT.joinpath('Beta')}"
+        in issued
+    )
+    assert {path.relative_to(tmp_path).as_posix() for path in mirrored} == {
+        "Alpha/dataset.yaml",
+        "Alpha/dataset_state.feather",
+        "Beta/dataset.yaml",
+        "Beta/dataset_state.feather",
+    }
+    # Each dataset's own table has to travel, so a mirror that pulled one table twice is not a mirror of the project.
+    assert tmp_path.joinpath("Alpha", "dataset_state.feather").read_text() == "Alpha state"
+    assert tmp_path.joinpath("Beta", "dataset_state.feather").read_text() == "Beta state"
 
 
 def test_a_project_holding_no_dataset_regenerates_its_manifest_alone(

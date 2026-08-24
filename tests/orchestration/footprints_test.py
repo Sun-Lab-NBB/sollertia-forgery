@@ -59,15 +59,11 @@ from sollertia_forgery.registries import (
 from sollertia_forgery.shared_assets import ProcessingPipelines, multi_recording_dataset_name
 from sollertia_forgery.microcontrollers import PARSE_JOB_NAME, CONTROLLER_EXTRACTION_JOB_NAME
 from sollertia_forgery.orchestration.footprints import (
-    _ASSEMBLY_WRITE_COPIES,
     _POSE_PREDICTION_RATIO,
     _RETAINED_FRAME_BUFFERS,
     _SINGLE_PRECISION_BYTES,
     _ARCHIVE_DIRECTORY_RATIO,
     _DECODER_BUFFER_MEMORY_MB,
-    _CHECKSUM_READER_MEMORY_MB,
-    _SUB_DATASET_BYTES_PER_SAMPLE,
-    _ASSEMBLY_FLUORESCENCE_COLUMNS,
     JobFootprint,
     _apply_tolerance,
     _read_array_shape,
@@ -75,6 +71,7 @@ from sollertia_forgery.orchestration.footprints import (
     size_session_jobs,
     _round_to_gigabyte,
     _bytes_to_megabytes,
+    _resolve_widest_camera_frame_pixels,
 )
 
 if TYPE_CHECKING:
@@ -102,6 +99,21 @@ REGION_LINES: list[list[int]] = [[1, 100], [101, 300], []]
 
 SAMPLING_RATE: float = 10.0
 """The per-plane sampling rate the synthetic acquisition parameters declare."""
+
+CHECKSUM_READER_MEMORY_MB: int = 285
+"""The resident memory the checksum model charges one reader. The tunable terms of a model this package owns are
+stated here rather than imported back out of it, so that retuning one moves this expectation instead of moving both
+sides of the comparison together."""
+
+ASSEMBLY_FLUORESCENCE_COLUMNS: int = 8
+"""The fluorescence columns the per-session assembly model charges one recording, anchored on the same terms."""
+
+ASSEMBLY_WRITE_COPIES: int = 1
+"""The copies of the assembled fluorescence volume the same model charges at the write, anchored on the same terms."""
+
+SUB_DATASET_BYTES_PER_SAMPLE: int = 512
+"""The memory the same model charges the behavior, runtime, and video sub-datasets per sample of the clock they are
+placed on, anchored on the same terms."""
 
 
 def write_surgery_metadata(session: SessionData, genotype: str = "GP5.17") -> Path:
@@ -378,9 +390,9 @@ def assembly_memory(samples: int, regions: int) -> int:
     Returns:
         The reportable memory in megabytes.
     """
-    columns = _ASSEMBLY_FLUORESCENCE_COLUMNS * _ASSEMBLY_WRITE_COPIES * samples * regions * _SINGLE_PRECISION_BYTES
+    columns = ASSEMBLY_FLUORESCENCE_COLUMNS * ASSEMBLY_WRITE_COPIES * samples * regions * _SINGLE_PRECISION_BYTES
     return _apply_tolerance(
-        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + samples * _SUB_DATASET_BYTES_PER_SAMPLE)
+        memory_mb=WORKER_MEMORY_MB + _bytes_to_megabytes(byte_count=columns + samples * SUB_DATASET_BYTES_PER_SAMPLE)
     )
 
 
@@ -397,7 +409,7 @@ def test_checksum_memory_scales_with_the_readers_a_job_opens(experiment_session:
 
     narrow = estimates[CHECKSUM_JOB_NAME, ""]
     wide = estimates[CHECKSUM_JOB_NAME, "wide"]
-    assert narrow.memory_mb == _apply_tolerance(memory_mb=WORKER_MEMORY_MB + 8 * _CHECKSUM_READER_MEMORY_MB)
+    assert narrow.memory_mb == _apply_tolerance(memory_mb=WORKER_MEMORY_MB + 8 * CHECKSUM_READER_MEMORY_MB)
     assert wide.memory_mb > narrow.memory_mb
     # The checksum stage is this package's own, so each job is planned at the allocation it was handed.
     assert (narrow.cores, wide.cores) == (8, 16)
@@ -431,7 +443,7 @@ def test_a_runtime_job_whose_archive_was_never_written_is_refused(experiment_ses
     """
     experiment_session.raw_data.behavior_data_path.mkdir(parents=True, exist_ok=True)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Unable to find the log archive of source '51'"):
         size_session_jobs(
             pipeline=ProcessingPipelines.RUNTIME,
             session=experiment_session,
@@ -454,13 +466,13 @@ def test_a_camera_extraction_estimate_follows_the_video_library_model(
     assert estimates[CAMERA_EXTRACTION_JOB_NAME, "77"] == camera_library_footprint(archive=archive)
     # The controller archive of source 99 was never written, and each library refuses an archive it cannot read
     # because the job reading it could not run either. That refusal reaches the caller unchanged.
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Unable to find the log archive of source '99'"):
         size_session_jobs(
             pipeline=ProcessingPipelines.VIDEO,
             session=experiment_session,
             jobs=[(CONTROLLER_EXTRACTION_JOB_NAME, "99", 8)],
         )
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Unable to find the log archive of source '99'"):
         size_session_jobs(
             pipeline=ProcessingPipelines.VIDEO,
             session=experiment_session,
@@ -547,7 +559,7 @@ def test_a_parse_estimate_is_refused_when_the_behavior_directory_holds_no_archiv
     """
     experiment_session.raw_data.behavior_data_path.mkdir(parents=True, exist_ok=True)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Unable to size a job reading a log archive from"):
         size_session_jobs(
             pipeline=ProcessingPipelines.MICROCONTROLLER,
             session=experiment_session,
@@ -561,7 +573,7 @@ def test_a_parse_estimate_is_refused_when_the_behavior_directory_is_absent(
     """A session that recorded no behavior data carries no directory to search, which is refused the same way."""
     assert not experiment_session.raw_data.behavior_data_path.is_dir()
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Unable to size a job reading a log archive from"):
         size_session_jobs(
             pipeline=ProcessingPipelines.MICROCONTROLLER,
             session=experiment_session,
@@ -594,6 +606,10 @@ def test_a_video_estimate_charges_every_job_the_widest_recorded_frame(
     )
 
     widest_pixels = moving_block_frames.shape[1] * moving_block_frames.shape[2]
+    # Read straight off the container headers, since the memory figure below passes through the tolerance and a
+    # frame count as wrong as zero still lands inside the headroom that leaves.
+    assert _resolve_widest_camera_frame_pixels(camera_directory=camera) == widest_pixels
+
     per_worker = (
         _bytes_to_megabytes(byte_count=widest_pixels * _SINGLE_PRECISION_BYTES * _RETAINED_FRAME_BUFFERS)
         + _DECODER_BUFFER_MEMORY_MB
@@ -774,7 +790,7 @@ def test_two_photon_jobs_are_refused_when_the_session_holds_no_raw_imaging(exper
     """
     write_surgery_metadata(session=experiment_session)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Neither of its two inputs resolved"):
         two_photon_estimates(
             session=experiment_session,
             jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4), (str(SingleRecordingJobNames.COMBINE), "", 1)],
@@ -788,7 +804,7 @@ def test_two_photon_jobs_are_refused_when_the_imaging_directory_holds_no_paramet
     write_surgery_metadata(session=experiment_session)
     experiment_session.raw_data_path.joinpath("mesoscope_data").mkdir(parents=True, exist_ok=True)
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="Neither of its two inputs resolved"):
         two_photon_estimates(session=experiment_session, jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4)])
 
 
@@ -799,7 +815,9 @@ def test_two_photon_jobs_are_refused_when_every_image_is_excluded(experiment_ses
     write_acquisition_parameters(directory=directory, region_lines=REGION_LINES)
     write_imaging_stack(directory=directory, name="zstack.tif", pages=8)
 
-    with pytest.raises(FileNotFoundError):
+    # The parameters were read here, so the refusal names the frames the conversion could not count rather than the
+    # unresolved inputs an unreadable recording reports.
+    with pytest.raises(FileNotFoundError, match="so the frames its conversion reads cannot be counted"):
         two_photon_estimates(session=experiment_session, jobs=[(str(SingleRecordingJobNames.BINARIZE), "", 4)])
 
 
@@ -866,6 +884,33 @@ def test_dataset_stages_are_sized_from_the_processed_recordings_they_read(
     )
 
 
+def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
+    project_root: Path, session_factory: Callable[..., SessionData]
+) -> None:
+    """The write that closes an assembly job streams the frame it was handed rather than rebuilding it, so the columns
+    the assembly already holds are what the stage peaks at.
+
+    The reportable figure is rounded up to the whole gigabyte, which leaves a recording of the scale the other dataset
+    tests use unable to tell one copy of its fluorescence from two. This recording is therefore written large enough
+    that its retained columns are a gigabyte in their own right, which is the scale the copy count becomes visible at.
+    """
+    session = session_factory(animal_id="305", experiment_name="test_experiment")
+    write_surgery_metadata(session=session)
+    write_processed_recording(session=session, regions=48, samples=150_000)
+    dataset = build_dataset(
+        project_root=project_root,
+        name="ds_one_copy",
+        sessions=[session],
+        session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
+    )
+
+    estimates = size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    assert estimates[FORGING_JOB_NAME, session.session_name] == JobFootprint(
+        cores=1, memory_mb=assembly_memory(samples=150_000, regions=48)
+    )
+
+
 def test_a_written_multi_day_array_replaces_the_tracked_region_bound(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
@@ -915,12 +960,12 @@ def test_dataset_stages_are_refused_for_a_session_carrying_no_processed_output(
 
     # cindra refuses a recording set carrying no processed output rather than sizing it from a guess, and the
     # assembly stage has no fluorescence of its own to read either.
-    for job in (
-        (MULTIDAY_DISCOVERY_JOB_NAME, "305", 30),
-        (MULTIDAY_EXTRACTION_JOB_NAME, session.session_name, 16),
-        (FORGING_JOB_NAME, session.session_name, 1),
+    for job, refusal in (
+        ((MULTIDAY_DISCOVERY_JOB_NAME, "305", 30), "carry no combined"),
+        ((MULTIDAY_EXTRACTION_JOB_NAME, session.session_name, 16), "carry no combined"),
+        ((FORGING_JOB_NAME, session.session_name, 1), "carries no processed imaging"),
     ):
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError, match=refusal):
             size_dataset_jobs(dataset=dataset, jobs=[job])
 
 
@@ -1028,7 +1073,9 @@ def test_a_recording_whose_metadata_is_absent_is_refused(
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
-    write_trace_array(path=session.processed_data.cindra_data_path.joinpath("cell_fluorescence.npy"), shape=(120, 900))
+    traces = write_trace_array(
+        path=session.processed_data.cindra_data_path.joinpath("cell_fluorescence.npy"), shape=(120, 900)
+    )
     dataset = build_dataset(
         project_root=project_root,
         name="ds_partial",
@@ -1036,25 +1083,37 @@ def test_a_recording_whose_metadata_is_absent_is_refused(
         session_type=SessionTypes.MESOSCOPE_EXPERIMENT,
     )
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="carries no processed imaging"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    # The traces themselves read cleanly, so the missing archive alone is what leaves the geometry unresolved.
+    assert _read_array_shape(array_path=traces) == (120, 900)
 
 
 def test_a_trace_array_of_another_rank_is_refused(
     project_root: Path, session_factory: Callable[..., SessionData]
 ) -> None:
-    """A fluorescence array carrying a rank other than regions by samples is not read as a recording geometry."""
+    """A fluorescence array carrying a rank other than regions by samples is not read as a recording geometry.
+
+    The rank is rejected on both sides of the two the geometry is made of, so an array carrying a further axis is
+    refused rather than read as its leading two extents.
+    """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
     directory = session.processed_data.cindra_data_path
-    write_trace_array(path=directory.joinpath("cell_fluorescence.npy"), shape=(120,))
+    flat = write_trace_array(path=directory.joinpath("cell_fluorescence.npy"), shape=(120,))
     write_combined_metadata(directory=directory, height=64, width=64)
     dataset = build_dataset(
         project_root=project_root, name="ds_rank", sessions=[session], session_type=SessionTypes.MESOSCOPE_EXPERIMENT
     )
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError, match="carries no processed imaging"):
         size_dataset_jobs(dataset=dataset, jobs=[(FORGING_JOB_NAME, session.session_name, 1)])
+
+    # The metadata archive is present here, so the rank the header reports is the whole of what the refusal rests on.
+    assert _read_array_shape(array_path=flat) is None
+    volume = write_trace_array(path=directory.joinpath("volume.npy"), shape=(4, 120, 900))
+    assert _read_array_shape(array_path=volume) is None
 
 
 def test_a_second_format_version_header_is_parsed_the_same_way(tmp_path: Path) -> None:

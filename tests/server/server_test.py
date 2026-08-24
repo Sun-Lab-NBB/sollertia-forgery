@@ -450,6 +450,24 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
     }
 
 
+def test_get_job_statuses_reports_a_pending_allocation_the_queue_calls_blocked(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that an allocation accounting calls pending and the queue calls unsatisfiable reports as blocked.
+
+    Accounting reports a permanently blocked allocation as pending, so the queue's reason field is the only thing
+    that retires it. Every identifier of an ordinary batch is one accounting knows, so the queue has to be read for
+    that batch rather than only for one holding an allocation accounting cannot place.
+    """
+    stub_ssh_transport.job_statuses.update({"1000": "PENDING", "1001": "RUNNING"})
+    stub_ssh_transport.blocked_job_ids.add("1000")
+
+    statuses = connected_server.get_job_statuses(slurm_job_ids=("1000", "1001"))
+
+    assert statuses == {"1000": JobStatus.BLOCKED, "1001": JobStatus.RUNNING}
+    assert any(command.startswith("squeue") for command in stub_ssh_transport.commands)
+
+
 def test_get_job_statuses_skips_the_queue_lookup_without_a_pending_allocation(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:

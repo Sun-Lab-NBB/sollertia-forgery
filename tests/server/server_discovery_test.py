@@ -180,6 +180,21 @@ def test_discover_project_markers_reports_the_datasets_beside_the_sessions(
     assert project_path.joinpath("dataset_alpha").is_dir()
 
 
+def test_discover_project_markers_orders_the_datasets_naturally(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """Verifies that a dataset name carrying fewer digits is listed ahead of a longer one, as a reader reads them."""
+    project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
+    for name in ("dataset_100", "dataset_10", "dataset_9"):
+        marker = project_path.joinpath(name, "dataset.yaml")
+        marker.parent.mkdir(parents=True)
+        marker.write_text("dataset: marker\n")
+
+    markers = discover_project_markers(project_path=connected_server.root.joinpath(_PROJECT), server=connected_server)
+
+    assert [path.name for path in markers.datasets] == ["dataset_9", "dataset_10", "dataset_100"]
+
+
 def test_discover_project_markers_reads_both_marker_names_in_one_search(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 import pytest
+from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.video import ENERGY_JOB_NAME
@@ -17,7 +18,9 @@ from sollertia_forgery.interfaces.responses import (
     count_values,
     project_item,
     resolve_page,
+    reject_unknown,
     resolve_detail_limit,
+    resolve_elapsed_seconds,
 )
 from sollertia_forgery.interfaces.forging_tools import list_project_datasets_tool
 from sollertia_forgery.interfaces.management_tools import read_project_jobs_tool
@@ -146,8 +149,38 @@ def test_the_default_page_shrinks_when_detail_is_requested() -> None:
 
 
 def test_counting_values_reports_absent_subjects_as_a_category() -> None:
-    """Verifies that a null is itself a value a caller filters on, so it is counted rather than dropped."""
-    assert count_values(values=["a", "a", None, "b"]) == {"a": 2, "b": 1, "none": 1}
+    """Verifies that a null is itself a value a caller filters on, so it is counted rather than dropped.
+
+    A breakdown is read top to bottom as the list of values an axis can be filtered on, so the counts are reported in
+    value order rather than in the order the column happens to hold them.
+    """
+    counts = count_values(values=["a", "a", None, "b"])
+
+    assert counts == {"a": 2, "b": 1, "none": 1}
+    assert list(counts) == ["a", "b", "none"]
+
+
+def test_filtering_on_a_column_the_table_does_not_hold_names_the_columns_it_does() -> None:
+    """Verifies that a filter naming a column the artifact lacks is answered rather than left to fail on the read."""
+    frame = pl.DataFrame({"status": ["FAILED"], "pipeline": ["video"]})
+
+    response = reject_unknown(frame=frame, column="state", values=["FAILED"], subject="job")
+
+    assert response is not None
+    assert not response["success"]
+    assert "state" in response["error"]
+    assert "['pipeline', 'status']" in response["error"]
+
+
+def test_the_elapsed_runtime_a_response_reports_is_measured_in_seconds() -> None:
+    """Verifies that an operation timed in milliseconds is reported in the seconds every response carries it in."""
+    timer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
+    timer.reset()
+    timer.delay(delay=100, allow_sleep=True, block=False)
+
+    elapsed = resolve_elapsed_seconds(timer=timer)
+
+    assert 0.09 <= elapsed < 1
 
 
 def test_projecting_an_item_leaves_out_what_carries_nothing() -> None:

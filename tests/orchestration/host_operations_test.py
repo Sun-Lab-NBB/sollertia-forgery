@@ -199,6 +199,21 @@ def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> Non
     # The forging command runs every outstanding tracked job, so a definition-only step never names it.
     assert "slf forge" not in issued
 
+    host.define_dataset(
+        project_root=Path("/data/P"),
+        dataset_name="ds",
+        session_names=["s2", "s1"],
+        recreate_animals=[],
+        force_recreate=False,
+    )
+
+    extended = server.commands[1]
+    # A rebuild deletes the whole hierarchy and reassembles it, so an additive definition must not carry the flag.
+    assert "force_recreate=False" in extended
+    # The order the sessions were acquired in is what the dataset records, so the caller's own order travels intact.
+    assert 'session_names=tuple(["s2", "s1"])' in extended
+    assert "recreate_animals=tuple([])" in extended
+
 
 def test_a_failing_remote_operation_reports_the_invocation_it_ran() -> None:
     """A caller needs to know which command failed, since one invocation can carry several."""
@@ -501,7 +516,10 @@ def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, exp
     # The checksum stage is the one pipeline whose every job reads data this session carries, so it is the one that
     # survives the sizing pass.
     assert planned[0]["job_count"] == 1
-    assert planned[0]["summed_memory_mb"] > 0
+    # The reported figure is the memory the projection records for that unit's jobs, so the two agree exactly. A
+    # summary built from any other planned quantity would disagree with the table a submission is sized against.
+    plan_rows = LocalHost.read_rows(path=project_plan_path(project_directory=project_root))
+    assert planned[0]["summed_memory_mb"] == sum(int(row["memory_mb"]) for row in plan_rows)
 
 
 def test_a_unit_no_pipeline_resolves_a_job_for_is_reported_beside_the_ones_that_planned(
@@ -549,6 +567,26 @@ def test_refreshing_a_dataset_batch_writes_the_state_of_the_named_datasets_alone
     assert not other.dataset_data_path.parent.joinpath(DATASET_STATE_FILENAME).is_file()
 
 
+def test_materializing_a_dataset_batch_refreshes_the_state_of_the_datasets_it_names(project: ProjectData) -> None:
+    """The batch is resolved from these tables, so the units a materialization covers reach the state step it runs.
+
+    A materialization that named no unit there would refresh no table at all, leaving the batch to be prepared and
+    closed against whatever state the previous run left behind.
+    """
+    named = create_dataset(project=project, name="named_dataset")
+    other = create_dataset(project=project, name="other_dataset")
+
+    LocalHost.materialize(
+        project_root=project.path,
+        unit_paths=[named.dataset_data_path.parent],
+        unit_kind=DATASET_UNIT,
+        replan=False,
+    )
+
+    assert named.dataset_data_path.parent.joinpath(DATASET_STATE_FILENAME).is_file()
+    assert not other.dataset_data_path.parent.joinpath(DATASET_STATE_FILENAME).is_file()
+
+
 def test_a_table_the_local_host_does_not_hold_reads_as_no_rows(tmp_path: Path) -> None:
     """A project whose artifacts were never written reads cleanly rather than failing."""
     assert LocalHost.read_rows(path=tmp_path.joinpath("absent.feather")) == []
@@ -573,6 +611,36 @@ def test_a_local_reset_returns_the_units_tracked_jobs_to_the_scheduled_state(
     LocalHost.reset_jobs(pipeline="runtime", job_ids_by_unit={experiment_session.raw_data_path.parent: []})
 
     assert ProcessingTracker(file_path=tracker_path).snapshot()[job_id].status is ProcessingStatus.SCHEDULED
+
+
+def test_a_local_reset_applies_each_units_own_identifiers_to_that_unit_alone(
+    experiment_session: SessionData,
+    session_factory: Callable[..., SessionData],
+    write_tracker: Callable[..., ProcessingTracker],
+) -> None:
+    """A retry names the jobs it wants back, so every other record the unit holds survives the reset.
+
+    A job identifier carries no unit, so the two sessions record the same stage under the same identifier. Applying
+    one unit's identifiers to the other, or discarding them and clearing everything, would push a succeeded record
+    the caller never named back to the scheduled state and recompute a whole run's work.
+    """
+    retried = session_factory(animal_id="321", experiment_name="test_experiment")
+    jobs = [("runtime_processing", "1"), ("runtime_processing", "2")]
+    retried_tracker = resolve_session_tracker_path(session=retried, pipeline=ProcessingPipelines.RUNTIME)
+    untouched_tracker = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.RUNTIME)
+    write_tracker(retried_tracker, jobs, succeeded=jobs)
+    write_tracker(untouched_tracker, jobs, succeeded=jobs)
+    named = ProcessingTracker.generate_job_id(job_name="runtime_processing", specifier="1")
+    unnamed = ProcessingTracker.generate_job_id(job_name="runtime_processing", specifier="2")
+
+    LocalHost.reset_jobs(pipeline="runtime", job_ids_by_unit={retried.raw_data_path.parent: [named]})
+
+    reset_snapshot = ProcessingTracker(file_path=retried_tracker).snapshot()
+    assert reset_snapshot[named].status is ProcessingStatus.SCHEDULED
+    assert reset_snapshot[unnamed].status is ProcessingStatus.SUCCEEDED
+    assert {entry.status for entry in ProcessingTracker(file_path=untouched_tracker).snapshot().values()} == {
+        ProcessingStatus.SUCCEEDED
+    }
 
 
 def test_a_local_cleanup_reports_the_bytes_each_removal_freed(experiment_session: SessionData) -> None:
@@ -659,6 +727,21 @@ def test_refreshing_a_dataset_batch_remotely_names_every_dataset_it_covers(
     assert f"slf dataset-state -dp {datasets[0]} -dp {datasets[1]}" in issued
 
 
+def test_refreshing_a_session_batch_remotely_recreates_its_own_projects_manifest(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """A session batch's state lives in the project manifest's walk, so its refresh recreates that project's manifest.
+
+    The manifest-regeneration tool names no unit at all, so a refresh that resolved the dataset command instead would
+    issue it without the dataset paths its option requires and the server would reject the whole invocation.
+    """
+    RemoteHost(server=connected_server).generate_state(
+        project_root=SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
+    )
+
+    assert f"slf manifest -pp {SERVER_PROJECT_ROOT} create" in issued_command(server=stub_ssh_transport)
+
+
 def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
@@ -704,6 +787,27 @@ def test_a_remote_plan_naming_no_unit_reprojects_the_project_alone(
     assert "slf plan session" not in issued
 
 
+def test_a_remote_plan_issues_the_unit_kind_and_the_unit_set_the_caller_named(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """The per-unit step is what registers the jobs, so it has to name every unit under the kind the caller passed.
+
+    A session batch planned as a dataset one resolves no job and still exits cleanly, which reaches the caller as a
+    plan that found no outstanding work rather than as a command that never ran.
+    """
+    first = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
+    second = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-03-03-04-05-000006")
+
+    RemoteHost(server=connected_server).plan(
+        project_root=SERVER_PROJECT_ROOT, unit_paths=[first, second], unit_kind=SESSION_UNIT, replan=False
+    )
+
+    issued = issued_command(server=stub_ssh_transport)
+    # The chaining operator ends the command, so neither session was dropped and no replan flag was appended.
+    assert f"slf plan session -sp {first} -sp {second} &&" in issued
+    assert f"slf plan project -pp {SERVER_PROJECT_ROOT}" in issued
+
+
 def test_a_table_the_server_does_not_hold_reads_as_no_rows(connected_server: Server) -> None:
     """A project the server never planned reads cleanly rather than failing."""
     assert RemoteHost(server=connected_server).read_rows(path=SERVER_PROJECT_ROOT.joinpath("absent.feather")) == []
@@ -742,6 +846,28 @@ def test_a_failing_remote_cleanup_reports_the_invocation_it_ran(
 
     with pytest.raises(RuntimeError, match=r"'slf clean -p video -up .+' exited with code 2"):
         RemoteHost(server=connected_server).clean(pipeline="video", unit_paths=[SERVER_PROJECT_ROOT.joinpath("305")])
+
+
+def test_a_server_side_invocation_killed_by_a_signal_is_reported_as_a_failure(
+    connected_server: Server, stub_ssh_transport: StubSSHTransport
+) -> None:
+    """A killed command closes its channel without an exit status, which the connection reports as a negative code.
+
+    Only an exit of exactly zero means the invocation finished, so a signalled or memory-killed command stops the
+    caller rather than handing it the half-written artifacts the command never got to finish.
+    """
+    stub_ssh_transport.respond("bash -lc", return_code=-1)
+    captured_host, _server = build_remote_host(return_code=-1)
+
+    with pytest.raises(RuntimeError):
+        RemoteHost(server=connected_server).generate_state(
+            project_root=SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
+        )
+
+    # The invocation whose output the caller parses answers the same way, so a killed cleanup never reads as a short
+    # removal list.
+    with pytest.raises(RuntimeError):
+        captured_host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
 
 
 def test_the_remote_host_resolves_no_tracker_location_at_all(connected_server: Server) -> None:

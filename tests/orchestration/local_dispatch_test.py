@@ -436,6 +436,25 @@ def test_admission_fills_both_budgets_and_defers_what_neither_can_hold() -> None
     assert sum(job.core_weight for job in pool.submitted) == CORE_BUDGET
 
 
+def test_a_later_pass_counts_the_cores_the_already_running_jobs_committed() -> None:
+    """Every pass recomputes the committed totals from the running set, so capacity already taken is never reoffered.
+
+    A pass that began its core tally at zero would see a full pool as an idle one and admit another budget's worth of
+    work on top of it, running twice the cores the batch was budgeted for.
+    """
+    jobs = [make_job(job_id=f"job{index}", cores=16, memory_mb=1024) for index in range(6)]
+    state = build_state(jobs=jobs)
+
+    first = admit(state)
+    second = admit(state)
+
+    # The first pass commits all sixty-four cores, and the memory budget stays wide open throughout, so cores are the
+    # only term that can hold the two remaining jobs back.
+    assert len(first.submitted) == 4
+    assert second.submitted == []
+    assert len(state.pending_jobs) == 2
+
+
 def test_a_job_larger_than_the_whole_budget_still_runs_alone() -> None:
     """A batch whose only job outsizes the host makes progress rather than stalling on an unreachable fit."""
     oversized = make_job(job_id="oversized", cores=999, memory_mb=10_000_000)
@@ -768,6 +787,41 @@ def test_the_pool_hands_its_children_whatever_console_state_the_parent_holds(
     job_execution_manager(state=build_state(jobs=[]))
 
     assert [initargs[1] for initargs in recorded] == [False, True]
+
+
+def test_the_pool_spawns_the_batchs_own_width_while_pinning_its_children_to_the_thread_ceiling(
+    monkeypatch: pytest.MonkeyPatch, restored_console: None
+) -> None:
+    """The width the pool spawns at and the threads each child pins its libraries to are two unrelated figures.
+
+    The batch tools size the pool from the host's cores and leave the thread ceiling at its default of one, so a pool
+    spawned at the ceiling instead would run every local batch strictly serially with nothing reported about it.
+    """
+    recorded: list[tuple[int, tuple[Any, ...]]] = []
+
+    class WidthCapturingPool(RecordingPool):
+        """Stands in for the shared pool, recording the width it spawns at and the arguments its children start with."""
+
+        def __init__(self, max_workers: int, initializer: Callable[..., None], initargs: tuple[Any, ...]) -> None:  # noqa: ARG002
+            super().__init__()
+            recorded.append((max_workers, initargs))
+
+        def __enter__(self) -> Self:
+            """Enters the pool's scope, which the manager holds for the session."""
+            return self
+
+        def __exit__(self, *_exception: object) -> None:
+            """Leaves the pool's scope without suppressing anything."""
+
+    monkeypatch.setattr("sollertia_forgery.orchestration.local.ProcessPoolExecutor", WidthCapturingPool)
+    state = build_state(jobs=[])
+    state.pool_size = 8
+    state.thread_ceiling = 2
+
+    console.enable()
+    job_execution_manager(state=state)
+
+    assert recorded == [(8, (2, False))]
 
 
 def test_the_pool_import_pin_hands_the_parent_back_what_it_was_using(monkeypatch: pytest.MonkeyPatch) -> None:

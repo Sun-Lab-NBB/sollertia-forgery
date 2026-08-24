@@ -184,6 +184,55 @@ def test_a_live_allocation_named_by_the_tracker_is_adopted(
     assert not reconciliation.resettable
 
 
+def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
+    running_job: Callable[[str | None], GenericPendingJob],
+) -> None:
+    """Verifies that a job both sources claim is adopted onto the allocation its tracker names, not the ledger's.
+
+    An executor identifier appears only once an allocation starts running, so it describes a later moment than this
+    host's record of submitting one. Preferring the ledger's stale identifier would query an allocation that has
+    already finished, read the job as finished with it, and submit a second allocation over the files the live one is
+    still writing.
+    """
+    job = running_job("slurm:991")
+    record_batch(
+        batch=SubmissionBatch(
+            batch_id="earlier",
+            submissions=[
+                RemoteSubmission(job_id=job.job_id, slurm_job_id="777", unit_path=_UNIT_PATH, pipeline="video")
+            ],
+        )
+    )
+    server = _StubServer(statuses={"777": JobStatus.FAILED, "991": JobStatus.RUNNING})
+
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
+
+    assert reconciliation.adopted == {(_UNIT_PATH, job.job_id): "991"}
+    # Dispatching the job again would run two allocations over the same tracker and the same output.
+    assert not reconciliation.dispatchable
+    assert not reconciliation.resettable
+
+
+def test_an_executor_naming_the_scheduler_but_no_allocation_is_submitted_again(
+    running_job: Callable[[str | None], GenericPendingJob],
+) -> None:
+    """Verifies that a truncated executor identifier is treated as naming no allocation at all.
+
+    A record carrying the scheme without an allocation names nothing the scheduler can be asked about. Treating it as
+    a claim would adopt the job forever, since an allocation the scheduler reports nothing for reads as one that has
+    not yet reached a terminal state.
+    """
+    job = running_job("slurm:")
+    server = _StubServer(statuses={})
+
+    reconciliation = reconcile_remote_jobs(server=server, jobs=[job])
+
+    assert server.queried == [], "a job claiming no allocation sent the scheduler a query"
+    assert not reconciliation.adopted
+    assert [dispatched.job_id for dispatched in reconciliation.dispatchable] == [job.job_id]
+    assert [resettable.job_id for resettable in reconciliation.resettable] == [job.job_id]
+
+
 def test_a_finished_allocation_is_submitted_again(running_job: Callable[[str | None], GenericPendingJob]) -> None:
     """Verifies that a job whose tracker names a finished allocation is submitted again."""
     job = running_job("slurm:991")

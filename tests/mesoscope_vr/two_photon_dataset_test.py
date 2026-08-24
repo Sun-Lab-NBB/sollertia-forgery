@@ -294,6 +294,32 @@ def test_assemble_cindra_dataset_matches_pulse_count_exactly(layout: _Layout) ->
     assert dataset.schema[DatasetColumn.MULTI_DAY_SPIKES] == pl.Array(pl.Float32, 2)
 
 
+def test_assemble_cindra_dataset_publishes_every_trace_array_under_its_own_column(layout: _Layout) -> None:
+    """Verifies each of the eight fluorescence columns carries the cindra array whose name it advertises.
+
+    The four traces of a recording share their shape and their dtype, so a column fed from a sibling array ships the
+    wrong signal to every downstream reader without any schema difference to give it away.
+    """
+    _prepare(layout, pulses=_pulse_train(1_000_000, 5), frame_count=5)
+
+    dataset = layout.assemble()
+
+    # The single-recording classification keeps ROIs 0, 2 and 3 of the four-ROI arrays, while both ROIs of the
+    # two-ROI multi-recording arrays survive. Each array counts up from the ramp its own offset shifts, so the first
+    # frame's vector names both the directory the column was read from and the array it holds.
+    expected = {
+        DatasetColumn.SINGLE_DAY_CELL_FLUORESCENCE: (pl.Array(pl.Float32, 3), [0.0, 10.0, 15.0]),
+        DatasetColumn.SINGLE_DAY_NEUROPIL_FLUORESCENCE: (pl.Array(pl.Float32, 3), [1.0, 11.0, 16.0]),
+        DatasetColumn.SINGLE_DAY_SUBTRACTED_FLUORESCENCE: (pl.Array(pl.Float32, 3), [2.0, 12.0, 17.0]),
+        DatasetColumn.SINGLE_DAY_SPIKES: (pl.Array(pl.Float32, 3), [3.0, 13.0, 18.0]),
+        DatasetColumn.MULTI_DAY_CELL_FLUORESCENCE: (pl.Array(pl.Float32, 2), [1000.0, 1005.0]),
+        DatasetColumn.MULTI_DAY_NEUROPIL_FLUORESCENCE: (pl.Array(pl.Float32, 2), [1001.0, 1006.0]),
+        DatasetColumn.MULTI_DAY_SUBTRACTED_FLUORESCENCE: (pl.Array(pl.Float32, 2), [1002.0, 1007.0]),
+        DatasetColumn.MULTI_DAY_SPIKES: (pl.Array(pl.Float32, 2), [1003.0, 1008.0]),
+    }
+    assert {column: (dataset.schema[column], dataset[column].to_numpy()[0].tolist()) for column in expected} == expected
+
+
 def test_assemble_cindra_dataset_records_elapsed_minutes(layout: _Layout) -> None:
     """Verifies the elapsed-minutes column measures each frame from the first retained pulse."""
     _prepare(layout, pulses=_pulse_train(4_000_000, 4, period_us=1_200_000), frame_count=4)
@@ -332,6 +358,52 @@ def test_assemble_cindra_dataset_falls_back_to_scanimage(layout: _Layout) -> Non
 
     assert dataset["frame"].to_list() == [1, 2, 3, 4]
     assert dataset["time_us"].to_list() == [1_000_000, 1_100_000, 1_200_000, 1_300_000]
+    # The fallback restores the timestamp width the primary path emits, so sessions of one project carry one schema
+    # whichever path aligned them.
+    assert dataset["time_us"].dtype == pl.UInt64
+
+
+def test_scanimage_fallback_preserves_epoch_scale_pulse_timestamps(layout: _Layout) -> None:
+    """Verifies the fallback carries real, epoch-scale rising-edge timestamps through to the assembled table.
+
+    Logged TTL timestamps are microseconds since the UTC epoch, so a narrower intermediate width would wrap every
+    value while leaving the alignment itself internally consistent and its frame-count guard satisfied.
+    """
+    base = 1_700_000_000_000_000
+    pulses = [(base + index * 100_000, OUT_OF_WINDOW_DURATION_US) for index in range(4)]
+    _prepare(layout, pulses=pulses, frame_count=4)
+    _write_frame_metadata(layout.raw_data_path, frame_numbers=[1, 2, 3, 4], frame_seconds=[0.0, 0.1, 0.2, 0.3])
+
+    dataset = layout.assemble()
+
+    assert dataset["frame"].to_list() == [1, 2, 3, 4]
+    assert dataset["time_us"].to_list() == [base, base + 100_000, base + 200_000, base + 300_000]
+
+
+def test_scanimage_fallback_orders_the_frames_of_each_acquisition_after_the_previous_one(layout: _Layout) -> None:
+    """Verifies a session recording two acquisitions matches each acquisition's frames to its own pulses.
+
+    The ScanImage frame counter restarts at one for every further acquisition, so ordering the archive by that counter
+    alone interleaves the acquisitions and hands the matcher timestamps that no longer ascend.
+    """
+    pulses = [
+        (5_000_000, OUT_OF_WINDOW_DURATION_US),
+        (5_100_000, OUT_OF_WINDOW_DURATION_US),
+        (10_000_000, OUT_OF_WINDOW_DURATION_US),
+        (10_100_000, OUT_OF_WINDOW_DURATION_US),
+    ]
+    _prepare(layout, pulses=pulses, frame_count=4)
+    _write_frame_metadata(
+        layout.raw_data_path,
+        frame_numbers=[1, 2, 1, 2],
+        frame_seconds=[0.0, 0.1, 5.0, 5.1],
+        acquisition_numbers=[1, 1, 2, 2],
+    )
+
+    dataset = layout.assemble()
+
+    assert dataset["frame"].to_list() == [1, 2, 3, 4]
+    assert dataset["time_us"].to_list() == [5_000_000, 5_100_000, 10_000_000, 10_100_000]
 
 
 def test_scanimage_fallback_keeps_the_closest_pulse_per_frame(layout: _Layout) -> None:
@@ -424,6 +496,22 @@ def test_assemble_discards_unacquired_pulse_runs(layout: _Layout) -> None:
     assert dataset["elapsed_minutes"].to_list() == pytest.approx([0.0, 0.02, 0.03, 0.05])
 
 
+def test_assemble_discards_a_stray_pulse_run_logged_after_the_acquisition(layout: _Layout) -> None:
+    """Verifies a stray run of hand-triggered pulses is dropped even when it trails the session's real acquisition.
+
+    The surplus handling clips the front of the log, so a stray run that sits behind the acquisition survives the clip
+    and costs the dataset that many real frames unless the run matching discards it first.
+    """
+    pulses = [*_pulse_train(10_000_000, 4, period_us=1_000_000), *_pulse_train(20_000_000, 2, period_us=1_000_000)]
+    _prepare(layout, pulses=pulses, frame_count=4)
+    _write_frame_metadata(layout.raw_data_path, frame_numbers=[1, 2, 3, 4], acquisition_numbers=[1, 1, 1, 1])
+
+    dataset = layout.assemble()
+
+    assert dataset["frame"].to_list() == [1, 2, 3, 4]
+    assert dataset["time_us"].to_list() == [10_000_000, 11_000_000, 12_000_000, 13_000_000]
+
+
 def test_assemble_keeps_runs_when_no_assignment_covers_the_acquisitions(layout: _Layout) -> None:
     """Verifies the pulse log is kept whole when there are more acquisitions than gap-separated pulse runs."""
     pulses = [*_pulse_train(1_000_000, 3), *_pulse_train(10_000_000, 2)]
@@ -444,6 +532,17 @@ def test_resolve_acquisition_sizes_reads_the_acquisition_index(tmp_path: Path) -
     assert _resolve_acquisition_sizes(raw_data_path=tmp_path) == [3, 2, 1]
 
 
+def test_resolve_acquisition_sizes_counts_the_frames_carrying_each_acquisition_index(tmp_path: Path) -> None:
+    """Verifies the sizes count the frames of each acquisition rather than reporting the acquisition indices.
+
+    ScanImage numbers acquisitions with a session-global counter, so the indices a session's archive carries are
+    unrelated to the number of frames each of those acquisitions holds.
+    """
+    _write_frame_metadata(tmp_path, frame_numbers=[1, 2, 3, 1, 2], acquisition_numbers=[5, 5, 5, 7, 7])
+
+    assert _resolve_acquisition_sizes(raw_data_path=tmp_path) == [3, 2]
+
+
 def test_resolve_acquisition_sizes_peels_repeated_frame_numbers(tmp_path: Path) -> None:
     """Verifies acquisition sizes are recovered from the frame-number multiset when no acquisition index is stored."""
     _write_frame_metadata(tmp_path, frame_numbers=[1, 2, 3, 1, 2, 1])
@@ -459,6 +558,15 @@ def test_resolve_acquisition_sizes_without_archive(tmp_path: Path) -> None:
 def test_match_runs_to_acquisitions_spans_consecutive_runs() -> None:
     """Verifies an acquisition split across neighbouring runs claims the whole consecutive span."""
     assert _match_runs_to_acquisitions(run_lengths=[2, 3, 4], acquisition_sizes=[5, 4]) == [(0, 1), (2, 2)]
+
+
+def test_match_runs_to_acquisitions_pairs_acquisitions_recorded_out_of_size_order() -> None:
+    """Verifies each acquisition claims the run span matching its own frame count, whatever order the runs arrive in.
+
+    The acquisition sizes are reported largest first while the runs stay chronological, so a session whose smaller
+    acquisition ran first is only accounted for by pairing the two lists across that mismatch.
+    """
+    assert _match_runs_to_acquisitions(run_lengths=[2, 4, 3], acquisition_sizes=[4, 2]) == [(0, 0), (1, 1)]
 
 
 def test_match_runs_to_acquisitions_without_acquisitions() -> None:

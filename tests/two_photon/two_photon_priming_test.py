@@ -456,6 +456,42 @@ def test_a_single_stage_registers_only_the_jobs_it_runs(
     assert snapshot[dispatched_jobs[0]["job_id"]].status == ProcessingStatus.SCHEDULED
 
 
+@pytest.mark.parametrize(
+    ("stage_flags", "expected"),
+    [
+        (
+            {"register": True},
+            [
+                (str(SingleRecordingJobNames.REGISTER), "plane_0"),
+                (str(SingleRecordingJobNames.REGISTER), "plane_1"),
+            ],
+        ),
+        (
+            {"process": True},
+            [
+                (str(SingleRecordingJobNames.PROCESS), "plane_0"),
+                (str(SingleRecordingJobNames.PROCESS), "plane_1"),
+            ],
+        ),
+        ({"combine": True}, [(str(SingleRecordingJobNames.COMBINE), "")]),
+    ],
+)
+def test_naming_any_one_stage_dispatches_that_stage_alone(
+    primed_session: SessionData,
+    dispatched_jobs: list[dict[str, Any]],
+    stage_flags: dict[str, bool],
+    expected: list[tuple[str, str]],
+) -> None:
+    """Verifies naming any single stage runs that stage alone, rather than falling into the run-everything default.
+
+    An invocation naming no stage runs all four, so a stage the request does not recognize would silently re-run the
+    whole recording and overwrite the outputs the operator asked to leave alone.
+    """
+    run_two_photon_processing_pipeline(session_path=_session_path(primed_session), **stage_flags)
+
+    assert _dispatched_pairs(dispatched_jobs) == expected
+
+
 def test_a_target_plane_narrows_the_per_plane_stages(
     primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
 ) -> None:
@@ -531,6 +567,32 @@ def test_a_job_identifier_runs_that_job_alone(
 
     snapshot = ProcessingTracker(file_path=primed_session.processed_data.two_photon_tracker_path).snapshot()
     assert list(snapshot) == [job_id]
+
+
+def test_a_remote_job_keeps_the_recorded_state_of_its_sibling_jobs(
+    primed_session: SessionData, dispatched_jobs: list[dict[str, Any]]
+) -> None:
+    """Verifies a scheduler-dispatched job leaves the state its sibling jobs recorded in the shared tracker intact.
+
+    The scheduler dispatches each job of the universe separately against one tracker, so a job that treated its
+    siblings as foreign entries would erase their completion and have every finished stage dispatched again.
+    """
+    run_two_photon_processing_pipeline(session_path=_session_path(primed_session))
+    tracker = ProcessingTracker(file_path=primed_session.processed_data.two_photon_tracker_path)
+    combine_id = ProcessingTracker.generate_job_id(job_name=str(SingleRecordingJobNames.COMBINE), specifier="")
+    tracker.start_job(job_id=combine_id)
+    tracker.complete_job(job_id=combine_id)
+    dispatched_jobs.clear()
+
+    run_two_photon_processing_pipeline(
+        session_path=_session_path(primed_session),
+        job_id=ProcessingTracker.generate_job_id(job_name=str(SingleRecordingJobNames.BINARIZE), specifier=""),
+    )
+
+    assert _dispatched_pairs(dispatched_jobs) == [(str(SingleRecordingJobNames.BINARIZE), "")]
+    snapshot = tracker.snapshot()
+    assert len(snapshot) == len(_expected_universe())
+    assert snapshot[combine_id].status == ProcessingStatus.SUCCEEDED
 
 
 def test_an_unknown_job_identifier_lists_the_available_jobs(

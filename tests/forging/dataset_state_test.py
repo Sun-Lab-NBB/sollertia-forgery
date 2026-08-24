@@ -53,19 +53,32 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     raise RuntimeError(message)
 
 
-@pytest.fixture
-def dataset(tmp_path: Path) -> SimpleNamespace:
-    """Builds a stand-in dataset whose root and session list drive the state artifact."""
-    dataset_root = tmp_path.joinpath("dataset")
+def build_dataset(dataset_root: Path, first_animal: str, second_animal: str) -> SimpleNamespace:
+    """Builds a stand-in dataset whose root and session list drive the state artifact.
+
+    Args:
+        dataset_root: The directory the dataset's tracker and state artifact are written into.
+        first_animal: The identifier of the animal the first session belongs to.
+        second_animal: The identifier of the animal the second session belongs to.
+
+    Returns:
+        The stand-in dataset, carrying the attributes the state artifact reads.
+    """
     dataset_root.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
         name="test_dataset",
         dataset_data_path=dataset_root.joinpath("dataset.yaml"),
         sessions=(
-            SimpleNamespace(session=_FIRST_SESSION, animal="305"),
-            SimpleNamespace(session=_SECOND_SESSION, animal="321"),
+            SimpleNamespace(session=_FIRST_SESSION, animal=first_animal),
+            SimpleNamespace(session=_SECOND_SESSION, animal=second_animal),
         ),
     )
+
+
+@pytest.fixture
+def dataset(tmp_path: Path) -> SimpleNamespace:
+    """Builds a stand-in dataset whose root and session list drive the state artifact."""
+    return build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="305", second_animal="321")
 
 
 def _align_tracker(dataset: SimpleNamespace, jobs: list[tuple[str, str]]) -> ProcessingTracker:
@@ -219,13 +232,22 @@ def test_a_job_name_without_a_scope_stops_the_serialization(dataset: SimpleNames
 
 
 def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespace) -> None:
-    """Verifies that the stored table carries exactly the declared columns and dtypes, since consumers read it by
-    schema.
+    """Verifies that the stored table carries exactly the declared columns and dtypes, and that every column of a
+    scheduled, a running, and a failed row holds what the tracker recorded for that job.
+
+    A consumer reads this artifact by schema and addresses a job it finds here by the identifier the row publishes, so
+    a column that carries the wrong field ships a snapshot that names jobs no tracker holds.
     """
     tracker = _align_tracker(
         dataset=dataset,
-        jobs=[(MULTIDAY_DISCOVERY_JOB_NAME, "305"), (FORGING_JOB_NAME, _FIRST_SESSION)],
+        jobs=[
+            (MULTIDAY_DISCOVERY_JOB_NAME, "305"),
+            (MULTIDAY_EXTRACTION_JOB_NAME, _FIRST_SESSION),
+            (FORGING_JOB_NAME, _FIRST_SESSION),
+        ],
     )
+    running_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_EXTRACTION_JOB_NAME, specifier=_FIRST_SESSION)
+    tracker.start_job(job_id=running_id, executor_id="slurm:12344")
     failed_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=_FIRST_SESSION)
     tracker.start_job(job_id=failed_id, executor_id="slurm:12345")
     tracker.fail_job(job_id=failed_id, error_message="assembly failed")
@@ -235,8 +257,48 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
 
     assert written == dataset_state_path(dataset=dataset)
     assert dict(frame.schema) == DATASET_STATE_SCHEMA
-    assert frame["job_name"].to_list() == [FORGING_JOB_NAME, MULTIDAY_DISCOVERY_JOB_NAME]
+    assert frame["job_name"].to_list() == [
+        MULTIDAY_EXTRACTION_JOB_NAME,
+        FORGING_JOB_NAME,
+        MULTIDAY_DISCOVERY_JOB_NAME,
+    ]
+
     failure = frame.filter(pl.col("job_name") == FORGING_JOB_NAME).to_dicts()[0]
+    assert failure["dataset"] == "test_dataset"
+    assert failure["scope"] == SESSION_SCOPE
+    assert failure["job_id"] == failed_id
+    assert failure["specifier"] == _FIRST_SESSION
     assert failure["status"] == "FAILED"
     assert failure["executor_id"] == "slurm:12345"
     assert failure["error_message"] == "assembly failed"
+    assert failure["completed_at"] >= failure["started_at"]
+
+    running = frame.filter(pl.col("job_name") == MULTIDAY_EXTRACTION_JOB_NAME).to_dicts()[0]
+    assert running["job_id"] == running_id
+    assert running["status"] == "RUNNING"
+    assert running["started_at"] is not None
+    assert running["completed_at"] is None
+
+    scheduled = frame.filter(pl.col("job_name") == MULTIDAY_DISCOVERY_JOB_NAME).to_dicts()[0]
+    assert scheduled["job_id"] == ProcessingTracker.generate_job_id(
+        job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier="305"
+    )
+    assert scheduled["scope"] == ANIMAL_SCOPE
+    assert scheduled["specifier"] == "305"
+    assert scheduled["error_message"] is None
+    assert scheduled["started_at"] is None
+
+
+def test_the_written_artifact_orders_its_animals_the_way_a_reader_reads_them(tmp_path: Path) -> None:
+    """Verifies that the published rows are ordered naturally, so animal 9 precedes animal 10 rather than following it.
+
+    Animal identifiers are numbers held as text, and every other listing this stack produces reads them in numeric
+    order, so ordering the snapshot as plain text would disagree with all of them.
+    """
+    numbered = build_dataset(dataset_root=tmp_path.joinpath("dataset"), first_animal="10", second_animal="9")
+    _align_tracker(dataset=numbered, jobs=[(FORGING_JOB_NAME, _FIRST_SESSION), (FORGING_JOB_NAME, _SECOND_SESSION)])
+
+    frame = pl.read_ipc(source=generate_dataset_state(dataset=numbered), memory_map=True)
+
+    assert frame["animal"].to_list() == ["9", "10"]
+    assert frame["session"].to_list() == [_SECOND_SESSION, _FIRST_SESSION]

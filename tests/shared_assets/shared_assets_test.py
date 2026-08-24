@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING
 import importlib
 
+import polars as pl
 import pytest
 from ataraxis_base_utilities import console
 
@@ -15,6 +16,7 @@ import sollertia_forgery
 from sollertia_forgery.shared_assets import (
     SESSION_PIPELINES,
     ProcessingPipelines,
+    natural_sort,
     delay_terminal,
     multi_recording_dataset_name,
     resolve_session_tracker_path,
@@ -71,6 +73,21 @@ def test_the_terminal_delay_holds_the_runtime_for_its_declared_period() -> None:
     delay_terminal()
 
     assert time.perf_counter() - start >= 0.09
+
+
+def test_a_natural_sort_orders_an_identifier_by_the_number_it_embeds() -> None:
+    """Every identifier this library orders on embeds a number in text, so a listing has to place 2 ahead of 10.
+
+    Ordering the same identifiers as plain text puts 10 ahead of 2, which is the inversion this function exists to
+    keep out of the project manifest, the project plan, the project jobs artifact, and the dataset state artifact.
+    """
+    frame = pl.DataFrame({"animal": ["10", "2", "1"], "session": ["a", "b", "c"]})
+
+    ordered = natural_sort(frame=frame, by=["animal"])
+
+    assert ordered["animal"].to_list() == ["1", "2", "10"]
+    # The remaining columns travel with the row their identifier was read from.
+    assert ordered["session"].to_list() == ["c", "b", "a"]
 
 
 def test_the_multi_recording_dataset_name_is_qualified_by_animal() -> None:
