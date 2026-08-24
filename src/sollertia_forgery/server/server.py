@@ -54,7 +54,10 @@ class CommandResult:
 
 
 class JobStatus(StrEnum):
-    """Defines the set of status codes returned by SLURM for managed jobs."""
+    """Defines the set of status codes this library resolves for managed jobs.
+
+    These are the states SLURM reports, plus the ``BLOCKED`` and ``UNKNOWN`` states resolved locally.
+    """
 
     PENDING = "PENDING"
     """The job is queued and waiting for resources."""
@@ -631,7 +634,8 @@ class Server:
 
         Raises:
             FileNotFoundError: If the searched path is not a directory on the remote server.
-            RuntimeError: If the search command failed, which leaves it having covered only part of the tree.
+            RuntimeError: If the search command failed, which leaves it having covered only part of the tree, or if
+                the search reported an entry that does not sit under the searched directory.
         """
         if not self.is_directory(remote_path=remote_path):
             message = (

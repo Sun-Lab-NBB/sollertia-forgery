@@ -967,7 +967,8 @@ def stub_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         monkeypatch: The fixture used to replace the runner.
 
     Returns:
-        A recorder carrying the ``calls`` list of invoked argument sequences and the ``result`` completed process
+        A recorder carrying the ``calls`` list of ``(argument list, keyword mapping)`` pairs, one per invocation,
+        and the ``result`` completed process
         every call answers, which a test may reassign before the code under test runs.
     """
     recorder = SimpleNamespace(
@@ -1048,7 +1049,7 @@ def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> FrozenClock:
 
 @dataclass
 class BatchIdentifiers:
-    """Issues the sequential identifiers every prepared batch is recorded under.
+    """Issues the sequential seeds every prepared batch identifier is derived from.
 
     Attributes:
         issued: The identifiers handed out so far, in the order they were issued.
@@ -1075,7 +1076,8 @@ def deterministic_batch_ids(monkeypatch: pytest.MonkeyPatch) -> BatchIdentifiers
         monkeypatch: The fixture used to replace the identifier source the batch registry holds.
 
     Returns:
-        The issuer, whose ``issued`` list names every batch recorded during the test in order.
+        The issuer, whose ``issued`` list holds the unpadded seed of every batch recorded during the test, in order.
+        Each recorded identifier is its seed right-padded to sixteen characters.
     """
     identifiers = BatchIdentifiers()
     monkeypatch.setattr(

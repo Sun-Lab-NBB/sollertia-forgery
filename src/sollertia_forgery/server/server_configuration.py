@@ -119,7 +119,7 @@ def get_server_configuration() -> ServerConfiguration:
 
 
 def get_server_configuration_path() -> Path:
-    """Returns the path under which the ``server_configuration.yaml`` file is stored.
+    """Returns the path to the ``server_configuration.yaml`` file under the Sollertia platform working directory.
 
     Returns:
         The path to the configuration file under the Sollertia platform working directory, resolved without reading

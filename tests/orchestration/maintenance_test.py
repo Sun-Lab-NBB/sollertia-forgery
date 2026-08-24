@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 VIDEO_JOBS: list[tuple[str, str]] = [("motion_energy", "face_camera"), ("camera_timestamps", "face_camera")]
-"""The video jobs every tracker these tests write is aligned against."""
+"""The video jobs every video tracker these tests write is aligned against."""
 
 
 def job_identifier(job: tuple[str, str]) -> str:
@@ -139,7 +139,7 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_reset(
     experiment_session: SessionData,
     video_tracker: ProcessingTracker,  # Requested so the healthy unit carries records to clear.
 ) -> None:
-    """One unresolvable unit is reported and skipped rather than abandoning the reset of the others."""
+    """One unresolvable unit is skipped rather than abandoning the reset of the others."""
     unresolvable = tmp_path.joinpath("not_a_session")
     unresolvable.mkdir()
 
@@ -207,7 +207,7 @@ def test_a_unit_that_cannot_be_loaded_leaves_its_siblings_cleaned(
     experiment_session: SessionData,
     video_tracker: ProcessingTracker,  # Requested so the healthy unit carries output to remove.
 ) -> None:
-    """One unresolvable unit is reported and skipped rather than abandoning the cleanup of the others."""
+    """One unresolvable unit is skipped rather than abandoning the cleanup of the others."""
     unresolvable = tmp_path.joinpath("not_a_session")
     unresolvable.mkdir()
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.VIDEO)

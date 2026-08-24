@@ -98,7 +98,8 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
         file_path=raw_data_path.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION)
     )
 
-    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock for the other two.
+    # Assembles the fluorescence sub-dataset first. Its ``time_us`` column is the reference clock the other
+    # sub-datasets align to.
     fluorescence_data = assemble_cindra_dataset(
         cindra_data_path=cindra_data_path,
         microcontroller_data_path=microcontroller_data_path,

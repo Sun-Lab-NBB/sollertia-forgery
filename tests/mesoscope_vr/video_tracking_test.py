@@ -224,7 +224,7 @@ def test_process_mesoscope_video_tracking_reads_the_natural_sort_first_predictio
         session=tracking_session, output_directory=tracking_session.processed_data.video_data_path
     )
 
-    # Natural sort orders the two-frame suffix before the ten-frame suffix, so the three-row file is the one read.
+    # Natural sort orders the '_2' suffix before the '_10' suffix, so the three-row file is the one read.
     assert pl.read_ipc(tracking_session.processed_data.video_data_path.joinpath(_OUTPUT_FILENAME)).height == 3
 
 

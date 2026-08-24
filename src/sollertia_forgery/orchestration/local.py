@@ -42,8 +42,9 @@ size cannot be resized once the worker has imported the library that owns them.
 Notes:
     polars builds its thread pool as it is imported, exposes no runtime setter, and is not one of the pools
     ``threadpool_limits`` manages, so the only moment its width can be chosen is before the child process imports it.
-    Every job type that uses polars in the executor process itself declares a single core, so one thread is the width
-    that matches what those jobs were admitted at.
+    One pool serves every job type, so the width has to be chosen once for all of them rather than per job. The job
+    types that lean on polars for their own work are therefore pinned to one thread whatever core weight they were
+    admitted at, and a wider allocation buys those stages no extra dataframe threads.
 
     The BLAS and OpenMP variables are deliberately absent, which is why this narrower tuple stands in for the shared
     ``limit_worker_threads`` context that pins all of them. Their pools are resized at runtime for the duration of
@@ -347,8 +348,8 @@ def apply_decode_thread_ceiling(cores: int) -> None:
 
     Notes:
         tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
-        life of the process. The value a pool worker writes as it starts is therefore the one every read in that
-        worker sees, and a later write in the same process reaches nothing.
+        life of the process. The last write before that first decode is therefore the one every read in that worker
+        sees, and every write after it reaches nothing.
 
         cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
         the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.

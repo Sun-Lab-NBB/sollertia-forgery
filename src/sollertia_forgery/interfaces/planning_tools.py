@@ -168,15 +168,17 @@ def read_project_plan_tool(
     """Reads the planned cores and memory of a project's jobs out of its stored projection, in three widening stages.
 
     A bare call reports the figures a submission is sized against alongside a ``breakdown`` naming every unit kind,
-    animal, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs carrying their
-    subject and their figures. Opting into detail adds each job's tracked identifier and the jobs it waits for.
+    animal, dataset, pipeline, and job type the projection holds. Naming a filter adds a page of planned jobs
+    carrying their subject and their figures. Opting into detail adds each job's tracked identifier and the jobs it
+    waits for.
 
     The totals and the breakdown span every planned job regardless of the filters, so narrowing what is listed never
     distorts what is reported. Reads the stored table rather than any unit's data, so the cost is independent of how
     much the project holds.
 
     Args:
-        project_path: The absolute path to the project's root data directory.
+        project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
+            ``remote``, where only its final component names the project.
         host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
             compute server. A remote read mirrors the project's artifacts onto this machine and reads the
             mirror, so it reports what the project currently records without regenerating anything.

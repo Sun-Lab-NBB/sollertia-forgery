@@ -1,4 +1,6 @@
-"""Tests the aggregation and filtering the planning tools layer performs over a stored plan projection."""
+"""Tests the aggregation and filtering the planning tools layer performs over a stored plan projection, alongside the
+dataset state status counts.
+"""
 
 from __future__ import annotations
 

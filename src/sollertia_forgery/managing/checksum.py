@@ -8,6 +8,8 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
+from ..shared_assets import verify_openmp_runtime
+
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
@@ -66,13 +68,18 @@ def run_checksum_processing_pipeline(
             tracker is touched so the session's last recorded verdict survives.
         OSError: If any directory or file under the session's raw_data directory cannot be read, which the pipeline
             records as a job failure before re-raising.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # The checksum pool's initializer sizes the numeric backends, which brings up the Numba threading layer, so a host
+    # whose layer has no runtime to load fails here rather than partway through a session.
+    verify_openmp_runtime()
+
     session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
     # A session holding nothing the checksum covers is refused before the tracker is touched, so its last recorded
-    # integrity verdict survives. Leaving the refusal to start_job would rest it on the tracker not yet holding the
-    # job, which stops being true the moment a previous run registered it.
+    # integrity verdict survives. Leaving the refusal to align_jobs would surface it as a generic empty-job-list
+    # error naming neither the session nor its missing raw data.
     if not possible:
         message = (
             f"Unable to resolve the data integrity checksum for the session '{session.session_name}'. The session's "

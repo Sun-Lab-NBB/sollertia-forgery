@@ -1239,7 +1239,9 @@ def test_a_regeneration_that_fails_still_mirrors_what_the_server_holds(
 def test_mirroring_without_regeneration_pulls_the_artifacts_as_the_server_last_wrote_them(
     connected_server: Server, stub_ssh_transport: Any, tmp_path: Path
 ) -> None:
-    """Replanning is a preparation step rather than a mirroring one, so a caller may take the server as it stands."""
+    """Regeneration is optional, so a caller may take the server's manifest and dataset tables as they stand and
+    issue no rewrite.
+    """
     server_project = stub_ssh_transport.local_path(SERVER_PROJECT_ROOT)
     server_project.mkdir(parents=True)
     server_project.joinpath("TestProject_jobs.feather").write_text("jobs")

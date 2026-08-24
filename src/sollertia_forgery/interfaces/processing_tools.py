@@ -242,7 +242,8 @@ def inspect_job_resources_tool(
     Args:
         pipeline: The pipeline to inspect, one of ``checksum``, ``runtime``, ``microcontroller``, ``video``,
             ``two_photon``, ``forging``.
-        session_paths: The session root directories to inspect.
+        session_paths: The processing unit directories to inspect, which are session roots for every session
+            pipeline and dataset roots for ``forging``. For ``remote`` these are paths ON THE SERVER.
         options: The pipeline-specific parameters the inspected jobs would run with, forwarded to preparation. See
             ``prepare_batch_tool`` for the keys each pipeline reads.
         host: Where the data sits, either ``local`` for this machine or ``remote`` for the configured compute server.
@@ -341,9 +342,12 @@ def execute_jobs_tool(
         A response dict with ``started``, the ``host`` it dispatched to, ``total_jobs``, the ``pipelines`` the batch
         holds, and any ``adopted_jobs`` it left to an allocation already running them. A local dispatch adds the
         resolved ``core_budget``, ``memory_budget_mb``, ``pool_size``, and a ``job_allocations`` entry per job type. A
-        remote dispatch adds the ``batch_id`` its scripts and logs are filed under, ``walltime_minutes``, the
-        ``batch_directory`` on the server, and a ``submissions`` list pairing each job with the allocation it runs as.
-        Either host adds an ``invalid_jobs`` list when a recorded descriptor could not be built into a job.
+        remote dispatch adds the ``batch_id`` its scripts and logs are filed under, the ``batch_ids`` the submission
+        covered, ``walltime_minutes``, the ``batch_directory`` on the server, and a ``submissions`` list pairing each
+        job with the allocation it runs as. Either host adds an ``invalid_jobs`` list when a recorded descriptor could
+        not be built into a job. Returns an error when an identifier resolves to no prepared batch, when no batch is
+        named, when the named batches mix hosts, when every prepared job is blocked or already succeeded, or when no
+        recorded descriptor builds into a job.
     """
     documents, missing = read_prepared_batches(batch_ids=batch_ids)
     if missing:
@@ -427,16 +431,19 @@ def get_processing_status_tool(
     Naming a filter adds a page of jobs carrying identity and status. Filtering to ``failed`` is how a caller reads
     which jobs failed, and opting into detail adds each one's error text, timing, and the resources it was admitted at.
 
-    A batch that has finished carries an ``outcomes`` entry, which is the durable snapshot closure took of what its
-    jobs recorded. Read ``complete``, ``succeeded``, ``failed``, ``blocked``, and ``outstanding`` from it to decide
-    whether the run needs anything further, and ``failed_jobs`` for the error text each failure recorded.
+    A ``remote`` call carries an ``outcomes`` entry for any batch that settled and closed on it. A ``local`` call
+    carries one only when no batch state is held in this process and ``batch_ids`` names the closed batch. The entry is
+    the durable snapshot closure took of what the batch's jobs recorded. Read ``complete``, ``succeeded``,
+    ``failed``, ``blocked``, and ``outstanding`` from it to decide whether the run needs anything further, and
+    ``failed_jobs`` for the error text each failure recorded.
 
     Args:
         host: Which batch to report on, either ``local`` for this machine's pool or ``remote`` for the outstanding
             allocations on the server's scheduler.
         batch_ids: Restricts a ``remote`` report to these outstanding batches. Omit to cover all of them. Naming any
-            batch also counts as a filter, so the response carries a page of jobs. Ignored for ``local``, where one
-            pool holds one batch.
+            batch also counts as a filter, so the response carries a page of jobs. For ``local`` it names the closed
+            batches whose recorded outcomes to report when no batch is running in this process, and it is ignored
+            while a batch is running, since one pool holds one batch.
         status_filter: Restricts the listing to one status. Locally one of ``succeeded``, ``failed``, ``running``, or
             ``scheduled``, and remotely a scheduler state such as ``FAILED``, ``RUNNING``, or ``BLOCKED``.
         session_paths: Restricts the listing to these session root directories.

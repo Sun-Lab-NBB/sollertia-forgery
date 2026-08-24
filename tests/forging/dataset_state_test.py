@@ -232,8 +232,9 @@ def test_a_job_name_without_a_scope_stops_the_serialization(dataset: SimpleNames
 
 
 def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespace) -> None:
-    """Verifies that the stored table carries exactly the declared columns and dtypes, and that every column of a
-    scheduled, a running, and a failed row holds what the tracker recorded for that job.
+    """Verifies that the stored table carries exactly the declared columns and dtypes, and that a failed row carries
+    every field the tracker recorded for it, while a running row and a scheduled row carry the identifier, the scope,
+    and the timestamps their state implies.
 
     A consumer reads this artifact by schema and addresses a job it finds here by the identifier the row publishes, so
     a column that carries the wrong field ships a snapshot that names jobs no tracker holds.

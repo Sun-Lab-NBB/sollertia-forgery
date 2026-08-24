@@ -9,9 +9,9 @@ from enum import StrEnum
 
 
 class BehaviorDataFiles(StrEnum):
-    """Enumerates the canonical filenames of the behavior feather files written by the donated Mesoscope-VR parsers and
-    read back by the donated assembly worker. The microcontroller parsers write the module feathers into the session's
-    ``processed_data/microcontroller_data`` directory, while the runtime parser writes the runtime feathers into
+    """Enumerates the canonical filenames of the behavior feather files written by the donated Mesoscope-VR parsers,
+    most of which the donated assembly worker reads back. The microcontroller parsers write the module feathers into
+    the session's ``processed_data/microcontroller_data`` directory, while the runtime parser writes them into
     ``processed_data/runtime_data``.
 
     Notes:
@@ -98,7 +98,8 @@ class DatasetColumn(StrEnum):
         ``LICK``, ``WATER_UL``, ``REWARD``, ``SYSTEM_STATE``) are present in every forged session.
     """
 
-    # Groups the behavior-alignment columns produced by the forging behavior assembly.
+    # Groups the behavior-alignment columns. The two time columns come from the fluorescence assembly for experiment
+    # sessions and from the behavior assembly for training sessions.
     TIME_US = "time_us"
     ELAPSED_MINUTES = "elapsed_minutes"
     BRAKE = "brake"
@@ -181,7 +182,10 @@ _COLUMN_DESCRIPTIONS: dict[DatasetColumn, str] = {
         "playing with no water delivered during the tone), or 'yes' (reward tone playing with water delivered during "
         "the tone)."
     ),
-    DatasetColumn.SYSTEM_STATE: "Acquisition system state at each sample (idle, rest, run).",
+    DatasetColumn.SYSTEM_STATE: (
+        "Acquisition system state at each sample (idle, rest, run for experiment sessions, lick training or run "
+        "training for training sessions)."
+    ),
     # Runtime and experiment column descriptions.
     DatasetColumn.TRIAL: "One-based trial identifier at each sample. 65535 marks samples outside the run state.",
     DatasetColumn.TRIAL_TYPE: (

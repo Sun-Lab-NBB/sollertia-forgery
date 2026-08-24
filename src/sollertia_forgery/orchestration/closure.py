@@ -69,9 +69,9 @@ def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
     """Snapshots what one finished batch's jobs recorded and stores the result on the batch itself.
 
     Notes:
-        Rewrites the project's artifacts on the host, delivers the state artifacts to this machine, and reads each of
-        the batch's jobs out of them. Regenerating first is what makes the snapshot describe the state after the run
-        rather than the state the run was prepared against.
+        Rewrites the project's artifacts on the host, reads each of the batch's jobs out of them where the host holds
+        them, and delivers a copy of each artifact to this machine. Regenerating first is what makes the snapshot
+        describe the state after the run rather than the state the run was prepared against.
 
         The outcome is written onto the batch's own record, so a finished batch stays answerable once nothing is
         running and nothing is queued.

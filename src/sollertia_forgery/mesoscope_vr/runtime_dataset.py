@@ -62,7 +62,7 @@ def assemble_runtime_dataset(
     Raises:
         FileNotFoundError: If any of the required encoder, VR cue, trigger zone, trial, or runtime state feathers is
             missing from the processed data directories.
-        ValueError: If a recorded trial type index or runtime state code has no entry in the experiment
+        InvalidOperationError: If a recorded trial type index or runtime state code has no entry in the experiment
             configuration's mappings.
     """
     # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
@@ -241,8 +241,9 @@ def _check_trigger_zones(
     Args:
         traversed_distance: The cumulative distance traveled by the animal during the experiment at each sampling
             time-point.
-        trigger_zone_starts: The trigger zone start boundaries for each sequential experiment trial.
-        trigger_zone_ends: The trigger zone end boundaries for each sequential experiment trial.
+        trigger_zone_starts: The trigger zone start boundaries, in ascending distance order, for the trials that
+            reached their trigger zone.
+        trigger_zone_ends: The trigger zone end boundaries, in the same order as the start boundaries.
 
     Returns:
         Whether each distance-point falls within a trigger zone, encoded as 1 (inside) or 0 (outside).

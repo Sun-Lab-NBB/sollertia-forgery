@@ -77,7 +77,8 @@ def run_two_photon_processing_pipeline(
         ignored. This lets an external scheduler drive cross-job parallelism by dispatching each identifier
         concurrently.
 
-        The worker count reaches cindra as a call argument, so it applies to the single stage this invocation runs.
+        The worker count reaches cindra as a call argument, so it applies to every stage this invocation dispatches
+        rather than being baked into the configuration.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.

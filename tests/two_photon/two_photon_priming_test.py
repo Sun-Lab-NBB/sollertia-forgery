@@ -351,7 +351,9 @@ def test_only_the_two_photon_pipeline_declares_a_priming_step() -> None:
 def test_resolving_jobs_reads_the_bootstrap_and_writes_nothing(
     monkeypatch: pytest.MonkeyPatch, stubbed_recording: Callable[..., SimpleNamespace]
 ) -> None:
-    """Verifies resolution shapes the universe from the primed plane count without materializing the bootstrap."""
+    """Verifies resolution shapes the universe from the plane count cindra's own resolver reports, without
+    materializing the bootstrap.
+    """
     session = stubbed_recording(plane_count=3)
     _forbid_writes(monkeypatch=monkeypatch)
 

@@ -76,7 +76,8 @@ def body_clock() -> NDArray[np.uint64]:
 
 
 def write_behavior_sources(session: SessionData) -> None:
-    """Writes the module-parsed and runtime-parsed feathers a run-training session's behavior assembly reads.
+    """Writes the module-parsed and runtime-parsed feathers a run-training session's behavior assembly and
+    session-bounds clip read.
 
     The valve stream plays one reward tone that dispenses water, the encoder advances at a constant rate, and the
     system leaves idle at the session start before settling into rest.
@@ -220,7 +221,7 @@ def test_assemble_training_dataset_reports_the_recorded_behavior(
     # The tone opens at 2_000_000 and the delivery lands at 2_400_000, so every sample of that span reads as rewarded.
     assert rewards[2_200_000] == "yes"
     assert rewards[3_000_000] == "no"
-    # The reference clock starts at zero, so the first retained sample sits one second into the session.
+    # The reference clock starts at zero, so the first retained sample sits one second into the recording.
     assert assembled["elapsed_minutes"].to_list()[0] == pytest.approx(0.02)
     # The body camera's luminance is constant, and its motion energy is its own frame index.
     assert assembled["body_camera_frame_luminance"].to_list() == [128.0] * assembled.height

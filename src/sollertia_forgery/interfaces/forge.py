@@ -50,7 +50,8 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
     type=int,
     default=-1,
     show_default=True,
-    help="The number of worker processes to use for parallel assembly. Set to -1 for automatic resolution.",
+    help="The number of worker processes to use for the multi-day and assembly stages. Set to -1 for automatic "
+    "resolution.",
 )
 @click.option(
     "-f",

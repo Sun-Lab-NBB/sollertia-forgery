@@ -1,4 +1,6 @@
-"""Tests the paging primitives every read tool shares and the three stages the project read tools report in."""
+"""Tests the paging primitives every read tool shares, the three stages read_project_jobs_tool reports in, and the
+project dataset listing.
+"""
 
 from __future__ import annotations
 
@@ -239,6 +241,7 @@ def test_semi_detail_omits_the_provenance_that_detail_adds(project_directory: Pa
     assert "job_id" in semi
     assert full["error_message"] == "it failed"
     assert full["executor_id"] == "slurm:1"
+    assert full["started_at"] == 1
 
 
 def test_a_scheduled_job_omits_the_fields_it_has_no_value_for(project_directory: Path) -> None:

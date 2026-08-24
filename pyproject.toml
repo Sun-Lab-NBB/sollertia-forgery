@@ -47,7 +47,8 @@ dependencies = [
     "ataraxis-data-structures>=7.1,<8",  # 7.1 first exports the log-archive, marker, and worker-thread helpers
     "sollertia-shared-assets>=10.0.0rc3,<11",  # rc3 first exports the per-system session type registry
 
-    # Acquisition and Processing Pipelines (called in-process by the behavior and forging pipelines)
+    # Acquisition and Processing Pipelines (called in-process by the video, microcontroller, two-photon, and forging
+    # pipelines)
     "ataraxis-video-system>=5.1.1,<6",
     "ataraxis-communication-interface>=7.1.1,<8",
     "cindra>=2.0.0rc6,<3",  # rc6 first exports the pipeline data records, including the combined recording metadata
@@ -99,8 +100,9 @@ dependencies = [
 Homepage = "https://github.com/Sun-Lab-NBB/sollertia-forgery"
 Documentation = "https://sollertia-forgery-api-docs.netlify.app/"
 
-# CLI interface. A single root command exposes the system-agnostic management commands, the agentic MCP server,
-# the remote project-workflow orchestration group, and the system-specific 'mesoscope' command group.
+# CLI interface. A single root command exposes the system-agnostic management commands ('manifest', 'checksum',
+# 'dataset-state', 'server', 'reset', 'clean', 'omp'), the agentic MCP server ('mcp'), and the generic 'process',
+# 'forge', and 'plan' commands.
 [project.scripts]
 slf = "sollertia_forgery.interfaces.entry_points:slf_cli"
 
@@ -114,9 +116,6 @@ dev = [
 
     # Development Automation
     "ataraxis-automation>=9,<10",
-
-    # Architecture (enforces the dependency-direction contracts declared under [tool.importlinter])
-    "import-linter>=2,<3",
 
     # Types
     "types-psutil>=7,<8",
@@ -177,7 +176,7 @@ lint.ignore = [
     "CPY001",  # The license is declared in the LICENSE file and the license and license-files metadata fields
 
     # Project-specific
-    "W293",    # Terminal tables and CLI help text carry blank lines that hold the surrounding indentation
+    "W293",    # Reserved for multi-line string literals whose blank lines must hold the surrounding indentation
 ]
 
 # Additional formatting configurations
@@ -228,10 +227,10 @@ disallow_untyped_defs = true # Enforces function annotation
 warn_unused_ignores = true   # Warns against using 'type: ignore' for packages with type stubs
 
 exclude = [
-    "sollertia-forgery-\\d+",  # Ignores temporary folder created by setuptools when building the sdist
+    "sollertia_forgery-\\d+",  # Ignores the temporary folder created when building the sdist
     "venv.*/",                 # Ignores virtual environments
-    "build/",                  # Ignores the sdist directory
-    "dist/",                   # Ignores the wheel directory
+    "build/",                  # Ignores the build backend's working directory
+    "dist/",                   # Ignores the built distribution directory
     "docs/",                   # Ignores the sphinx / doxygen directory
     "stubs/",                  # Ignores stubs directory (stubgen output target)
     "recipe/",                 # Ignores recipe directory (grayskull output target)
@@ -265,10 +264,10 @@ addopts = "--import-mode=importlib"
 pythonpath = ["."]
 
 # Configures the coverage data the '{py}-test' tox task collects. Most of the interface layer is excluded from
-# measurement, as the Click commands, the MCP server, and the remote halves of the MCP tool groups only run inside a
-# live CLI invocation or MCP session. The exclusions are listed per module rather than as a directory glob, so that a
-# module added to the layer is measured by default and exempting it stays a deliberate edit. The modules absent from
-# this list carry no infrastructure coupling and the test suite already exercises them directly.
+# measurement, as the Click command modules, the MCP server, and the MCP tool modules reach external infrastructure
+# that only a live CLI invocation or MCP session supplies. The exclusions are listed per module rather than as a
+# directory glob, so that a module added to the layer is measured by default and exempting it stays a deliberate edit.
+# The modules absent from this list hold the shared response and server-instance plumbing the measured tests import.
 [tool.coverage.run]
 branch = true  # Reports a conditional or loop whose alternate path no test takes as a gap
 omit = [
@@ -318,21 +317,3 @@ exclude_lines = [
     '^\s*pass$',
 ]
 
-# Import-linter contracts that enforce the library's dependency direction. Every layer may import the layers below it
-# and none above it, so an acquisition-system package is reached only through the registries hub and the shared
-# substrate depends on nothing. Modules sharing a layer are independent of one another, which is what keeps a system
-# package out of the cross-system infrastructure and each worker package out of its siblings.
-[tool.importlinter]
-root_package = "sollertia_forgery"
-
-[[tool.importlinter.contracts]]
-name = "Dependencies flow from the shared substrate up to the interface layer"
-type = "layers"
-layers = [
-    "sollertia_forgery.interfaces",
-    "sollertia_forgery.orchestration",
-    "sollertia_forgery.forging | sollertia_forgery.video | sollertia_forgery.runtime | sollertia_forgery.two_photon | sollertia_forgery.microcontrollers",
-    "sollertia_forgery.registries",
-    "sollertia_forgery.mesoscope_vr | sollertia_forgery.managing | sollertia_forgery.server",
-    "sollertia_forgery.shared_assets",
-]

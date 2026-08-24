@@ -81,8 +81,10 @@ def run_microcontroller_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the session's microcontroller manifest is missing, or, in remote mode, if a requested
-            extraction job's log archive is not present.
+        FileNotFoundError: If the session's raw behavior data directory does not exist, if the session's
+            microcontroller manifest is missing, if the registered eligibility accessor cannot load its own inputs,
+            for example an absent hardware state file, or, in remote mode, if a requested extraction job's log archive
+            is not present.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
             the raw behavior data tree holds more than one microcontroller manifest, if no manifest controller
@@ -98,8 +100,8 @@ def run_microcontroller_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Looks up the parser function and the extracted event codes for every module this session's acquisition system
-    # can parse from the central registries, inferring the system from the session.
+    # Looks up the parser function of every module this session's acquisition system can parse, and the event codes
+    # of the modules the session configured for use, inferring the system from the session.
     parsers = resolve_microcontroller_parsers(system=session.acquisition_system)
     event_codes = _resolve_eligible_event_codes(session=session)
 
@@ -209,7 +211,8 @@ def discover_microcontroller_jobs(
         The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
         controller that declares at least one module the acquisition system parses and the session configured for use,
         plus one parse job per such module. The possible subset narrows the universe to controllers whose log archive
-        is present on disk, since a controller with no archive can be neither extracted nor parsed. Locating those
+        resolves to exactly one file under the raw behavior data tree, since a controller with no archive, or one
+        whose name matches several archives, can be neither extracted nor parsed. Locating those
         archives is delegated to the acquisition library's own resolver, so discovery reads the manifest and indexes
         the archive names, leaving the archives' contents and every output file untouched.
 
@@ -222,7 +225,9 @@ def discover_microcontroller_jobs(
         ``"{controller_id}-{module_type}-{module_id}"``.
 
     Raises:
-        FileNotFoundError: If the session's microcontroller manifest is not present.
+        FileNotFoundError: If the session's raw behavior data directory does not exist, if the session's
+            microcontroller manifest is not present, or if the registered eligibility accessor cannot load its own
+            inputs, for example an absent hardware state file.
         ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
             the raw behavior data tree holds more than one microcontroller manifest, or if no manifest controller
             declares a module the acquisition system extracts.

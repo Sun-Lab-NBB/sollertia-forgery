@@ -80,8 +80,8 @@ def define_forging_dataset_tool(
     are prepared, and preparing a dataset this tool has not built reports an error. A per-animal configuration is
     written only for the animals whose acquisition system resolves a multi-recording configuration, which is the
     case for sessions carrying two-photon imaging data. The batch layer names the cores a cross-recording job runs
-    under on the command that dispatches it, so the configuration file carries the recording set and the progress flag
-    alone.
+    under on the command that dispatches it, so the configuration file carries the recording set, the qualified dataset
+    name, and the progress flag, and no core count.
 
     Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
     animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
@@ -161,8 +161,8 @@ def generate_dataset_state_tool(dataset_paths: list[str], host: str = "local") -
 
     Reads the dataset's forging tracker and rewrites the snapshot, so it is cheap enough to run before deciding
     what to forge and again once a run finishes. A ``local`` snapshot reports a dataset it cannot read in its own entry
-    and leaves the others alone, while a ``remote`` snapshot fails the whole call, since one server-side invocation
-    covers every named dataset.
+    and leaves the others alone, while a ``remote`` snapshot fails the whole call, since one failure anywhere in the
+    server-side sequence aborts it.
 
     Args:
         dataset_paths: The dataset root directories to snapshot, which are paths ON THE SERVER for ``remote``.

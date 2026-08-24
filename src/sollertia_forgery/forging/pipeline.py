@@ -197,12 +197,15 @@ def define_forging_dataset(
         and not dataset_animal.animal_path.joinpath(MULTI_RECORDING_CONFIGURATION_FILENAME).is_file()
         and project_root.joinpath(dataset_animal.animal).is_dir()
     )
-    materialize_multiday_plan(
-        dataset=dataset,
-        project_root=project_root,
-        display_progress=display_progress,
-        animals=(resolved_animals - existing_animals) | frozenset(recreate_animals) | unconfigured_animals,
-    )
+    # Materializing loads every requested animal's sessions before the resolver can decline, so a dataset whose type
+    # the system tracks nothing across skips the call outright rather than paying that read to write nothing.
+    if tracked_across_recordings:
+        materialize_multiday_plan(
+            dataset=dataset,
+            project_root=project_root,
+            display_progress=display_progress,
+            animals=(resolved_animals - existing_animals) | frozenset(recreate_animals) | unconfigured_animals,
+        )
 
     if recreate_animals:
         tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
@@ -237,8 +240,9 @@ def run_forging_pipeline(
         ``define_forging_dataset`` roots the ordering. It resolves the hierarchy from the requested session list and
         writes each animal's multi-recording configuration, so no job runs before it completes.
 
-        Every stage the tracker already records as succeeded is skipped, so an invocation runs only the jobs still
-        outstanding. Rebuilding an animal resets that animal's jobs first.
+        In local mode every stage the tracker already records as succeeded is skipped, so an invocation runs only the
+        jobs still outstanding. In remote mode the named job runs whatever state the tracker records for it.
+        Rebuilding an animal resets that animal's jobs first.
 
         In local mode (``job_id`` is None) every outstanding stage runs in sequence: each animal's discovery and its
         per-session extractions, then the assembly jobs across a parallel pool. The assembly stage runs sequentially
@@ -257,18 +261,22 @@ def run_forging_pipeline(
             outstanding job runs (local mode).
         workers: The number of workers to use. A value less than 1 uses all available CPU cores (minus reserved
             cores), and 1 forces sequential assembly.
-        display_progress: Determines whether to display progress bars during the multi-day and assembly stages.
+        display_progress: Determines whether to display a progress bar during the assembly stage. The multi-day
+            stages read the flag recorded in each animal's configuration by ``define_forging_dataset``.
 
     Raises:
         ValueError: If the dataset is not defined, if its acquisition system is unknown, if the provided job_id
-            does not match any job, or if a discovery job's multi-recording configuration names fewer than two
-            recording directories or no dataset name.
-        FileNotFoundError: If the dataset carries no ``data_descriptions.feather`` companion file, or if a discovery
-            job's multi-recording configuration is missing, is not a .yaml file, is not a valid multi-recording
-            configuration, or names a recording that holds no combined metadata archive.
-        RuntimeError: If a discovery job's multi-recording configuration names a recording directory holding several
-            combined metadata archives, or names recording paths that carry no unique identifying component. It is
-            also raised when the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
+            does not match any job, or if a cross-recording job's multi-recording configuration names fewer than two
+            recording directories or no dataset name. Also raised when an assembled session's ``data.feather`` carries
+            a column the dataset's description companion file does not describe.
+        FileNotFoundError: If the dataset carries no ``data_descriptions.feather`` companion file, or if a
+            cross-recording job's multi-recording configuration is missing, is not a .yaml file, is not a valid
+            multi-recording configuration, or names a recording that holds no combined metadata archive. Also raised
+            when a source session is missing a re-exported shared asset it is required to carry.
+        RuntimeError: If a cross-recording job's multi-recording configuration names a recording directory holding
+            several combined metadata archives, names recording paths that carry no unique identifying component, or
+            names a recording whose identifying component contains a colon. It is also raised when the host is macOS
+            and carries no loadable OpenMP runtime for the Numba threading layer.
     """
     # Every worker count below one means the same thing throughout this library, which is every available core. The
     # cross-recording stages are dispatched into cindra, which spells that request as -1 and rejects every other
@@ -429,8 +437,8 @@ def materialize_multiday_plan(
         per animal. The acquisition system's resolver decides whether the stage applies, and an animal whose
         resolver returns None is omitted.
 
-        Writing a configuration truncates the file in place under no lock, so only ``define_forging_dataset`` calls
-        this. Every other invocation reads the plan back through ``load_multiday_plan``.
+        Writing a configuration replaces the file through a rename under no lock, so only ``define_forging_dataset``
+        calls this. Every other invocation reads the plan back through ``load_multiday_plan``.
 
         Each materialized animal has every one of its sessions loaded from the project root, so restricting the call
         to the animals that need one keeps a dataset's growth independent of the source data of the animals it already
@@ -738,8 +746,9 @@ def _run_multiday_job(
         FileNotFoundError: If the configuration file is missing, is not a .yaml file, is not a valid multi-recording
             configuration, or names a recording that holds no combined metadata archive.
         ValueError: If the configuration names fewer than two recording directories or no dataset name.
-        RuntimeError: If the configuration names a recording directory holding several combined metadata archives, or
-            names recording paths that carry no unique identifying component.
+        RuntimeError: If the configuration names a recording directory holding several combined metadata archives,
+            names recording paths that carry no unique identifying component, or names a recording whose identifying
+            component contains a colon.
     """
     job_name, specifier = job
     console.echo(
@@ -886,8 +895,9 @@ def _execute_jobs_parallel(
     """Runs the provided assembly jobs concurrently across a shared ProcessPoolExecutor.
 
     Notes:
-        Every dispatched job is tracked individually, and in-flight futures are allowed to finish on failure so the
-        tracker stays accurate for all of them. The first captured exception is re-raised after all futures resolve.
+        Every dispatched job is tracked individually, and a failure stops neither the in-flight futures nor the
+        queued sessions, so the tracker stays accurate for the whole batch. The first captured exception is re-raised
+        after all futures resolve.
 
         A job is marked running as its pool slot opens rather than as the queue is built, so the tracker never reports
         more jobs running than the pool can execute and a recorded start time is the time the work began.
@@ -1027,7 +1037,8 @@ def _forge_session(
         described_columns: The column names the dataset describes, which every assembled session is held to.
 
     Raises:
-        FileNotFoundError: If a shared asset the session is required to carry is missing from the source session.
+        FileNotFoundError: If a re-exported shared asset the session is required to carry is missing from the source
+            session.
         ValueError: If the assembled feather carries a column the dataset's description companion file does not
             describe.
     """

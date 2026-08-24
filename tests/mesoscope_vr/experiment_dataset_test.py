@@ -402,7 +402,9 @@ def test_assemble_experiment_dataset_emits_every_sub_dataset_column(assembled_ex
 
 
 def test_assemble_experiment_dataset_rides_the_fluorescence_clock(assembled_experiment: pl.DataFrame) -> None:
-    """Verifies the reference clock is the scan pulse clock, clipped to the session bounds and renumbered from one."""
+    """Verifies the reference clock is the scan pulse clock, numbered from one and then clipped to the session
+    bounds, so the first retained frame keeps its original one-based index.
+    """
     retained = retained_frame_indices()
 
     assert assembled_experiment["time_us"].to_list() == [int(pulse_times()[index]) for index in retained]

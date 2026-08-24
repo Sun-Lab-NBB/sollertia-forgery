@@ -97,9 +97,10 @@ def project_manifest_path(project_directory: Path) -> Path:
 def generate_project_manifest(project_directory: Path, *, display_progress: bool = False) -> None:
     """Builds and saves the project manifest .feather file under the target project's root directory.
 
-    The manifest captures one row per session with its acquisition metadata and per-pipeline processing status. A
-    file lock serializes concurrent writers, and the outcome is recorded on a manifest processing tracker in the
-    project root.
+    The manifest captures one row per session with its acquisition metadata and per-pipeline processing status. It
+    also writes the project job artifact, ``<project>_jobs.feather``, into the same root, publishing it before the
+    manifest itself. A file lock serializes concurrent writers, and the outcome is recorded on a manifest processing
+    tracker in the project root.
 
     Args:
         project_directory: The path to the processed project's root directory.
@@ -267,8 +268,8 @@ class ProjectManifest:
             console.echo(message=str(self._data), raw=True)
 
     def print_summary(self, animal: str | None = None) -> None:
-        """Prints a summary view of the manifest file to the terminal, excluding the experimenter notes data for
-        each session.
+        """Prints a summary view of the manifest file to the terminal, excluding the session path and the
+        experimenter notes data for each session.
 
         This data view is optimized for tracking which processing steps have been applied to each of the project's data
         acquisition sessions. The ``session`` column shows the per-animal 1-based session index, and the ``date``
@@ -546,6 +547,7 @@ def _build_session_row(
 
     Raises:
         ValueError: If the session's type has no registered descriptor class.
+        FileNotFoundError: If the session carries no descriptor file at its canonical raw-data path.
     """
     # Parses the session name, a UTC timestamp, into a timezone-aware UTC datetime. A name that does not follow the
     # session naming format yields None, which the manifest stores as a null date rather than aborting the walk.
@@ -605,7 +607,8 @@ def _read_pipeline_state(
 
     Returns:
         A tuple of the rolled-up status label and the list of per-job entries, each carrying the ``pipeline``
-        discriminator alongside the full ``JobState`` payload. A tracker that does not exist yields ``not_started``
+        discriminator and the registry ``job_id`` alongside the ``JobState`` payload, whose ``error_message`` key is
+        absent for a job that recorded no failure. A tracker that does not exist yields ``not_started``
         and no entries.
     """
     status_payload = ProcessingTracker(file_path=tracker_path).summarize()

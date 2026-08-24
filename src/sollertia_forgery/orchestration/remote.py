@@ -79,8 +79,8 @@ def prepare_remote_batch(
         The prepared batch document.
 
     Raises:
-        ValueError: If the named pipeline is not a supported batch pipeline, or if the named units do not share one
-            project.
+        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named
+            units do not share one project.
         FileNotFoundError: If the server holds no plan table for the units' project.
         RuntimeError: If a server-side command fails.
     """

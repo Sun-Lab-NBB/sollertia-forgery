@@ -84,9 +84,9 @@ def run_video_processing_pipeline(
         mirroring the cindra pipeline's resolution. The parse and energy jobs honor ``target_camera`` to narrow that
         pass to a single camera. In remote mode (a ``job_id`` is provided) only the single job matching that identifier
         runs, chosen entirely by the identifier, so the flags and ``target_camera`` are ignored. This lets an external
-        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way each parse or
-        energy job fans its per-recording decoding across the worker pool, while the rename and tracking jobs run
-        single-core.
+        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way a parse job
+        fans its archive decoding across the worker pool once the archive is large enough, an energy job fans its
+        recording decoding the same way, and the rename and tracking jobs run single-core.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -109,7 +109,12 @@ def run_video_processing_pipeline(
         ValueError: If the camera manifest registers no cameras, if the raw behavior data tree holds more than one
             camera manifest, if no camera log archives are discovered for the timestamp stage, or if job_id does not
             match an available job. Also raised when target_camera has no discovered log archive while the timestamp
-            stage runs, or is not registered in the camera manifest while the motion-energy stage runs.
+            stage runs, or is not registered in the camera manifest while the motion-energy stage runs, when a
+            camera's recording cannot be opened, reports no frames, cannot decode the frame preceding a decode chunk,
+            or ends early at a chunk other than the last, and when two cameras resolve the same canonical timestamp
+            filename.
+        OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and
+            the log archives are searched for.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
@@ -351,9 +356,9 @@ def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
         the manifest registers, and indexes the log archive backing each of them. The pipeline composes its own rename,
         tracking, and motion-energy jobs on top of the universe it returns.
 
-        The colloquial names recorded at acquisition time (for example, ``left_camera``) determine every output
-        filename this pipeline writes and locate each camera's recording on disk, so the manifest is the only camera
-        configuration the pipeline needs.
+        The colloquial names recorded at acquisition time (for example, ``left_camera``) determine the canonical
+        motion-energy and renamed-timestamp filenames this pipeline publishes and locate each camera's recording on
+        disk, so the manifest is the only camera configuration the pipeline needs.
 
         The resolver answers a tree holding no manifest with an empty universe rather than an error, and refuses a
         directory that is not there at all. A session that ran no DataLogger-backed source has no behavior data
@@ -372,6 +377,8 @@ def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
     Raises:
         FileNotFoundError: If the raw behavior data directory holds no camera manifest.
         ValueError: If the camera manifest registers no cameras, or the directory tree holds more than one manifest.
+        OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and
+            the log archives are searched for.
     """
     camera_jobs = resolve_jobs(log_directory=data_directory) if data_directory.is_dir() else None
     if camera_jobs is None or camera_jobs.manifest_path is None:

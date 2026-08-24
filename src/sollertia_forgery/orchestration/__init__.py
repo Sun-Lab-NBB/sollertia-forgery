@@ -1,6 +1,7 @@
 """Provides the orchestration layer: the shared preparation path, the execution hosts, the batch job-execution engine
-and its resource estimators, the pipeline dispatch table, the job plan caches, the remote scheduler backend, and the
-prepared-batch registry with its closure.
+and its resource estimators, the pipeline dispatch table, the job descriptors and the graph algorithms that order them,
+the job plan caches, the remote scheduler backend and its submission ledger, the running-job reconciliation, the
+prepared-batch registry with its closure, and the unit maintenance operations.
 """
 
 from .graph import (

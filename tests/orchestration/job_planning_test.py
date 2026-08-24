@@ -916,10 +916,14 @@ def test_forgetting_a_batch_removes_its_record_and_its_lock(
     """Verifies that retiring a batch takes its whole footprint, leaving the outstanding records alone."""
     first = record_prepared_batch(document=make_document())
     second = record_prepared_batch(document=make_document())
+    outstanding = record_prepared_batch(document=make_document())
 
     removed = forget_prepared_batches(batch_ids=[first, "never_recorded", second])
 
     assert removed == [first, second]
+    # The batch this call did not name keeps both its document and its lock.
+    assert read_prepared_batch(batch_id=outstanding) is not None
+    assert batch_path(batch_id=outstanding).is_file()
     assert not batch_path(batch_id=first).is_file()
     assert not batch_path(batch_id=first).with_suffix(".yaml.lock").is_file()
     assert read_prepared_batch(batch_id=second) is None

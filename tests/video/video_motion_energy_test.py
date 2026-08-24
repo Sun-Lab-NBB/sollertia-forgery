@@ -429,8 +429,8 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
 def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
 
-    The caps must not leak past the pool they were set for. The analysis package deliberately runs multi-threaded
-    numba kernels, and a leaked cap would silently serialize them.
+    The caps must not leak past the pool they were set for. Every caller outside a decode pool relies on the numeric
+    backends opening their full thread pool, so a leaked cap would silently narrow them for the rest of the process.
     """
     sentinel = "OMP_NUM_THREADS"
     monkeypatch.setenv(name=sentinel, value="13")

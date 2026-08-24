@@ -67,9 +67,9 @@ class GenericPendingJob(PendingJob):
 
     Notes:
         Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so one
-        descriptor serves every pipeline. The shared worker routes on ``pipeline`` and each session pipeline's worker
-        reads ``unit_path`` and ``job_id``. Fields a pipeline does not use stay at their defaults, and a descriptor
-        missing a field the engine requires is rejected before dispatch.
+        descriptor serves every pipeline. The shared worker routes on ``pipeline``, every worker reads ``unit_path``,
+        and a multi-job pipeline's worker reads ``job_id`` as well. Fields a pipeline does not use stay at their
+        defaults, and a descriptor missing a field the engine requires is rejected before dispatch.
     """
 
     pipeline: str = ""

@@ -169,7 +169,8 @@ def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_co
     ]
     assert assembled[f"{PUPIL_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([2.0, 4.0, 5.0])
     assert assembled[PupilColumn.PUPIL_DIAMETER_PX].to_list() == pytest.approx([25.0, 35.0, 40.0])
-    # A boolean state cannot be blended, so each flag takes the value of the frame that precedes the reference sample.
+    # A boolean state cannot be blended, so each flag takes the value of the last frame acquired at or before the
+    # reference sample.
     assert assembled.schema[PupilColumn.BLINKING_STATE] == pl.UInt8
     assert assembled[PupilColumn.BLINKING_STATE].to_list() == [1, 0, 1]
 

@@ -554,7 +554,7 @@ def test_an_empty_status_query_retires_nothing() -> None:
 
 
 def test_a_batch_with_a_live_allocation_is_left_outstanding() -> None:
-    """Verifies that a batch holding one allocation still queued is left outstanding."""
+    """Verifies that a batch holding one allocation still running is left outstanding."""
     record_batch(
         batch=SubmissionBatch(
             batch_id="first",

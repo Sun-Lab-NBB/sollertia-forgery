@@ -213,7 +213,8 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
     Returns:
         A response dict with ``canceled``, a ``canceled_jobs`` count of every allocation the cancellation named,
         including the ones that had already finished, the ``batch_ids`` it covered, and a ``message``. Returns an error
-        when no batch is outstanding.
+        when no batch is outstanding, when the named batches hold no allocation, or when the scheduler cannot be
+        reached.
     """
     ledger = read_ledger()
     if not ledger.batches:

@@ -72,7 +72,9 @@ def _stub_surgery_loader(monkeypatch: pytest.MonkeyPatch, genotype: str) -> None
 
 
 def _stub_session(tmp_path: Path, session_type: SessionTypes, *, surgery_present: bool = True) -> SimpleNamespace:
-    """Returns a stand-in session exposing the surgery metadata path and session type the resolvers read."""
+    """Returns a stand-in session exposing the surgery metadata path, the session type, and the session name the
+    resolvers read.
+    """
     surgery_metadata_path = tmp_path.joinpath("surgery_metadata.yaml")
     if surgery_present:
         surgery_metadata_path.write_text(data="stub")

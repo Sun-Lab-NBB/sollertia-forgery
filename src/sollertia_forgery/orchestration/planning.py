@@ -175,6 +175,8 @@ def resolve_session_plan(
     Raises:
         ValueError: If no pipeline resolves any job for this session, since a session with no plannable job names no
             path to a plan file.
+        TimeoutError: If a pipeline's processing tracker lock or the plan file's own lock cannot be acquired within
+            the timeout period.
     """
     dispatches = [
         dispatch
@@ -210,6 +212,8 @@ def resolve_dataset_plan(
     Raises:
         ValueError: If the forging pipeline resolves no job for this dataset, since a dataset with no plannable job
             names no path to a plan file.
+        TimeoutError: If a pipeline's processing tracker lock or the plan file's own lock cannot be acquired within
+            the timeout period.
     """
     dispatch = resolve_dispatch(pipeline=ProcessingPipelines.FORGING)
     dispatches = [] if dispatch is None else [dispatch]

@@ -493,15 +493,15 @@ def _assert_registry_coverage() -> None:
 
     Confirms that every ``AcquisitionSystems`` member has an entry in the forging-assembly, runtime-parser,
     two-photon-data, video-tracking, microcontroller event-code, microcontroller eligibility, cindra configuration,
-    and forging-admission registries. Confirms that every member registers at least one microcontroller module parser,
-    that every parseable microcontroller module declares the event codes its parser reads, and that every session type
-    a system admits into a dataset is a session type that system records.
+    multi-recording session-type, and forging-admission registries. Confirms that every member registers at least one
+    microcontroller module parser, that every parseable microcontroller module declares the event codes its parser
+    reads, and that every session type a system admits into a dataset is a session type that system records.
 
     Raises:
         RuntimeError: If any acquisition system is missing from a donor registry, if a parseable microcontroller
-            module does not declare its event codes, or if a forging-admission entry names a session type its system
-            does not record. The error names the offending members so extenders can immediately locate the unwired
-            touch point.
+            module does not declare its event codes, if a system declares cross-recording tracking for a session type
+            it does not record, or if a forging-admission entry names a session type its system does not record. The
+            error names the offending members so extenders can immediately locate the unwired touch point.
     """
     systems = frozenset(AcquisitionSystems)
     microcontroller_systems = frozenset(system for system, _, _ in _MICROCONTROLLER_PARSER_REGISTRY)

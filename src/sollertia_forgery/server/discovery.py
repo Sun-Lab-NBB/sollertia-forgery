@@ -30,7 +30,9 @@ _SESSION_MARKER_DEPTH: int = 4
 
 @dataclass(frozen=True, slots=True)
 class ProjectMarkers:
-    """Stores the dataset and session marker files one remote project holds."""
+    """Stores the dataset directories and acquired sessions one remote project holds, as resolved from its marker
+    files.
+    """
 
     datasets: tuple[Path, ...]
     """The absolute paths to the project's forged dataset directories, in natural sort order."""

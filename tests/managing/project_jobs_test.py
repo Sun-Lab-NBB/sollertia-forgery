@@ -127,8 +127,8 @@ def test_the_written_artifact_groups_rows_by_subject_then_pipeline(tmp_path: Pat
 def test_the_written_rows_order_every_identifier_the_way_it_is_written(tmp_path: Path) -> None:
     """Verifies that the rows place animal 2 ahead of animal 10 and specifier 2 ahead of specifier 10.
 
-    Every identifier the artifact orders on is a number held as text, so ordering the rows as plain text would put 10
-    ahead of 2 and leave this artifact disagreeing with the manifest a reader joins it against.
+    The animal and the specifier are numbers held as text, so ordering the rows as plain text would put 10 ahead of 2
+    and leave this artifact disagreeing with the manifest a reader joins it against.
     """
     rows: list[dict[str, str | None]] = [
         {"animal": "10", "session": "s1", "pipeline": "two_photon", "job_name": "registration", "specifier": "10"},

@@ -30,9 +30,10 @@ def natural_sort(frame: pl.DataFrame, by: Sequence[str], *, nulls_last: bool = F
     """Orders a frame on the named string columns the way a reader reads them, so 2 precedes 10.
 
     Notes:
-        Every identifier this library sorts on embeds a number in text, which covers animal identifiers, camera source
-        identifiers, plane specifiers, and operator-chosen dataset names. Ordering those as plain text puts 10 ahead of
-        2, so a listing disagrees with the order the same identifiers are read and written in everywhere else.
+        Many of the identifiers this library sorts on embed a number in text, which covers animal identifiers, camera
+        source identifiers, plane specifiers, and operator-chosen dataset names. Ordering those as plain text puts 10
+        ahead of 2, so a listing disagrees with the order the same identifiers are read and written in everywhere
+        else.
 
         Each column is ranked over its distinct values alone and the frame is then ordered on the resulting integers.
         A column holds far fewer distinct identifiers than rows, so the text comparison runs over the small set and the

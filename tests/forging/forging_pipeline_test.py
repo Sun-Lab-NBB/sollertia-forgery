@@ -373,7 +373,7 @@ def test_define_forging_dataset_materializes_a_configuration_for_each_tracked_an
     experiment_project: ForgingProject,
 ) -> None:
     """Verifies that defining a dataset writes each animal's cross-recording configuration pointing at its cindra
-    outputs, under the lowercased directory name cindra writes its results into.
+    outputs, under the qualified, unfolded dataset name the pipeline records for it.
     """
     dataset = define_forging_dataset(
         name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root

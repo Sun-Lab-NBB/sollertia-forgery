@@ -384,9 +384,9 @@ def _round_to_gigabyte(memory_mb: int) -> int:
         whatever consumes it. Rounding here instead keeps the figure a plan records identical to the figure a
         submission requests, which is what lets a planned batch and a submitted one be compared directly.
 
-        A figure a dependency already sized is rounded here as well. Those models report at their own quantum, which
-        is finer than a gigabyte, so this is the boundary where every figure reaches one scale whichever model
-        produced it.
+        A figure a dependency already sized is rounded here as well. The acquisition libraries report at a 256
+        megabyte quantum while cindra already reports at a whole gigabyte, so this is the boundary where every figure
+        reaches one scale whichever model produced it.
 
     Args:
         memory_mb: The memory to round, in megabytes.
@@ -401,8 +401,8 @@ def _apply_tolerance(memory_mb: int) -> int:
     """Applies the shared estimate tolerance to a modeled memory figure and rounds it to a whole gigabyte.
 
     Notes:
-        The tolerance is cindra's, which the sibling acquisition libraries carry at the same value, so every stage of
-        a mixed batch is weighed on one scale.
+        The tolerance is cindra's, which the video library carries at the same value while the communication library
+        carries a wider one, so a mixed batch is weighed on close but not identical scales.
 
     Args:
         memory_mb: The modeled memory in megabytes, before any margin.
@@ -611,7 +611,8 @@ def _size_two_photon_job(
     Raises:
         FileNotFoundError: If the recording carries neither pipeline output nor readable raw imaging data, in which
             case no stage of it can run.
-        ValueError: If the specifier names an imaging plane the recording does not hold.
+        ValueError: If the specifier names an imaging plane the recording does not hold, or if both inputs were
+            readable and still describe no whole imaging plane.
     """
     sizing = size_single_recording_job(
         job_name=SingleRecordingJobNames(job_name),
@@ -651,7 +652,8 @@ def _size_multi_recording_job(
         The job's footprint, holding cindra's own width for the stage and its memory at that width.
 
     Raises:
-        FileNotFoundError: If no recording the job spans carries a combined metadata archive, in which case neither
+        FileNotFoundError: If the job spans no recording, if any recording it spans carries no combined metadata
+            archive, or if any recording reports no regions in its combined trace array, in which case neither
             cross-recording stage can run.
         ValueError: If the dataset's acquisition system donates no multi-recording configuration, which leaves the
             stage with no parameters to be sized against.
@@ -741,8 +743,8 @@ def _widest_file_memory_mb(candidates: Collection[Path], expansion_ratio: float,
     """Models memory from the largest of the files a stage may read, for a stage whose input is one of several.
 
     Notes:
-        The candidates are discovered by the party that owns their naming, which is the acquisition system for a
-        prediction file and the data-structures library for a log archive, so no naming rule is repeated here.
+        A log archive is discovered by the data-structures library that owns its naming, while a prediction file is
+        matched here by its container extension alone, because it is written upstream of this platform.
 
     Args:
         candidates: The files the stage may read, one of which the estimate is drawn from.
@@ -964,8 +966,8 @@ def _size_forging_job(
     """Sizes one per-session assembly job from the processed output it reads.
 
     Notes:
-        The assembled frame retains every fluorescence column it attaches, and the write that closes the job rechunks
-        the frame into a second copy of the whole thing, so the shape of the session's own fluorescence is what the
+        The assembled frame retains every fluorescence column it attaches, and the write that closes the job streams
+        the frame it was handed rather than rebuilding it, so the shape of the session's own fluorescence is what the
         job is charged. The stage is this package's own, and its fan-out is a fixed handful of threads, so it runs at
         the allocation its type declared.
 

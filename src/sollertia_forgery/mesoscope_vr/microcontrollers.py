@@ -121,7 +121,8 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
     _GAS_PUFF_MODULE: _ModuleSpecification(
         required_fields=(),
         usage_flags=("delivered_gas_puffs",),
-        # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
+        # The gas-puff valve shares the water-valve firmware, so it emits one tone-off code (55) at setup even with no
+        # tone buzzer wired, but the
         # gas-puff parser does not read them, so extracting them would be wasted work.
         event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
     ),

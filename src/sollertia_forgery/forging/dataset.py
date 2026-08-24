@@ -73,7 +73,8 @@ def resolve_dataset(
 
     Raises:
         ValueError: If the arguments contradict each other or leave the dataset without a definition to build from.
-            Also raised when an animal named for rebuilding is absent from the dataset or has no provided sessions.
+            Also raised when an animal is named for rebuilding more than once, or when one named for rebuilding is
+            absent from the dataset or has no provided sessions.
             A provided session that would widen a frozen animal's session set raises too, as does one whose session
             type or acquisition system differs from the dataset's. A provided session whose type joins no dataset for
             its acquisition system, or that has a required pipeline still outstanding, raises too.

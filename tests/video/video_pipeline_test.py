@@ -35,7 +35,8 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _FACE_SOURCE_ID: int = 51
-"""The manifest source identifier of the camera every fixture gives both an archive and a recording."""
+"""The manifest source identifier of the first registered camera, which most tests stage an archive or a recording
+for."""
 
 _BODY_SOURCE_ID: int = 62
 """The manifest source identifier of the second registered camera, used to prove per-camera job independence."""

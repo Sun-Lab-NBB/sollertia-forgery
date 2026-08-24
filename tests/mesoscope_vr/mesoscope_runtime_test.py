@@ -640,7 +640,7 @@ def test_decompose_matches_the_longer_motif_when_a_shorter_trial_is_its_prefix()
 def test_decompose_reports_trial_types_in_the_configuration_declaration_order() -> None:
     """Verifies that the decoded trial type indices count against the experiment configuration's declaration order.
 
-    The descriptor builder resolves each decoded trial's corridor geometry by that same order, so indices counted
+    The trial-sequence processor resolves each decoded trial's corridor geometry by that same order, so indices counted
     against an alphabetically sorted trial list would walk the wrong corridor for every trial of a session whose
     trial types happen not to be declared alphabetically.
     """
@@ -787,8 +787,9 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
     assert cues.tolist() == [1, 2, 1, 1, 2, 1, 2]
     assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 100.0, 130.0, 160.0]
     # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches the corridor position its trigger
-    # zone is declared at after travelling 10 cm less. Trials 1 and 3 follow a truncation, which re-enters the
-    # corridor, so the same offset applies to them.
+    # zone is declared at after travelling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the
+    # corridor, so the same offset applies to it. Trial 1 is cut short before its zone begins and contributes no
+    # entry, and trial 3 follows a complete trial, so its zone sits at the full 30 cm.
     assert trigger_starts.tolist() == [20.0, 100.0, 180.0]
     assert trigger_ends.tolist() == [35.0, 115.0, 190.0]
     assert trial_starts.tolist() == [0.0, 60.0, 80.0, 150.0]

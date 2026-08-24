@@ -92,8 +92,8 @@ def run_runtime_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # The archive filename a source writes is the data-structures library's own contract, so the same indexing pass
-    # discovery ran resolves the path rather than this pipeline rebuilding the name from the source id.
+    # The archive filename a source writes is the data-structures library's own contract, so the same indexing helper
+    # discovery used resolves the path rather than this pipeline rebuilding the name from the source id.
     archive_path = discover_log_archives(log_directory=log_directory)[source_id]
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
@@ -127,7 +127,7 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
         The archives are indexed through the data-structures library, which owns the name each source writes its
         archive under, so a session that recorded no runtime archive is reported without this pipeline restating that
         naming rule. The index covers the logger's own output directory, which is where a session's archives are
-        assembled side by side, and the pipeline resolves the archive it runs on through that same index.
+        assembled side by side, and the pipeline resolves the archive it runs on through that same helper.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.

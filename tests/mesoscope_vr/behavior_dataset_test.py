@@ -35,7 +35,8 @@ SAMPLE_COUNT = 10
 """The number of samples in the reference time vector."""
 
 ENCODER_PAIR_OFFSET_US = 50_000
-"""The spacing between the two encoder samples written around each reference sample, half the speed window."""
+"""The interval by which the first encoder sample of each pair precedes its reference sample, half the speed
+window."""
 
 MINIMUM_BRAKE_STRENGTH = 1.0
 """The brake-engagement threshold written into the synthetic hardware state."""
@@ -134,7 +135,7 @@ def write_required_feathers(microcontroller_data_path: Path, runtime_data_path: 
 
 
 def write_encoder_feather(microcontroller_data_path: Path) -> None:
-    """Writes the encoder feather as one sample pair straddling each reference sample.
+    """Writes the encoder feather as one sample pair ending on each reference sample.
 
     Each pair is spaced by half the running-speed window, so the speed reported at a reference sample is the pair's
     displacement over that half window. The animal travels only across the run samples and once during rest.
@@ -346,8 +347,8 @@ def test_assemble_behavior_dataset_steps_the_water_total_between_deliveries(tmp_
     )
 
     assert behavior_data["water_uL"].to_list() == pytest.approx([0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 5.0])
-    # The encoder is interpolated linearly, so its off-grid samples do blend their bracketing readings: sample five
-    # sits three seconds past the 6.5 cm reading and 2.95 seconds short of the following 12.0 cm one.
+    # The encoder is interpolated linearly, so its off-grid samples do blend their bracketing readings: the fifth
+    # sample sits three seconds past the 6.5 cm reading and 2.95 seconds short of the following 12.0 cm one.
     blend = (SAMPLE_INTERVAL_US // 2) / (SAMPLE_INTERVAL_US - ENCODER_PAIR_OFFSET_US)
     assert behavior_data["distance_cm"][4] == pytest.approx(6.5 + blend * 5.5)
 

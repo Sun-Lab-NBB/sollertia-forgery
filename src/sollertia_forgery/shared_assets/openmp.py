@@ -77,7 +77,7 @@ class OpenMPSummary:
     link_path: Path | None
     """The absolute path to the link that makes the runtime loadable, or None when no runtime was found."""
     searched_paths: tuple[Path, ...]
-    """The paths examined while discovering the runtime, in the order they were examined."""
+    """The candidate paths discovery considered, in the order it would examine them."""
     loadable: bool
     """Determines whether the OpenMP runtime loads from a fresh interpreter once the call returns."""
 
@@ -105,7 +105,8 @@ def verify_openmp_runtime() -> None:
     """Aborts the runtime when Numba's OpenMP threading layer has no runtime to load on this macOS host.
 
     Notes:
-        Every processing pipeline calls this before it dispatches a job, so a host that cannot run a parallelized
+        Every pipeline that dispatches a parallelized worker pool calls this before it starts a job, so a host that
+        cannot run a parallelized
         kernel fails while it has done no work rather than partway through a session. The error replaces the
         threading-layer error Numba raises at the first parallelized call, which names no remedy. The platforms whose
         threading layer needs no separately installed runtime return without checking anything.
@@ -159,8 +160,8 @@ def resolve_openmp_runtime(
         The summary describing the resolved runtime, the resolved link, and what the call changed.
 
     Raises:
-        RuntimeError: If the host runs a platform other than macOS, if the link directory cannot be created, or if
-            the link cannot be written.
+        RuntimeError: If the host runs a platform other than macOS, if the resolved link path already holds the
+            runtime itself, if the link directory cannot be created, or if the link cannot be written.
     """
     if sys.platform != "darwin":
         message = (

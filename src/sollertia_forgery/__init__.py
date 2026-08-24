@@ -28,9 +28,10 @@ multiprocessing.set_start_method("spawn", force=True)
 # functions are compiled. macOS uses OpenMP because tbb4py publishes no Apple Silicon wheel. All other platforms use
 # TBB for lower overhead on flat prange loops.
 #
-# Whether the selected layer has a runtime to load is checked by 'verify_openmp_runtime', which every processing
-# pipeline calls before it dispatches a job. Checking there rather than here keeps importing this library to read the
-# dataset types it publishes free of the macOS OpenMP setup a host needs only to process data.
+# Whether the selected layer has a runtime to load is checked by 'verify_openmp_runtime', which every pipeline that
+# dispatches a parallelized worker pool calls before it starts a job. The manifest pipeline runs single-threaded and
+# needs no runtime, so it is the one pipeline that does not. Checking there rather than here keeps importing this
+# library to read the dataset types it publishes free of the macOS OpenMP setup a host needs only to process data.
 config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"  # type: ignore[attr-defined]
 
 from ataraxis_base_utilities import console  # noqa: E402 - imported after the process-wide configuration above.

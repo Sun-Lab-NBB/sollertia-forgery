@@ -179,7 +179,7 @@ def print_slurm_info(
         )
         console.error(message=message, error=ValueError)
 
-    # Initializes communication with the server.
+    # Loads and validates the local server access configuration.
     configuration = get_server_configuration()
 
     # Resolves the username from the server configuration file if an explicit override is not provided.

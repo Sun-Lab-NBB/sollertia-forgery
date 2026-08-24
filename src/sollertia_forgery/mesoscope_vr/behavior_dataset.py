@@ -70,6 +70,8 @@ def assemble_behavior_dataset(
             missing.
         ValueError: If the hardware state configuration is missing the required ``system_state_codes`` mapping, or
             (when brake data is present) the required ``minimum_brake_strength`` value.
+        InvalidOperationError: If the session's system state feather carries a state code absent from the hardware
+            state configuration's ``system_state_codes`` mapping.
     """
     # The hardware state stores the mapping name-first, so it is inverted into the code-keyed lookup the Enum cast
     # needs.

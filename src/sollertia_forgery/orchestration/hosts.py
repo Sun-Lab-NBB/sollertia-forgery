@@ -787,7 +787,8 @@ def _definition_command(
     """Renders the command that builds a dataset hierarchy on the server.
 
     Notes:
-        Each argument is embedded as a JSON literal, which the Python parser reads as the same literal. A name
+        Every string argument is embedded as a JSON literal, which the Python parser reads as the same literal,
+        while the boolean is interpolated as its Python repr. A name
         carrying a space or a quote therefore survives both the parser and the shell quoting applied around it.
 
     Args:

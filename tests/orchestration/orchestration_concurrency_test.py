@@ -365,7 +365,8 @@ def test_job_options_round_trip_from_descriptor_to_worker() -> None:
 def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     """Verifies that the checksum estimate tracks the cores a job holds rather than the bytes it reads.
 
-    Every other estimator scales a per-byte ratio off an input file. A checksum worker streams its file in fixed
+    Most other estimators scale a per-byte ratio off an input file, and the rename estimator is the only other one
+    that reads none. A checksum worker streams its file in fixed
     chunks, so the session's size does not enter the estimate and only the reader count does.
     """
     single = _size_checksum_job(cores=1).memory_mb
@@ -398,7 +399,8 @@ def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: 
 
     assert "NUMBA_NUM_THREADS" not in os.environ
 
-    # The other threading layers stay pinned, since they read their variables when the job itself starts.
+    # The other threading layers are still written here, since the lazily-initialized decoders read their variables
+    # when a job first decodes.
     assert os.environ["OMP_NUM_THREADS"] == "1"
     assert os.environ["POLARS_MAX_THREADS"] == "1"
 
@@ -407,8 +409,8 @@ def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: 
 def test_every_dispatch_entry_declares_the_whole_generic_contract(pipeline: str) -> None:
     """Verifies that each registered pipeline supplies every callable the unit-generic dispatch contract requires.
 
-    The batch layer reads a unit only through these callables, so an entry omitting one fails at preparation rather
-    than at registration.
+    The batch layer reads a unit only through these callables, so this pins the set an entry must supply beyond what
+    the dataclass itself requires.
     """
     dispatch = resolve_dispatch(pipeline=pipeline)
     assert dispatch is not None

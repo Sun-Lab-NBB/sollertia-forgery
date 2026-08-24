@@ -887,7 +887,7 @@ def _record_resolution(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def test_define_forging_dataset_applies_every_definition_argument(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verifies that the definition entry point forwards the session list and the rebuild arguments."""
+    """Verifies that the definition entry point forwards the session list and the force-recreate flag."""
     recorded = _record_resolution(monkeypatch)
 
     with pytest.raises(RuntimeError, match="halted"):

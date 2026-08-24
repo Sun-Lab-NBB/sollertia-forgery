@@ -58,8 +58,8 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
         two separate renames, so the writer lands this one first and leaves a reader at worst holding job rows for a
         session the manifest does not list yet.
 
-        Stored uncompressed so a reader memory-maps it rather than decoding it, which is what makes a filtered read
-        cost the same whether a project holds fifty sessions or eight hundred.
+        Stored uncompressed so a reader memory-maps it rather than decoding it, which is what puts opening it a page
+        fault away from the reader instead of a full decode of every row.
 
         Published through a temporary file renamed over the destination, since the readers that memory-map the
         artifact take no lock of their own. Rewriting the destination in place would let such a reader map a file

@@ -95,10 +95,12 @@ FRAME_WIDTH: int = 64
 """The pixel width of one acquisition frame, shared by every plane the conversion stage slices out."""
 
 REGION_LINES: list[list[int]] = [[1, 100], [101, 300], []]
-"""The per-region line spans the synthetic acquisition parameters declare, holding one empty span the reader drops."""
+"""The per-region line spans the synthetic acquisition parameters declare. The parameters name no roi_number, so
+cindra reads the recording as single-region and discards every span."""
 
 SAMPLING_RATE: float = 10.0
-"""The per-plane sampling rate the synthetic acquisition parameters declare."""
+"""The volume acquisition rate the synthetic acquisition parameters declare, from which cindra derives a per-plane
+rate of half this figure across the two declared planes."""
 
 CHECKSUM_READER_MEMORY_MB: int = 285
 """The resident memory the checksum model charges one reader. The tunable terms of a model this package owns are
@@ -892,7 +894,8 @@ def test_the_assembly_estimate_charges_the_assembled_frame_a_single_time(
 
     The reportable figure is rounded up to the whole gigabyte, which leaves a recording of the scale the other dataset
     tests use unable to tell one copy of its fluorescence from two. This recording is therefore written large enough
-    that its retained columns are a gigabyte in their own right, which is the scale the copy count becomes visible at.
+    that a second copy of its retained columns would push the reported estimate from one whole gigabyte to two, which
+    is the scale the copy count becomes visible at.
     """
     session = session_factory(animal_id="305", experiment_name="test_experiment")
     write_surgery_metadata(session=session)
@@ -1224,4 +1227,4 @@ def test_the_camera_directory_is_read_once_even_when_it_is_removed_mid_session(
     )
 
     # A recorded frame adds pixels on top of the decoder and child cost, which the gigabyte rounding absorbs here.
-    assert with_recordings[ENERGY_JOB_NAME, "51"].memory_mb >= without_recordings[ENERGY_JOB_NAME, "51"].memory_mb
+    assert with_recordings[ENERGY_JOB_NAME, "51"].memory_mb == without_recordings[ENERGY_JOB_NAME, "51"].memory_mb

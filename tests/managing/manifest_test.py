@@ -130,6 +130,32 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     raise RuntimeError(message)
 
 
+def write_second_partial_then_fail(calls: list[int]) -> Any:
+    """Builds a frame-writer stand-in that serializes normally until the manifest write, which it fails partway.
+
+    Generation publishes the job artifact before the manifest, so failing the first call would abort before the
+    manifest is ever opened. Letting that call through puts the failure on the manifest's own publication.
+
+    Args:
+        calls: The list the stand-in appends to once per invocation, which is what sequences the two writes.
+
+    Returns:
+        The stand-in, which serializes the first frame it is handed and raises on every later one.
+    """
+    original = pl.DataFrame.write_ipc
+
+    def _writer(frame: pl.DataFrame, file: Any, **keywords: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            original(frame, file, **keywords)
+            return
+        file.write(b"partial")
+        message = "the artifact writer died mid-write"
+        raise RuntimeError(message)
+
+    return _writer
+
+
 # Tests for the generation walk
 
 
@@ -228,7 +254,9 @@ def test_generation_writes_the_job_artifact_beside_the_manifest(
     experiment_session: SessionData,
     mark_session_processed: Callable[[SessionData], None],
 ) -> None:
-    """Both artifacts are written under one lock, so a reader never sees one refreshed without the other."""
+    """Both artifacts are written under one lock, and the job artifact lands first, so a reader at worst holds job
+    rows for a session the manifest does not list yet.
+    """
     mark_session_processed(experiment_session)
 
     generate_project_manifest(project_directory=project_root)
@@ -361,18 +389,22 @@ def test_a_failed_write_leaves_the_previously_published_manifest_readable(
     project_manifest: Path,  # Requested so a complete manifest is already published when the failing run starts.
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The artifact is published by rename, so a writer that dies mid-write leaves the mapped file untouched.
+    """The manifest is published by rename, so a writer that dies mid-write leaves the mapped file untouched.
 
     Rewriting the destination in place truncates it first, which would leave every reader that memory-maps the
-    manifest without taking its lock facing an unreadable file.
+    manifest without taking its lock facing an unreadable file. The job artifact is published first, so the stand-in
+    lets that write through and dies on the manifest's own publication.
     """
     published = read_manifest(project_root=project_root).get_column("session").to_list()
 
-    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_partial_then_fail)
+    calls: list[int] = []
+    monkeypatch.setattr(pl.DataFrame, "write_ipc", write_second_partial_then_fail(calls=calls))
 
     with pytest.raises(RuntimeError, match="died mid-write"):
         generate_project_manifest(project_directory=project_root)
 
+    # Two writes were attempted, so the failure landed on the manifest rather than on the job artifact before it.
+    assert len(calls) == 2
     assert read_manifest(project_root=project_root).get_column("session").to_list() == published
     assert [entry.name for entry in project_root.iterdir() if entry.name.endswith(".tmp")] == []
 
