@@ -21,9 +21,11 @@ class ProcessingPipelines(StrEnum):
     its datasets.
 
     Notes:
-        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum,
-        which additionally carries ``CINDRA_MULTI_RECORDING`` for a stage cindra owns end to end. The values here are
-        short pipeline identifiers, so a caller resolves a tracker filename through that enum.
+        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum. The
+        values here are short pipeline identifiers, so a caller resolves a tracker filename through that enum. Cindra's
+        multi-recording stage has no member in either enum, since its tracker is written once per dataset inside a
+        dataset-named directory that no fixed per-session path addresses. This library resolves that stage's paths
+        through cindra's own ``resolve_dataset_path`` instead.
     """
 
     MANIFEST = "manifest"

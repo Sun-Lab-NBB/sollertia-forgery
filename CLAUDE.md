@@ -44,67 +44,99 @@ from the repository root.
    - **Use online version**: Fetch documentation and API details from the GitHub repository
    - **Update local copy**: The user will pull the latest changes locally before proceeding
 
-4. **Proceed with correct source**: Use whichever version the user selects as the authoritative reference for API usage,
-   patterns, and documentation.
+4. **Proceed with correct source**: Use whichever version the user selects, and treat that version as the
+   authoritative reference for API usage, patterns, and documentation.
 
 ## Available skills
 
 **Forging plugin skills** (`sollertia` marketplace, `forging` plugin):
 
-| Skill                            | Description                                                            |
-|----------------------------------|------------------------------------------------------------------------|
-| `/behavior-input-format`         | Documents the raw artifacts the behavior-processing pipelines consume  |
-| `/behavior-processing`           | Orchestrates batch behavior processing through the MCP server          |
-| `/behavior-results`              | Documents the behavior-processing outputs and how to verify them       |
-| `/camera-timestamp-extraction`   | Documents the manifest-driven camera timestamp extraction stage        |
-| `/checksum-verification`         | Orchestrates batch checksum verification and regeneration              |
-| `/data-processing-design`        | Documents the agnostic-worker and per-system-donation design pattern   |
-| `/dataset-forging`               | Orchestrates batch dataset forging through the MCP server              |
-| `/dataset-forging-input-format`  | Documents the inputs the forging pipeline reads                        |
-| `/dataset-forging-results`       | Documents the forged dataset outputs and how to verify them            |
-| `/datasets`                      | Discovers, reads, and writes the dataset-level records                 |
-| `/forging-mcp-environment-setup` | Diagnoses and resolves MCP server connectivity issues                  |
-| `/microcontroller-primitives`    | Documents the agnostic microcontroller parsing primitives              |
-| `/project-manifest`              | Documents the project manifest and the tools that read and generate it |
-| `/server-configuration`          | Authors and modifies the remote compute server configuration           |
+| Skill                            | Description                                                                        |
+|----------------------------------|------------------------------------------------------------------------------------|
+| `/behavior-input-format`         | Documents the raw artifacts the behavior-processing pipelines consume              |
+| `/behavior-processing`           | Orchestrates batch behavior processing through the MCP server                      |
+| `/behavior-results`              | Documents the behavior-processing outputs and how to verify them                   |
+| `/camera-timestamp-extraction`   | Documents the manifest-driven stage that extracts camera timestamps                |
+| `/checksum-verification`         | Orchestrates batch checksum verification and regeneration                          |
+| `/data-processing-design`        | Documents the design pattern that pairs agnostic workers with per-system donations |
+| `/dataset-definition`            | Composes forged datasets and reports their forging job state                       |
+| `/dataset-forging`               | Orchestrates batch dataset forging through the MCP server                          |
+| `/dataset-forging-input-format`  | Documents the inputs the forging pipeline reads                                    |
+| `/dataset-forging-results`       | Documents the forged dataset outputs and how to verify them                        |
+| `/forging-mcp-environment-setup` | Diagnoses and resolves MCP server connectivity issues                              |
+| `/microcontroller-primitives`    | Documents the agnostic microcontroller parsing primitives                          |
+| `/project-manifest`              | Documents the project manifest and the tools that read and generate it             |
+| `/server-configuration`          | Authors and modifies the remote compute server configuration                       |
 
 **Automation plugin skills** (`ataraxis` marketplace, `automation` plugin) provide the style guides listed above,
 `/explore-codebase`, `/explore-dependencies`, and the `/audit-*` family.
 
 ## MCP server
 
-The library exposes an MCP server through the `slf mcp` command, defined in
-`src/sollertia_forgery/interfaces/mcp_server.py`. Tool modules register their tools purely as an import side effect,
-and the server discovers them by the `_tools` filename suffix under `src/sollertia_forgery/interfaces/`.
+The library exposes an MCP server through the `slf mcp` command, which is defined in
+`src/sollertia_forgery/interfaces/mcp_server.py`. The server selects its transport with `-t/--transport`, defaulting to
+`stdio` and also accepting `sse` and `streamable-http` for a network client. Tool modules register their tools purely as
+an import side effect, and the server discovers them by the `_tools` filename suffix under
+`src/sollertia_forgery/interfaces/`. The `stdio` transport disables the console, because the pipelines echo progress to
+the same stream that carries the JSON-RPC messages.
 
-**When adding an MCP tool**, place it in the `*_tools.py` module that owns its domain, decorate it with `@mcp.tool()`
-from `.mcp_instance`, and give it a `Returns` section naming the response keys in prose. Add the module to the
-`[tool.coverage.run] omit` list in `pyproject.toml` if it is a new tool module, because tool modules reach
-infrastructure only a live MCP session supplies.
+**When adding an MCP tool**, place it in the `*_tools.py` module that owns its domain and decorate it with `@mcp.tool()`
+from `.mcp_instance`. Return through the `ok_response` and `error_response` helpers in `.responses`, and give the tool a
+`Returns` section that names the response keys in prose. Add a new tool module to the `[tool.coverage.run] omit` list in
+`pyproject.toml`, because tool modules reach infrastructure that only a live MCP session supplies.
 
 ## Downstream library integration
 
-This library reads the records `sollertia-shared-assets` defines and drives the pipelines `ataraxis-video-system`,
-`ataraxis-communication-interface`, and `cindra` publish. It never references the downstream analysis repository, which
-owns its own artifact names.
+This library reads the records defined by `sollertia-shared-assets` and drives the pipelines published by
+`ataraxis-video-system`, `ataraxis-communication-interface`, and `cindra`. It never references the downstream analysis
+repository, which owns its own artifact names.
+
+## Companion library synchronization
+
+`sollertia-shared-assets` owns the vocabulary this library uses for dispatch, and `sollertia-experiment` records the
+data this library processes, so an out-of-domain extension usually lands as one change in each of the three
+repositories.
+
+- `AcquisitionSystems`, `SessionTypes`, `SYSTEM_SESSION_TYPES`, `ProcessingTrackers`, `ProcessedData`, `SessionData`,
+  and `DatasetData` all live in `sollertia-shared-assets`. A new acquisition system or session type gains its
+  enumeration member there first, and this library never mints one locally.
+- Adding an `AcquisitionSystems` member upstream breaks every import path that reaches `registries.py`, and that break
+  holds until this library wires the new system. Those paths cover every processing pipeline. Read the RuntimeError
+  raised by `_assert_registry_coverage` as the remaining extension checklist.
+- `_FORGING_ADMISSION_REGISTRY` and `_MULTI_RECORDING_SESSION_TYPE_REGISTRY` validate their session types against
+  `SYSTEM_SESSION_TYPES`, so each type this library assigns to a system must appear under that same system in the
+  upstream registry.
+- A new per-session pipeline needs an upstream tracker filename in `ProcessingTrackers` and an upstream output directory
+  in `ProcessedData`, before `shared_assets/pipelines.py` is able to resolve the tracker location.
+- `sollertia-experiment` has to acquire the data before anything here can process it, so confirm that the acquisition
+  side writes the artifacts a new pipeline reads and creates sessions of a new session type.
 
 ## Distribution model
 
 The package ships to PyPI as `sollertia-forgery` and installs the `slf` CLI. Its Claude Code skills and its MCP server
 registration ship separately, through the `forging` plugin of the [sollertia](https://github.com/Sun-Lab-NBB/sollertia)
-marketplace. An agent asked to add or change a skill edits that repository rather than this one.
+marketplace. An agent that is asked to add or change a skill edits that repository rather than this one.
 
 ## Project context
 
+This is **sollertia-forgery**, the data processing counterpart to `sollertia-experiment`. It turns the raw acquisition
+logs of a recorded session into per-session data tables, verifies the integrity of the acquired data, and forges the
+processed sessions into the multi-session datasets consumed by a downstream analysis repository.
+
 ### Key areas
 
-| Path                                   | Contents                                                           |
-|----------------------------------------|--------------------------------------------------------------------|
-| `src/sollertia_forgery/registries.py`  | The acquisition-system dispatch registries and their import checks |
-| `src/sollertia_forgery/mesoscope_vr/`  | The Mesoscope-VR system's donated parsers, resolvers, and workers  |
-| `src/sollertia_forgery/orchestration/` | Batch preparation, dispatch, execution, and closure on both hosts  |
-| `src/sollertia_forgery/interfaces/`    | The `slf` Click CLI and the MCP tool modules                       |
-| `src/sollertia_forgery/shared_assets/` | The agnostic substrate every category package draws on             |
+| Path                                   | Contents                                                             |
+|----------------------------------------|----------------------------------------------------------------------|
+| `src/sollertia_forgery/registries.py`  | The acquisition-system dispatch registries and their coverage check  |
+| `src/sollertia_forgery/mesoscope_vr/`  | The Mesoscope-VR system's donated parsers, resolvers, and workers    |
+| `src/sollertia_forgery/orchestration/` | Planning, preparation, dispatch, execution, closure, and maintenance |
+| `src/sollertia_forgery/managing/`      | The checksum pipeline, the project manifest, and the job artifact    |
+| `src/sollertia_forgery/server/`        | SLURM job composition, the SSH and SFTP transport, and its config    |
+| `src/sollertia_forgery/interfaces/`    | The `slf` Click CLI and the MCP tool modules                         |
+| `src/sollertia_forgery/shared_assets/` | The agnostic substrate every category package draws on               |
+
+The `video/`, `microcontrollers/`, `runtime/`, `two_photon/`, and `forging/` category packages sit beside them, one
+per pipeline.
 
 ### Architecture
 
@@ -113,20 +145,69 @@ The processing packages are **system-agnostic**. A category package such as `vid
 acquisition system contributes lives in a per-system package such as `mesoscope_vr/`, and reaches the agnostic
 pipelines through `registries.py`.
 
-`registries.py` maps each `AcquisitionSystems` member to the workers, parsers, resolvers, and locators that system
-donates, and runs an import-time coverage check that refuses a partially wired system. The dependency runs one way,
-because a per-system package never imports an agnostic category package.
+`registries.py` maps each `AcquisitionSystems` member to the workers, parsers, resolvers, and locators donated by that
+member, and runs an import-time coverage check that refuses a partially wired system. The dependency runs one way,
+because a per-system package never imports an agnostic category package. A category pipeline imports `registries.py` and
+`registries.py` imports every per-system package, so the reverse import is a genuine cycle rather than a style
+preference.
 
-**When adding an acquisition system**, add its package, register every donation in `registries.py`, and let the
-coverage check tell you what is still unwired.
+Work reaches a host as a **job**, and every pipeline models its jobs the same way. `slf plan` reads a unit's acquisition
+data, registers every job that unit is able to run on the unit's processing tracker, and records each job's cores,
+memory, and upstream jobs. Preparation joins the tracker state to those records into one descriptor per job under a
+batch identifier, and dispatch runs the batch either on this machine's process pool or as one SLURM allocation per job.
+Each job holds a `ProcessingStatus` on the tracker, one of `SCHEDULED`, `RUNNING`, `SUCCEEDED`, or `FAILED`. A rerun
+therefore resolves only the work still outstanding. The run reports a job as blocked rather than dispatched when it can
+neither queue that job's upstream stage nor confirm that the stage already succeeded.
+
+The public surface of the distribution is the `slf` CLI and the MCP server that CLI starts, so the top-level
+`__init__.py` re-exports no library symbol and its `__all__` is empty. Adding a name to a public listing is a deliberate
+API change rather than a convenience.
+
+### Extension contracts
+
+Every registry is private to `registries.py` and is reached through that module's `resolve_*` accessors, so a consuming
+pipeline never indexes a registry directly. All ten registries are the designed extension point, and a new acquisition
+system supplies an entry in each.
+
+| Registry                                 | Donation                                                         |
+|------------------------------------------|------------------------------------------------------------------|
+| `_MICROCONTROLLER_PARSER_REGISTRY`       | One `MicrocontrollerParser` per parsed hardware module           |
+| `_MICROCONTROLLER_EVENT_CODE_REGISTRY`   | The event codes every parsed module reads                        |
+| `_MICROCONTROLLER_ELIGIBILITY_REGISTRY`  | The modules a given session configured for use                   |
+| `_RUNTIME_PARSER_REGISTRY`               | The source id of the runtime log, paired with its parser         |
+| `_VIDEO_TRACKING_REGISTRY`               | The system's whole video-tracking pass                           |
+| `_TWO_PHOTON_DATA_REGISTRY`              | The locator for the raw two-photon imaging directory             |
+| `_CINDRA_CONFIGURATION_REGISTRY`         | The single- and multi-recording cindra config resolvers          |
+| `_FORGING_ASSEMBLY_REGISTRY`             | The per-session assembler and its column descriptions            |
+| `_FORGING_ADMISSION_REGISTRY`            | The pipelines a session of each type completes to join a dataset |
+| `_MULTI_RECORDING_SESSION_TYPE_REGISTRY` | The session types the system tracks across recordings            |
+
+Every registry is keyed by `AcquisitionSystems`, except `_MICROCONTROLLER_PARSER_REGISTRY`, whose
+`(AcquisitionSystems, module_type, module_id)` key lets a system register one parser per hardware module.
+
+`_assert_registry_coverage()` runs when `registries.py` is imported and raises a `RuntimeError` that names the offending
+members. It fires when a system is missing from any registry, when a parseable microcontroller module declares no event
+codes, and when a declared session type is absent from the upstream `SYSTEM_SESSION_TYPES` pairing for that system.
+
+**When adding an acquisition system**, add its package, register every donation in `registries.py`, and let the coverage
+check tell you what is still unwired. Nothing under `orchestration/` or `interfaces/` changes, because every command
+resolves the system from the session or dataset it opens.
+
+**When adding a processing stage**, define or reuse its job name, emit it from the pipeline's job discovery, order it in
+the prerequisite mapping, and give it both a `_JOB_CORE_ALLOCATIONS` entry and a sizing model in `footprints.py`. A job
+type missing either one is a hard error rather than a job admitted at a default size.
+
+**When adding a processing pipeline**, add its `ProcessingPipelines` member and tracker entry in
+`shared_assets/pipelines.py`, its category package, and both its `BATCH_PIPELINES` membership and its
+`PipelineDispatch` entry, which `_assert_dispatch_coverage` holds in step. Then add its CLI and MCP surfaces.
 
 ### Code standards
 
-- Every category package `__init__.py` exports its pipeline entry point, every stage job name, and the job
-  discovery and prerequisite callables the orchestration layer binds. A name reaches that list only when a package
-  outside the defining one imports it, and a symbol no other module reaches at all carries the underscore.
-- A stage backed by a library `execute_job` binding reuses that library's own exported job-name constant rather than a
-  local string, so the tracker identifiers stay aligned with the library's.
+- Every category package `__init__.py` exports its pipeline entry point, every stage job name, and the job discovery and
+  prerequisite callables the orchestration layer binds. A name reaches that list only when a package outside the
+  defining one imports it, and a symbol that no other module reaches at all carries the underscore.
+- A stage backed by a library `execute_job` binding reuses the job-name constant that library exports rather than a
+  local string, so the tracker identifiers stay aligned with the library's own.
 - The test suite covers 100% of the measured statements. Interface modules are excluded per module through the
   `[tool.coverage.run] omit` list rather than through a directory glob.
 - A test that spawns a process pool or mutates process-wide state carries `@pytest.mark.xdist_group`, because the suite
