@@ -65,8 +65,7 @@ def assemble_runtime_dataset(
         InvalidOperationError: If a recorded trial type index or runtime state code has no entry in the experiment
             configuration's mappings.
     """
-    # Uses the experiment configuration file to map the integer trial type codes and runtime state codes to
-    # descriptive names. Adds "undefined" as a special value for masking non-run experiment states.
+    # Adds "undefined" as a special value for masking non-run experiment states.
     trial_type_mapping = dict(enumerate(experiment_configuration.trial_structures.keys()))
     trial_type_categories = [*trial_type_mapping.values(), "undefined"]
     trial_enum_dtype = pl.Enum(trial_type_categories)
@@ -101,8 +100,8 @@ def assemble_runtime_dataset(
         is_discrete=False,
     )
 
-    # Loads guidance state data. The processing pipeline produces separate reinforcing and aversive guidance files,
-    # each conditional on whether the corresponding events were recorded during the session.
+    # The processing pipeline produces separate reinforcing and aversive guidance files, each conditional on
+    # whether the corresponding events were recorded during the session.
     reinforcing_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.REINFORCING_GUIDANCE)
     aversive_guidance_file = runtime_data_path.joinpath(BehaviorDataFiles.AVERSIVE_GUIDANCE)
 
@@ -202,9 +201,7 @@ def clip_to_session_bounds(assembled_data: pl.DataFrame, runtime_data_path: Path
         the tail holds the teardown period. The session begins at the first ``system_state`` entry whose code differs
         from the idle code, and later idle spans stay in place because a paused session also returns to idle.
 
-        Clipping the fully assembled dataset trims every column at once, which keeps the sub-dataset assemblers free
-        of setup-specific and teardown-specific handling. A session that never leaves idle keeps its head, and a
-        session with no runtime-state entry keeps its tail.
+        A session that never leaves idle keeps its head, and a session with no runtime-state entry keeps its tail.
 
     Args:
         assembled_data: The fully assembled DataFrame, ordered by its session's reference clock.

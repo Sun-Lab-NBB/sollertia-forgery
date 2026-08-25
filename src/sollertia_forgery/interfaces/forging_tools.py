@@ -79,9 +79,8 @@ def define_forging_dataset_tool(
     Every forging job runs against a hierarchy this tool established, so a dataset is defined here before its jobs
     are prepared, and preparing a dataset this tool has not built reports an error. A per-animal configuration is
     written only for the animals whose acquisition system resolves a multi-recording configuration, which is the
-    case for sessions carrying two-photon imaging data. The batch layer names the cores a cross-recording job runs
-    under on the command that dispatches it, so the configuration file carries the recording set, the qualified dataset
-    name, and the progress flag, and no core count.
+    case for sessions carrying two-photon imaging data. The configuration file carries the recording set, the
+    qualified dataset name, and the progress flag.
 
     Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
     animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
@@ -299,7 +298,7 @@ def read_dataset_state_tool(
     window = resolve_page(
         total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response
@@ -317,10 +316,6 @@ def list_project_datasets_tool(
     detailed: bool = False,
 ) -> dict[str, Any]:
     """Lists the forged datasets stored under a project, and which of them hold a given session or animal.
-
-    This is the tool that answers what datasets a project holds and whether a session has been forged into any of
-    them, which no other tool reports. The manifest is session-rowed and says nothing about datasets, because a
-    dataset's own artifacts own that fact.
 
     A project holds a handful of datasets rather than thousands, so the listing is the summary and appears in every
     response. Naming a session or an animal narrows it to the datasets holding them. Opting into detail reads each

@@ -96,10 +96,10 @@ def run_two_photon_processing_pipeline(
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra acquisition
-            parameters file is available for the recording, if the acquisition system's resolver reports missing
-            inputs it needs to resolve the configuration, or, in remote mode, if the session carries no materialized
-            cindra configuration or no per-plane bootstrap for a preparation pass to have written.
+        FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra
+            acquisition parameters file is available for the recording, or if the acquisition system's resolver
+            reports missing inputs it needs to resolve the configuration. In remote mode, also raised when the
+            session carries no materialized cindra configuration and no per-plane bootstrap.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the
             acquisition system's resolver cannot resolve a configuration for the session, or if job_id does not match
             any available job.
@@ -209,7 +209,7 @@ def prime_two_photon_recording(session_path: Path) -> None:
     Notes:
         cindra requires the shared configuration and every plane's runtime data to be written by one single-threaded
         step before any job reads them, because every per-job stage loads that bootstrap rather than writing it. This
-        is that step, and it is what a preparation pass calls before the pipeline's jobs are resolved.
+        is that step.
 
         Priming is idempotent, so a session that already carries a complete bootstrap is read rather than rewritten and
         this call returns without touching what its jobs recorded there. That keeps repeated preparation of the same
@@ -246,8 +246,9 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
     Notes:
         cindra owns this pipeline's job model, so the universe is the single binarization job, one registration job and
         one processing job per virtual imaging plane, and the single combination job. The virtual-plane count is a
-        property of the recording's acquisition parameters (ROI x physical plane for MROI data), read from the copy the
-        bootstrap wrote and falling back to the raw parameters file when the session has yet to be primed.
+        property of the recording's acquisition parameters (ROI x physical plane for MROI data). It is read from
+        the copy the bootstrap wrote, falling back to the raw parameters file when the session has yet to be
+        primed.
 
         Possibility here states what this session can run rather than what it has already produced, so every stage the
         recording declares is possible and the possible subset equals the universe. A freshly acquired session

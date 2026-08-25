@@ -183,7 +183,7 @@ def build_batch_document(
             continue
 
         outstanding = [
-            build_job_descriptor(
+            _build_job_descriptor(
                 state_row=row,
                 plan_row=unit_plan[job_id],
                 unit_path=unit_path,
@@ -198,7 +198,7 @@ def build_batch_document(
             for job_id, row in unit_state.items()
             if job_id not in succeeded
         ]
-        submittable, unit_blocked = partition_blocked_jobs(jobs=outstanding, succeeded=succeeded)
+        submittable, unit_blocked = _partition_blocked_jobs(jobs=outstanding, succeeded=succeeded)
         jobs.extend(submittable)
         blocked.extend(unit_blocked)
         units.append(
@@ -215,7 +215,7 @@ def build_batch_document(
     )
 
 
-def build_job_descriptor(
+def _build_job_descriptor(
     state_row: dict[str, Any],
     plan_row: dict[str, Any],
     unit_path: Path,
@@ -280,7 +280,7 @@ def index_rows_by_unit(rows: list[dict[str, Any]], key: str) -> dict[str, dict[s
     return indexed
 
 
-def partition_blocked_jobs(
+def _partition_blocked_jobs(
     jobs: list[dict[str, Any]], succeeded: set[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Splits a unit's outstanding jobs into the ones this run may dispatch and the ones it may not.

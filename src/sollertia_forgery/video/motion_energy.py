@@ -48,7 +48,7 @@ _MONOCHROME_PLANE_INDEX: int = 1
 source's channels are identical, so any one carries the image."""
 
 
-class MotionEnergyColumn(StrEnum):
+class _MotionEnergyColumn(StrEnum):
     """Defines every column written into a camera's motion-energy feather by the video-processing pipeline.
 
     Notes:
@@ -166,8 +166,8 @@ def compute_camera_motion_energy(
     # other per-frame feathers follow.
     pl.DataFrame(
         data={
-            MotionEnergyColumn.MOTION_ENERGY: energy,
-            MotionEnergyColumn.FRAME_LUMINANCE: luminance,
+            _MotionEnergyColumn.MOTION_ENERGY: energy,
+            _MotionEnergyColumn.FRAME_LUMINANCE: luminance,
         }
     ).write_ipc(file=output_path, compression="uncompressed")
 
@@ -197,7 +197,7 @@ def _read_frame_count(video_path: Path) -> int:
                 f"decoding, which usually means the file is truncated or its codec is unavailable."
             )
             console.error(message=message, error=ValueError)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_count = int(capture.get(propId=cv2.CAP_PROP_FRAME_COUNT))
     finally:
         capture.release()
 

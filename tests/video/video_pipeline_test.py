@@ -1,4 +1,4 @@
-"""Tests for the system-agnostic camera video-processing pipeline and its job discovery."""
+"""Contains tests for the system-agnostic camera video-processing pipeline and its job discovery."""
 
 from __future__ import annotations
 
@@ -140,8 +140,8 @@ def camera_session(experiment_session: SessionData) -> SessionData:
         The same session, whose raw behavior-data directory now carries the camera manifest.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA},
     )
     return experiment_session
 
@@ -222,7 +222,7 @@ def _job_status(session: SessionData, job_name: str, specifier: str) -> Processi
     Returns:
         The recorded status, or None when the tracker does not hold the job.
     """
-    tracker = ProcessingTracker(file_path=_video_directory(session).joinpath(ProcessingTrackers.VIDEO))
+    tracker = ProcessingTracker(file_path=_video_directory(session=session).joinpath(ProcessingTrackers.VIDEO))
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
     job_state = tracker.snapshot().get(job_id)
     return job_state.status if job_state is not None else None
@@ -254,13 +254,20 @@ def test_unflagged_run_executes_every_stage(
         assert pl.read_ipc(parsed).height == _RECORDING_FRAMES
         assert canonical.stat().st_ino == parsed.stat().st_ino
         assert pl.read_ipc(video_directory.joinpath(f"{camera_name}{MOTION_ENERGY_SUFFIX}")).height == _RECORDING_FRAMES
-        assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
-        assert _job_status(camera_session, ENERGY_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
+        assert (
+            _job_status(session=camera_session, job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(source_id))
+            == ProcessingStatus.SUCCEEDED
+        )
+        assert (
+            _job_status(session=camera_session, job_name=ENERGY_JOB_NAME, specifier=str(source_id))
+            == ProcessingStatus.SUCCEEDED
+        )
     assert not video_directory.joinpath("camera_101_timestamps.feather").exists()
     assert _job_status(camera_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
     assert _job_status(camera_session, TRACKING_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_multiple_workers_share_one_pool_across_the_run(
     camera_session: SessionData,
     write_frame_archive: Callable[..., Path],
@@ -500,7 +507,7 @@ def test_rename_job_preserves_a_feather_already_named_canonically(
     Unlinking the canonical name in that case would destroy the parsed feather the job is meant to publish.
     """
     canonical_name = f"camera_{_FACE_SOURCE_ID}"
-    _write_manifest(experiment_session.raw_data.behavior_data_path, {_FACE_SOURCE_ID: canonical_name})
+    _write_manifest(directory=experiment_session.raw_data.behavior_data_path, cameras={_FACE_SOURCE_ID: canonical_name})
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
     run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
@@ -520,8 +527,8 @@ def test_rename_job_refuses_a_manifest_naming_two_cameras_alike(
     camera's timestamps would never be published under a name of their own.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
     )
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
@@ -542,8 +549,8 @@ def test_rename_job_refuses_a_camera_named_after_another_cameras_parsed_feather(
     which the job would then report as a success.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
     )
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)

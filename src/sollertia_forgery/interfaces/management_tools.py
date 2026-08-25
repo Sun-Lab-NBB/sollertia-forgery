@@ -232,7 +232,7 @@ def read_project_manifest_tool(
         limit=resolve_detail_limit(limit=limit, detailed=detailed),
         start_row=start_row,
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["sessions"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response
@@ -259,8 +259,8 @@ def read_project_jobs_tool(
     holds, which is how you find what needs attention without listing anything. Naming a filter adds a page of jobs
     carrying identity and status. Opting into detail adds the executor, the timestamps, and any recorded error.
 
-    This is the tool for reading job state across a whole project. It reads the stored artifact rather than the
-    trackers, so a snapshot pulled from another host answers without any access to the data it describes.
+    Reads the stored artifact rather than the trackers, so a snapshot pulled from another host answers without
+    any access to the data it describes.
 
     Args:
         project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
@@ -334,7 +334,7 @@ def read_project_jobs_tool(
     window = resolve_page(
         total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response

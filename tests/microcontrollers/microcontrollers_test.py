@@ -1,4 +1,4 @@
-"""Tests the standalone microcontroller log processing pipeline."""
+"""Contains tests for the standalone microcontroller log processing pipeline."""
 
 from __future__ import annotations
 
@@ -370,7 +370,7 @@ def disabled_console() -> Iterator[None]:
 def staged_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Builds a session with a staged manifest and log archive, and binds the stubbed loader onto the pipeline."""
     session = _make_session(tmp_path)
-    _write_inputs(session)
+    _write_inputs(session=session)
     monkeypatch.setattr(pipeline_module, "SessionData", SimpleNamespace(load=lambda session_path: session))  # noqa: ARG005
     return session
 
@@ -380,31 +380,31 @@ def staged_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNam
 
 def test_resolve_microcontroller_parsers_returns_mesoscope_callables() -> None:
     """Verifies that resolve_microcontroller_parsers returns callable parsers for the Mesoscope-VR system."""
-    parsers = resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR)
+    parsers = resolve_microcontroller_parsers(system=AcquisitionSystems.MESOSCOPE_VR)
     assert parsers  # Mesoscope-VR registers at least one module parser.
     assert all(callable(parser) for parser in parsers.values())
     # The session stores the acquisition system as a string. Resolution must accept that form too.
-    assert resolve_microcontroller_parsers(AcquisitionSystems.MESOSCOPE_VR.value).keys() == parsers.keys()
+    assert resolve_microcontroller_parsers(system=AcquisitionSystems.MESOSCOPE_VR.value).keys() == parsers.keys()
 
 
 def test_resolve_microcontroller_parsers_invalid_system_raises() -> None:
     """Verifies that resolve_microcontroller_parsers rejects an unknown acquisition system."""
     with pytest.raises(ValueError, match="Unable to resolve the acquisition system"):
-        resolve_microcontroller_parsers("not_a_real_system")
+        resolve_microcontroller_parsers(system="not_a_real_system")
 
 
 def test_resolve_two_photon_data_locator_returns_mesoscope_callable() -> None:
     """Verifies that resolve_two_photon_data_locator returns the Mesoscope-VR locator."""
-    locator = resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR)
+    locator = resolve_two_photon_data_locator(system=AcquisitionSystems.MESOSCOPE_VR)
     assert callable(locator)
     # The session stores the acquisition system as a string. Resolution must accept that form too.
-    assert resolve_two_photon_data_locator(AcquisitionSystems.MESOSCOPE_VR.value) is locator
+    assert resolve_two_photon_data_locator(system=AcquisitionSystems.MESOSCOPE_VR.value) is locator
 
 
 def test_resolve_two_photon_data_locator_invalid_system_raises() -> None:
     """Verifies that resolve_two_photon_data_locator rejects an unknown acquisition system."""
     with pytest.raises(ValueError, match="Unable to resolve the acquisition system"):
-        resolve_two_photon_data_locator("not_a_real_system")
+        resolve_two_photon_data_locator(system="not_a_real_system")
 
 
 def test_locate_two_photon_data_resolves_mesoscope_data_directory(tmp_path: Path) -> None:
@@ -412,7 +412,7 @@ def test_locate_two_photon_data_resolves_mesoscope_data_directory(tmp_path: Path
     # The Mesoscope-VR locator places the raw two-photon imaging data in the 'mesoscope_data' directory under the
     # session's raw-data root.
     session = SimpleNamespace(raw_data_path=tmp_path)
-    assert locate_two_photon_data(session) == tmp_path / "mesoscope_data"
+    assert locate_two_photon_data(session=session) == tmp_path / "mesoscope_data"
 
 
 def test_registered_parsers_are_picklable() -> None:
@@ -452,7 +452,7 @@ def test_resolve_controllers_derives_config_from_manifest(tmp_path: Path) -> Non
     """Verifies that _resolve_controllers derives extraction configurations from the acquisition manifest."""
     session = _make_session(tmp_path)
     # (9, 9) is not registered for any system, so it must be excluded from the derived configuration.
-    _write_inputs(session, modules=((2, 1), (9, 9)), stage_archive=False)
+    _write_inputs(session=session, modules=((2, 1), (9, 9)), stage_archive=False)
 
     controllers = pipeline_module._resolve_controllers(
         session=session,
@@ -469,7 +469,7 @@ def test_resolve_controllers_derives_config_from_manifest(tmp_path: Path) -> Non
 def test_resolve_controllers_rejects_manifest_with_no_extractable_module(tmp_path: Path) -> None:
     """Verifies that _resolve_controllers rejects a manifest whose modules are all unparseable."""
     session = _make_session(tmp_path)
-    _write_inputs(session, modules=((9, 9),), stage_archive=False)
+    _write_inputs(session=session, modules=((9, 9),), stage_archive=False)
 
     with pytest.raises(ValueError, match="declares a module"):
         pipeline_module._resolve_controllers(
@@ -642,7 +642,9 @@ def test_local_pipeline_tracks_only_the_jobs_a_staged_archive_supports(
 
     run_microcontroller_processing_pipeline(session_path=tmp_path, workers=1)
 
-    counts = _count_by_status(session.processed_data.microcontroller_data_path / ProcessingTrackers.MICROCONTROLLER)
+    counts = _count_by_status(
+        tracker_path=session.processed_data.microcontroller_data_path / ProcessingTrackers.MICROCONTROLLER
+    )
     # Controller 102's extraction and parse jobs belong to the universe, but neither is registered on the tracker.
     assert sum(counts.values()) == 3
     assert counts[ProcessingStatus.SUCCEEDED] == 3
@@ -1033,16 +1035,26 @@ def test_local_pipeline_extracts_a_real_log_archive(
 ) -> None:
     """Verifies that a local run extracts a real log archive and filters each module by its registered codes."""
     session = _make_session(tmp_path)
-    _write_inputs(session, stage_archive=False)
+    _write_inputs(session=session, stage_archive=False)
     write_log_archive(
         path=session.raw_data.behavior_data_path / "101_log.npz",
         source_id=101,
         messages=[
-            (10, _module_data_payload(2, 1, 51, _ONE_UINT32_PROTOTYPE, np.uint32(7))),
-            (20, _module_state_payload(2, 1, 52)),
-            (30, _module_data_payload(4, 1, 51, _ONE_UINT16_PROTOTYPE, np.uint16(700))),
+            (
+                10,
+                _module_data_payload(
+                    module_type=2, module_id=1, event_code=51, prototype=_ONE_UINT32_PROTOTYPE, value=np.uint32(7)
+                ),
+            ),
+            (20, _module_state_payload(module_type=2, module_id=1, event_code=52)),
+            (
+                30,
+                _module_data_payload(
+                    module_type=4, module_id=1, event_code=51, prototype=_ONE_UINT16_PROTOTYPE, value=np.uint16(700)
+                ),
+            ),
             # Event code 60 is outside the modules' registered filters, so extraction drops it.
-            (40, _module_state_payload(4, 1, 60)),
+            (40, _module_state_payload(module_type=4, module_id=1, event_code=60)),
         ],
     )
     output_directory = session.processed_data.microcontroller_data_path
@@ -1103,6 +1115,7 @@ def test_local_pipeline_leaves_a_disabled_console_disabled(
 # Parallel parse stage.
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_parallel_parse_stage_runs_every_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_session: SimpleNamespace
 ) -> None:
@@ -1119,6 +1132,7 @@ def test_parallel_parse_stage_runs_every_module(
     assert counts[ProcessingStatus.SUCCEEDED] == 3
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_parallel_parse_stage_records_a_failing_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_session: SimpleNamespace
 ) -> None:
@@ -1196,6 +1210,7 @@ def test_remote_parse_records_a_failing_parser(
     assert _status(tracker_path=tracker_path, job_name=PARSE_JOB_NAME, specifier="101-2-1") == ProcessingStatus.FAILED
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_parallel_parse_stage_keeps_the_first_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, staged_session: SimpleNamespace
 ) -> None:

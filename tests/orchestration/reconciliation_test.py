@@ -9,21 +9,19 @@ from ataraxis_data_structures import ProcessingStatus, ProcessingTracker
 
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
-    BatchDocument,
     resolve_batch_host,
-    read_prepared_batch,
     reconcile_local_jobs,
     read_prepared_batches,
     reconcile_remote_jobs,
     record_prepared_batch,
-    forget_prepared_batches,
 )
-from sollertia_forgery.orchestration.graph import build_pending_job
+from sollertia_forgery.orchestration.graph import BatchDocument, build_pending_job
 from sollertia_forgery.orchestration.ledger import (
     SubmissionBatch,
     RemoteSubmission,
     record_batch,
 )
+from sollertia_forgery.orchestration.batches import read_prepared_batch, _forget_prepared_batches
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -190,9 +188,9 @@ def test_the_allocation_the_tracker_names_outranks_the_one_the_ledger_recorded(
     """Verifies that a job both sources claim is adopted onto the allocation its tracker names, not the ledger's.
 
     An executor identifier appears only once an allocation starts running, so it describes a later moment than this
-    host's record of submitting one. Preferring the ledger's stale identifier would query an allocation that has
-    already finished, read the job as finished with it, and submit a second allocation over the files the live one is
-    still writing.
+    host's record of submitting one. Preferring the ledger's stale identifier would query an allocation that has already
+    finished, read the job as finished with it, and submit a second allocation over the files the live one is still
+    writing.
     """
     job = running_job("slurm:991")
     record_batch(
@@ -218,9 +216,9 @@ def test_an_executor_naming_the_scheduler_but_no_allocation_is_submitted_again(
 ) -> None:
     """Verifies that a truncated executor identifier is treated as naming no allocation at all.
 
-    A record carrying the scheme without an allocation names nothing the scheduler can be asked about. Treating it as
-    a claim would adopt the job forever, since an allocation the scheduler reports nothing for reads as one that has
-    not yet reached a terminal state.
+    A record carrying the scheme without an allocation names nothing the scheduler can be asked about. Treating it as a
+    claim would adopt the job forever, since an allocation the scheduler reports nothing for reads as one that has not
+    yet reached a terminal state.
     """
     job = running_job("slurm:")
     server = _StubServer(statuses={})
@@ -290,7 +288,7 @@ def test_a_recorded_batch_outlives_the_process_that_prepared_it() -> None:
     assert recovered.host == "local"
     assert recovered.jobs == [{"job_id": "a"}]
 
-    assert forget_prepared_batches(batch_ids=[batch_id]) == [batch_id]
+    assert _forget_prepared_batches(batch_ids=[batch_id]) == [batch_id]
     assert read_prepared_batch(batch_id=batch_id) is None
 
 

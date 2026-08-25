@@ -52,6 +52,8 @@ def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]
     transport local agent clients are expected to use. The 'sse' and 'streamable-http' transports instead serve the
     same tools over the network, which is how remote agent clients reach a server running on the processing host.
     """
+    # Importing at module level runs '_register_tool_modules', which imports every MCP tool module and the
+    # pipelines they reach, so every 'slf' subcommand would pay that cost at startup.
     from .mcp_server import run_server  # noqa: PLC0415
 
     # The stdio transport sends the JSON-RPC messages over stdout, which is also the stream the console writes all

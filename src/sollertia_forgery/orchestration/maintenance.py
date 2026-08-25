@@ -102,7 +102,7 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
         # terms rather than through one branch that would have to ask which it was handed.
         tracker_path = dispatch.tracker_path(unit)
         if tracker_path.exists():
-            removed.append({"path": str(tracker_path), "removed_bytes": resolve_path_size(path=tracker_path)})
+            removed.append({"path": str(tracker_path), "removed_bytes": _resolve_path_size(path=tracker_path)})
             tracker_path.unlink()
             # The lock file is bookkeeping beside the tracker rather than tracked output of its own, and its path
             # comes from the tracker's own derivation, so the removal cannot disagree with the file the tracker locks.
@@ -110,12 +110,12 @@ def clean_pipeline_output(pipeline: str, unit_paths: Sequence[Path]) -> list[dic
 
         owned = dispatch.output_path(unit)
         if owned is not None and owned.exists():
-            removed.append({"path": str(owned), "removed_bytes": resolve_path_size(path=owned)})
+            removed.append({"path": str(owned), "removed_bytes": _resolve_path_size(path=owned)})
             delete_directory(directory_path=owned)
     return removed
 
 
-def resolve_path_size(path: Path) -> int:
+def _resolve_path_size(path: Path) -> int:
     """Sums the bytes a path holds, counting a directory's whole tree and a file's own size.
 
     Args:

@@ -9,22 +9,26 @@ import pytest
 
 from sollertia_forgery.server import JobStatus
 from sollertia_forgery.orchestration import (
-    BatchDocument,
     close_batch,
     read_ledger,
     resolve_batches,
     read_batch_outcome,
     close_settled_batches,
     record_prepared_batch,
-    retire_settled_batches,
 )
-from sollertia_forgery.orchestration.ledger import SubmissionBatch, RemoteSubmission, record_batch
+from sollertia_forgery.orchestration.graph import BatchDocument
+from sollertia_forgery.orchestration.ledger import (
+    SubmissionBatch,
+    RemoteSubmission,
+    record_batch,
+    _retire_settled_batches,
+)
 from sollertia_forgery.orchestration.closure import _OUTCOME_FIELD_LIMIT, _resolve_outcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sollertia_forgery.orchestration import BatchOutcome
+    from sollertia_forgery.orchestration.closure import _BatchOutcome
 
 pytestmark = pytest.mark.usefixtures("isolated_working_directory")
 
@@ -233,7 +237,7 @@ def _resolve_batch_outcome(
     jobs: list[dict[str, Any]],
     rows: list[dict[str, Any]],
     blocked: list[dict[str, Any]] | None = None,
-) -> BatchOutcome:
+) -> _BatchOutcome:
     """Counts a stand-in batch against stand-in state rows.
 
     Args:
@@ -276,7 +280,8 @@ def _record_settled_batch(unit_path: str = _UNIT_PATH, slurm_job_id: str = "7") 
 
 
 def test_a_forging_batch_spanning_two_datasets_counts_every_dataset_it_dispatched() -> None:
-    """A dataset batch reads one same-named state table per dataset, unlike a session batch's single project table.
+    """Verifies that a dataset batch reads one same-named state table per dataset, unlike a session batch's single
+    project table.
 
     Each table therefore has to be read where the host holds it rather than from a delivered copy, and delivered
     somewhere it cannot overwrite the table another dataset already delivered under the same filename.
@@ -401,8 +406,8 @@ def test_a_settled_batch_is_snapshotted_before_it_leaves_the_ledger() -> None:
 
 
 def test_a_submission_dispatching_several_prepared_batches_snapshots_each_one_it_covered() -> None:
-    """One submission may dispatch several prepared batches, and each carries its own document, so closing the
-    submission has to snapshot every batch it covered rather than the one its ledger entry is keyed by.
+    """Verifies that one submission may dispatch several prepared batches, and each carries its own document, so closing
+    the submission has to snapshot every batch it covered rather than the one its ledger entry is keyed by.
     """
     covered = [
         record_prepared_batch(
@@ -549,7 +554,7 @@ def test_an_empty_status_query_retires_nothing() -> None:
     """Verifies that a status query observing no allocation retires no batch."""
     record_batch(batch=SubmissionBatch(batch_id="first", submissions=[RemoteSubmission(job_id="a", slurm_job_id="7")]))
 
-    assert retire_settled_batches(statuses={}) == []
+    assert _retire_settled_batches(statuses={}) == []
     assert [batch.batch_id for batch in read_ledger().batches] == ["first"]
 
 
@@ -565,7 +570,7 @@ def test_a_batch_with_a_live_allocation_is_left_outstanding() -> None:
         )
     )
 
-    retired = retire_settled_batches(statuses={"7": JobStatus.COMPLETED, "8": JobStatus.RUNNING})
+    retired = _retire_settled_batches(statuses={"7": JobStatus.COMPLETED, "8": JobStatus.RUNNING})
 
     assert retired == []
     assert [batch.batch_id for batch in read_ledger().batches] == ["first"]
@@ -576,7 +581,7 @@ def test_only_the_settled_batches_leave_the_ledger() -> None:
     record_batch(batch=SubmissionBatch(batch_id="done", submissions=[RemoteSubmission(job_id="a", slurm_job_id="7")]))
     record_batch(batch=SubmissionBatch(batch_id="live", submissions=[RemoteSubmission(job_id="b", slurm_job_id="8")]))
 
-    retired = retire_settled_batches(statuses={"7": JobStatus.COMPLETED, "8": JobStatus.PENDING})
+    retired = _retire_settled_batches(statuses={"7": JobStatus.COMPLETED, "8": JobStatus.PENDING})
 
     assert retired == ["done"]
     assert [batch.batch_id for batch in read_ledger().batches] == ["live"]
@@ -586,7 +591,7 @@ def test_a_batch_holding_no_allocation_is_never_reported_as_settled() -> None:
     """Verifies that a batch whose submissions were never recorded is never reported as settled."""
     record_batch(batch=SubmissionBatch(batch_id="empty"))
 
-    assert retire_settled_batches(statuses={"7": JobStatus.COMPLETED}) == []
+    assert _retire_settled_batches(statuses={"7": JobStatus.COMPLETED}) == []
     assert [batch.batch_id for batch in read_ledger().batches] == ["empty"]
 
 

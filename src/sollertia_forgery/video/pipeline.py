@@ -416,7 +416,7 @@ def _dispatch_job(
         camera_names: The mapping of camera source IDs to their colloquial manifest names.
         video_data_directory: The processed video-data directory where parsed feathers, their canonical hardlinks, the
             tracking outputs, and the motion-energy feathers are all written.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
         workers: The number of worker processes the extraction binding may use, and that the energy job decodes
             each recording with.
         display_progress: Determines whether the extraction binding displays a progress bar and whether the energy
@@ -514,7 +514,7 @@ def _link_parsed_timestamps(
         camera_names: The mapping of camera source IDs to their colloquial manifest names, from which the canonical
             timestamp feather filenames are built.
         job_id: The unique hexadecimal identifier for the rename job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
     """
     with tracker.run_job(job_id=job_id):
         _verify_canonical_names(video_data_directory=video_data_directory, camera_names=camera_names)
@@ -622,7 +622,7 @@ def _run_pose_tracking(
         session: The loaded session whose acquisition system selects the tracking function.
         video_data_directory: The processed video-data directory the tracking outputs are written into.
         job_id: The unique hexadecimal identifier for the tracking job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
     """
     with tracker.run_job(job_id=job_id):
         resolve_video_tracking(system=session.acquisition_system)(
@@ -653,7 +653,7 @@ def _run_motion_energy(
             output feather.
         video_data_directory: The processed video-data directory the motion-energy feather is written into.
         job_id: The unique hexadecimal identifier for this camera's energy job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
         workers: The number of worker processes to decode the recording with.
         display_progress: Determines whether per-chunk completion is reported as the recording is measured.
         executor: An optional process pool to decode the recording's chunks in. When None, a pool is created and torn

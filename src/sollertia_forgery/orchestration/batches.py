@@ -24,7 +24,7 @@ _LOCK_TIMEOUT_SECONDS: float = 20.0
 
 
 @dataclass
-class PreparedBatch(YamlConfig):
+class _PreparedBatch(YamlConfig):
     """Records one prepared batch under the identifier that preparation issued for it.
 
     Notes:
@@ -60,7 +60,7 @@ def batch_directory() -> Path:
     return remote_state_path().joinpath(_BATCH_DIRECTORY_NAME)
 
 
-def batch_path(batch_id: str) -> Path:
+def _batch_path(batch_id: str) -> Path:
     """Resolves where one prepared batch is recorded.
 
     Args:
@@ -85,9 +85,9 @@ def record_prepared_batch(document: BatchDocument) -> str:
         Timeout: If the batch file's lock cannot be acquired within the timeout period.
     """
     batch_id = uuid4().hex[:16]
-    path = batch_path(batch_id=batch_id)
+    path = _batch_path(batch_id=batch_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    recorded = PreparedBatch(
+    recorded = _PreparedBatch(
         batch_id=batch_id, pipeline=document.pipeline, host=document.host, document=asdict(document)
     )
     with FileLock(str(_lock_path(path=path))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
@@ -104,10 +104,10 @@ def read_prepared_batch(batch_id: str) -> BatchDocument | None:
     Returns:
         The recorded batch document, or None when this host holds no batch under that identifier.
     """
-    path = batch_path(batch_id=batch_id)
+    path = _batch_path(batch_id=batch_id)
     if not path.is_file():
         return None
-    return PreparedBatch.from_yaml(file_path=path).as_document()
+    return _PreparedBatch.from_yaml(file_path=path).as_document()
 
 
 def read_prepared_batches(batch_ids: list[str]) -> tuple[list[BatchDocument], list[str]]:
@@ -160,7 +160,7 @@ def resolve_batch_host(documents: list[BatchDocument]) -> str:
     return hosts[0]
 
 
-def forget_prepared_batches(batch_ids: list[str]) -> list[str]:
+def _forget_prepared_batches(batch_ids: list[str]) -> list[str]:
     """Removes the recorded batches this host holds under the named identifiers.
 
     Args:
@@ -171,7 +171,7 @@ def forget_prepared_batches(batch_ids: list[str]) -> list[str]:
     """
     removed: list[str] = []
     for batch_id in batch_ids:
-        path = batch_path(batch_id=batch_id)
+        path = _batch_path(batch_id=batch_id)
         if not path.is_file():
             continue
         path.unlink()
@@ -197,11 +197,11 @@ def record_batch_outcome(batch_id: str, outcome: dict[str, Any]) -> bool:
     Raises:
         Timeout: If the batch file's lock cannot be acquired within the timeout period.
     """
-    path = batch_path(batch_id=batch_id)
+    path = _batch_path(batch_id=batch_id)
     if not path.is_file():
         return False
     with FileLock(str(_lock_path(path=path))).acquire(timeout=_LOCK_TIMEOUT_SECONDS):
-        recorded = PreparedBatch.from_yaml(file_path=path)
+        recorded = _PreparedBatch.from_yaml(file_path=path)
         recorded.outcome = dict(outcome)
         recorded.to_yaml(file_path=path)
     return True
@@ -216,10 +216,10 @@ def read_batch_outcome(batch_id: str) -> dict[str, Any] | None:
     Returns:
         The stored outcome, or None when this host holds no such batch or the batch has yet to reach closure.
     """
-    path = batch_path(batch_id=batch_id)
+    path = _batch_path(batch_id=batch_id)
     if not path.is_file():
         return None
-    outcome = PreparedBatch.from_yaml(file_path=path).outcome
+    outcome = _PreparedBatch.from_yaml(file_path=path).outcome
     return outcome or None
 
 

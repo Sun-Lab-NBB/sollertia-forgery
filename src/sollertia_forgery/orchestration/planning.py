@@ -63,8 +63,8 @@ Notes:
 """
 
 
-@dataclass
-class JobPlanEntry:
+@dataclass(slots=True)
+class _JobPlanEntry:
     """Records the resource figures one job occupies while it runs."""
 
     pipeline: str = ""
@@ -93,7 +93,7 @@ class JobPlanEntry:
 
 
 @dataclass
-class JobPlan(YamlConfig):
+class _JobPlan(YamlConfig):
     """Records the resource figures every job of one processing unit occupies.
 
     Notes:
@@ -109,15 +109,15 @@ class JobPlan(YamlConfig):
     """The name of the unit this plan describes."""
     unit_kind: str = ""
     """The kind of unit this plan describes, either a session or a dataset."""
-    entries: list[JobPlanEntry] = field(default_factory=list)
+    entries: list[_JobPlanEntry] = field(default_factory=list)
     """The planned jobs, one entry per job the unit's pipelines resolve."""
 
-    def entry_map(self) -> dict[tuple[str, str, str], JobPlanEntry]:
+    def entry_map(self) -> dict[tuple[str, str, str], _JobPlanEntry]:
         """Returns the plan's entries keyed by their identifying triple."""
         return {entry.key: entry for entry in self.entries}
 
 
-def session_plan_path(session: SessionData) -> Path:
+def _session_plan_path(session: SessionData) -> Path:
     """Resolves the path to a session's job plan cache.
 
     Args:
@@ -129,7 +129,7 @@ def session_plan_path(session: SessionData) -> Path:
     return session.processed_data_path.joinpath(_PLAN_FILENAME)
 
 
-def dataset_plan_path(dataset: DatasetData) -> Path:
+def _dataset_plan_path(dataset: DatasetData) -> Path:
     """Resolves the path to a dataset's job plan cache.
 
     Args:
@@ -155,7 +155,7 @@ def project_plan_path(project_directory: Path) -> Path:
 
 def resolve_session_plan(
     session_path: Path, *, regenerate_plan: bool = False, display_progress: bool = False
-) -> JobPlan:
+) -> _JobPlan:
     """Plans every processing job of one session, estimating only the jobs the cache does not already hold.
 
     Notes:
@@ -194,7 +194,7 @@ def resolve_session_plan(
 
 def resolve_dataset_plan(
     dataset_path: Path, *, regenerate_plan: bool = False, display_progress: bool = False
-) -> JobPlan:
+) -> _JobPlan:
     """Plans every forging job of one dataset, estimating only the jobs the cache does not already hold.
 
     Notes:
@@ -260,7 +260,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
     unplanned_units = 0
 
     for session in iterate_sessions(root_path=project_directory):
-        plan = _load_plan(plan_path=session_plan_path(session=session))
+        plan = _load_plan(plan_path=_session_plan_path(session=session))
         if plan is None:
             unplanned_units += 1
             continue
@@ -271,7 +271,7 @@ def generate_project_plan(project_directory: Path, *, display_progress: bool = F
         )
 
     for dataset in discover_project_datasets(project_root=project_directory):
-        plan = _load_plan(plan_path=dataset_plan_path(dataset=dataset))
+        plan = _load_plan(plan_path=_dataset_plan_path(dataset=dataset))
         if plan is None:
             unplanned_units += 1
             continue
@@ -311,7 +311,7 @@ def _resolve_unit_plan(
     *,
     regenerate_plan: bool,
     display_progress: bool,
-) -> JobPlan:
+) -> _JobPlan:
     """Plans one unit across the pipelines that operate on it, preserving every figure already recorded.
 
     Notes:
@@ -364,7 +364,7 @@ def _resolve_unit_plan(
         unit, universe, possible = discovered
         if located is None:
             unit_plan_path = (
-                session_plan_path(session=unit) if unit_kind == SESSION_UNIT else dataset_plan_path(dataset=unit)
+                _session_plan_path(session=unit) if unit_kind == SESSION_UNIT else _dataset_plan_path(dataset=unit)
             )
             located = (unit_plan_path, dispatch.unit_name(unit))
         resolved.append((dispatch, unit, universe, possible))
@@ -374,7 +374,7 @@ def _resolve_unit_plan(
 
     plan_path, unit_name = located
     recorded = _load_plan(plan_path=plan_path)
-    entries: dict[tuple[str, str, str], JobPlanEntry] = (
+    entries: dict[tuple[str, str, str], _JobPlanEntry] = (
         {} if recorded is None or regenerate_plan else dict(recorded.entry_map())
     )
 
@@ -411,7 +411,7 @@ def _resolve_unit_plan(
 
         for job_name, specifier in outstanding:
             footprint = footprints[job_name, specifier]
-            entry = JobPlanEntry(
+            entry = _JobPlanEntry(
                 pipeline=dispatch.pipeline.value,
                 job_name=job_name,
                 specifier=specifier,
@@ -431,7 +431,7 @@ def _resolve_unit_plan(
         for pipeline, reason in skipped.items():
             console.echo(message=f"Pipeline '{pipeline}': Planned no job for '{unit_path}'. {reason}")
 
-    plan = JobPlan(unit_name=unit_name, unit_kind=unit_kind, entries=[entries[key] for key in natsorted(entries)])
+    plan = _JobPlan(unit_name=unit_name, unit_kind=unit_kind, entries=[entries[key] for key in natsorted(entries)])
     _save_plan(plan=plan, plan_path=plan_path)
     return plan
 
@@ -524,7 +524,7 @@ def _reject_unit(unit_path: Path, unit_kind: str, skipped: dict[str, str]) -> No
     console.error(message=message, error=ValueError)
 
 
-def _load_plan(plan_path: Path) -> JobPlan | None:
+def _load_plan(plan_path: Path) -> _JobPlan | None:
     """Reads a unit's plan cache.
 
     Args:
@@ -535,10 +535,10 @@ def _load_plan(plan_path: Path) -> JobPlan | None:
     """
     if not plan_path.is_file():
         return None
-    return JobPlan.from_yaml(file_path=plan_path)
+    return _JobPlan.from_yaml(file_path=plan_path)
 
 
-def _save_plan(plan: JobPlan, plan_path: Path) -> None:
+def _save_plan(plan: _JobPlan, plan_path: Path) -> None:
     """Writes a unit's plan cache under its own lock.
 
     Args:
@@ -555,7 +555,7 @@ def _save_plan(plan: JobPlan, plan_path: Path) -> None:
 
 
 def _projection_row(
-    entry: JobPlanEntry, animal: str | None, session: str | None, dataset: str | None
+    entry: _JobPlanEntry, animal: str | None, session: str | None, dataset: str | None
 ) -> dict[str, Any]:
     """Renders one plan entry as a row of the project projection.
 

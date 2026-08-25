@@ -32,9 +32,7 @@ def assemble_experiment_dataset(source_session_path: Path, output_path: Path, da
     Combines the session's fluorescence, behavior, runtime, and video sub-datasets into a single time-aligned Polars
     DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The fluorescence sub-dataset is
     assembled first because its ``time_us`` column is the reference clock the other sub-datasets align to. The video
-    sub-dataset is optional and contributes columns only when the session carries processed camera feathers. The
-    meaning of each emitted column is documented by ``DatasetColumn`` and donated to the dataset's
-    ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
+    sub-dataset is optional and contributes columns only when the session carries processed camera feathers.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.

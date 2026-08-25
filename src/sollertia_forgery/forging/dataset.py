@@ -43,8 +43,7 @@ def resolve_dataset(
     left alone and a session it does not hold is appended.
 
     Notes:
-        The provided list names the set of sessions the dataset must contain, so a session named more than once in it
-        is resolved once and joins the dataset once.
+        A session named more than once in the provided list is resolved once and joins the dataset once.
 
         An animal already in the dataset is frozen. Providing a session it does not hold is rejected, because
         widening an animal's session set often requires rebuilding the entire animal's dataset. Adding an animal

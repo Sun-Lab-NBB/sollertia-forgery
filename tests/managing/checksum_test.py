@@ -1,4 +1,6 @@
-"""Tests the session raw-data integrity pipeline that establishes, confirms, or condemns the stored data checksum."""
+"""Contains tests for the session raw-data integrity pipeline that establishes, confirms, or condemns the stored data
+checksum.
+"""
 
 from __future__ import annotations
 
@@ -52,8 +54,9 @@ def read_job_state(session: SessionData) -> tuple[str, str | None]:
     return state.status.name, state.error_message
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_regeneration_establishes_the_stored_checksum(training_session: SessionData) -> None:
-    """A session that was never checksummed gets its baseline written and its job recorded as succeeded."""
+    """Verifies a session that was never checksummed gets its baseline written and its job recorded as succeeded."""
     assert not training_session.raw_data.checksum_path.is_file()
 
     run_checksum_processing_pipeline(session_path=training_session.raw_data_path.parent, regenerate_checksum=True)
@@ -64,7 +67,9 @@ def test_regeneration_establishes_the_stored_checksum(training_session: SessionD
 
 
 def test_verification_confirms_untouched_raw_data(training_session: SessionData) -> None:
-    """Recomputing an unchanged directory reproduces the stored value, which the pipeline records as a success."""
+    """Verifies that recomputing an unchanged directory reproduces the stored value, which the pipeline records as a
+    success.
+    """
     session_path = training_session.raw_data_path.parent
     run_checksum_processing_pipeline(session_path=session_path, regenerate_checksum=True, workers=1)
     baseline = training_session.raw_data.checksum_path.read_text().strip()
@@ -76,7 +81,7 @@ def test_verification_confirms_untouched_raw_data(training_session: SessionData)
 
 
 def test_verification_condemns_raw_data_that_changed(training_session: SessionData) -> None:
-    """A mismatch is recorded as a job failure naming both checksums, which is how corruption is surfaced."""
+    """Verifies a mismatch is recorded as a job failure naming both checksums, which is how corruption is surfaced."""
     session_path = training_session.raw_data_path.parent
     run_checksum_processing_pipeline(session_path=session_path, regenerate_checksum=True, workers=1)
     stored = training_session.raw_data.checksum_path.read_text().strip()
@@ -94,7 +99,9 @@ def test_verification_condemns_raw_data_that_changed(training_session: SessionDa
 def test_a_compromised_session_announces_its_outcome(
     training_session: SessionData, reported_messages: list[str]
 ) -> None:
-    """The mismatch verdict is reported alongside the preamble, so an operator sees corruption as it is found."""
+    """Verifies that the mismatch verdict is reported alongside the preamble, so an operator sees corruption as it is
+    found.
+    """
     session_path = training_session.raw_data_path.parent
     run_checksum_processing_pipeline(session_path=session_path, regenerate_checksum=True, workers=1)
     training_session.raw_data_path.joinpath("intruder.bin").write_bytes(b"unexpected")
@@ -106,7 +113,9 @@ def test_a_compromised_session_announces_its_outcome(
 
 
 def test_a_verified_session_announces_its_outcome(training_session: SessionData, reported_messages: list[str]) -> None:
-    """The success message reports the verdict, so an operator reads the outcome without opening the tracker."""
+    """Verifies that the success message reports the verdict, so an operator reads the outcome without opening the
+    tracker.
+    """
     session_path = training_session.raw_data_path.parent
     run_checksum_processing_pipeline(session_path=session_path, regenerate_checksum=True, workers=1)
 
@@ -116,16 +125,17 @@ def test_a_verified_session_announces_its_outcome(training_session: SessionData,
 
 
 def test_verification_without_a_stored_value_reports_how_to_establish_one(training_session: SessionData) -> None:
-    """Verification needs a baseline, so its absence names regeneration rather than reading as a mismatch."""
+    """Verifies verification needs a baseline, so its absence names regeneration rather than reading as a mismatch."""
     with pytest.raises(FileNotFoundError, match="No checksum file exists at"):
         run_checksum_processing_pipeline(session_path=training_session.raw_data_path.parent, workers=1)
 
 
 def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_session: SessionData) -> None:
-    """A regeneration that cannot store its result records the fault on the tracker and re-raises it unchanged.
+    """Verifies that a regeneration that cannot store its result records the fault on the tracker and re-raises it
+    unchanged.
 
-    The stored value's location is occupied by a directory, so writing the freshly computed checksum faults inside
-    the calculation itself, which is the one place this pipeline's failure envelope has to cover.
+    The stored value's location is occupied by a directory, so writing the freshly computed checksum faults inside the
+    calculation itself, which is the one place this pipeline's failure envelope has to cover.
     """
     training_session.raw_data.checksum_path.mkdir()
 
@@ -141,7 +151,7 @@ def test_a_write_fault_marks_the_job_failed_before_it_propagates(training_sessio
 
 
 def test_discovery_reports_the_single_job_the_pipeline_owns(training_session: SessionData) -> None:
-    """The universe is one job specified by the session, and an acquired session makes that job possible."""
+    """Verifies the universe is one job specified by the session, and an acquired session makes that job possible."""
     session, universe, possible = discover_checksum_jobs(session_path=training_session.raw_data_path.parent)
 
     assert session.session_name == training_session.session_name
@@ -150,7 +160,7 @@ def test_discovery_reports_the_single_job_the_pipeline_owns(training_session: Se
 
 
 def test_every_checksum_job_declares_no_prerequisite(training_session: SessionData) -> None:
-    """The single job depends on nothing, so the ordering contract maps it to an empty tuple."""
+    """Verifies that the single job depends on nothing, so the ordering contract maps it to an empty tuple."""
     session, universe, _possible = discover_checksum_jobs(session_path=training_session.raw_data_path.parent)
 
     assert checksum_job_prerequisites(session=session, universe=universe) == {
@@ -161,8 +171,8 @@ def test_every_checksum_job_declares_no_prerequisite(training_session: SessionDa
 def test_a_session_with_nothing_to_checksum_is_refused_before_the_tracker_is_touched(
     training_session: SessionData, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session whose raw data never arrived makes no job possible, so the run is refused by name and the tracker is
-    left exactly as it was found.
+    """Verifies that a session whose raw data never arrived makes no job possible, so the run is refused by name and the
+    tracker is left exactly as it was found.
     """
     monkeypatch.setattr(checksum_module, "_has_checksummable_data", lambda raw_data_path: False)  # noqa: ARG005
 
@@ -177,8 +187,8 @@ def test_a_session_with_nothing_to_checksum_is_refused_before_the_tracker_is_tou
 def test_a_session_that_lost_its_raw_data_keeps_its_recorded_verdict(
     training_session: SessionData, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session whose tracker already records a verdict keeps it when its raw data is later archived off, since the
-    refusal is decided from the data rather than from the tracker's ignorance of the job.
+    """Verifies that a session whose tracker already records a verdict keeps it when its raw data is later archived off,
+    since the refusal is decided from the data rather than from the tracker's ignorance of the job.
     """
     run_checksum_processing_pipeline(
         session_path=training_session.raw_data_path.parent, regenerate_checksum=True, workers=1
@@ -197,7 +207,9 @@ def test_a_session_that_lost_its_raw_data_keeps_its_recorded_verdict(
 
 
 def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_path: Path) -> None:
-    """The checksum file, its tracker, and the tracker lock are excluded, so a directory of only those is empty."""
+    """Verifies that the checksum file, its tracker, and the tracker lock are excluded, so a directory of only those is
+    empty.
+    """
     raw_data = tmp_path.joinpath("raw_data")
     raw_data.mkdir()
     for name in _CHECKSUM_EXCLUDED_FILES:
@@ -210,12 +222,13 @@ def test_a_directory_holding_only_bookkeeping_files_has_nothing_to_checksum(tmp_
 
 
 def test_an_absent_raw_data_directory_has_nothing_to_checksum(tmp_path: Path) -> None:
-    """A session whose acquired data never arrived carries no coverable file at all."""
+    """Verifies that a session whose acquired data never arrived carries no coverable file at all."""
     assert not _has_checksummable_data(raw_data_path=tmp_path.joinpath("never_acquired"))
 
 
 def test_a_file_stored_below_the_raw_data_root_is_still_covered_by_the_checksum(tmp_path: Path) -> None:
-    """Acquired data lands in per-source subdirectories, so coverage is decided by the full walk the checksum runs.
+    """Verifies that acquired data lands in per-source subdirectories, so coverage is decided by the full walk the
+    checksum runs.
 
     A subdirectory is not itself a coverable file, so a raw data directory holding only empty subdirectories is as
     unprocessable as an empty one.

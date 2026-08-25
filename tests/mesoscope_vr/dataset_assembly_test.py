@@ -1,5 +1,5 @@
-"""Tests the Mesoscope-VR forging dispatcher, the training-session reference-clock resolver, the session-bounds clip,
-and the behavior dataset's reward classifier.
+"""Contains tests for the Mesoscope-VR forging dispatcher, the training-session reference-clock resolver, the session-
+bounds clip, and the behavior dataset's reward classifier.
 """
 
 from __future__ import annotations
@@ -172,7 +172,9 @@ def test_multi_recording_dataset_name_is_qualified_by_animal() -> None:
 def test_dispatch_routes_experiment_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a mesoscope experiment session is routed to the experiment assembler with the dataset name forwarded."""
     monkeypatch.setattr(
-        target=dispatcher_module, name="SessionData", value=_stub_session_loader(SessionTypes.MESOSCOPE_EXPERIMENT)
+        target=dispatcher_module,
+        name="SessionData",
+        value=_stub_session_loader(session_type=SessionTypes.MESOSCOPE_EXPERIMENT),
     )
     calls = _patch_assemblers(monkeypatch)
 
@@ -189,7 +191,9 @@ def test_dispatch_routes_experiment_session(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.parametrize("session_type", [SessionTypes.RUN_TRAINING, SessionTypes.LICK_TRAINING])
 def test_dispatch_routes_training_session(monkeypatch: pytest.MonkeyPatch, session_type: SessionTypes) -> None:
     """Verifies a run or lick training session is routed to the training assembler, which takes no dataset name."""
-    monkeypatch.setattr(target=dispatcher_module, name="SessionData", value=_stub_session_loader(session_type))
+    monkeypatch.setattr(
+        target=dispatcher_module, name="SessionData", value=_stub_session_loader(session_type=session_type)
+    )
     calls = _patch_assemblers(monkeypatch)
 
     dispatcher_module.assemble_mesoscope_session(
@@ -205,7 +209,9 @@ def test_dispatch_routes_training_session(monkeypatch: pytest.MonkeyPatch, sessi
 def test_dispatch_rejects_window_checking_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a window-checking session is rejected by the dispatcher."""
     monkeypatch.setattr(
-        target=dispatcher_module, name="SessionData", value=_stub_session_loader(SessionTypes.WINDOW_CHECKING)
+        target=dispatcher_module,
+        name="SessionData",
+        value=_stub_session_loader(session_type=SessionTypes.WINDOW_CHECKING),
     )
     _patch_assemblers(monkeypatch)
 
@@ -227,7 +233,7 @@ def test_clip_to_session_bounds_drops_the_setup_and_teardown_spans(tmp_path: Pat
     )
 
     clipped = clip_to_session_bounds(
-        assembled_data=_build_assembled_dataset([0, 1_000, 2_000, 3_000, 4_000]), runtime_data_path=tmp_path
+        assembled_data=_build_assembled_dataset(timestamps=[0, 1_000, 2_000, 3_000, 4_000]), runtime_data_path=tmp_path
     )
 
     assert clipped["time_us"].to_list() == [2_000, 3_000]
@@ -246,7 +252,7 @@ def test_clip_to_session_bounds_anchors_the_head_on_the_first_non_idle_state(tmp
     )
 
     clipped = clip_to_session_bounds(
-        assembled_data=_build_assembled_dataset([0, 1_000, 2_000, 3_000]), runtime_data_path=tmp_path
+        assembled_data=_build_assembled_dataset(timestamps=[0, 1_000, 2_000, 3_000]), runtime_data_path=tmp_path
     )
 
     assert clipped["time_us"].to_list() == [1_000, 2_000, 3_000]
@@ -257,7 +263,7 @@ def test_clip_to_session_bounds_keeps_a_dataset_inside_both_bounds(tmp_path: Pat
     _write_state_streams(directory=tmp_path, system_states={0: 2}, runtime_times=np.array([0, 5_000], dtype=np.uint64))
 
     clipped = clip_to_session_bounds(
-        assembled_data=_build_assembled_dataset([1_000, 2_000, 3_000]), runtime_data_path=tmp_path
+        assembled_data=_build_assembled_dataset(timestamps=[1_000, 2_000, 3_000]), runtime_data_path=tmp_path
     )
 
     assert clipped["time_us"].to_list() == [1_000, 2_000, 3_000]

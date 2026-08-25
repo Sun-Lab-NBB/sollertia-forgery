@@ -1,4 +1,4 @@
-"""Tests for the Mesoscope-VR video sub-dataset assembler and its training-session camera-clock resolver."""
+"""Contains tests for the Mesoscope-VR video sub-dataset assembler and its training-session camera-clock resolver."""
 
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def test_assemble_video_dataset_interpolates_the_body_camera_onto_the_reference_
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 10.0, 20.0],
         frame_luminance=[100.0, 110.0, 120.0],
     )
@@ -149,12 +149,12 @@ def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_co
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[1.0, 3.0, 5.0],
         frame_luminance=[10.0, 20.0, 30.0],
     )
     _write_pupil(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
         diameter=[20.0, 30.0, 40.0],
         blinking=[True, False, True],
     )
@@ -181,12 +181,12 @@ def test_assemble_video_dataset_skips_a_camera_whose_clock_is_absent(
     # Only the body camera recorded, yet the face camera's energy feather is present from an earlier partial run.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 8.0],
         frame_luminance=[1.0, 9.0],
     )
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[0.0, 1.0],
         frame_luminance=[2.0, 3.0],
     )
@@ -201,7 +201,7 @@ def test_assemble_video_dataset_skips_a_face_camera_carrying_no_pupil_feather(
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[0.0, 4.0],
         frame_luminance=[1.0, 5.0],
     )
@@ -216,7 +216,7 @@ def test_assemble_video_dataset_rejects_an_energy_feather_disagreeing_with_the_c
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 4.0],
         frame_luminance=[1.0, 5.0],
     )
@@ -230,7 +230,9 @@ def test_assemble_video_dataset_rejects_a_pupil_feather_disagreeing_with_the_clo
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000))
     _write_pupil(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL), diameter=[20.0, 30.0, 40.0], blinking=[True] * 3
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
+        diameter=[20.0, 30.0, 40.0],
+        blinking=[True] * 3,
     )
 
     with pytest.raises(ValueError, match=re.escape("has 3 rows, but the")):

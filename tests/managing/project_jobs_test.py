@@ -9,12 +9,11 @@ import pytest
 from ataraxis_data_structures import TrackerStatus
 
 from sollertia_forgery.managing import (
-    PROJECT_JOBS_SCHEMA,
     project_jobs_path,
-    write_project_jobs,
     project_manifest_path,
 )
-from sollertia_forgery.managing.manifest import PIPELINE_STATUS_COLUMNS, _read_pipeline_state
+from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA, write_project_jobs
+from sollertia_forgery.managing.manifest import _PIPELINE_STATUS_COLUMNS, _read_pipeline_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -34,13 +33,10 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args:
-        _frame: The frame the writer was called on, which this stand-in never serializes.
-        file: The open file object the artifact is written to.
-        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame the writer was called on, which this stand-in never serializes. file: The open file object
+    the artifact is written to. **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
-    Raises:
-        RuntimeError: Always, standing in for a writer that dies partway through.
+    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
     file.write(b"partial")
     message = "the artifact writer died mid-write"
@@ -61,10 +57,10 @@ def test_the_job_artifact_sits_beside_the_manifest(tmp_path: Path) -> None:
 def test_the_job_schema_carries_the_subject_and_the_pipeline_discriminator() -> None:
     """Verifies that the job schema carries the subject columns and the pipeline discriminator."""
     for column in (*_SUBJECT_COLUMNS, "pipeline"):
-        assert column in PROJECT_JOBS_SCHEMA
+        assert column in _PROJECT_JOBS_SCHEMA
 
-    assert PROJECT_JOBS_SCHEMA["animal"] == pl.String
-    assert PROJECT_JOBS_SCHEMA["session"] == pl.String
+    assert _PROJECT_JOBS_SCHEMA["animal"] == pl.String
+    assert _PROJECT_JOBS_SCHEMA["session"] == pl.String
 
 
 def test_the_job_schema_covers_every_field_a_tracker_reports(
@@ -77,12 +73,12 @@ def test_the_job_schema_covers_every_field_a_tracker_reports(
     )
 
     emitted = set(tracker.summarize()["jobs"][0])
-    declared = set(PROJECT_JOBS_SCHEMA) - set(_SUBJECT_COLUMNS) - {"pipeline"}
+    declared = set(_PROJECT_JOBS_SCHEMA) - set(_SUBJECT_COLUMNS) - {"pipeline"}
 
     assert emitted == declared
 
 
-@pytest.mark.parametrize("pipeline", list(PIPELINE_STATUS_COLUMNS))
+@pytest.mark.parametrize("pipeline", list(_PIPELINE_STATUS_COLUMNS))
 def test_reading_a_pipeline_state_returns_a_label_and_its_job_entries(
     pipeline: ProcessingPipelines, tmp_path: Path, write_tracker: Callable[..., ProcessingTracker]
 ) -> None:
@@ -111,7 +107,7 @@ def test_the_written_artifact_groups_rows_by_subject_then_pipeline(tmp_path: Pat
     frame = pl.read_ipc(source=written, memory_map=True)
 
     assert written == project_jobs_path(project_directory=tmp_path)
-    assert dict(frame.schema) == PROJECT_JOBS_SCHEMA
+    assert dict(frame.schema) == _PROJECT_JOBS_SCHEMA
     assert list(
         zip(frame.get_column("animal"), frame.get_column("session"), frame.get_column("pipeline"), strict=True)
     ) == [
@@ -150,7 +146,7 @@ def test_a_project_that_recorded_no_job_still_gets_its_artifact(tmp_path: Path) 
     frame = pl.read_ipc(source=write_project_jobs(project_directory=tmp_path, job_rows=[]), memory_map=True)
 
     assert frame.height == 0
-    assert dict(frame.schema) == PROJECT_JOBS_SCHEMA
+    assert dict(frame.schema) == _PROJECT_JOBS_SCHEMA
 
 
 def test_a_failed_write_leaves_the_previously_published_artifact_readable(
@@ -175,7 +171,7 @@ def test_a_failed_write_leaves_the_previously_published_artifact_readable(
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")] == []
 
 
-@pytest.mark.parametrize("pipeline", list(PIPELINE_STATUS_COLUMNS))
+@pytest.mark.parametrize("pipeline", list(_PIPELINE_STATUS_COLUMNS))
 def test_an_absent_tracker_contributes_no_job_rows(pipeline: ProcessingPipelines, tmp_path: Path) -> None:
     """Verifies that an absent tracker reports not_started and contributes no job rows."""
     status, entries = _read_pipeline_state(pipeline=pipeline, tracker_path=tmp_path.joinpath("absent.yaml"))

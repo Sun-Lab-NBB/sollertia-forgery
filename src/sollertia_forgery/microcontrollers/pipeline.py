@@ -55,7 +55,7 @@ def run_microcontroller_processing_pipeline(
     """Discovers, validates, and executes microcontroller log processing jobs for the target session.
 
     Notes:
-        This is a two-stage pipeline. Stage 1 (extraction) reads each controller's log archive via the
+        Stage 1 (extraction) reads each controller's log archive via the
         ataraxis-communication-interface binding and writes raw per-module feathers into the session's
         ``microcontroller_data`` directory. Stage 2 (parsing) partitions each raw feather by event code and runs the
         parser registered for the session's acquisition system (resolved via ``resolve_microcontroller_parsers``),
@@ -68,9 +68,9 @@ def run_microcontroller_processing_pipeline(
         processing tracker is co-located with the extracted and parsed output in ``microcontroller_data``.
 
         The extraction configuration is materialized into ``microcontroller_data`` on every invocation, before any
-        job is dispatched. The acquisition binding reads each controller's extraction targets from that file rather
-        than from an in-memory object, and a scheduler may dispatch a single extraction job into a fresh process, so
-        writing the file unconditionally is what lets a remote job read the same configuration the local run used.
+        job is dispatched. The acquisition binding reads each controller's extraction targets from that file
+        rather than from an in-memory object. A scheduler may dispatch a single extraction job into a fresh
+        process, so writing the file unconditionally lets a remote job read the configuration the local run used.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -82,14 +82,14 @@ def run_microcontroller_processing_pipeline(
 
     Raises:
         FileNotFoundError: If the session's raw behavior data directory does not exist, if the session's
-            microcontroller manifest is missing, if the registered eligibility accessor cannot load its own inputs,
-            for example an absent hardware state file, or, in remote mode, if a requested extraction job's log archive
-            is not present.
+            microcontroller manifest is missing, or if the registered eligibility accessor cannot load its own
+            inputs, for example an absent hardware state file. In remote mode, also raised when a requested
+            extraction job's log archive is not present.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
-        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed, if
-            the raw behavior data tree holds more than one microcontroller manifest, if no manifest controller
-            declares a module the session's acquisition system extracts, if no processable controllers are
-            discovered, or if the provided job_id does not match any available job.
+        ValueError: If the session's acquisition system is unknown, if the microcontroller manifest is malformed,
+            or if the raw behavior data tree holds more than one microcontroller manifest. Also raised when no
+            manifest controller declares a module the session's acquisition system extracts, when no processable
+            controllers are discovered, or when the provided job_id matches no available job.
     """
     # A stage this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
     # runtime to load fails here rather than partway through a session.
@@ -211,10 +211,10 @@ def discover_microcontroller_jobs(
         The universe enumerates every job the session's microcontroller manifest could produce: one extraction job per
         controller that declares at least one module the acquisition system parses and the session configured for use,
         plus one parse job per such module. The possible subset narrows the universe to controllers whose log archive
-        resolves to exactly one file under the raw behavior data tree, since a controller with no archive, or one
-        whose name matches several archives, can be neither extracted nor parsed. Locating those
-        archives is delegated to the acquisition library's own resolver, so discovery reads the manifest and indexes
-        the archive names, leaving the archives' contents and every output file untouched.
+        resolves to exactly one file under the raw behavior data tree. A controller with no archive, or one whose
+        name matches several archives, can be neither extracted nor parsed. Locating those archives is delegated
+        to the acquisition library's own resolver, so discovery reads the manifest and indexes the archive names,
+        leaving the archives' contents and every output file untouched.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -301,8 +301,9 @@ def _resolve_controllers(
         the manifest declares, and the session's acquisition system supplies the event codes each module's parser
         reads. Taking the topology from the universe is what lets one manifest read serve both this derivation and
         the job discovery that shares it. A manifest module the system does not parse, or that the session did not
-        configure for use, is excluded, since extracting it would produce an intermediate feather nothing consumes,
-        and a controller left with no such module contributes no configuration at all. Requiring the manifest also
+        configure for use, is excluded, since extracting it would produce an intermediate feather nothing
+        consumes. A controller left with no such module contributes no configuration at all. Requiring the
+        manifest also
         confirms the archives were produced by ataraxis-communication-interface, which distinguishes the
         microcontroller controllers from the runtime DataLogger archive that shares the same directory. Kernel
         extraction is never configured, because this pipeline does not consume the kernel feather.
@@ -351,8 +352,7 @@ def _resolve_controllers(
         message = (
             f"Unable to resolve microcontroller controllers for session '{session.session_name}'. None of the "
             f"controllers registered in the microcontroller manifest at '{job_universe.manifest_path}' declares a "
-            f"module the "
-            f"'{session.acquisition_system}' acquisition system extracts."
+            f"module the '{session.acquisition_system}' acquisition system extracts."
         )
         console.error(message=message, error=ValueError)
 
@@ -365,9 +365,9 @@ def _materialize_extraction_config(
     """Writes the session's derived extraction configuration into the microcontroller data directory.
 
     Notes:
-        The acquisition binding reads each controller's extraction targets from a configuration file rather than from
-        an in-memory object, so the configuration slf derives from the manifest and its own event code registry has
-        to reach disk before any extraction job runs. The file is written under the acquisition library's own
+        The acquisition binding reads each controller's extraction targets from a configuration file rather than
+        from an in-memory object. The configuration slf derives from the manifest and its own event code registry
+        therefore reaches disk before any extraction job runs. The file is written under the acquisition library's own
         configuration filename, next to the extracted output and the processing tracker.
 
         The write is unconditional. A scheduler may dispatch a single extraction job into a fresh process, so the
@@ -449,11 +449,10 @@ def _discover_jobs(
     Notes:
         Locating the controllers is the acquisition library's own job, so the resolved universe already carries each
         registered controller's archive, in ascending identifier order and resolved only when exactly one file under
-        the directory carries that controller's name. This function composes that locating with the eligibility rule
-        the library knows nothing about: a
-        controller contributes jobs only if at least one of its configured modules is eligible (present in the
-        resolved parser mapping). Extracting a controller with no parseable modules would produce intermediate
-        feathers that nothing consumes.
+        the directory carries that controller's name. Composing that locating with the eligibility rule the
+        library knows nothing about yields the job set. A controller contributes jobs only if at least one of its
+        configured modules is eligible, meaning it is present in the resolved parser mapping. Extracting a
+        controller with no parseable modules would produce intermediate feathers that nothing consumes.
 
         The universe enumerates every job the configuration could produce (one extraction job per such controller
         plus one parse job per eligible module), which stays stable across invocations for foreign-entry detection
@@ -584,7 +583,7 @@ def _run_extraction_stage(
                 if console_enabled:
                     console.enable()
             if progress_bar is not None:
-                progress_bar.update(1)
+                progress_bar.update(n=1)
 
 
 def _run_parse_stage(
@@ -698,7 +697,7 @@ def _execute_parse_jobs_sequential(
                     session=session,
                 )
             if progress_bar is not None:
-                progress_bar.update(1)
+                progress_bar.update(n=1)
 
 
 def _execute_parse_jobs_parallel(
@@ -763,7 +762,7 @@ def _execute_parse_jobs_parallel(
                 if first_exception is None:
                     first_exception = exception
             if progress_bar is not None:
-                progress_bar.update(1)
+                progress_bar.update(n=1)
 
     if first_exception is not None:
         raise first_exception
@@ -874,8 +873,8 @@ def _run_parse(
     """Parses one raw module feather into its domain-specific feather.
 
     Notes:
-        This is the atomic unit of work dispatched to worker processes by the parallel parse path, so it must
-        remain importable at module level and accept only picklable arguments. It reads the raw module feather via
+        Remains importable at module level and accepts only picklable arguments, since the parallel parse path
+        dispatches this to worker processes. It reads the raw module feather via
         memory mapping, partitions it by event code in a single pass, and delegates to the registered parser. The
         parser then resolves any system configuration from the session and writes its feather into the output
         directory.

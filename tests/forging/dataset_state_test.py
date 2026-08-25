@@ -1,4 +1,6 @@
-"""Tests the dataset state artifact: job scope resolution, subject resolution, and the written table's layout."""
+"""Contains tests for the dataset state artifact: job scope resolution, subject resolution, and the written table's
+layout.
+"""
 
 from __future__ import annotations
 
@@ -11,18 +13,20 @@ from ataraxis_base_utilities import console
 from ataraxis_data_structures import ProcessingTracker
 
 from sollertia_forgery.forging import (
-    ANIMAL_SCOPE,
-    SESSION_SCOPE,
     FORGING_JOB_NAME,
-    DATASET_JOB_SCOPES,
-    DATASET_STATE_SCHEMA,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
     dataset_state_path,
     forging_tracker_path,
     generate_dataset_state,
 )
-from sollertia_forgery.forging.state import _build_job_rows
+from sollertia_forgery.forging.state import (
+    _ANIMAL_SCOPE,
+    _SESSION_SCOPE,
+    _DATASET_JOB_SCOPES,
+    _DATASET_STATE_SCHEMA,
+    _build_job_rows,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -40,13 +44,10 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args:
-        _frame: The frame the writer was called on, which this stand-in never serializes.
-        file: The open file object the artifact is written to.
-        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame the writer was called on, which this stand-in never serializes. file: The open file object
+    the artifact is written to. **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
-    Raises:
-        RuntimeError: Always, standing in for a writer that dies partway through.
+    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
     file.write(b"partial")
     message = "the artifact writer died mid-write"
@@ -97,14 +98,14 @@ def _align_tracker(dataset: SimpleNamespace, jobs: list[tuple[str, str]]) -> Pro
 
 def test_every_forging_job_name_declares_a_scope() -> None:
     """Verifies that each of the three job names the forging universe emits declares the unit its specifier names."""
-    assert set(DATASET_JOB_SCOPES) == {
+    assert set(_DATASET_JOB_SCOPES) == {
         MULTIDAY_DISCOVERY_JOB_NAME,
         MULTIDAY_EXTRACTION_JOB_NAME,
         FORGING_JOB_NAME,
     }
-    assert DATASET_JOB_SCOPES[MULTIDAY_DISCOVERY_JOB_NAME] == ANIMAL_SCOPE
-    assert DATASET_JOB_SCOPES[MULTIDAY_EXTRACTION_JOB_NAME] == SESSION_SCOPE
-    assert DATASET_JOB_SCOPES[FORGING_JOB_NAME] == SESSION_SCOPE
+    assert _DATASET_JOB_SCOPES[MULTIDAY_DISCOVERY_JOB_NAME] == _ANIMAL_SCOPE
+    assert _DATASET_JOB_SCOPES[MULTIDAY_EXTRACTION_JOB_NAME] == _SESSION_SCOPE
+    assert _DATASET_JOB_SCOPES[FORGING_JOB_NAME] == _SESSION_SCOPE
 
 
 def test_a_dataset_without_a_tracker_reports_no_jobs(dataset: SimpleNamespace) -> None:
@@ -126,7 +127,7 @@ def test_an_empty_dataset_writes_an_artifact_carrying_the_declared_schema(datase
     frame = pl.read_ipc(source=written, memory_map=True)
 
     assert frame.height == 0
-    assert dict(frame.schema) == DATASET_STATE_SCHEMA
+    assert dict(frame.schema) == _DATASET_STATE_SCHEMA
 
 
 def test_a_failed_write_leaves_the_previously_published_state_readable(
@@ -190,9 +191,7 @@ def test_generation_stays_silent_without_progress_reporting(
 
 
 def test_each_scope_resolves_its_own_subject(dataset: SimpleNamespace) -> None:
-    """Verifies that an animal-scoped job takes its specifier as the animal, and a session-scoped job resolves its
-    animal.
-    """
+    """Verifies an animal-scoped job takes its specifier as the animal, and a session-scoped job resolves its animal."""
     _align_tracker(
         dataset=dataset,
         jobs=[
@@ -236,8 +235,8 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
     every field the tracker recorded for it, while a running row and a scheduled row carry the identifier, the scope,
     and the timestamps their state implies.
 
-    A consumer reads this artifact by schema and addresses a job it finds here by the identifier the row publishes, so
-    a column that carries the wrong field ships a snapshot that names jobs no tracker holds.
+    A consumer reads this artifact by schema and addresses a job it finds here by the identifier the row publishes, so a
+    column that carries the wrong field ships a snapshot that names jobs no tracker holds.
     """
     tracker = _align_tracker(
         dataset=dataset,
@@ -257,7 +256,7 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
     frame = pl.read_ipc(source=written, memory_map=True)
 
     assert written == dataset_state_path(dataset=dataset)
-    assert dict(frame.schema) == DATASET_STATE_SCHEMA
+    assert dict(frame.schema) == _DATASET_STATE_SCHEMA
     assert frame["job_name"].to_list() == [
         MULTIDAY_EXTRACTION_JOB_NAME,
         FORGING_JOB_NAME,
@@ -266,7 +265,7 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
 
     failure = frame.filter(pl.col("job_name") == FORGING_JOB_NAME).to_dicts()[0]
     assert failure["dataset"] == "test_dataset"
-    assert failure["scope"] == SESSION_SCOPE
+    assert failure["scope"] == _SESSION_SCOPE
     assert failure["job_id"] == failed_id
     assert failure["specifier"] == _FIRST_SESSION
     assert failure["status"] == "FAILED"
@@ -284,7 +283,7 @@ def test_the_written_artifact_matches_the_declared_schema(dataset: SimpleNamespa
     assert scheduled["job_id"] == ProcessingTracker.generate_job_id(
         job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier="305"
     )
-    assert scheduled["scope"] == ANIMAL_SCOPE
+    assert scheduled["scope"] == _ANIMAL_SCOPE
     assert scheduled["specifier"] == "305"
     assert scheduled["error_message"] is None
     assert scheduled["started_at"] is None

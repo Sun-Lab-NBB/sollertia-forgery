@@ -1,4 +1,4 @@
-"""Tests the discovery of a project's sessions stored under the remote compute server's data root."""
+"""Contains tests for the discovery of a project's sessions stored under the remote compute server's data root."""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from sollertia_forgery.server import discover_project_data, discover_project_markers, discover_project_sessions
+from sollertia_forgery.server import (
+    discover_project_data,
+    discover_project_markers,
+)
+from sollertia_forgery.server.discovery import _discover_project_sessions
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,7 +70,7 @@ def test_discover_project_sessions_returns_every_acquired_session(
     """Verifies that discovery returns one entry per acquired session, skipping datasets and non-directory entries."""
     _build_remote_project(transport=stub_ssh_transport)
 
-    discovered = discover_project_sessions(project=_PROJECT, server=connected_server)
+    discovered = _discover_project_sessions(project=_PROJECT, server=connected_server)
 
     assert [(session.animal, session.session) for session in discovered] == [
         ("305", _FIRST_SESSION),
@@ -80,7 +84,7 @@ def test_discover_project_sessions_returns_nothing_for_an_empty_project(
     """Verifies that a project directory holding no animal directories yields no sessions."""
     stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}").mkdir(parents=True)
 
-    assert discover_project_sessions(project=_PROJECT, server=connected_server) == ()
+    assert _discover_project_sessions(project=_PROJECT, server=connected_server) == ()
 
 
 def test_discover_project_data_connects_reports_and_closes(
@@ -97,26 +101,30 @@ def test_discover_project_data_connects_reports_and_closes(
         ("321", _SECOND_SESSION),
     ]
     assert stub_ssh_transport.connections == [("test.server.com", "tester")]
-    assert stub_ssh_transport.closed is True
+    assert stub_ssh_transport.closed
 
 
 def test_discover_project_sessions_skips_a_session_a_dataset_directory_holds(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A marked directory is a dataset rather than an animal, so a session it holds is not the project's session."""
+    """Verifies that a marked directory is a dataset rather than an animal, so a session it holds is not the project's
+    session.
+    """
     project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
     marker = project_path.joinpath("hybrid", "S1", "raw_data", "session_data.yaml")
     marker.parent.mkdir(parents=True)
     marker.write_text("session: marker\n")
     project_path.joinpath("hybrid", "dataset.yaml").write_text("dataset: marker\n")
 
-    assert discover_project_sessions(project=_PROJECT, server=connected_server) == ()
+    assert _discover_project_sessions(project=_PROJECT, server=connected_server) == ()
 
 
 def test_discover_project_sessions_ignores_a_marker_the_hierarchy_does_not_place_at_a_session(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """The search matches on file name alone, so a same-named file at another depth or parent is not a session."""
+    """Verifies that the search matches on file name alone, so a same-named file at another depth or parent is not a
+    session.
+    """
     project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
     for relative in (
         ("305", _FIRST_SESSION, "processed_data", "session_data.yaml"),
@@ -127,47 +135,53 @@ def test_discover_project_sessions_ignores_a_marker_the_hierarchy_does_not_place
         decoy.parent.mkdir(parents=True, exist_ok=True)
         decoy.write_text("decoy\n")
 
-    assert discover_project_sessions(project=_PROJECT, server=connected_server) == ()
+    assert _discover_project_sessions(project=_PROJECT, server=connected_server) == ()
 
 
 def test_discover_project_sessions_orders_the_sessions_naturally(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """The server reports its matches in directory order, so the discovered sessions are ordered on this host."""
+    """Verifies that the server reports its matches in directory order, so the discovered sessions are ordered on this
+    host.
+    """
     project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
     for animal in ("100", "10", "9"):
         marker = project_path.joinpath(animal, _FIRST_SESSION, "raw_data", "session_data.yaml")
         marker.parent.mkdir(parents=True)
         marker.write_text("session: marker\n")
 
-    discovered = discover_project_sessions(project=_PROJECT, server=connected_server)
+    discovered = _discover_project_sessions(project=_PROJECT, server=connected_server)
 
     assert [session.animal for session in discovered] == ["9", "10", "100"]
 
 
 def test_discover_project_sessions_rejects_a_project_the_server_does_not_hold(connected_server: Server) -> None:
-    """A project the server holds no directory for is an absent project rather than a project holding no sessions."""
+    """Verifies that a project the server holds no directory for is an absent project rather than a project holding no
+    sessions.
+    """
     with pytest.raises(FileNotFoundError, match=r"holds no directory at that path"):
-        discover_project_sessions(project="Absent", server=connected_server)
+        _discover_project_sessions(project="Absent", server=connected_server)
 
 
 def test_discover_project_sessions_rejects_a_search_that_covered_part_of_the_tree(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A search the server could not complete would answer for the part of the tree it read, which is not an answer."""
+    """Verifies that a search the server could not complete would answer for the part of the tree it read, which is not
+    an answer.
+    """
     _build_remote_project(transport=stub_ssh_transport)
     stub_ssh_transport.respond(
         prefix="find -L ", stdout="", stderr="find: '/data/sollertia/TestProject/305': Permission denied", return_code=1
     )
 
     with pytest.raises(RuntimeError, match=r"reached only part of the tree"):
-        discover_project_sessions(project=_PROJECT, server=connected_server)
+        _discover_project_sessions(project=_PROJECT, server=connected_server)
 
 
 def test_discover_project_markers_reports_the_datasets_beside_the_sessions(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Both marker kinds answer the same question about the same tree, so one search reports both."""
+    """Verifies that both marker kinds answer the same question about the same tree, so one search reports both."""
     project_path = _build_remote_project(transport=stub_ssh_transport)
 
     markers = discover_project_markers(project_path=connected_server.root.joinpath(_PROJECT), server=connected_server)
@@ -198,7 +212,9 @@ def test_discover_project_markers_orders_the_datasets_naturally(
 def test_discover_project_markers_reads_both_marker_names_in_one_search(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Both marker kinds answer one search, so it carries them as alternatives rather than as conditions to satisfy."""
+    """Verifies that both marker kinds answer one search, so it carries them as alternatives rather than as conditions
+    to satisfy.
+    """
     _build_remote_project(transport=stub_ssh_transport)
 
     discover_project_markers(project_path=connected_server.root.joinpath(_PROJECT), server=connected_server)
@@ -214,7 +230,9 @@ def test_discover_project_markers_reads_both_marker_names_in_one_search(
 def test_discover_project_markers_reads_only_the_dataset_depth_when_sessions_are_excluded(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A caller needing the datasets alone leaves the session and output directories every animal holds unread."""
+    """Verifies that a caller needing the datasets alone leaves the session and output directories every animal holds
+    unread.
+    """
     _build_remote_project(transport=stub_ssh_transport)
 
     markers = discover_project_markers(
@@ -229,14 +247,16 @@ def test_discover_project_markers_reads_only_the_dataset_depth_when_sessions_are
 def test_discover_project_sessions_orders_a_name_ahead_of_the_sibling_that_extends_it(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """The order is taken over the names each session is reported by rather than over the paths they were found at."""
+    """Verifies that the order is taken over the names each session is reported by rather than over the paths they were
+    found at.
+    """
     project_path = stub_ssh_transport.local_path(f"/data/sollertia/{_PROJECT}")
     for animal, session in (("305", "S2"), ("305", "S10"), ("305-repeat", "S1"), ("305", "S1")):
         marker = project_path.joinpath(animal, session, "raw_data", "session_data.yaml")
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("session: marker\n")
 
-    discovered = discover_project_sessions(project=_PROJECT, server=connected_server)
+    discovered = _discover_project_sessions(project=_PROJECT, server=connected_server)
 
     assert [(session.animal, session.session) for session in discovered] == [
         ("305", "S1"),

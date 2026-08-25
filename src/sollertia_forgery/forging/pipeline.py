@@ -78,9 +78,6 @@ Notes:
     Only assembly declares a ceiling. It holds one core per job, so this is what sets the width of the pool it
     opens. The cross-recording jobs exist for two-photon sessions alone, and each of them takes a wide core
     allocation of its own, so the core budget already bounds how many run at once and no separate ceiling applies.
-
-    This mapping is the single source for both the local assembly pool and the shared batch layer, which merges it
-    into its own concurrency table.
 """
 
 _MULTIDAY_JOB_NAMES: dict[MultiRecordingJobNames, str] = {
@@ -134,9 +131,9 @@ def define_forging_dataset(
         all follows from the dataset's recorded session type, so a dataset of sessions the system tracks nothing
         across reads no source data here.
 
-        An animal that already carries its configuration is left alone, and one whose sessions have moved off this
-        machine is passed over, so a dataset keeps growing while part of its source data lives elsewhere and a large
-        project is forged in passes.
+        An animal that already carries its configuration is left alone, and one whose sessions have moved off
+        this machine is passed over. A dataset therefore keeps growing while part of its source data lives
+        elsewhere, and a large project is forged in passes.
 
     Args:
         name: The unique name of the dataset.
@@ -144,7 +141,8 @@ def define_forging_dataset(
             subject to the resolution policy.
         project_root: The path to the project's root directory that stores the animal and session data directories.
             The dataset hierarchy is also created under this directory.
-        display_progress: The progress-bar flag recorded in each materialized configuration.
+        display_progress: Determines whether the configuration materialized for each animal requests progress
+            bars.
         force_recreate: Determines whether to delete the whole existing dataset hierarchy and rebuild it from the
             provided session list.
         recreate_animals: The identifiers of animals already in the dataset to rebuild from the sessions the provided
@@ -200,7 +198,7 @@ def define_forging_dataset(
     # Materializing loads every requested animal's sessions before the resolver can decline, so a dataset whose type
     # the system tracks nothing across skips the call outright rather than paying that read to write nothing.
     if tracked_across_recordings:
-        materialize_multiday_plan(
+        _materialize_multiday_plan(
             dataset=dataset,
             project_root=project_root,
             display_progress=display_progress,
@@ -295,9 +293,9 @@ def run_forging_pipeline(
     dataset_path = dataset.dataset_data_path.parent
     session_lookup: dict[str, DatasetSession] = {entry.session: entry for entry in dataset.sessions}
 
-    multiday_plan = load_multiday_plan(dataset=dataset)
+    multiday_plan = _load_multiday_plan(dataset=dataset)
     multiday_stages = _resolve_multiday_stages(multiday_plan=multiday_plan)
-    universe = build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
 
     dataset_path.mkdir(parents=True, exist_ok=True)
     tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
@@ -422,12 +420,12 @@ def discover_forging_jobs(dataset_path: Path) -> tuple[DatasetData, list[tuple[s
         FileNotFoundError: If the dataset's own marker is not present under the provided path.
     """
     dataset = DatasetData.load(dataset_path=dataset_path)
-    multiday_plan = load_multiday_plan(dataset=dataset)
-    universe = build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
+    multiday_plan = _load_multiday_plan(dataset=dataset)
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=multiday_plan)
     return dataset, universe, list(universe)
 
 
-def materialize_multiday_plan(
+def _materialize_multiday_plan(
     dataset: DatasetData, project_root: Path, *, display_progress: bool, animals: Collection[str] | None = None
 ) -> dict[str, tuple[Path, list[str]]]:
     """Resolves the per-animal cross-recording plan and materializes each tracked animal's configuration.
@@ -438,7 +436,7 @@ def materialize_multiday_plan(
         resolver returns None is omitted.
 
         Writing a configuration replaces the file through a rename under no lock, so only ``define_forging_dataset``
-        calls this. Every other invocation reads the plan back through ``load_multiday_plan``.
+        calls this. Every other invocation reads the plan back through ``_load_multiday_plan``.
 
         Each materialized animal has every one of its sessions loaded from the project root, so restricting the call
         to the animals that need one keeps a dataset's growth independent of the source data of the animals it already
@@ -447,7 +445,8 @@ def materialize_multiday_plan(
     Args:
         dataset: The resolved dataset whose animals are planned.
         project_root: The path to the project's root directory that stores the animal and session data directories.
-        display_progress: The progress-bar flag recorded in each materialized configuration.
+        display_progress: Determines whether the configuration materialized for each animal requests progress
+            bars.
         animals: The identifiers of the animals to materialize a configuration for. Pass None to materialize every
             animal the dataset holds, which is what a freshly created dataset needs.
 
@@ -498,7 +497,7 @@ def materialize_multiday_plan(
     return plan
 
 
-def load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]]:
+def _load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]]:
     """Reads back the per-animal cross-recording plan a defining invocation materialized.
 
     Notes:
@@ -529,7 +528,7 @@ def load_multiday_plan(dataset: DatasetData) -> dict[str, tuple[Path, list[str]]
     return plan
 
 
-def build_forging_universe(
+def _build_forging_universe(
     dataset: DatasetData, multiday_plan: dict[str, tuple[Path, list[str]]]
 ) -> list[tuple[str, str]]:
     """Builds the full forging job universe for the dataset's tracker.
@@ -542,7 +541,7 @@ def build_forging_universe(
 
     Args:
         dataset: The resolved dataset whose sessions are assembled.
-        multiday_plan: The per-animal multi-day plan from ``materialize_multiday_plan`` or ``load_multiday_plan``.
+        multiday_plan: The per-animal multi-day plan from ``_materialize_multiday_plan`` or ``_load_multiday_plan``.
 
     Returns:
         The list of ``(job_name, specifier)`` pairs the forging tracker aligns against.
@@ -573,7 +572,7 @@ def forging_job_prerequisites(
 
     Args:
         dataset: The resolved dataset the universe was built from.
-        universe: The job set to build ordering over, as returned by ``build_forging_universe``.
+        universe: The job set to build ordering over, as returned by ``_build_forging_universe``.
 
     Returns:
         A mapping of each job to its tuple of prerequisite jobs, following the discovery to extraction to assembly
@@ -634,9 +633,9 @@ def _resolve_multiday_stages(multiday_plan: dict[str, tuple[Path, list[str]]]) -
     """Resolves every cross-recording stage the multi-day plan implies, keyed by the forging job that tracks it.
 
     Notes:
-        Which stages an animal runs, the order they run in, and the stage that has nothing before it are all cindra's
-        to declare, so they come from its resolvers and this call only renames the result into the forging tracker's
-        vocabulary. The returned mapping preserves that order, animal by animal, so iterating it dispatches an
+        Which stages an animal runs, the order they run in, and the stage that has nothing before it are all
+        cindra's to declare. They come from its resolvers, and this call only renames the result into the forging
+        tracker's vocabulary. The returned mapping preserves that order, animal by animal, so iterating it dispatches an
         animal's stages in the order cindra executes them.
 
         Every cindra stage reads the shared multi-recording bootstrap rather than writing it, so the animal's first
@@ -644,7 +643,7 @@ def _resolve_multiday_stages(multiday_plan: dict[str, tuple[Path, list[str]]]) -
         other stage of its animal, so it is the only point at which no peer stage of the same animal can be running.
 
     Args:
-        multiday_plan: The per-animal multi-day plan from ``materialize_multiday_plan`` or ``load_multiday_plan``.
+        multiday_plan: The per-animal multi-day plan from ``_materialize_multiday_plan`` or ``_load_multiday_plan``.
 
     Returns:
         A mapping of each cross-recording forging job to the cindra stage it dispatches. Empty when no animal needs
@@ -899,8 +898,9 @@ def _execute_jobs_parallel(
         queued sessions, so the tracker stays accurate for the whole batch. The first captured exception is re-raised
         after all futures resolve.
 
-        A job is marked running as its pool slot opens rather than as the queue is built, so the tracker never reports
-        more jobs running than the pool can execute and a recorded start time is the time the work began.
+        A job is marked running as its pool slot opens rather than as the queue is built. The tracker therefore
+        never reports more jobs running than the pool can execute, and a recorded start time is the time the work
+        began.
 
     Args:
         sessions: The ordered list of session names to assemble.

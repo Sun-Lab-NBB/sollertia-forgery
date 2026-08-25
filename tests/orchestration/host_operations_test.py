@@ -1,4 +1,6 @@
-"""Tests the execution-host contract, the operations each host runs, and the artifact locations a batch reads."""
+"""Contains tests for the execution-host contract, the operations each host runs, and the artifact locations a batch
+reads.
+"""
 
 from __future__ import annotations
 
@@ -28,14 +30,16 @@ from sollertia_forgery.orchestration import (
     remote as remote_module,
     maintenance,
     project_plan_path,
-    resolve_path_size,
-    plan_artifact_path,
     reset_tracked_jobs,
-    environment_commands,
-    state_artifact_paths,
     clean_pipeline_output,
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines, resolve_session_tracker_path
+from sollertia_forgery.orchestration.hosts import (
+    plan_artifact_path,
+    environment_commands,
+    state_artifact_paths,
+)
+from sollertia_forgery.orchestration.maintenance import _resolve_path_size
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -45,7 +49,7 @@ if TYPE_CHECKING:
 
     from sollertia_forgery.server import Server
 
-SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
+_SERVER_PROJECT_ROOT: Path = Path("/data/sollertia/TestProject")
 """The project directory every remote-host test addresses on the stubbed compute server."""
 
 
@@ -126,7 +130,7 @@ def build_stub_dispatch(tracker_file: Path) -> Any:
 
 
 def test_a_batched_remote_reset_costs_one_invocation() -> None:
-    """Each unit is reset against its own identifiers, and the per-unit commands chain into one round trip."""
+    """Verifies each unit is reset against its own identifiers, and the per-unit commands chain into one round trip."""
     host, server = build_remote_host()
 
     host.reset_jobs(
@@ -145,7 +149,7 @@ def test_a_batched_remote_reset_costs_one_invocation() -> None:
 
 
 def test_a_remote_reset_naming_no_unit_issues_nothing() -> None:
-    """A reset covering no unit has nothing to do, so it never reaches the server."""
+    """Verifies that a reset covering no unit has nothing to do, so it never reaches the server."""
     host, server = build_remote_host()
 
     host.reset_jobs(pipeline="video", job_ids_by_unit={})
@@ -154,7 +158,9 @@ def test_a_remote_reset_naming_no_unit_issues_nothing() -> None:
 
 
 def test_a_remote_cleanup_reports_the_bytes_each_removal_freed() -> None:
-    """The command prints the bytes beside each path, so a remote cleanup returns the figures a local one does."""
+    """Verifies that the command prints the bytes beside each path, so a remote cleanup returns the figures a local one
+    does.
+    """
     host, server = build_remote_host(
         stdout="4096 /data/P/305/a/processed_data/video\n17 /data/P/305/a/video_tracker.yaml\n"
     )
@@ -169,7 +175,7 @@ def test_a_remote_cleanup_reports_the_bytes_each_removal_freed() -> None:
 
 
 def test_a_remote_cleanup_ignores_output_that_is_not_a_removal() -> None:
-    """Unrelated lines never become removals, so a warning on the same stream cannot inflate the report."""
+    """Verifies unrelated lines never become removals, so a warning on the same stream cannot inflate the report."""
     host, _server = build_remote_host(stdout="warning: something happened\n2048 /data/P/305/a/processed_data/video\n")
 
     removed = host.clean(pipeline="video", unit_paths=[Path("/data/P/305/a")])
@@ -178,7 +184,9 @@ def test_a_remote_cleanup_ignores_output_that_is_not_a_removal() -> None:
 
 
 def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> None:
-    """A definition builds the hierarchy alone, so it carries the session set and the rebuild flags and no job."""
+    """Verifies that a definition builds the hierarchy alone, so it carries the session set and the rebuild flags and no
+    job.
+    """
     host, server = build_remote_host()
 
     host.define_dataset(
@@ -216,7 +224,7 @@ def test_defining_a_remote_dataset_names_its_sessions_and_rebuild_flags() -> Non
 
 
 def test_a_failing_remote_operation_reports_the_invocation_it_ran() -> None:
-    """A caller needs to know which command failed, since one invocation can carry several."""
+    """Verifies that a caller needs to know which command failed, since one invocation can carry several."""
     host, _server = build_remote_host(return_code=1)
 
     with pytest.raises(RuntimeError, match=r"'slf reset -p video -up .+' exited with code 1"):
@@ -224,7 +232,7 @@ def test_a_failing_remote_operation_reports_the_invocation_it_ran() -> None:
 
 
 def test_chained_commands_stop_at_the_first_failure() -> None:
-    """Later steps depend on earlier ones, so one round trip must not run past a failure."""
+    """Verifies that later steps depend on earlier ones, so one round trip must not run past a failure."""
     rendered = environment_commands(
         environment="slf_server", commands=[["slf", "plan", "project"], ["slf", "manifest"]]
     )
@@ -236,7 +244,9 @@ def test_chained_commands_stop_at_the_first_failure() -> None:
 def test_a_batched_local_reset_clears_only_the_identifiers_each_unit_tracks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_tracker: Callable[..., ProcessingTracker]
 ) -> None:
-    """Passing a whole batch's identifiers is safe, because a unit resets its own share and ignores the rest."""
+    """Verifies that passing a whole batch's identifiers is safe, because a unit resets its own share and ignores the
+    rest.
+    """
     session = tmp_path.joinpath("2024_11_04")
     session.mkdir(parents=True)
     tracker_path = session.joinpath("tracker.yaml")
@@ -258,7 +268,9 @@ def test_a_batched_local_reset_clears_only_the_identifiers_each_unit_tracks(
 def test_a_local_reset_naming_no_identifier_clears_every_tracked_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_tracker: Callable[..., ProcessingTracker]
 ) -> None:
-    """Naming nothing returns the unit to a clean slate, which is how a caller discards a whole run's records."""
+    """Verifies that naming nothing returns the unit to a clean slate, which is how a caller discards a whole run's
+    records.
+    """
     session = tmp_path.joinpath("2024_11_04")
     session.mkdir(parents=True)
     tracker_path = session.joinpath("tracker.yaml")
@@ -277,23 +289,23 @@ def test_a_local_reset_naming_no_identifier_clears_every_tracked_job(
 
 
 def test_a_path_size_sums_every_file_it_holds(tmp_path: Path) -> None:
-    """A caller deciding whether a cleanup was worth running needs the bytes each removal would free."""
+    """Verifies that a caller deciding whether a cleanup was worth running needs the bytes each removal would free."""
     directory = tmp_path.joinpath("output")
     directory.mkdir()
     directory.joinpath("a.bin").write_bytes(b"x" * 100)
     directory.joinpath("b.bin").write_bytes(b"y" * 23)
 
-    assert resolve_path_size(path=directory) == 123
-    assert resolve_path_size(path=directory.joinpath("a.bin")) == 100
+    assert _resolve_path_size(path=directory) == 123
+    assert _resolve_path_size(path=directory.joinpath("a.bin")) == 100
 
 
 def test_cleaning_an_unsupported_pipeline_removes_nothing(tmp_path: Path) -> None:
-    """A pipeline the dispatch table does not hold names no output, so nothing is removed."""
+    """Verifies that a pipeline the dispatch table does not hold names no output, so nothing is removed."""
     assert clean_pipeline_output(pipeline="nonexistent", unit_paths=[tmp_path]) == []
 
 
 def test_the_local_host_reports_where_an_artifact_already_sits(tmp_path: Path) -> None:
-    """This machine already holds its own artifacts, so nothing is copied to deliver one."""
+    """Verifies that this machine already holds its own artifacts, so nothing is copied to deliver one."""
     artifact = tmp_path.joinpath("project_jobs.feather")
     artifact.write_text("rows")
 
@@ -304,7 +316,9 @@ def test_the_local_host_reports_where_an_artifact_already_sits(tmp_path: Path) -
 def test_the_mirrored_artifact_set_covers_what_the_read_tools_resolve_from(
     tmp_path: Path,
 ) -> None:
-    """A mirrored table is only readable alongside the file its tool resolves it from, so both travel together."""
+    """Verifies that a mirrored table is only readable alongside the file its tool resolves it from, so both travel
+    together.
+    """
     pulled: list[str] = []
 
     class StubMirrorServer:
@@ -437,8 +451,8 @@ def issued_command(server: StubSSHTransport, index: int = 0) -> str:
 
 
 def test_the_protocol_declares_the_operations_preparation_runs_against_a_host() -> None:
-    """Both hosts run the same underlying functions, so the protocol states the operations rather than implementing
-    any of them.
+    """Verifies that both hosts run the same underlying functions, so the protocol states the operations rather than
+    implementing any of them.
     """
     declared = {name for name in vars(ExecutionHost) if not name.startswith("_")}
     assert declared == {
@@ -472,7 +486,7 @@ def test_the_protocol_declares_the_operations_preparation_runs_against_a_host() 
 
 
 def test_each_host_reports_itself_under_the_name_a_batch_records(connected_server: Server) -> None:
-    """A prepared batch records where it was prepared, so it runs on the host that holds the data it reads."""
+    """Verifies a prepared batch records where it was prepared, so it runs on the host that holds the data it reads."""
     remote_host = RemoteHost(server=connected_server)
 
     assert LocalHost().label == "local"
@@ -487,7 +501,9 @@ def test_each_host_reports_itself_under_the_name_a_batch_records(connected_serve
 def test_materializing_a_session_batch_writes_the_plan_and_the_state_it_is_resolved_from(
     project_root: Path, experiment_session: SessionData
 ) -> None:
-    """Planning registers a unit's jobs and the state step reads those registries, so the order is what carries it."""
+    """Verifies that planning registers a unit's jobs and the state step reads those registries, so the order is what
+    carries it.
+    """
     session_path = experiment_session.raw_data_path.parent
 
     LocalHost.materialize(project_root=project_root, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=False)
@@ -505,7 +521,9 @@ def test_materializing_a_session_batch_writes_the_plan_and_the_state_it_is_resol
 
 
 def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, experiment_session: SessionData) -> None:
-    """A submission is sized against these figures, so planning reports the count and the memory each unit resolved."""
+    """Verifies that a submission is sized against these figures, so planning reports the count and the memory each unit
+    resolved.
+    """
     session_path = experiment_session.raw_data_path.parent
 
     planned = LocalHost.plan(project_root=project_root, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=True)
@@ -525,7 +543,7 @@ def test_planning_reports_the_figures_each_unit_recorded(project_root: Path, exp
 def test_a_unit_no_pipeline_resolves_a_job_for_is_reported_beside_the_ones_that_planned(
     project_root: Path, experiment_session: SessionData
 ) -> None:
-    """One unit carrying none of the data the pipelines consume never stops the units that carry it."""
+    """Verifies that one unit carrying none of the data the pipelines consume never stops the units that carry it."""
     session_path = experiment_session.raw_data_path.parent
     absent = project_root.joinpath("305", "2026-01-02-03-04-05-000006")
 
@@ -539,8 +557,8 @@ def test_a_unit_no_pipeline_resolves_a_job_for_is_reported_beside_the_ones_that_
 
 
 def test_planning_a_dataset_reads_the_forging_pipeline_alone(project_root: Path) -> None:
-    """A dataset batch is planned against the forging pipeline, which resolves nothing for a directory holding no
-    dataset.
+    """Verifies that a dataset batch is planned against the forging pipeline, which resolves nothing for a directory
+    holding no dataset.
     """
     planned = LocalHost.plan(
         project_root=project_root,
@@ -555,7 +573,9 @@ def test_planning_a_dataset_reads_the_forging_pipeline_alone(project_root: Path)
 
 
 def test_refreshing_a_dataset_batch_writes_the_state_of_the_named_datasets_alone(project: ProjectData) -> None:
-    """A dataset batch reads one table per named dataset, so a dataset the batch does not cover is left alone."""
+    """Verifies that a dataset batch reads one table per named dataset, so a dataset the batch does not cover is left
+    alone.
+    """
     named = create_dataset(project=project, name="named_dataset")
     other = create_dataset(project=project, name="other_dataset")
 
@@ -568,7 +588,8 @@ def test_refreshing_a_dataset_batch_writes_the_state_of_the_named_datasets_alone
 
 
 def test_materializing_a_dataset_batch_refreshes_the_state_of_the_datasets_it_names(project: ProjectData) -> None:
-    """The batch is resolved from these tables, so the units a materialization covers reach the state step it runs.
+    """Verifies that the batch is resolved from these tables, so the units a materialization covers reach the state step
+    it runs.
 
     A materialization that named no unit there would refresh no table at all, leaving the batch to be prepared and
     closed against whatever state the previous run left behind.
@@ -588,7 +609,7 @@ def test_materializing_a_dataset_batch_refreshes_the_state_of_the_datasets_it_na
 
 
 def test_a_table_the_local_host_does_not_hold_reads_as_no_rows(tmp_path: Path) -> None:
-    """A project whose artifacts were never written reads cleanly rather than failing."""
+    """Verifies that a project whose artifacts were never written reads cleanly rather than failing."""
     assert LocalHost.read_rows(path=tmp_path.joinpath("absent.feather")) == []
 
     written = write_plan_table(path=tmp_path.joinpath("plan.feather"), rows=[{"job_id": "energy"}])
@@ -598,7 +619,7 @@ def test_a_table_the_local_host_does_not_hold_reads_as_no_rows(tmp_path: Path) -
 def test_a_local_reset_returns_the_units_tracked_jobs_to_the_scheduled_state(
     experiment_session: SessionData,
 ) -> None:
-    """The trackers sit on this machine, so the reset runs in this process rather than over a command line."""
+    """Verifies the trackers sit on this machine, so the reset runs in this process rather than over a command line."""
     tracker_path = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.RUNTIME)
     tracker_path.parent.mkdir(parents=True, exist_ok=True)
     jobs = [("runtime_processing", "1")]
@@ -618,11 +639,11 @@ def test_a_local_reset_applies_each_units_own_identifiers_to_that_unit_alone(
     session_factory: Callable[..., SessionData],
     write_tracker: Callable[..., ProcessingTracker],
 ) -> None:
-    """A retry names the jobs it wants back, so every other record the unit holds survives the reset.
+    """Verifies that a retry names the jobs it wants back, so every other record the unit holds survives the reset.
 
-    A job identifier carries no unit, so the two sessions record the same stage under the same identifier. Applying
-    one unit's identifiers to the other, or discarding them and clearing everything, would push a succeeded record
-    the caller never named back to the scheduled state and recompute a whole run's work.
+    A job identifier carries no unit, so the two sessions record the same stage under the same identifier. Applying one
+    unit's identifiers to the other, or discarding them and clearing everything, would push a succeeded record the
+    caller never named back to the scheduled state and recompute a whole run's work.
     """
     retried = session_factory(animal_id="321", experiment_name="test_experiment")
     jobs = [("runtime_processing", "1"), ("runtime_processing", "2")]
@@ -644,7 +665,7 @@ def test_a_local_reset_applies_each_units_own_identifiers_to_that_unit_alone(
 
 
 def test_a_local_cleanup_reports_the_bytes_each_removal_freed(experiment_session: SessionData) -> None:
-    """A caller deciding whether a cleanup was worth running needs the bytes it freed."""
+    """Verifies that a caller deciding whether a cleanup was worth running needs the bytes it freed."""
     output = experiment_session.processed_data.runtime_data_path
     output.mkdir(parents=True, exist_ok=True)
     output.joinpath("payload.bin").write_bytes(b"x" * 512)
@@ -657,7 +678,9 @@ def test_a_local_cleanup_reports_the_bytes_each_removal_freed(experiment_session
 
 
 def test_defining_a_local_dataset_rejects_a_session_the_project_does_not_hold(project_root: Path) -> None:
-    """The hierarchy is built from the named sessions, so a name resolving to no directory stops the definition."""
+    """Verifies that the hierarchy is built from the named sessions, so a name resolving to no directory stops the
+    definition.
+    """
     with pytest.raises(FileNotFoundError, match="2026-01-02-03-04-05-000006"):
         LocalHost.define_dataset(
             project_root=project_root,
@@ -669,8 +692,8 @@ def test_defining_a_local_dataset_rejects_a_session_the_project_does_not_hold(pr
 
 
 def test_the_local_host_resolves_where_each_units_tracker_sits(experiment_session: SessionData) -> None:
-    """The local engine opens these files directly, so a batch dispatched here carries the locations on its
-    descriptors.
+    """Verifies that the local engine opens these files directly, so a batch dispatched here carries the locations on
+    its descriptors.
     """
     session_path = experiment_session.raw_data_path.parent
     unloadable = session_path.parent.joinpath("2026-01-02-03-04-05-000006")
@@ -685,7 +708,9 @@ def test_the_local_host_resolves_where_each_units_tracker_sits(experiment_sessio
 
 
 def test_an_unsupported_pipeline_resolves_no_tracker_at_all(experiment_session: SessionData) -> None:
-    """A pipeline the dispatch table does not hold names no tracker, so no descriptor carries a location for it."""
+    """Verifies that a pipeline the dispatch table does not hold names no tracker, so no descriptor carries a location
+    for it.
+    """
     assert (
         LocalHost.resolve_tracker_paths(pipeline="not_a_pipeline", unit_paths=[experiment_session.raw_data_path.parent])
         == {}
@@ -698,29 +723,33 @@ def test_an_unsupported_pipeline_resolves_no_tracker_at_all(experiment_session: 
 def test_materializing_a_session_batch_remotely_ships_its_steps_as_one_chained_invocation(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Chaining costs a single round trip and holds the order the steps require, since planning registers the jobs."""
-    session_path = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
+    """Verifies that chaining costs a single round trip and holds the order the steps require, since planning registers
+    the jobs.
+    """
+    session_path = _SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
 
     RemoteHost(server=connected_server).materialize(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=True
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=[session_path], unit_kind=SESSION_UNIT, replan=True
     )
 
     issued = issued_command(server=stub_ssh_transport)
     assert len(stub_ssh_transport.commands) == 1
     assert f"slf plan session -sp {session_path} -rp" in issued
-    assert f"slf plan project -pp {SERVER_PROJECT_ROOT}" in issued
-    assert f"slf manifest -pp {SERVER_PROJECT_ROOT} create" in issued
+    assert f"slf plan project -pp {_SERVER_PROJECT_ROOT}" in issued
+    assert f"slf manifest -pp {_SERVER_PROJECT_ROOT} create" in issued
     assert issued.index("slf plan session") < issued.index("slf plan project") < issued.index("slf manifest")
 
 
 def test_refreshing_a_dataset_batch_remotely_names_every_dataset_it_covers(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A dataset batch reads one table per named dataset, so one command carries every dataset the batch covers."""
-    datasets = [SERVER_PROJECT_ROOT.joinpath("first"), SERVER_PROJECT_ROOT.joinpath("second")]
+    """Verifies that a dataset batch reads one table per named dataset, so one command carries every dataset the batch
+    covers.
+    """
+    datasets = [_SERVER_PROJECT_ROOT.joinpath("first"), _SERVER_PROJECT_ROOT.joinpath("second")]
 
     RemoteHost(server=connected_server).generate_state(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=datasets, unit_kind=DATASET_UNIT
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=datasets, unit_kind=DATASET_UNIT
     )
 
     issued = issued_command(server=stub_ssh_transport)
@@ -730,23 +759,26 @@ def test_refreshing_a_dataset_batch_remotely_names_every_dataset_it_covers(
 def test_refreshing_a_session_batch_remotely_recreates_its_own_projects_manifest(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A session batch's state lives in the project manifest's walk, so its refresh recreates that project's manifest.
+    """Verifies that a session batch's state lives in the project manifest's walk, so its refresh recreates that
+    project's manifest.
 
     The manifest-regeneration tool names no unit at all, so a refresh that resolved the dataset command instead would
     issue it without the dataset paths its option requires and the server would reject the whole invocation.
     """
     RemoteHost(server=connected_server).generate_state(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
     )
 
-    assert f"slf manifest -pp {SERVER_PROJECT_ROOT} create" in issued_command(server=stub_ssh_transport)
+    assert f"slf manifest -pp {_SERVER_PROJECT_ROOT} create" in issued_command(server=stub_ssh_transport)
 
 
 def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """The per-unit figures are read out of the projection, so a remote plan reports what a local one returns."""
-    plan_path = project_plan_path(project_directory=SERVER_PROJECT_ROOT)
+    """Verifies that the per-unit figures are read out of the projection, so a remote plan reports what a local one
+    returns.
+    """
+    plan_path = project_plan_path(project_directory=_SERVER_PROJECT_ROOT)
     write_plan_table(
         path=stub_ssh_transport.local_path(plan_path),
         rows=[
@@ -756,11 +788,11 @@ def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
             {"job_id": "forge", "unit_kind": DATASET_UNIT, "animal": None, "dataset": "a_dataset"},
         ],
     )
-    planned = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
-    unplanned = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-03-03-04-05-000006")
+    planned = _SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
+    unplanned = _SERVER_PROJECT_ROOT.joinpath("305", "2026-01-03-03-04-05-000006")
 
     summarized = RemoteHost(server=connected_server).plan(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=[planned, unplanned], unit_kind=SESSION_UNIT, replan=False
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=[planned, unplanned], unit_kind=SESSION_UNIT, replan=False
     )
 
     assert summarized[0] == {
@@ -776,9 +808,11 @@ def test_a_remote_plan_reports_the_figures_the_projection_now_holds(
 def test_a_remote_plan_naming_no_unit_reprojects_the_project_alone(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Naming no unit drops the per-unit planning step, which is how a caller reprojects an already planned project."""
+    """Verifies that naming no unit drops the per-unit planning step, which is how a caller reprojects an already
+    planned project.
+    """
     summarized = RemoteHost(server=connected_server).plan(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT, replan=False
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT, replan=False
     )
 
     assert summarized == []
@@ -790,34 +824,35 @@ def test_a_remote_plan_naming_no_unit_reprojects_the_project_alone(
 def test_a_remote_plan_issues_the_unit_kind_and_the_unit_set_the_caller_named(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """The per-unit step is what registers the jobs, so it has to name every unit under the kind the caller passed.
+    """Verifies that the per-unit step is what registers the jobs, so it has to name every unit under the kind the
+    caller passed.
 
-    A session batch planned as a dataset one resolves no job and still exits cleanly, which reaches the caller as a
-    plan that found no outstanding work rather than as a command that never ran.
+    A session batch planned as a dataset one resolves no job and still exits cleanly, which reaches the caller as a plan
+    that found no outstanding work rather than as a command that never ran.
     """
-    first = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
-    second = SERVER_PROJECT_ROOT.joinpath("305", "2026-01-03-03-04-05-000006")
+    first = _SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")
+    second = _SERVER_PROJECT_ROOT.joinpath("305", "2026-01-03-03-04-05-000006")
 
     RemoteHost(server=connected_server).plan(
-        project_root=SERVER_PROJECT_ROOT, unit_paths=[first, second], unit_kind=SESSION_UNIT, replan=False
+        project_root=_SERVER_PROJECT_ROOT, unit_paths=[first, second], unit_kind=SESSION_UNIT, replan=False
     )
 
     issued = issued_command(server=stub_ssh_transport)
     # The chaining operator ends the command, so neither session was dropped and no replan flag was appended.
     assert f"slf plan session -sp {first} -sp {second} &&" in issued
-    assert f"slf plan project -pp {SERVER_PROJECT_ROOT}" in issued
+    assert f"slf plan project -pp {_SERVER_PROJECT_ROOT}" in issued
 
 
 def test_a_table_the_server_does_not_hold_reads_as_no_rows(connected_server: Server) -> None:
-    """A project the server never planned reads cleanly rather than failing."""
-    assert RemoteHost(server=connected_server).read_rows(path=SERVER_PROJECT_ROOT.joinpath("absent.feather")) == []
+    """Verifies that a project the server never planned reads cleanly rather than failing."""
+    assert RemoteHost(server=connected_server).read_rows(path=_SERVER_PROJECT_ROOT.joinpath("absent.feather")) == []
 
 
 def test_fetching_an_artifact_copies_it_off_the_server_so_this_machine_keeps_it(
     connected_server: Server, stub_ssh_transport: StubSSHTransport, tmp_path: Path
 ) -> None:
-    """The copy stays in place, so a snapshot survives the server regenerating its own artifacts afterward."""
-    remote_artifact = SERVER_PROJECT_ROOT.joinpath("TestProject_jobs.feather")
+    """Verifies the copy stays in place, so a snapshot survives the server regenerating its own artifacts afterward."""
+    remote_artifact = _SERVER_PROJECT_ROOT.joinpath("TestProject_jobs.feather")
     stub_ssh_transport.local_path(remote_artifact).parent.mkdir(parents=True, exist_ok=True)
     stub_ssh_transport.local_path(remote_artifact).write_bytes(b"recorded state")
     destination = tmp_path.joinpath("snapshot", "batch01")
@@ -827,13 +862,13 @@ def test_fetching_an_artifact_copies_it_off_the_server_so_this_machine_keeps_it(
 
     assert fetched == destination.joinpath("TestProject_jobs.feather")
     assert fetched.read_bytes() == b"recorded state"
-    assert host.fetch(path=SERVER_PROJECT_ROOT.joinpath("absent.feather"), destination=destination) is None
+    assert host.fetch(path=_SERVER_PROJECT_ROOT.joinpath("absent.feather"), destination=destination) is None
 
 
 def test_a_remote_cleanup_naming_no_unit_issues_nothing(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A cleanup covering no unit has nothing to remove, so it never reaches the server."""
+    """Verifies that a cleanup covering no unit has nothing to remove, so it never reaches the server."""
     assert RemoteHost(server=connected_server).clean(pipeline="video", unit_paths=[]) == []
     assert stub_ssh_transport.commands == []
 
@@ -841,27 +876,30 @@ def test_a_remote_cleanup_naming_no_unit_issues_nothing(
 def test_a_failing_remote_cleanup_reports_the_invocation_it_ran(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A caller needs the command and the server's own message, since one invocation can carry several commands."""
-    stub_ssh_transport.respond("bash -lc", stderr="slf: no such pipeline", return_code=2)
+    """Verifies that a caller needs the command and the server's own message, since one invocation can carry several
+    commands.
+    """
+    stub_ssh_transport.respond(prefix="bash -lc", stderr="slf: no such pipeline", return_code=2)
 
     with pytest.raises(RuntimeError, match=r"'slf clean -p video -up .+' exited with code 2"):
-        RemoteHost(server=connected_server).clean(pipeline="video", unit_paths=[SERVER_PROJECT_ROOT.joinpath("305")])
+        RemoteHost(server=connected_server).clean(pipeline="video", unit_paths=[_SERVER_PROJECT_ROOT.joinpath("305")])
 
 
 def test_a_server_side_invocation_killed_by_a_signal_is_reported_as_a_failure(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A killed command closes its channel without an exit status, which the connection reports as a negative code.
+    """Verifies that a killed command closes its channel without an exit status, which the connection reports as a
+    negative code.
 
-    Only an exit of exactly zero means the invocation finished, so a signalled or memory-killed command stops the
-    caller rather than handing it the half-written artifacts the command never got to finish.
+    Only an exit of exactly zero means the invocation finished, so a signalled or memory-killed command stops the caller
+    rather than handing it the half-written artifacts the command never got to finish.
     """
-    stub_ssh_transport.respond("bash -lc", return_code=-1)
+    stub_ssh_transport.respond(prefix="bash -lc", return_code=-1)
     captured_host, _server = build_remote_host(return_code=-1)
 
     with pytest.raises(RuntimeError):
         RemoteHost(server=connected_server).generate_state(
-            project_root=SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
+            project_root=_SERVER_PROJECT_ROOT, unit_paths=[], unit_kind=SESSION_UNIT
         )
 
     # The invocation whose output the caller parses answers the same way, so a killed cleanup never reads as a short
@@ -871,10 +909,12 @@ def test_a_server_side_invocation_killed_by_a_signal_is_reported_as_a_failure(
 
 
 def test_the_remote_host_resolves_no_tracker_location_at_all(connected_server: Server) -> None:
-    """A remotely dispatched job records its own outcome on the server, so naming a path here would only mislead."""
+    """Verifies that a remotely dispatched job records its own outcome on the server, so naming a path here would only
+    mislead.
+    """
     assert (
         RemoteHost(server=connected_server).resolve_tracker_paths(
-            pipeline="video", unit_paths=[SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")]
+            pipeline="video", unit_paths=[_SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")]
         )
         == {}
     )
@@ -884,21 +924,21 @@ def test_the_remote_host_resolves_no_tracker_location_at_all(connected_server: S
 
 
 def test_the_state_artifacts_of_a_batch_follow_the_kind_of_unit_it_covers() -> None:
-    """A session batch reads one table per project while a dataset batch reads one table per named dataset."""
-    datasets = [SERVER_PROJECT_ROOT.joinpath("first"), SERVER_PROJECT_ROOT.joinpath("second")]
+    """Verifies a session batch reads one table per project while a dataset batch reads one table per named dataset."""
+    datasets = [_SERVER_PROJECT_ROOT.joinpath("first"), _SERVER_PROJECT_ROOT.joinpath("second")]
 
-    assert state_artifact_paths(project_root=SERVER_PROJECT_ROOT, unit_paths=datasets, unit_kind=DATASET_UNIT) == [
+    assert state_artifact_paths(project_root=_SERVER_PROJECT_ROOT, unit_paths=datasets, unit_kind=DATASET_UNIT) == [
         dataset.joinpath(DATASET_STATE_FILENAME) for dataset in datasets
     ]
     assert state_artifact_paths(
-        project_root=SERVER_PROJECT_ROOT,
-        unit_paths=[SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")],
+        project_root=_SERVER_PROJECT_ROOT,
+        unit_paths=[_SERVER_PROJECT_ROOT.joinpath("305", "2026-01-02-03-04-05-000006")],
         unit_kind=SESSION_UNIT,
-    ) == [project_jobs_path(project_directory=SERVER_PROJECT_ROOT)]
+    ) == [project_jobs_path(project_directory=_SERVER_PROJECT_ROOT)]
 
 
 def test_the_plan_artifact_of_a_batch_is_its_projects_projection() -> None:
-    """Every job's planned figures ship in one table per project, whichever kind of unit the batch covers."""
-    assert plan_artifact_path(project_root=SERVER_PROJECT_ROOT) == project_plan_path(
-        project_directory=SERVER_PROJECT_ROOT
+    """Verifies every job's planned figures ship in one table per project, whichever kind of unit the batch covers."""
+    assert plan_artifact_path(project_root=_SERVER_PROJECT_ROOT) == project_plan_path(
+        project_directory=_SERVER_PROJECT_ROOT
     )

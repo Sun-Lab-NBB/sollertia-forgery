@@ -260,8 +260,8 @@ def inspect_job_resources_tool(
         and ``summed_memory_mb``. Carries a ``breakdown`` per job type and a ``units`` list naming each session and how
         many jobs it resolved. Carries a ``jobs`` list with ``rows``, ``matched_rows``, ``start_row``, and
         ``next_start_row`` whenever a filter is named or the listing is requested. For ``local`` it also carries this
-        machine's ``total_memory_mb`` and the batch-available ``total_cores`` left after the reserved system cores;
-        both are absent for ``remote``, where the scheduler holds the budgets and the caller names what a job requests.
+        machine's ``total_memory_mb`` and the batch-available ``total_cores`` left after the reserved system cores.
+        Both are absent for ``remote``, where the scheduler holds the budgets and the caller names what a job requests.
     """
     prepared = prepare_batch_tool(
         pipeline=pipeline, session_paths=session_paths, options=options, host=host, include_job_descriptors=True

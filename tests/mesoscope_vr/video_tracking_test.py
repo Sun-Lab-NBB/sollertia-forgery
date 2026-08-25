@@ -1,4 +1,4 @@
-"""Tests for the Mesoscope-VR pupil and eye tracking worker donated to the video-processing pipeline."""
+"""Contains tests for the Mesoscope-VR pupil and eye tracking worker donated to the video-processing pipeline."""
 
 from __future__ import annotations
 
@@ -178,7 +178,7 @@ def test_process_mesoscope_video_tracking_skips_when_no_prediction_file_is_prese
 def test_process_mesoscope_video_tracking_writes_every_pupil_column(
     tracking_session: SessionData, write_dlc_predictions: Callable[..., Path]
 ) -> None:
-    points = _build_points([_frame_specification(), _frame_specification()])
+    points = _build_points(specifications=[_frame_specification(), _frame_specification()])
     write_dlc_predictions(
         tracking_session.raw_data.camera_data_path.joinpath("face_eye_tracking_predictions.h5"), points
     )
@@ -217,8 +217,12 @@ def test_process_mesoscope_video_tracking_reads_the_natural_sort_first_predictio
     tracking_session: SessionData, write_dlc_predictions: Callable[..., Path]
 ) -> None:
     camera_data = tracking_session.raw_data.camera_data_path
-    write_dlc_predictions(camera_data.joinpath("face_eye_tracking_2.h5"), _build_points([_frame_specification()] * 3))
-    write_dlc_predictions(camera_data.joinpath("face_eye_tracking_10.h5"), _build_points([_frame_specification()] * 7))
+    write_dlc_predictions(
+        camera_data.joinpath("face_eye_tracking_2.h5"), _build_points(specifications=[_frame_specification()] * 3)
+    )
+    write_dlc_predictions(
+        camera_data.joinpath("face_eye_tracking_10.h5"), _build_points(specifications=[_frame_specification()] * 7)
+    )
 
     process_mesoscope_video_tracking(
         session=tracking_session, output_directory=tracking_session.processed_data.video_data_path
@@ -239,7 +243,7 @@ def test_read_points_from_h5_rejects_a_file_holding_no_prediction_frame(tmp_path
 def test_read_points_from_h5_rejects_a_file_missing_a_canonical_bodypart(
     tmp_path: Path, write_dlc_predictions: Callable[..., Path]
 ) -> None:
-    points = _build_points([_frame_specification()])
+    points = _build_points(specifications=[_frame_specification()])
     del points["pupil_top"]
     h5_path = write_dlc_predictions(tmp_path.joinpath("face_eye_tracking.h5"), points)
 
@@ -270,14 +274,14 @@ def test_compute_pupil_metrics_measures_a_tilted_pupil_by_its_semi_diameter_cros
     # for it the way it can for the axis-aligned circle every other synthetic frame carries.
     tilted = _frame_specification(pupil_semi_a=(-4.8, 6.4), pupil_semi_b=(9.6, 7.2))
 
-    metrics = _compute_pupil_metrics(points=_build_points([tilted]))
+    metrics = _compute_pupil_metrics(points=_build_points(specifications=[tilted]))
 
     assert metrics[PupilColumn.PUPIL_AREA_PX2][0] == pytest.approx(np.pi * 96.0, rel=1e-5)
     assert metrics[PupilColumn.PUPIL_DIAMETER_PX][0] == pytest.approx(20.0, abs=1e-3)
 
 
 def test_compute_pupil_metrics_keeps_a_lost_eye_ring_open_while_the_pupil_resolves() -> None:
-    points = _build_points([_frame_specification(), _frame_specification(eye_confident=(0, 1))])
+    points = _build_points(specifications=[_frame_specification(), _frame_specification(eye_confident=(0, 1))])
 
     metrics = _compute_pupil_metrics(points=points)
 
@@ -291,7 +295,9 @@ def test_compute_pupil_metrics_keeps_a_lost_eye_ring_open_while_the_pupil_resolv
 
 
 def test_compute_pupil_metrics_flags_a_blink_when_the_eye_ring_and_the_pupil_are_both_lost() -> None:
-    points = _build_points([_frame_specification(), _frame_specification(eye_confident=(0, 1), pupil_confident=(0, 1))])
+    points = _build_points(
+        specifications=[_frame_specification(), _frame_specification(eye_confident=(0, 1), pupil_confident=(0, 1))]
+    )
 
     metrics = _compute_pupil_metrics(points=points)
 
@@ -302,7 +308,7 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_ring_and_the_pupil_are
 
 
 def test_compute_pupil_metrics_keeps_a_lost_reflection_open_while_the_pupil_resolves() -> None:
-    points = _build_points([_frame_specification(), _frame_specification(reflection_confident=False)])
+    points = _build_points(specifications=[_frame_specification(), _frame_specification(reflection_confident=False)])
 
     metrics = _compute_pupil_metrics(points=points)
 
@@ -320,7 +326,7 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_closes_below_half_its_
     # A one-pixel vertical semi-axis leaves the eye at a tenth of its open aspect ratio, well under the half-median cut.
     closed = _frame_specification(eye_semi_b=(0.0, 1.0))
 
-    metrics = _compute_pupil_metrics(points=_build_points([*open_frames, closed]))
+    metrics = _compute_pupil_metrics(points=_build_points(specifications=[*open_frames, closed]))
 
     # The closed frame keeps a fully confident pupil ring, so this also pins the openness term as the one term a
     # resolving pupil does not override: a fitted eye measured to be closing is an observation rather than a gap.
@@ -336,7 +342,7 @@ def test_compute_pupil_metrics_flags_a_blink_when_the_eye_closes_below_half_its_
 
 
 def test_compute_pupil_metrics_flags_dilation_when_the_pupil_is_lost_under_an_open_eye() -> None:
-    points = _build_points([_frame_specification(), _frame_specification(pupil_confident=(0, 1))])
+    points = _build_points(specifications=[_frame_specification(), _frame_specification(pupil_confident=(0, 1))])
 
     metrics = _compute_pupil_metrics(points=points)
 
@@ -349,7 +355,9 @@ def test_compute_pupil_metrics_flags_dilation_when_the_pupil_is_lost_under_an_op
 
 
 def test_compute_pupil_metrics_keeps_every_frame_open_when_no_eye_fit_survives_but_the_pupil_does() -> None:
-    points = _build_points([_frame_specification(eye_confident=(0,)), _frame_specification(eye_confident=(1,))])
+    points = _build_points(
+        specifications=[_frame_specification(eye_confident=(0,)), _frame_specification(eye_confident=(1,))]
+    )
 
     metrics = _compute_pupil_metrics(points=points)
 
@@ -363,7 +371,7 @@ def test_compute_pupil_metrics_keeps_every_frame_open_when_no_eye_fit_survives_b
 def test_compute_pupil_metrics_returns_not_a_number_for_a_zero_extent_eye_fit() -> None:
     collapsed = _frame_specification(eye_semi_a=(0.0, 0.0), eye_semi_b=(0.0, 0.0))
 
-    metrics = _compute_pupil_metrics(points=_build_points([collapsed]))
+    metrics = _compute_pupil_metrics(points=_build_points(specifications=[collapsed]))
 
     assert metrics[PupilColumn.EYE_WIDTH_PX][0] == pytest.approx(0.0)
     assert np.isnan(metrics[PupilColumn.EYE_OPENNESS][0])
@@ -376,7 +384,7 @@ def test_compute_pupil_metrics_returns_not_a_number_for_a_zero_extent_eye_fit() 
 
 def test_compute_pupil_metrics_reports_a_residual_only_for_an_overdetermined_pupil_ring() -> None:
     determined = _frame_specification(pupil_confident=(0, 2, 4))
-    points = _build_points([_frame_specification(), determined])
+    points = _build_points(specifications=[_frame_specification(), determined])
     # Displaces one confident perimeter point off the true ellipse, so the overdetermined fit carries a real residual.
     points["pupil_top"][0, 1] += 4.0
 

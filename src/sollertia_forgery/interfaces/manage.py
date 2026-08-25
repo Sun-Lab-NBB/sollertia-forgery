@@ -29,9 +29,6 @@ _CONTEXT_SETTINGS: dict[str, int] = {"max_content_width": 120}
 class _SharedManifestParameters:
     """Bundles the option parsed on the ``manifest`` group and shared across its ``create`` and ``print``
     subcommands.
-
-    The group callback builds one of these from its option and stores it on the Click context, and each subcommand
-    reads it back through the ``_pass_shared_parameters`` decorator.
     """
 
     project_path: Path | None
@@ -135,8 +132,8 @@ def print_project_manifest_data(
     """Prints the requested data from the target project's manifest file to the terminal as a formatted table."""
     if not summary and not notes:
         message = (
-            "No data display options were selected when calling the command. Pass either the 'notes' (-n), "
-            "'summary' (-s), or both flags when calling the command."
+            "Unable to print the manifest data. At least one of the '--notes' (-n) and '--summary' (-s) "
+            "display flags must be supplied, but neither was given."
         )
         console.error(message=message, error=ValueError)
 
@@ -211,8 +208,8 @@ def print_project_manifest_data(
 def checksum_command(session_path: Path, workers: int, *, regenerate_checksum: bool, no_progress: bool) -> None:
     """Resolves the data integrity checksum for the target session's 'raw_data' directory.
 
-    This command can be used to either verify the integrity of the session's data or to update the session's data
-    integrity checksum to include expected changes.
+    Verifies the stored checksum by default, and recalculates it to absorb expected changes when
+    --regenerate-checksum is given.
     """
     run_checksum_processing_pipeline(
         session_path=session_path,
@@ -275,8 +272,7 @@ def dataset_state_command(dataset_path: tuple[Path, ...]) -> None:
 def reset_command(pipeline: str, unit_path: tuple[Path, ...], job_id: tuple[str, ...]) -> None:
     """Returns tracked jobs of the named units to the scheduled state, leaving every untargeted job's record intact.
 
-    This is what a submission calls before dispatching a batch, so a status read never reports the previous attempt's
-    outcome while the new one waits to start. One invocation covers every named unit, and each unit resets only the
+    One invocation covers every named unit, and each unit resets only the
     identifiers it actually tracks, so a batch spanning many units costs a single call.
     """
     reset = reset_tracked_jobs(pipeline=pipeline, unit_paths=unit_path, job_ids=job_id)
@@ -303,8 +299,7 @@ def clean_command(pipeline: str, unit_path: tuple[Path, ...]) -> None:
     """Removes a pipeline's output and processing tracker for the named units.
 
     Returns each unit to an unprocessed state, so a later preparation rediscovers every job from the acquired data
-    rather than resuming a partial run. Each removed path is reported with the bytes it held, one per line, so a
-    caller driving this over a command line reads the same figures an in-process call returns.
+    rather than resuming a partial run. Each removed path is reported with the bytes it held, one per line.
     """
     for removed in clean_pipeline_output(pipeline=pipeline, unit_paths=unit_path):
         console.echo(message=f"{removed['removed_bytes']} {removed['path']}", raw=True)

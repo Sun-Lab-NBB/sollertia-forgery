@@ -21,10 +21,9 @@ maintainers = [
     { name = "Ivan Kondratyev", email = "ik278@cornell.edu" },
 ]
 
-# The list of keywords that describe the project
 keywords = ["sollertia", "dataset", "data", "processing"]
 
-# Additional classifiers used by PIP to group repositories.
+# Trove classifiers. PyPI uses them to group the project by audience, domain, python version, and platform.
 classifiers = [
     # Development status
     "Development Status :: 5 - Production/Stable",
@@ -39,7 +38,6 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# Runtime project dependencies.
 dependencies = [
     # Sollertia Libraries
     "ataraxis-time>=7,<8",
@@ -49,8 +47,8 @@ dependencies = [
 
     # Acquisition and Processing Pipelines (called in-process by the video, microcontroller, two-photon, and forging
     # pipelines)
-    "ataraxis-video-system>=5.1.1,<6",
-    "ataraxis-communication-interface>=7.1.1,<8",
+    "ataraxis-video-system>=5.1,<6",  # 5.1 first exports the OutputLayout the video pipeline resolves against
+    "ataraxis-communication-interface>=7.1,<8",  # 7.1 first exports the serial protocol and prototype enums
     "cindra>=2.0.0rc6,<3",  # rc6 first exports the pipeline data records, including the combined recording metadata
 
     # Video Decoding (frame decoding and SIMD frame math for the motion-energy stage).
@@ -228,15 +226,17 @@ warn_unused_ignores = true   # Warns against using 'type: ignore' for packages w
 
 exclude = [
     "sollertia_forgery-\\d+",  # Ignores the temporary folder created when building the sdist
-    "venv.*/",                 # Ignores virtual environments
+    "venv.*/",
     "build/",                  # Ignores the build backend's working directory
-    "dist/",                   # Ignores the built distribution directory
+    "dist/",
     "docs/",                   # Ignores the sphinx / doxygen directory
     "stubs/",                  # Ignores stubs directory (stubgen output target)
     "recipe/",                 # Ignores recipe directory (grayskull output target)
-    "tests/",                  # Ignores the test directory.
+    "tests/",
 ]
 
+# The server modules build their payloads from runtime data the annotations cannot express, so type errors
+# inside them are suppressed rather than annotated away.
 [[tool.mypy.overrides]]
 module = [
     "sollertia_forgery.server.server",

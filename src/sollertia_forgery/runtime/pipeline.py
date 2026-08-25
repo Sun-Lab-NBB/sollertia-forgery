@@ -202,7 +202,7 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
         )
 
     return pl.DataFrame(
-        {
+        data={
             "time_us": pl.Series(name="time_us", values=timestamps, dtype=pl.UInt64),
             "payload": pl.Series(name="payload", values=payloads, dtype=pl.Binary),
         }

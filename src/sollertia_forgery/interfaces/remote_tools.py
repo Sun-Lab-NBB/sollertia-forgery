@@ -81,8 +81,6 @@ def remote_batch_status(
 ) -> dict[str, Any]:
     """Reports the scheduler state of the outstanding remote batches, in three widening stages.
 
-    ``get_processing_status_tool`` delegates a ``remote`` request here.
-
     A bare call covers every outstanding batch, queries the scheduler for all of them in one accounting call, and
     reports the counts alongside a ``breakdown`` naming every batch, pipeline, job type, state, and unit. Naming a
     filter adds a page of jobs, and opting into detail adds the resources each allocation requested and the log files
@@ -198,8 +196,6 @@ def remote_batch_status(
 
 def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
     """Cancels the allocations of the outstanding remote batches.
-
-    ``cancel_processing_tool`` delegates a ``remote`` request here.
 
     Cancels queued and running allocations alike in one command. A dependent of a canceled allocation is canceled by
     the scheduler in turn, because its dependency can no longer complete successfully. The batches are resolved from

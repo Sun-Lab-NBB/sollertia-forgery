@@ -29,9 +29,9 @@ from sollertia_forgery.two_photon import (
     two_photon_job_prerequisites,
     run_two_photon_processing_pipeline,
 )
-from sollertia_forgery.orchestration import resolve_dispatch
 from sollertia_forgery.shared_assets import SESSION_PIPELINES, ProcessingPipelines
 import sollertia_forgery.two_photon.pipeline as two_photon_pipeline
+from sollertia_forgery.orchestration.dispatch import resolve_dispatch
 
 if TYPE_CHECKING:
     from pathlib import Path

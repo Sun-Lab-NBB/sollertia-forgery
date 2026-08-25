@@ -1,5 +1,5 @@
-"""Tests the paging primitives every read tool shares, the three stages read_project_jobs_tool reports in, and the
-project dataset listing.
+"""Contains tests for the paging primitives every read tool shares, the three stages read_project_jobs_tool reports in,
+and the project dataset listing.
 """
 
 from __future__ import annotations
@@ -12,7 +12,11 @@ from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.video import ENERGY_JOB_NAME
-from sollertia_forgery.managing import CHECKSUM_JOB_NAME, PROJECT_JOBS_SCHEMA, project_jobs_path
+from sollertia_forgery.managing import (
+    CHECKSUM_JOB_NAME,
+    project_jobs_path,
+)
+from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.interfaces.responses import (
     _DEFAULT_ITEM_LIMIT,
@@ -91,7 +95,7 @@ def _install_jobs(project_directory: Path, count: int = _JOB_COUNT) -> Path:
         )
     )
     path = project_jobs_path(project_directory=project_directory)
-    pl.DataFrame(data=rows, schema=PROJECT_JOBS_SCHEMA, strict=False).write_ipc(file=path, compression="uncompressed")
+    pl.DataFrame(data=rows, schema=_PROJECT_JOBS_SCHEMA, strict=False).write_ipc(file=path, compression="uncompressed")
     return path
 
 
@@ -342,7 +346,7 @@ def test_detail_reports_an_absent_state_snapshot_rather_than_guessing(project_di
     full = list_project_datasets_tool(project_path=str(project_directory), detailed=True)["datasets"][0]
 
     assert "state_exists" not in semi
-    assert full["state_exists"] is False
+    assert not full["state_exists"]
     assert full["animals"] == ["305"]
 
 

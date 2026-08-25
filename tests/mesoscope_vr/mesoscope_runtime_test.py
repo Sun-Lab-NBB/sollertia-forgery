@@ -1,4 +1,6 @@
-"""Tests for the Mesoscope-VR runtime log parser and the runtime dataset assembler that reads the feathers it writes."""
+"""Contains tests for the Mesoscope-VR runtime log parser and the runtime dataset assembler that reads the feathers it
+writes.
+"""
 
 from __future__ import annotations
 
@@ -262,7 +264,7 @@ def test_runtime_pipeline_writes_experiment_behavior_feathers(
             (4000, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))),
             (5000, _state_payload(_REINFORCING_GUIDANCE_CODE, 1)),
             (6000, _state_payload(_AVERSIVE_GUIDANCE_CODE, 1)),
-            (7000, _state_payload(_UNROUTED_CODE, 7)),
+            (7000, _state_payload(code=_UNROUTED_CODE, value=7)),
             (8000, _state_payload(_RUNTIME_STATE_CODE, 0)),
         ],
         onset_us=_ARCHIVE_ONSET_US,
@@ -279,19 +281,19 @@ def test_runtime_pipeline_writes_experiment_behavior_feathers(
     assert runtime_state["time_us"].to_list() == [_ARCHIVE_ONSET_US + 3000, _ARCHIVE_ONSET_US + 8000]
     assert runtime_state["runtime_state"].to_list() == [1, 0]
 
-    reinforcing = _read_feather(directory, BehaviorDataFiles.REINFORCING_GUIDANCE)
+    reinforcing = _read_feather(directory=directory, name=BehaviorDataFiles.REINFORCING_GUIDANCE)
     assert reinforcing["time_us"].to_list() == [_ARCHIVE_ONSET_US + 5000]
     assert reinforcing["reinforcing_guidance_state"].to_list() == [1]
 
-    aversive = _read_feather(directory, BehaviorDataFiles.AVERSIVE_GUIDANCE)
+    aversive = _read_feather(directory=directory, name=BehaviorDataFiles.AVERSIVE_GUIDANCE)
     assert aversive["time_us"].to_list() == [_ARCHIVE_ONSET_US + 6000]
     assert aversive["aversive_guidance_state"].to_list() == [1]
 
-    cues = _read_feather(directory, BehaviorDataFiles.VR_CUE)
+    cues = _read_feather(directory=directory, name=BehaviorDataFiles.VR_CUE)
     assert cues["vr_cue"].to_list() == _repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT)
     assert cues["traveled_distance_cm"].to_numpy() == pytest.approx(np.arange(2 * _TRIAL_COUNT) * _CUE_LENGTH_CM)
 
-    trigger_zones = _read_feather(directory, BehaviorDataFiles.VR_TRIGGER_ZONE)
+    trigger_zones = _read_feather(directory=directory, name=BehaviorDataFiles.VR_TRIGGER_ZONE)
     assert trigger_zones["trigger_zone_start_cm"].to_numpy() == pytest.approx(30.0 + 60.0 * np.arange(_TRIAL_COUNT))
     assert trigger_zones["trigger_zone_end_cm"].to_numpy() == pytest.approx(45.0 + 60.0 * np.arange(_TRIAL_COUNT))
 
@@ -308,10 +310,10 @@ def test_parse_runtime_writes_only_state_feathers_for_training_session(
 
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 0)),
                 (200, _state_payload(_RUNTIME_STATE_CODE, 1)),
-                (300, _distance_payload(120.0)),
+                (300, _distance_payload(distance_cm=120.0)),
             ]
         ),
         output_directory=directory,
@@ -336,10 +338,10 @@ def test_parse_runtime_discards_a_cue_sequence_a_training_session_does_not_colle
     """
     directory = tmp_path.joinpath("training_runtime_data")
     # The first two cue codes are the system-state code and the value that code would carry.
-    corridor = _cue_payload([_SYSTEM_STATE_CODE, 2] * 300)
+    corridor = _cue_payload(cue_codes=[_SYSTEM_STATE_CODE, 2] * 300)
 
     parse_runtime(
-        decoded_messages=_decoded_messages([(100, corridor), (200, _state_payload(_SYSTEM_STATE_CODE, 0))]),
+        decoded_messages=_decoded_messages(messages=[(100, corridor), (200, _state_payload(_SYSTEM_STATE_CODE, 0))]),
         output_directory=directory,
         session=training_session,
     )
@@ -355,7 +357,7 @@ def test_parse_runtime_omits_guidance_feathers_when_unrecorded(experiment_sessio
 
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
                 (200, _state_payload(_RUNTIME_STATE_CODE, 1)),
                 (300, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))),
@@ -404,18 +406,18 @@ def test_parse_runtime_writes_each_guidance_feather_on_its_own_recorded_transiti
 
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
                 (200, _state_payload(_RUNTIME_STATE_CODE, 1)),
                 (300, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT))),
-                (400, _state_payload(guidance_code, 1)),
+                (400, _state_payload(code=guidance_code, value=1)),
             ]
         ),
         output_directory=directory,
         session=experiment_session,
     )
 
-    recorded = _read_feather(directory, recorded_file)
+    recorded = _read_feather(directory=directory, name=recorded_file)
     assert recorded["time_us"].to_list() == [400]
     assert recorded[recorded_column].to_list() == [1]
     assert not directory.joinpath(unrecorded_file).exists()
@@ -434,10 +436,10 @@ def test_parse_runtime_truncates_the_trial_spanning_the_recorded_corridor_swap(
 
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
                 (200, corridor),
-                (300, _distance_payload(90.1)),
+                (300, _distance_payload(distance_cm=90.1)),
                 (400, corridor),
             ]
         ),
@@ -449,7 +451,7 @@ def test_parse_runtime_truncates_the_trial_spanning_the_recorded_corridor_swap(
     # The second trial is cut short by the swap, so the third trial starts at the recorded distance itself. 90.1 is
     # compared exactly, since it is deliberately not representable in single precision.
     assert trials["traveled_distance_cm"].to_list()[:4] == [0.0, 60.0, 90.1, 150.1]
-    # The first corridor contributes the completed trial and the truncated one alone; the rest of it is abandoned.
+    # The first corridor contributes the completed trial and the truncated one alone. The rest of it is abandoned.
     assert len(trials) == _TRIAL_COUNT + 2
 
 
@@ -489,14 +491,14 @@ def test_parse_runtime_raises_for_trial_absent_from_task_template(
     """Verifies that a trial the VR task template does not define is reported against the template's trial set."""
     _write_configurations(
         session=experiment_session,
-        experiment_configuration=_build_experiment_configuration(["absent_trial"]),
+        experiment_configuration=_build_experiment_configuration(trial_names=["absent_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}),
     )
 
     with pytest.raises(ValueError, match="Unable to resolve trial geometry") as raised:
         parse_runtime(
             decoded_messages=_decoded_messages(
-                [(100, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT)))]
+                messages=[(100, _cue_payload(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], _TRIAL_COUNT)))]
             ),
             output_directory=tmp_path.joinpath("runtime_data"),
             session=experiment_session,
@@ -524,7 +526,7 @@ def test_parse_runtime_raises_for_breakpoint_count_mismatch(experiment_session: 
 
     with pytest.raises(ValueError, match="Unable to decompose input cue sequence") as raised:
         parse_runtime(
-            decoded_messages=_decoded_messages([(100, corridor), (200, corridor)]),
+            decoded_messages=_decoded_messages(messages=[(100, corridor), (200, corridor)]),
             output_directory=tmp_path.joinpath("runtime_data"),
             session=experiment_session,
         )
@@ -542,11 +544,11 @@ def test_parse_runtime_raises_for_undecomposable_cue_sequence(experiment_session
             {"reward_trial": ["grating", "checker"], "control_trial": ["checker", "grating", "grating"]}
         ),
     )
-    corridor = [*_repeating_cue_sequence([_CHECKER_CODE, _GRATING_CODE, _GRATING_CODE], 167), 3]
+    corridor = [*_repeating_cue_sequence(motif=[_CHECKER_CODE, _GRATING_CODE, _GRATING_CODE], repeats=167), 3]
 
     with pytest.raises(RuntimeError, match="Unable to decompose VR wall cue sequence") as raised:
         parse_runtime(
-            decoded_messages=_decoded_messages([(100, _cue_payload(corridor))]),
+            decoded_messages=_decoded_messages(messages=[(100, _cue_payload(corridor))]),
             output_directory=tmp_path.joinpath("runtime_data"),
             session=experiment_session,
         )
@@ -559,8 +561,8 @@ def test_decompose_reports_the_failure_position_when_no_trial_is_decoded() -> No
     """Verifies the reported failure context of a corridor shorter than the shortest trial motif."""
     with pytest.raises(RuntimeError, match="Unable to decompose VR wall cue sequence") as raised:
         _decompose_multiple_cue_sequences_into_trials(
-            experiment_configuration=_build_experiment_configuration(["long_trial"]),
-            task_template=_build_task_template({"long_trial": ["grating", "checker", "grating"]}),
+            experiment_configuration=_build_experiment_configuration(trial_names=["long_trial"]),
+            task_template=_build_task_template(trial_cue_sequences={"long_trial": ["grating", "checker", "grating"]}),
             cue_sequences=[np.array([_GRATING_CODE, _CHECKER_CODE], dtype=np.uint8)],
             distance_breakpoints=[],
         )
@@ -600,13 +602,16 @@ def test_decompose_decodes_every_trial_of_a_configuration_mixing_motif_lengths()
     """Verifies that a corridor made of short trials decomposes in full when a longer trial type is also configured.
 
     The number of trials the kernel may decode is capped by the corridor length over the shortest configured motif,
-    and hitting that cap returns an ordinary trial count rather than a failure, so a cap measured against the longest
+    and hitting that cap returns an ordinary trial count rather than a failure. A cap measured against the longest
     motif would truncate the session with no error raised anywhere.
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
-        experiment_configuration=_build_experiment_configuration(["reward_trial", "long_trial"]),
+        experiment_configuration=_build_experiment_configuration(trial_names=["reward_trial", "long_trial"]),
         task_template=_build_task_template(
-            {"reward_trial": ["grating", "checker"], "long_trial": ["checker", "grating", "checker", "grating"]}
+            trial_cue_sequences={
+                "reward_trial": ["grating", "checker"],
+                "long_trial": ["checker", "grating", "checker", "grating"],
+            }
         ),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 4), dtype=np.uint8)],
         distance_breakpoints=[],
@@ -623,12 +628,17 @@ def test_decompose_matches_the_longer_motif_when_a_shorter_trial_is_its_prefix()
     first, it eats two cues of every three-cue trial and the rest of the corridor stops decomposing altogether.
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
-        experiment_configuration=_build_experiment_configuration(["control_trial", "reward_trial"]),
+        experiment_configuration=_build_experiment_configuration(trial_names=["control_trial", "reward_trial"]),
         task_template=_build_task_template(
-            {"control_trial": ["grating", "checker", "grating"], "reward_trial": ["grating", "checker"]}
+            trial_cue_sequences={
+                "control_trial": ["grating", "checker", "grating"],
+                "reward_trial": ["grating", "checker"],
+            }
         ),
         cue_sequences=[
-            np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE, _GRATING_CODE], 2), dtype=np.uint8)
+            np.array(
+                _repeating_cue_sequence(motif=[_GRATING_CODE, _CHECKER_CODE, _GRATING_CODE], repeats=2), dtype=np.uint8
+            )
         ],
         distance_breakpoints=[],
     )
@@ -641,8 +651,8 @@ def test_decompose_reports_trial_types_in_the_configuration_declaration_order() 
     """Verifies that the decoded trial type indices count against the experiment configuration's declaration order.
 
     The trial-sequence processor resolves each decoded trial's corridor geometry by that same order, so indices counted
-    against an alphabetically sorted trial list would walk the wrong corridor for every trial of a session whose
-    trial types happen not to be declared alphabetically.
+    against an alphabetically sorted trial list would walk the wrong corridor for every trial of a session whose trial
+    types happen not to be declared alphabetically.
     """
     reward_motif = [_GRATING_CODE, _CHECKER_CODE]
     control_motif = [_CHECKER_CODE, _GRATING_CODE, _GRATING_CODE]
@@ -668,7 +678,9 @@ def test_decompose_accumulates_trial_distances_at_the_precision_of_the_declared_
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
-        task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_length_cm=30.1),
+        task_template=_build_task_template(
+            trial_cue_sequences={"reward_trial": ["grating", "checker"]}, cue_length_cm=30.1
+        ),
         cue_sequences=[np.array(_repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE], 2), dtype=np.uint8)],
         distance_breakpoints=[],
     )
@@ -711,7 +723,7 @@ def test_decompose_drops_the_trial_starting_at_a_distance_breakpoint() -> None:
 
 
 def test_decompose_reopens_the_accumulator_behind_the_cue_offset_after_a_corridor_swap() -> None:
-    """Verifies that the trials following a corridor swap stay in the travelled-distance frame under a cue offset.
+    """Verifies that the trials following a corridor swap stay in the traveled-distance frame under a cue offset.
 
     The animal re-enters the regenerated corridor already ``cue_offset_cm`` into its first cue, exactly as it entered
     the first corridor, so every boundary after the swap completes that much before the corridor position it names.
@@ -728,14 +740,14 @@ def test_decompose_reopens_the_accumulator_behind_the_cue_offset_after_a_corrido
 
     assert trial_types.tolist() == [0, 0, 0, 0]
     # Trial 1 completes after 50 cm because the first corridor is entered 10 cm in, trial 2 is cut at the 90 cm swap,
-    # and the second corridor is entered 10 cm in as well, so its two trials complete from 80 cm travelled onwards.
+    # and the second corridor is entered 10 cm in as well, so its two trials complete from 80 cm traveled onwards.
     assert trial_distances.tolist() == [50.0, 90.0, 140.0, 200.0]
 
 
-def test_every_distance_stream_shares_the_travelled_frame_under_a_cue_offset() -> None:
+def test_every_distance_stream_shares_the_traveled_frame_under_a_cue_offset() -> None:
     """Verifies the four distance streams agree with each other when the animal starts partway into its first cue.
 
-    The assembled dataset matches all four against one axis interpolated from the encoder's travelled distance, so a
+    The assembled dataset matches all four against one axis interpolated from the encoder's traveled distance, so a
     stream carrying corridor positions instead would place its column a fixed offset away from the cue column on the
     very same rows.
     """
@@ -743,7 +755,7 @@ def test_every_distance_stream_shares_the_travelled_frame_under_a_cue_offset() -
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
         task_template=_build_task_template({"reward_trial": ["grating", "checker"]}, cue_offset_cm=10.0),
         trial_types=np.array([0, 0, 0], dtype=np.int32),
-        # Trial 0 is entered 10 cm in, so it completes after 50 cm travelled; each later trial takes its full 60.
+        # Trial 0 is entered 10 cm in, so it completes after 50 cm traveled. Each later trial takes its full 60.
         trial_distances=np.array([50.0, 110.0, 170.0], dtype=np.float64),
     )
 
@@ -752,16 +764,16 @@ def test_every_distance_stream_shares_the_travelled_frame_under_a_cue_offset() -
     assert [cue_distances[index] for index in (0, 2, 4)] == trial_starts.tolist()
     assert cues.tolist() == [_GRATING_CODE, _CHECKER_CODE] * 3
 
-    # The trigger zone sits 30 cm into the corridor, which the first trial reaches after travelling only 20.
+    # The trigger zone sits 30 cm into the corridor, which the first trial reaches after traveling only 20.
     assert trigger_starts.tolist() == [20.0, 80.0, 140.0]
     assert trigger_ends.tolist() == [35.0, 95.0, 155.0]
 
 
-def test_decomposition_reports_trial_ends_as_distances_travelled() -> None:
+def test_decomposition_reports_trial_ends_as_distances_traveled() -> None:
     """Verifies the decomposition reports how far the animal ran rather than how long the corridor was.
 
     The trial ends it returns become the coordinate the assembled dataset interpolates the trial columns against, and
-    that coordinate is the encoder's travelled distance, so a corridor length would place every boundary too late.
+    that coordinate is the encoder's traveled distance, so a corridor length would place every boundary too late.
     """
     trial_types, trial_distances = _decompose_multiple_cue_sequences_into_trials(
         experiment_configuration=_build_experiment_configuration(["reward_trial"]),
@@ -787,7 +799,7 @@ def test_process_trial_sequence_resolves_cues_and_trigger_zones_of_truncated_tri
     assert cues.tolist() == [1, 2, 1, 1, 2, 1, 2]
     assert distances.tolist() == [0.0, 20.0, 50.0, 80.0, 100.0, 130.0, 160.0]
     # Trial 0 and trial 2 are entered 10 cm into their first cue, so each reaches the corridor position its trigger
-    # zone is declared at after travelling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the
+    # zone is declared at after traveling 10 cm less. Trial 2 follows trial 1's truncation, which re-enters the
     # corridor, so the same offset applies to it. Trial 1 is cut short before its zone begins and contributes no
     # entry, and trial 3 follows a complete trial, so its zone sits at the full 30 cm.
     assert trigger_starts.tolist() == [20.0, 100.0, 180.0]
@@ -825,7 +837,7 @@ def test_decompose_cue_sequence_kernel_prefers_the_longest_matching_motif() -> N
         motif_starts=np.array([0, 3], dtype=np.int32),
         motif_lengths=np.array([3, 2], dtype=np.int32),
         motif_indices=np.array([0, 1], dtype=np.int32),
-        max_trials=5,
+        maximum_trials=5,
     )
 
     assert trial_count == 2
@@ -841,7 +853,7 @@ def test_decompose_cue_sequence_kernel_reports_an_unmatched_position() -> None:
         motif_starts=np.array([0, 3], dtype=np.int32),
         motif_lengths=np.array([3, 2], dtype=np.int32),
         motif_indices=np.array([0, 1], dtype=np.int32),
-        max_trials=5,
+        maximum_trials=5,
     )
 
     assert trial_count == -1
@@ -875,7 +887,9 @@ def _write_experiment_runtime_feathers(session: SessionData, *, guidance: bool) 
         )
 
     directory = session.processed_data.runtime_data_path
-    parse_runtime(decoded_messages=_decoded_messages(sorted(messages)), output_directory=directory, session=session)
+    parse_runtime(
+        decoded_messages=_decoded_messages(messages=sorted(messages)), output_directory=directory, session=session
+    )
     return directory
 
 
@@ -890,7 +904,7 @@ def _write_encoder_feather(
     Args:
         session: The session whose processed microcontroller directory receives the feather.
         times_us: The timestamps of the recorded wheel-distance samples.
-        distances_cm: The cumulative distance the animal had travelled at each of those timestamps.
+        distances_cm: The cumulative distance the animal had traveled at each of those timestamps.
 
     Returns:
         The path to the directory the encoder feather was written into.
@@ -910,7 +924,7 @@ def test_assemble_runtime_dataset_aligns_every_column_to_the_reference_time(
     experiment_session: SessionData, experiment_configuration: MesoscopeExperimentConfiguration
 ) -> None:
     """Verifies the trial, cue, trigger zone, state, and guidance columns the assembler aligns."""
-    runtime_directory = _write_experiment_runtime_feathers(experiment_session, guidance=True)
+    runtime_directory = _write_experiment_runtime_feathers(session=experiment_session, guidance=True)
     microcontroller_directory = _write_encoder_feather(experiment_session)
 
     dataset = assemble_runtime_dataset(
@@ -934,7 +948,7 @@ def test_assemble_runtime_dataset_omits_the_guidance_columns_when_their_feathers
     experiment_session: SessionData, experiment_configuration: MesoscopeExperimentConfiguration
 ) -> None:
     """Verifies that a session without recorded guidance yields a dataset carrying the required columns alone."""
-    runtime_directory = _write_experiment_runtime_feathers(experiment_session, guidance=False)
+    runtime_directory = _write_experiment_runtime_feathers(session=experiment_session, guidance=False)
     microcontroller_directory = _write_encoder_feather(experiment_session)
 
     dataset = assemble_runtime_dataset(
@@ -953,9 +967,9 @@ def test_assemble_runtime_dataset_labels_a_mixed_session_against_the_reference_d
 ) -> None:
     """Verifies that the trial type of every sample is looked up in the distance frame the trial feather is keyed by.
 
-    The trial feather indexes its trial types by travelled distance while the state feathers are indexed by time, so
-    matching the trial types against the reference time instead labels every sample with whichever trial happens to
-    sit at that many centimetres. A session running a single trial type cannot tell the two apart.
+    The trial feather indexes its trial types by traveled distance while the state feathers are indexed by time.
+    Matching the trial types against the reference time instead labels every sample with whichever trial happens to
+    sit at that many centimeters. A session running a single trial type cannot tell the two apart.
     """
     configuration = _build_experiment_configuration(["reward_trial", "control_trial"])
     _write_configurations(
@@ -965,11 +979,13 @@ def test_assemble_runtime_dataset_labels_a_mixed_session_against_the_reference_d
             {"reward_trial": ["grating", "checker"], "control_trial": ["checker", "grating", "grating"]}
         ),
     )
-    corridor = _repeating_cue_sequence([_GRATING_CODE, _CHECKER_CODE, _CHECKER_CODE, _GRATING_CODE, _GRATING_CODE], 101)
+    corridor = _repeating_cue_sequence(
+        motif=[_GRATING_CODE, _CHECKER_CODE, _CHECKER_CODE, _GRATING_CODE, _GRATING_CODE], repeats=101
+    )
     runtime_directory = experiment_session.processed_data.runtime_data_path
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 2)),
                 (200, _state_payload(_RUNTIME_STATE_CODE, 1)),
                 (300, _cue_payload(corridor)),
@@ -981,7 +997,7 @@ def test_assemble_runtime_dataset_labels_a_mixed_session_against_the_reference_d
     # The animal covers 10 cm over the reference window, so every sample sits inside the session's first trial, which
     # is the reward trial. The timestamps themselves run to 1000, which is many trials along that same distance axis.
     microcontroller_directory = _write_encoder_feather(
-        experiment_session, times_us=(0, 500, 1000), distances_cm=(0.0, 5.0, 10.0)
+        session=experiment_session, times_us=(0, 500, 1000), distances_cm=(0.0, 5.0, 10.0)
     )
 
     dataset = assemble_runtime_dataset(
@@ -1031,7 +1047,7 @@ def test_clip_to_session_bounds_trims_the_setup_and_teardown_samples(
     directory = tmp_path.joinpath("runtime_data")
     parse_runtime(
         decoded_messages=_decoded_messages(
-            [
+            messages=[
                 (100, _state_payload(_SYSTEM_STATE_CODE, 0)),
                 (300, _state_payload(_SYSTEM_STATE_CODE, 2)),
                 (400, _state_payload(_RUNTIME_STATE_CODE, 1)),
@@ -1060,7 +1076,7 @@ def test_clip_to_session_bounds_retains_every_sample_without_state_transitions(
     """Verifies that a session that never left idle and recorded no runtime state keeps its full sample range."""
     directory = tmp_path.joinpath("runtime_data")
     parse_runtime(
-        decoded_messages=_decoded_messages([(100, _state_payload(_SYSTEM_STATE_CODE, 0))]),
+        decoded_messages=_decoded_messages(messages=[(100, _state_payload(_SYSTEM_STATE_CODE, 0))]),
         output_directory=directory,
         session=training_session,
     )

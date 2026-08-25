@@ -107,7 +107,7 @@ class SubmissionLedger(YamlConfig):
         return next((batch for batch in self.batches if batch.batch_id == batch_id), None)
 
 
-def ledger_path() -> Path:
+def _ledger_path() -> Path:
     """Returns the path to the submission ledger.
 
     This is the single source of the ledger's location, so every reader and writer derives the same path.
@@ -124,7 +124,7 @@ def read_ledger() -> SubmissionLedger:
     Returns:
         The recorded ledger.
     """
-    path = ledger_path()
+    path = _ledger_path()
     if not path.is_file():
         return SubmissionLedger()
     return SubmissionLedger.from_yaml(file_path=path)
@@ -166,7 +166,7 @@ def batch_is_settled(batch: SubmissionBatch, statuses: dict[str, JobStatus]) -> 
     )
 
 
-def retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
+def _retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
     """Drops every batch whose allocations have all reached a state they never leave.
 
     Notes:
@@ -249,7 +249,7 @@ def _save_ledger(ledger: SubmissionLedger) -> None:
     Args:
         ledger: The ledger to write.
     """
-    path = ledger_path()
+    path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     ledger.to_yaml(file_path=path)
 
@@ -263,6 +263,6 @@ def _ledger_lock() -> FileLock:
     Raises:
         Timeout: If the lock cannot be acquired within the timeout period.
     """
-    path = ledger_path()
+    path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path.with_suffix(path.suffix + ".lock"))).acquire(timeout=_LOCK_TIMEOUT_SECONDS)  # type: ignore[return-value]

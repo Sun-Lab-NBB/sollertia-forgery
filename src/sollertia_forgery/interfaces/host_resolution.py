@@ -57,9 +57,8 @@ def resolve_readable_project(project_path: str, host: str) -> Path:
     Notes:
         A remote project is mirrored onto this machine and read from the mirror, which is what lets one reader serve
         both hosts. The mirror keeps the project directory's name, so every artifact keeps the filename its writer
-        derived from the project. Mirroring leaves the server's artifacts as they stand, so regeneration stays a
-        deliberate act performed by ``generate_project_manifest_tool``, ``generate_dataset_state_tool``, and a
-        batch's closure.
+        derived from the project. Mirroring leaves the server's artifacts as they stand, so a read never regenerates
+        them.
 
     Args:
         project_path: The path to the project's root directory. A local read opens this path as given. A remote read

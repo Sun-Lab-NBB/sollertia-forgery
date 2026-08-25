@@ -151,9 +151,13 @@ def test_multi_recording_genotype_delta() -> None:
 )
 def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
     """Verifies each built single-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
-    built = _neutralize_single(dataclasses.asdict(_build_single_recording_configuration(genotype=genotype)))
+    built = _neutralize_single(
+        configuration=dataclasses.asdict(_build_single_recording_configuration(genotype=genotype))
+    )
     reference = _neutralize_single(
-        dataclasses.asdict(SingleRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name))
+        configuration=dataclasses.asdict(
+            SingleRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name)
+        )
     )
     assert built == reference
 
@@ -164,9 +168,11 @@ def test_single_recording_matches_reference_yaml(genotype: str, fixture_name: st
 )
 def test_multi_recording_matches_reference_yaml(genotype: str, fixture_name: str) -> None:
     """Verifies each built multi-recording configuration equals the reference mesoscope-vr YAML field-for-field."""
-    built = _neutralize_multi(dataclasses.asdict(_build_multi_recording_configuration(genotype=genotype)))
+    built = _neutralize_multi(configuration=dataclasses.asdict(_build_multi_recording_configuration(genotype=genotype)))
     reference = _neutralize_multi(
-        dataclasses.asdict(MultiRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name))
+        configuration=dataclasses.asdict(
+            MultiRecordingConfiguration.from_yaml(file_path=_FIXTURES_DIRECTORY / fixture_name)
+        )
     )
     assert built == reference
 
@@ -176,7 +182,7 @@ def test_resolve_single_recording_configuration_reads_genotype(
 ) -> None:
     """Verifies the single-recording resolver selects the configuration from the session's genotype."""
     configuration = resolve_single_recording_configuration(
-        stubbed_session(genotype="GCaMP8s x CamKIICre", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
+        session=stubbed_session(genotype="GCaMP8s x CamKIICre", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
     )
     assert configuration.main.tau == pytest.approx(0.7)
 
@@ -187,7 +193,7 @@ def test_resolve_single_recording_configuration_missing_surgery_errors(
     """Verifies the single-recording resolver raises when the session has no surgery metadata to read the genotype."""
     session = stubbed_session(genotype="GP5.17", session_type=SessionTypes.MESOSCOPE_EXPERIMENT, surgery_present=False)
     with pytest.raises(FileNotFoundError, match="Unable to resolve the cindra configuration"):
-        resolve_single_recording_configuration(session)
+        resolve_single_recording_configuration(session=session)
 
 
 def test_resolve_multi_recording_configuration_experiment_reads_genotype(
@@ -195,7 +201,7 @@ def test_resolve_multi_recording_configuration_experiment_reads_genotype(
 ) -> None:
     """Verifies the multi-recording resolver returns a genotype-tuned configuration for an experiment session."""
     configuration = resolve_multi_recording_configuration(
-        stubbed_session(genotype="GP5.17", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
+        session=stubbed_session(genotype="GP5.17", session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
     )
     assert configuration is not None
     assert configuration.roi_selection.probability_threshold == pytest.approx(0.85)
@@ -208,12 +214,15 @@ def test_resolve_multi_recording_configuration_training_returns_none(
     """Verifies the multi-recording resolver returns None for a training session, since Mesoscope-VR tracks no cells
     for it.
     """
-    assert resolve_multi_recording_configuration(stubbed_session(genotype="GP5.17", session_type=session_type)) is None
+    assert (
+        resolve_multi_recording_configuration(session=stubbed_session(genotype="GP5.17", session_type=session_type))
+        is None
+    )
 
 
 def test_locate_two_photon_data_resolves_the_raw_imaging_directory(experiment_session: SessionData) -> None:
     """Verifies the two-photon input locator points at the session's raw mesoscope_data directory."""
-    located = locate_two_photon_data(experiment_session)
+    located = locate_two_photon_data(session=experiment_session)
     assert located.name == "mesoscope_data"
     assert located.name == MesoscopeDirectories.MESOSCOPE_DATA
     assert located.parent == experiment_session.raw_data_path
@@ -232,15 +241,15 @@ def test_assert_indicator_coverage_names_uncovered_indicators(monkeypatch: pytes
 
 def test_registry_dispatches_by_member_and_by_value() -> None:
     """Verifies the cindra configuration registry dispatches to the Mesoscope-VR resolvers by member and by value."""
-    assert resolve_single_recording_configuration_resolver(AcquisitionSystems.MESOSCOPE_VR) is (
+    assert resolve_single_recording_configuration_resolver(system=AcquisitionSystems.MESOSCOPE_VR) is (
         resolve_single_recording_configuration
     )
-    assert resolve_multi_recording_configuration_resolver("mesoscope") is resolve_multi_recording_configuration
+    assert resolve_multi_recording_configuration_resolver(system="mesoscope") is resolve_multi_recording_configuration
 
 
 def test_registry_rejects_unknown_system() -> None:
     """Verifies resolving a resolver for an unknown acquisition system raises."""
     with pytest.raises(ValueError, match="supported AcquisitionSystems"):
-        resolve_single_recording_configuration_resolver("nonexistent-system")
+        resolve_single_recording_configuration_resolver(system="nonexistent-system")
     with pytest.raises(ValueError, match="supported AcquisitionSystems"):
-        resolve_multi_recording_configuration_resolver("nonexistent-system")
+        resolve_multi_recording_configuration_resolver(system="nonexistent-system")

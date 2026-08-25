@@ -15,26 +15,21 @@ _NATURAL_RANK_PREFIX: str = "__natural_rank_"
 """The prefix of the temporary rank columns a natural sort adds and drops. Prefixed so a column of the sorted frame
 cannot collide with one."""
 
-DELAY_TIMER: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
+_DELAY_TIMER: PrecisionTimer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
 """The shared timer ``delay_terminal`` uses to delay the runtime's execution."""
 
 
 def delay_terminal() -> None:
-    """Delays the runtime execution for 100 milliseconds using the shared ``DELAY_TIMER``, so consecutive terminal
+    """Delays the runtime execution for 100 milliseconds using the shared ``_DELAY_TIMER``, so consecutive terminal
     printouts stay visually separated.
     """
-    DELAY_TIMER.delay(delay=100, allow_sleep=True, block=False)
+    _DELAY_TIMER.delay(delay=100, allow_sleep=True, block=False)
 
 
 def natural_sort(frame: pl.DataFrame, by: Sequence[str], *, nulls_last: bool = False) -> pl.DataFrame:
     """Orders a frame on the named string columns the way a reader reads them, so 2 precedes 10.
 
     Notes:
-        Many of the identifiers this library sorts on embed a number in text, which covers animal identifiers, camera
-        source identifiers, plane specifiers, and operator-chosen dataset names. Ordering those as plain text puts 10
-        ahead of 2, so a listing disagrees with the order the same identifiers are read and written in everywhere
-        else.
-
         Each column is ranked over its distinct values alone and the frame is then ordered on the resulting integers.
         A column holds far fewer distinct identifiers than rows, so the text comparison runs over the small set and the
         row ordering stays a native integer sort.
@@ -65,10 +60,8 @@ def multi_recording_dataset_name(animal_id: str, dataset_name: str) -> str:
     dataset.
 
     Notes:
-        The forging pipeline prepends the animal identifier to the forged dataset name so an animal's multi-recording
-        outputs stay separate when a dataset spans several animals. That qualification is this library's, while the
-        directory the name resolves to is cindra's, so a caller that needs the directory passes this name to cindra's
-        own ``resolve_dataset_path`` rather than building the path here.
+        Qualifying the dataset name with the animal identifier keeps an animal's multi-recording outputs separate
+        when a dataset spans several animals.
 
     Args:
         animal_id: The identifier of the animal whose recordings are tracked together.

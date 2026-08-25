@@ -162,8 +162,7 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
     Reads each present camera's timestamp feather from the processed video-data directory, computes its mean frame rate
     as the recorded frame count divided by the timestamp span, and returns the timestamps of the camera with the lowest
     mean rate verbatim. The slowest camera is chosen because every other data source can be interpolated onto its
-    coarser grid without inventing samples between its frames. Training sessions carry no fluorescence clock, so this
-    camera clock stands in as the reference the behavior and video sub-datasets align to.
+    coarser grid without inventing samples between its frames.
 
     Args:
         video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.

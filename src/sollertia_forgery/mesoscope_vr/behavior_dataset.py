@@ -57,8 +57,7 @@ def assemble_behavior_dataset(
         raw_data_path: The path to the session's raw data directory containing the hardware state configuration.
         reference_time: The reference time vector to which to align the assembled dataset.
         drop_time_columns: Determines whether to drop the ``time_us`` and ``elapsed_minutes`` columns from the
-            assembled dataset before returning it to the caller. This option should be enabled if the time columns are
-            resolved as part of a different dataset that is later combined with the behavior dataset.
+            assembled dataset before returning it to the caller.
 
     Returns:
         A DataFrame aligned to the reference time vector with the columns ``time_us``, ``elapsed_minutes``,

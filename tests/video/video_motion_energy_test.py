@@ -17,7 +17,10 @@ from ataraxis_video_system import CAMERA_MANIFEST_FILENAME, CameraManifest, Came
 from sollertia_shared_assets import ProcessingTrackers
 from ataraxis_data_structures import ProcessingStatus, ProcessingTracker, limit_worker_threads
 
-from sollertia_forgery.video import ENERGY_JOB_NAME, MotionEnergyColumn, run_video_processing_pipeline
+from sollertia_forgery.video import (
+    ENERGY_JOB_NAME,
+    run_video_processing_pipeline,
+)
 import sollertia_forgery.video.pipeline as pipeline_module
 from sollertia_forgery.video.motion_energy import (
     _SPATIAL_BIN_SIZE,
@@ -27,6 +30,7 @@ from sollertia_forgery.video.motion_energy import (
     _join_chunks,
     _plan_chunks,
     _energy_chunk,
+    _MotionEnergyColumn,
     resolve_camera_video,
     compute_camera_motion_energy,
 )
@@ -125,8 +129,8 @@ def _record_cameras(session: SimpleNamespace, names: tuple[str, ...], frames: ND
 @pytest.fixture
 def static_video(tmp_path: Path) -> Path:
     """Builds a recording whose every frame is identical."""
-    rng = np.random.default_rng(seed=17)
-    single = rng.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
+    generator = np.random.default_rng(seed=17)
+    single = generator.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
     return _write_video(
         path=tmp_path.joinpath("static.mp4"), frames=np.repeat(a=single[None], repeats=_FIXTURE_FRAME_COUNT, axis=0)
     )
@@ -161,8 +165,8 @@ def test_binning_matches_exact_block_mean() -> None:
     interpolation is an exact block mean only when both dimensions divide evenly by the bin size. Both real cameras'
     dimensions fail that, so the interpolation blends across block boundaries.
     """
-    rng = np.random.default_rng(seed=3)
-    frame = rng.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
+    generator = np.random.default_rng(seed=3)
+    frame = generator.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
 
     binned = _bin_frame(frame=frame)
 
@@ -181,7 +185,7 @@ def test_binning_matches_exact_block_mean() -> None:
 
 def test_binning_crops_partial_blocks(static_video: Path) -> None:
     """Verifies frame dimensions that are not multiples of the bin size crop cleanly to whole blocks."""
-    binned = _decoded_frames(static_video)[0]
+    binned = _decoded_frames(path=static_video)[0]
     assert binned.shape == (_FRAME_HEIGHT // _SPATIAL_BIN_SIZE, _FRAME_WIDTH // _SPATIAL_BIN_SIZE)
 
 
@@ -215,8 +219,8 @@ def test_first_frame_is_the_only_missing_energy(tmp_path: Path, moving_video: Pa
     compute_camera_motion_energy(video_path=moving_video, output_path=output_path, workers=1)
 
     frame = pl.read_ipc(output_path)
-    energy = frame[MotionEnergyColumn.MOTION_ENERGY].to_numpy()
-    luminance = frame[MotionEnergyColumn.FRAME_LUMINANCE].to_numpy()
+    energy = frame[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()
+    luminance = frame[_MotionEnergyColumn.FRAME_LUMINANCE].to_numpy()
 
     assert np.isnan(energy[0])
     assert not np.isnan(energy[1:]).any()
@@ -228,7 +232,7 @@ def test_static_recording_yields_near_zero_energy(tmp_path: Path, static_video: 
     output_path = tmp_path.joinpath("static_energy.feather")
     compute_camera_motion_energy(video_path=static_video, output_path=output_path, workers=1)
 
-    energy = pl.read_ipc(output_path)[MotionEnergyColumn.MOTION_ENERGY].to_numpy()
+    energy = pl.read_ipc(output_path)[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()
     assert np.nanmax(energy) < 1.0
 
 
@@ -236,7 +240,7 @@ def test_energy_matches_the_decoded_frame_difference(tmp_path: Path, moving_vide
     """Verifies the written energy is the mean absolute difference of the frames the decoder actually produced."""
     output_path = tmp_path.joinpath("moving_energy.feather")
     compute_camera_motion_energy(video_path=moving_video, output_path=output_path, workers=1)
-    energy = pl.read_ipc(output_path)[MotionEnergyColumn.MOTION_ENERGY].to_numpy()
+    energy = pl.read_ipc(output_path)[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()
 
     frames = _decoded_frames(moving_video)
     expected = [float(np.mean(np.abs(current - previous))) for previous, current in pairwise(frames)]
@@ -255,8 +259,8 @@ def test_luminance_tracks_a_global_brightness_step(tmp_path: Path) -> None:
     compute_camera_motion_energy(video_path=video_path, output_path=output_path, workers=1)
 
     frame = pl.read_ipc(output_path)
-    energy = frame[MotionEnergyColumn.MOTION_ENERGY].to_numpy()
-    luminance = frame[MotionEnergyColumn.FRAME_LUMINANCE].to_numpy()
+    energy = frame[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()
+    luminance = frame[_MotionEnergyColumn.FRAME_LUMINANCE].to_numpy()
 
     assert luminance[:step_index].mean() < luminance[step_index:].mean()
     # The step frame is where the whole field changed at once, so it carries the largest difference in the recording.
@@ -270,8 +274,8 @@ def test_output_schema_is_positional(tmp_path: Path, moving_video: Path) -> None
 
     frame = pl.read_ipc(output_path)
     assert dict(frame.schema) == {
-        MotionEnergyColumn.MOTION_ENERGY: pl.Float32,
-        MotionEnergyColumn.FRAME_LUMINANCE: pl.Float32,
+        _MotionEnergyColumn.MOTION_ENERGY: pl.Float32,
+        _MotionEnergyColumn.FRAME_LUMINANCE: pl.Float32,
     }
     # The feather is a positional table, so it holds exactly one row per decoded frame.
     assert len(frame) == len(_decoded_frames(moving_video))
@@ -426,6 +430,7 @@ def test_pipeline_universe_carries_an_energy_job_per_camera(tmp_path: Path, patc
     assert set(tracker.snapshot()) == set(energy_jobs)
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies the thread caps are set inside the block and the prior environment is restored on exit.
 
@@ -440,6 +445,7 @@ def test_limited_worker_threads_cap_and_restore_the_environment(monkeypatch: pyt
     assert os.environ[sentinel] == "13"
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_limited_worker_threads_remove_variables_they_introduced(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies a variable absent before the block is absent again after it, rather than left set to one."""
     sentinel = _THREAD_LIMIT_VARIABLES[0]
@@ -472,6 +478,7 @@ def chunked_video(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return _write_video(path=tmp_path_factory.mktemp("chunked").joinpath("chunked.mp4"), frames=frames)
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_own_pool_multi_chunk_result_matches_the_sequential_pass(tmp_path: Path, chunked_video: Path) -> None:
     """Verifies a recording split across a pool the analysis owns yields exactly the sequential result."""
     output_path = tmp_path.joinpath("chunked_energy.feather")
@@ -482,13 +489,14 @@ def test_own_pool_multi_chunk_result_matches_the_sequential_pass(tmp_path: Path,
         video_path=str(chunked_video), start_frame=0, frame_count=_MINIMUM_CHUNK_FRAMES * 2
     )
 
-    energy = written[MotionEnergyColumn.MOTION_ENERGY].to_numpy()
+    energy = written[_MotionEnergyColumn.MOTION_ENERGY].to_numpy()
     assert np.array_equal(np.isnan(energy), np.isnan(sequential_energy))
     finite = ~np.isnan(sequential_energy)
     assert np.array_equal(energy[finite], sequential_energy[finite])
-    assert np.array_equal(written[MotionEnergyColumn.FRAME_LUMINANCE].to_numpy(), sequential_luminance)
+    assert np.array_equal(written[_MotionEnergyColumn.FRAME_LUMINANCE].to_numpy(), sequential_luminance)
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_shared_pool_decodes_the_chunks_and_reports_progress(tmp_path: Path, chunked_video: Path) -> None:
     """Verifies a caller-owned pool is used as-is, and the per-chunk progress report leaves the result unchanged."""
     own_path = tmp_path.joinpath("own_energy.feather")
@@ -586,8 +594,8 @@ def test_chunk_decode_stops_at_the_end_of_the_recording(moving_video: Path) -> N
 
 def test_binning_takes_one_plane_of_a_multi_plane_frame() -> None:
     """Verifies a decoder falling back to a three-channel expansion is reduced on a single plane."""
-    rng = np.random.default_rng(seed=11)
-    plane = rng.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
+    generator = np.random.default_rng(seed=11)
+    plane = generator.integers(low=0, high=256, size=(_FRAME_HEIGHT, _FRAME_WIDTH), dtype=np.uint8)
     expanded = np.stack([np.zeros_like(plane), plane, np.full_like(plane, fill_value=255)], axis=2)
 
     assert np.array_equal(_bin_frame(frame=expanded), _bin_frame(frame=plane))

@@ -248,7 +248,7 @@ def read_project_plan_tool(
     window = resolve_page(
         total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response

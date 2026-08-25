@@ -52,10 +52,6 @@ _SESSION_TRACKER_LOCATIONS: dict[ProcessingPipelines, Callable[[SessionData], Pa
 """Maps each per-session pipeline to the accessor that resolves its processing tracker from a loaded session.
 
 Notes:
-    The reporting layer that snapshots every pipeline's state and the dispatch table that runs one pipeline's jobs
-    both read this mapping, so the two agree on where a pipeline records its jobs. A pipeline writes its own tracker
-    from the output directory it owns, so this mapping serves the consumers that read a tracker across pipelines.
-
     The checksum tracker sits under the acquired data, since that pipeline verifies the acquired data in place. Every
     other pipeline records beside the output it produces.
 """

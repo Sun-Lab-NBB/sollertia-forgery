@@ -37,7 +37,7 @@ Notes:
     than to describe how long a stage takes.
 """
 
-BATCH_DIRECTORY_NAME: str = "processing_batches"
+_BATCH_DIRECTORY_NAME: str = "processing_batches"
 """The directory under the server's data root that holds one subdirectory per submitted batch."""
 
 _MEGABYTES_PER_GIGABYTE: int = 1024
@@ -57,10 +57,10 @@ def remote_batch_directory(server: Server, batch_id: str) -> Path:
     Returns:
         The path to the batch's directory on the server.
     """
-    return server.root.joinpath(BATCH_DIRECTORY_NAME, batch_id)
+    return server.root.joinpath(_BATCH_DIRECTORY_NAME, batch_id)
 
 
-def prepare_remote_batch(
+def _prepare_remote_batch(
     server: Server, pipeline: str, unit_paths: Sequence[str], options: dict[str, Any] | None = None
 ) -> BatchDocument:
     """Resolves a pipeline's submittable jobs for the named units on the remote compute server.
@@ -376,7 +376,7 @@ def _resolve_slurm_job_name(job: GenericPendingJob, index: int) -> str:
         The allocation name.
     """
     readable = "-".join(part for part in (job.name or job.unit_path.name, job.job_name, job.specifier) if part)
-    return f"{index:04d}-{_SLURM_NAME_SANITIZER.sub('_', readable)}"
+    return f"{index:04d}-{_SLURM_NAME_SANITIZER.sub(repl='_', string=readable)}"
 
 
 def _regenerate_remote_state(server: Server, project_path: Path, datasets: Sequence[Path]) -> None:

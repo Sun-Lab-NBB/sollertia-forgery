@@ -248,21 +248,18 @@ def session_factory(
 ) -> Callable[..., SessionData]:
     """Returns a builder that creates one acquired session through the shared hierarchy's own creator.
 
-    The builder stages the experiment configuration and the VR task template where the creator sources them from,
-    creates the session, writes the descriptor its type registers alongside the hardware state snapshot, and returns
-    the session reloaded from disk so both its raw and processed paths resolve absolutely.
+    The builder stages the experiment configuration and the VR task template where the creator sources them from. It
+    then creates the session, writes the descriptor its type registers alongside the hardware state snapshot, and
+    returns the session reloaded from disk so both its raw and processed paths resolve absolutely.
 
-    Args:
-        project: The created project the session is placed under.
-        isolated_working_directory: The isolated platform state, requested so the task templates directory the
-            builder registers is written under this test's own temporary directory rather than onto the host.
-        hardware_state: The hardware state snapshot written into the session's raw data.
-        experiment_configuration: The experiment configuration staged for the creator to copy into the session.
-        task_template: The VR task template staged for the creator to copy into the session.
+    Args: project: The created project the session is placed under. isolated_working_directory: The isolated platform
+    state, requested so the task templates directory the builder registers is written under this test's own temporary
+    directory rather than onto the host. hardware_state: The hardware state snapshot written into the session's raw
+    data. experiment_configuration: The experiment configuration staged for the creator to copy into the session.
+    task_template: The VR task template staged for the creator to copy into the session.
 
-    Returns:
-        A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and an
-        optional experiment name, and returning the loaded session.
+    Returns: A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and
+    an optional experiment name, and returning the loaded session.
     """
 
     def _create(
@@ -282,9 +279,9 @@ def session_factory(
         if declared_experiment is None and SessionTypes(session_type) in SESSION_TYPES_USING_VR_TASK:
             declared_experiment = "unconfigured_experiment"
 
-        # The shared hierarchy now sources both snapshots itself, copying the experiment configuration out of the
-        # project's configuration directory and the task template out of the host's templates directory, so both have
-        # to be staged before the session is created rather than written into raw data afterwards.
+        # The shared hierarchy sources both snapshots itself, copying the experiment configuration out of the
+        # project's configuration directory and the task template out of the host's templates directory. Both are
+        # therefore staged before the session is created.
         if declared_experiment is not None:
             project.create()
             experiment_configuration.to_yaml(
@@ -322,7 +319,7 @@ def session_factory(
 
         hardware_state.to_yaml(file_path=created.raw_data.hardware_state_path)
 
-        # A caller that named no experiment wants a session carrying no experiment snapshots, which the creator now
+        # A caller that named no experiment wants a session carrying no experiment snapshots, which the creator
         # always writes for a corridor-task type. Removing them here restores that shape, so a test can still build a
         # session whose experiment configuration or VR task template is absent.
         if experiment_name is None:
@@ -541,9 +538,15 @@ def write_grayscale_video() -> Callable[..., Path]:
         A callable taking the output path, the frame stack, and the container frame rate, and returning the path.
     """
 
-    def _write(path: Path, frames: NDArray[np.uint8], *, fps: int = 30) -> Path:
+    def _write(path: Path, frames: NDArray[np.uint8], *, frames_per_second: int = 30) -> Path:
         height, width = frames.shape[1:]
-        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height), isColor=True)
+        writer = cv2.VideoWriter(
+            filename=str(path),
+            fourcc=cv2.VideoWriter_fourcc(*"mp4v"),
+            fps=frames_per_second,
+            frameSize=(width, height),
+            isColor=True,
+        )
         for frame in frames:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
         writer.release()
@@ -640,7 +643,7 @@ class StubSSHTransport:
         job_statuses: The accounting state reported for each allocation identifier.
         blocked_job_ids: The allocation identifiers the queue reports as permanently blocked.
         connections: The host and user pairs the transport was asked to authenticate.
-        closed: Whether the connection was closed.
+        closed: Determines whether the connection was closed.
     """
 
     def __init__(self, remote_root: Path) -> None:
@@ -663,9 +666,8 @@ class StubSSHTransport:
         Lets a test tell the order of two operations apart, since a command that rewrites what a later step reads is
         indistinguishable from one that does not when the stub only records the invocation.
 
-        Args:
-            prefix: The leading text of the invocations this effect answers.
-            effect: The callable standing in for what the real command changes on the server.
+        Args: prefix: The leading text of the invocations this effect answers. effect: The callable standing in for what
+        the real command changes on the server.
         """
         self._side_effects[prefix] = effect
 
@@ -747,11 +749,9 @@ class StubSSHTransport:
         name order, because the real command emits directory order and a stub that sorted would let an implementation
         that never sorts pass.
 
-        Args:
-            command: The search invocation the server issued.
+        Args: command: The search invocation the server issued.
 
-        Returns:
-            A tuple of the NUL-separated records, the standard error, and the exit code.
+        Returns: A tuple of the NUL-separated records, the standard error, and the exit code.
         """
         tokens = shlex.split(command)
         start = Path(tokens[2])
@@ -865,9 +865,9 @@ class _StubSFTPClient:
             for entry in sorted(self._transport.local_path(path).iterdir())
         ]
 
-    def open(self, path: str, mode: str = "r") -> Any:
+    def open(self, filename: str, mode: str = "r") -> Any:
         """Opens one server-side file, creating its parent directories for a write."""
-        resolved = self._transport.local_path(path)
+        resolved = self._transport.local_path(filename)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return resolved.open(mode)
 

@@ -31,7 +31,7 @@ reports every total while listing this many examples of each problem."""
 
 
 @dataclass(slots=True)
-class BatchOutcome:
+class _BatchOutcome:
     """Records what one batch's jobs finally recorded, read back from the project's own state artifact."""
 
     batch_id: str = ""
@@ -65,7 +65,7 @@ class BatchOutcome:
     """The UTC timestamp (microsecond-precision epoch) the outcome was read at."""
 
 
-def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
+def close_batch(host: ExecutionHost, batch_id: str) -> _BatchOutcome | None:
     """Snapshots what one finished batch's jobs recorded and stores the result on the batch itself.
 
     Notes:
@@ -91,12 +91,12 @@ def close_batch(host: ExecutionHost, batch_id: str) -> BatchOutcome | None:
     if document is None:
         return None
 
-    outcome = verify_batch(host=host, document=document, batch_id=batch_id)
+    outcome = _verify_batch(host=host, document=document, batch_id=batch_id)
     record_batch_outcome(batch_id=batch_id, outcome=asdict(outcome))
     return outcome
 
 
-def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -> BatchOutcome:
+def _verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) -> _BatchOutcome:
     """Reads what a batch's jobs recorded out of freshly regenerated project artifacts.
 
     Notes:
@@ -149,7 +149,7 @@ def verify_batch(host: ExecutionHost, document: BatchDocument, batch_id: str) ->
 
 def close_settled_batches(
     host: ExecutionHost, batches: Sequence[SubmissionBatch], statuses: dict[str, JobStatus]
-) -> list[BatchOutcome]:
+) -> list[_BatchOutcome]:
     """Closes every batch whose allocations have all reached a state they never leave, then retires the ones that
     closed.
 
@@ -172,7 +172,7 @@ def close_settled_batches(
     """
     settled = [batch for batch in batches if batch_is_settled(batch=batch, statuses=statuses)]
 
-    closed: list[BatchOutcome] = []
+    closed: list[_BatchOutcome] = []
     retired: list[str] = []
     for batch in settled:
         try:
@@ -201,7 +201,7 @@ def _resolve_outcome(
     batch_id: str,
     recorded: dict[str, dict[str, dict[str, Any]]],
     snapshots: Sequence[Path],
-) -> BatchOutcome:
+) -> _BatchOutcome:
     """Counts a batch's jobs against the status each one recorded.
 
     Args:
@@ -213,7 +213,7 @@ def _resolve_outcome(
     Returns:
         The batch's outcome.
     """
-    outcome = BatchOutcome(
+    outcome = _BatchOutcome(
         batch_id=batch_id,
         pipeline=document.pipeline,
         host=document.host,

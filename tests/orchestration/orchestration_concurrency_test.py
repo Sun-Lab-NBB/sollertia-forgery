@@ -1,4 +1,6 @@
-"""Tests the shared batch engine: core allocation, two-dimensional admission, and the graph a batch is dispatched as."""
+"""Contains tests for the shared batch engine: core allocation, two-dimensional admission, and the graph a batch is
+dispatched as.
+"""
 
 from __future__ import annotations
 
@@ -27,25 +29,26 @@ from sollertia_forgery.orchestration import (
     BATCH_PIPELINES,
     JobExecutionState,
     prepare_batch,
-    resolve_dispatch,
     build_pending_job,
-    index_rows_by_unit,
-    plan_artifact_path,
-    build_batch_document,
-    partition_blocked_jobs,
     resolve_host_memory_mb,
     resolve_core_allocations,
-    resolve_submission_order,
     resolve_concurrency_limits,
-    resolve_dispatch_priorities,
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
+from sollertia_forgery.orchestration.graph import (
+    index_rows_by_unit,
+    build_batch_document,
+    _partition_blocked_jobs,
+    resolve_submission_order,
+    resolve_dispatch_priorities,
+)
+from sollertia_forgery.orchestration.hosts import plan_artifact_path
 from sollertia_forgery.orchestration.local import (
     PendingJob,
     _admit_pending_jobs,
     _initialize_worker_threads,
 )
-from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS
+from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS, resolve_dispatch
 from sollertia_forgery.orchestration.footprints import (
     _MEGABYTES_PER_GIGABYTE,
     _CHECKSUM_READER_MEMORY_MB,
@@ -178,14 +181,14 @@ def test_admission_stops_on_whichever_budget_binds_first() -> None:
         core_budget=_CORE_BUDGET,
         memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(run_admission_pass(core_bound).submitted) == 4
+    assert len(run_admission_pass(state=core_bound).submitted) == 4
 
     memory_bound = build_state(
         jobs=[make_pending_job(job_id=f"m{index}", cores=1, memory_mb=20000) for index in range(8)],
         core_budget=_CORE_BUDGET,
         memory_budget_mb=_MEMORY_BUDGET_MB,
     )
-    assert len(run_admission_pass(memory_bound).submitted) == 3
+    assert len(run_admission_pass(state=memory_bound).submitted) == 3
 
 
 def test_admission_never_commits_past_either_budget() -> None:
@@ -205,7 +208,7 @@ def test_admission_considers_the_heaviest_job_first() -> None:
     """Verifies that a large job is dispatched before lighter ones rather than waiting for them to drain."""
     jobs = [make_pending_job(job_id=f"light{index}", memory_mb=1024) for index in range(6)]
     jobs.append(make_pending_job(job_id="heavy", memory_mb=40000))
-    pool = run_admission_pass(build_state(jobs=jobs))
+    pool = run_admission_pass(state=build_state(jobs=jobs))
     assert pool.submitted[0].job_id == "heavy"
 
 
@@ -213,7 +216,9 @@ def test_light_jobs_backfill_the_capacity_a_heavy_job_leaves_spare() -> None:
     """Verifies that a heavy job runs alongside as many light jobs as the remaining budget allows."""
     jobs = [make_pending_job(job_id="heavy", cores=8, memory_mb=40000)]
     jobs += [make_pending_job(job_id=f"light{index}", cores=2, memory_mb=4000) for index in range(10)]
-    pool = run_admission_pass(build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB))
+    pool = run_admission_pass(
+        state=build_state(jobs=jobs, core_budget=_CORE_BUDGET, memory_budget_mb=_MEMORY_BUDGET_MB)
+    )
     submitted = {job.job_id for job in pool.submitted}
     assert "heavy" in submitted
     assert len(submitted) >= 6, "light jobs did not backfill around the heavy job"
@@ -283,13 +288,13 @@ def test_admission_blocks_a_dependent_whose_prerequisite_failed() -> None:
 def test_forward_progress_floor_never_bypasses_the_prerequisite_check() -> None:
     """Verifies that the single-job floor does not dispatch a job whose input does not exist yet."""
     downstream = make_pending_job(job_id="down", memory_mb=10_000_000, prerequisites=("up",))
-    assert not run_admission_pass(build_state(jobs=[downstream])).submitted
+    assert not run_admission_pass(state=build_state(jobs=[downstream])).submitted
 
 
 def test_forward_progress_floor_admits_a_job_larger_than_the_budget() -> None:
     """Verifies that a job no budget can hold still runs alone rather than stalling the batch."""
     oversized = make_pending_job(job_id="huge", cores=999, memory_mb=10_000_000)
-    assert [job.job_id for job in run_admission_pass(build_state(jobs=[oversized])).submitted] == ["huge"]
+    assert [job.job_id for job in run_admission_pass(state=build_state(jobs=[oversized])).submitted] == ["huge"]
 
 
 def test_estimates_carry_the_shared_tolerance() -> None:
@@ -380,6 +385,7 @@ def test_checksum_memory_is_flat_in_input_size_and_linear_in_cores() -> None:
     assert _size_checksum_job(cores=16).cores == 16
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_worker_initializer_leaves_the_numba_thread_variable_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Verifies that the worker initializer controls numba through its runtime setter rather than its environment.
 
@@ -562,7 +568,7 @@ def test_a_batch_document_dispatches_only_the_outstanding_planned_jobs() -> None
         "memory_mb": 4096,
         "prerequisite_ids": [],
         "options": {"regenerate_checksum": True},
-        # Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
+        # _Reconciliation reads the recorded outcome off the descriptor, so preparation carries it across rather than
         # leaving a later stage to reopen the tracker the state artifact was regenerated from.
         "status": "SCHEDULED",
         "executor_id": "",
@@ -724,7 +730,7 @@ def test_blocking_propagates_along_the_chain_that_waits_on_it() -> None:
         descriptor(job_id="independent"),
     ]
 
-    dispatchable, blocked = partition_blocked_jobs(jobs=jobs, succeeded=set())
+    dispatchable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded=set())
 
     assert [job["job_id"] for job in dispatchable] == ["independent"]
     assert [entry["job_id"] for entry in blocked] == ["root", "middle", "leaf"]
@@ -737,7 +743,7 @@ def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
     """Verifies that a prerequisite recorded as succeeded blocks nothing, even where this run never dispatches it."""
     jobs = [descriptor(job_id="downstream", prerequisites=("upstream",))]
 
-    dispatchable, blocked = partition_blocked_jobs(jobs=jobs, succeeded={"upstream"})
+    dispatchable, blocked = _partition_blocked_jobs(jobs=jobs, succeeded={"upstream"})
 
     assert [job["job_id"] for job in dispatchable] == ["downstream"]
     assert blocked == []
@@ -749,14 +755,11 @@ def test_an_already_succeeded_prerequisite_satisfies_its_dependent() -> None:
 class _StubPreparationHost:
     """Stands in for an execution host holding one project's tables and its units' trackers.
 
-    Args:
-        plan_rows: The rows the project's plan table holds.
-        state_rows: The rows the project's state table holds.
+    Args: plan_rows: The rows the project's plan table holds. state_rows: The rows the project's state table holds.
 
-    Attributes:
-        _plan_rows: The rows the project's plan table holds.
-        _state_rows: The rows the project's state table holds.
-        materialized: The project root, unit kind, and replan choice of every materialization this host was asked for.
+    Attributes: _plan_rows: The rows the project's plan table holds. _state_rows: The rows the project's state table
+    holds. materialized: The project root, unit kind, and replan choice of every materialization this host was asked
+    for.
     """
 
     def __init__(self, plan_rows: list[dict[str, Any]], state_rows: list[dict[str, Any]]) -> None:

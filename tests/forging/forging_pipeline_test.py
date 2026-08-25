@@ -1,5 +1,5 @@
-"""Tests the system-agnostic forging pipeline against a real project hierarchy, from dataset definition through the
-cross-recording stages and the per-session assembly.
+"""Contains tests for the system-agnostic forging pipeline against a real project hierarchy, from dataset definition
+through the cross-recording stages and the per-session assembly.
 """
 
 from __future__ import annotations
@@ -27,43 +27,45 @@ from sollertia_forgery.forging import (
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
-    load_multiday_plan,
     forging_tracker_path,
     run_forging_pipeline,
     discover_forging_jobs,
-    build_forging_universe,
     define_forging_dataset,
-    materialize_multiday_plan,
 )
 from sollertia_forgery.shared_assets import multi_recording_dataset_name
 import sollertia_forgery.forging.pipeline as pipeline_module
+from sollertia_forgery.forging.pipeline import (
+    _load_multiday_plan,
+    _build_forging_universe,
+    _materialize_multiday_plan,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
     from collections.abc import Callable
 
-DATASET_NAME: str = "TestDataset"
+_DATASET_NAME: str = "TestDataset"
 """The name every forged dataset in this module is defined under, carrying uppercase so the lowercasing the cindra
 output directory applies stays observable."""
 
-MULTIDAY_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
+_MULTIDAY_CONFIGURATION_FILENAME: str = "multi_recording_configuration.yaml"
 """The filename each tracked animal's materialized multi-recording configuration is written under."""
 
-ARGUMENT_RECORD_FILENAME: str = "assembly_arguments.txt"
+_ARGUMENT_RECORD_FILENAME: str = "assembly_arguments.txt"
 """The filename the stand-in assembly worker records its source path and dataset name into, which lets a job
 dispatched into a worker process report what it was called with."""
 
-DESCRIBED_COLUMN: str = "time_us"
+_DESCRIBED_COLUMN: str = "time_us"
 """A column name the Mesoscope-VR description binding declares, so a feather holding it passes the dataset's
 description check."""
 
-UNDESCRIBED_COLUMN: str = "unregistered_measurement"
+_UNDESCRIBED_COLUMN: str = "unregistered_measurement"
 """A column name no acquisition system describes, which the assembly stage rejects."""
 
-GENOTYPE: str = "GP5.17"
+_GENOTYPE: str = "GP5.17"
 """The genotype every synthetic animal records, which the Mesoscope-VR resolver maps to a calcium indicator."""
 
-PRIMING_STEP: str = "priming"
+_PRIMING_STEP: str = "priming"
 """The label the shared dispatch recorder marks a bootstrap priming call with, which collides with no cindra job
 name."""
 
@@ -77,8 +79,8 @@ def assemble_described_session(source_session_path: Path, output_path: Path, dat
         dataset_name: The unqualified dataset name the pipeline forwarded.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.parent.joinpath(ARGUMENT_RECORD_FILENAME).write_text(f"{source_session_path}\n{dataset_name}\n")
-    pl.DataFrame({DESCRIBED_COLUMN: [0, 1, 2]}).write_ipc(file=output_path, compression="uncompressed")
+    output_path.parent.joinpath(_ARGUMENT_RECORD_FILENAME).write_text(f"{source_session_path}\n{dataset_name}\n")
+    pl.DataFrame({_DESCRIBED_COLUMN: [0, 1, 2]}).write_ipc(file=output_path, compression="uncompressed")
 
 
 def assemble_undescribed_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
@@ -90,7 +92,7 @@ def assemble_undescribed_session(source_session_path: Path, output_path: Path, d
         dataset_name: The unqualified dataset name the pipeline forwarded.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({DESCRIBED_COLUMN: [0], UNDESCRIBED_COLUMN: [1]}).write_ipc(
+    pl.DataFrame({_DESCRIBED_COLUMN: [0], _UNDESCRIBED_COLUMN: [1]}).write_ipc(
         file=output_path, compression="uncompressed"
     )
 
@@ -157,7 +159,7 @@ def write_surgery_metadata(session: SessionData) -> None:
             id=int(session.animal_id),
             ear_punch="left",
             sex="F",
-            genotype=GENOTYPE,
+            genotype=_GENOTYPE,
             date_of_birth_us=1_600_000_000_000_000,
             weight_g=25.0,
             cage=1,
@@ -198,7 +200,7 @@ def recorded_dispatch_order() -> list[tuple[str, str]]:
 def recorded_primings(monkeypatch: pytest.MonkeyPatch, recorded_dispatch_order: list[tuple[str, str]]) -> list[Path]:
     """Replaces the cindra dataset priming call with a recorder that writes no bootstrap.
 
-    Every cross-recording stage now reads a shared bootstrap the priming call writes, and writing it needs processed
+    Every cross-recording stage reads a shared bootstrap the priming call writes, and writing it needs processed
     imaging output these tests never produce, so the call is recorded rather than performed.
 
     Args:
@@ -213,7 +215,7 @@ def recorded_primings(monkeypatch: pytest.MonkeyPatch, recorded_dispatch_order: 
     def _prime(configuration_path: Path) -> None:
         """Records one priming call without writing the bootstrap it would otherwise materialize."""
         primed.append(configuration_path)
-        recorded_dispatch_order.append((PRIMING_STEP, configuration_path.parent.name))
+        recorded_dispatch_order.append((_PRIMING_STEP, configuration_path.parent.name))
 
     monkeypatch.setattr(pipeline_module, "prime_dataset", _prime)
     return primed
@@ -225,17 +227,15 @@ def recorded_multiday_jobs(
 ) -> list[MultidayCall]:
     """Replaces the cindra cross-recording entry point with a recorder that succeeds on the forging tracker.
 
-    cindra records each stage's state directly on the tracker it is handed, so the recorder drives the same
-    transitions the real entry point would. The priming recorder is requested alongside it, since the discovery stage
-    primes the shared bootstrap before it dispatches.
+    cindra records each stage's state directly on the tracker it is handed, so the recorder drives the same transitions
+    the real entry point would. The priming recorder is requested alongside it, since the discovery stage primes the
+    shared bootstrap before it dispatches.
 
-    Args:
-        monkeypatch: The fixture used to replace the entry point the pipeline module holds.
-        recorded_primings: The recorder standing in for the dataset priming the discovery stage performs first.
-        recorded_dispatch_order: The shared timeline each dispatch is appended to alongside the primings.
+    Args: monkeypatch: The fixture used to replace the entry point the pipeline module holds. recorded_primings: The
+    recorder standing in for the dataset priming the discovery stage performs first. recorded_dispatch_order: The shared
+    timeline each dispatch is appended to alongside the primings.
 
-    Returns:
-        The list every dispatched invocation is appended to, in dispatch order.
+    Returns: The list every dispatched invocation is appended to, in dispatch order.
     """
     calls: list[MultidayCall] = []
 
@@ -376,29 +376,31 @@ def test_define_forging_dataset_materializes_a_configuration_for_each_tracked_an
     outputs, under the qualified, unfolded dataset name the pipeline records for it.
     """
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
 
-    plan = load_multiday_plan(dataset=dataset)
+    plan = _load_multiday_plan(dataset=dataset)
     assert set(plan) == {"305", "321"}
     assert plan["305"][1] == list(experiment_project.names()[:2])
 
     written = MultiRecordingConfiguration.from_yaml(file_path=plan["305"][0])
-    assert written.recording_io.dataset_name == multi_recording_dataset_name(animal_id="305", dataset_name=DATASET_NAME)
+    assert written.recording_io.dataset_name == multi_recording_dataset_name(
+        animal_id="305", dataset_name=_DATASET_NAME
+    )
     assert written.recording_io.recording_directories == tuple(
         session.processed_data.cindra_data_path for session in experiment_project.sessions[:2]
     )
-    assert written.runtime.display_progress_bars is False
+    assert not written.runtime.display_progress_bars
 
 
 def test_define_forging_dataset_names_a_repeated_session_once(experiment_project: ForgingProject) -> None:
-    """The session list names the sessions the dataset must contain rather than the sessions to append, and the shared
-    hierarchy rejects a request naming the same session twice, so a repeat resolves to one directory.
+    """Verifies that the session list names the sessions the dataset must contain rather than the sessions to append,
+    and the shared hierarchy rejects a request naming the same session twice, so a repeat resolves to one directory.
     """
     names = experiment_project.names()
 
     dataset = define_forging_dataset(
-        name=DATASET_NAME,
+        name=_DATASET_NAME,
         session_names=(names[0], names[1], names[0]),
         project_root=experiment_project.project_root,
     )
@@ -411,15 +413,15 @@ def test_define_forging_dataset_skips_an_animal_without_cross_recording_tracking
 ) -> None:
     """Verifies that an animal whose sessions resolve no multi-recording configuration carries no plan entry."""
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=training_project.names(), project_root=training_project.project_root
+        name=_DATASET_NAME, session_names=training_project.names(), project_root=training_project.project_root
     )
 
-    replanned = materialize_multiday_plan(
+    replanned = _materialize_multiday_plan(
         dataset=dataset, project_root=training_project.project_root, display_progress=True
     )
     assert replanned == {}
-    assert load_multiday_plan(dataset=dataset) == {}
-    assert build_forging_universe(dataset=dataset, multiday_plan={}) == [
+    assert _load_multiday_plan(dataset=dataset) == {}
+    assert _build_forging_universe(dataset=dataset, multiday_plan={}) == [
         (FORGING_JOB_NAME, name) for name in training_project.names()
     ]
 
@@ -427,14 +429,14 @@ def test_define_forging_dataset_skips_an_animal_without_cross_recording_tracking
 def test_define_forging_dataset_records_the_progress_preference(experiment_project: ForgingProject) -> None:
     """Verifies that the progress-bar flag reaches every materialized cross-recording configuration."""
     dataset = define_forging_dataset(
-        name=DATASET_NAME,
+        name=_DATASET_NAME,
         session_names=experiment_project.names(),
         project_root=experiment_project.project_root,
         display_progress=True,
     )
 
-    plan = load_multiday_plan(dataset=dataset)
-    assert MultiRecordingConfiguration.from_yaml(file_path=plan["321"][0]).runtime.display_progress_bars is True
+    plan = _load_multiday_plan(dataset=dataset)
+    assert MultiRecordingConfiguration.from_yaml(file_path=plan["321"][0]).runtime.display_progress_bars
 
 
 def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
@@ -442,17 +444,17 @@ def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
     recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
-    """Verifies that rebuilding an animal returns its recorded stages to the scheduled state and rewrites its
-    cross-recording configuration over its new session set, so the next run redoes those stages against the recordings
-    the dataset still holds for it.
+    """Verifies that rebuilding an animal returns its recorded stages to the scheduled state and rewrites its cross-
+    recording configuration over its new session set, so the next run redoes those stages against the recordings the
+    dataset still holds for it.
     """
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
-    define_forging_dataset(name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+    define_forging_dataset(name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     rebuilt = define_forging_dataset(
-        name=DATASET_NAME,
+        name=_DATASET_NAME,
         session_names=(names[0],),
         project_root=experiment_project.project_root,
         recreate_animals=("305",),
@@ -464,7 +466,7 @@ def test_define_forging_dataset_resets_a_rebuilt_animals_recorded_jobs(
     assert states[FORGING_JOB_NAME, names[2]] == ProcessingStatus.SUCCEEDED
     assert states[MULTIDAY_DISCOVERY_JOB_NAME, "321"] == ProcessingStatus.SUCCEEDED
 
-    written = MultiRecordingConfiguration.from_yaml(file_path=load_multiday_plan(dataset=rebuilt)["305"][0])
+    written = MultiRecordingConfiguration.from_yaml(file_path=_load_multiday_plan(dataset=rebuilt)["305"][0])
     assert written.recording_io.recording_directories == (
         experiment_project.sessions[0].processed_data.cindra_data_path,
     )
@@ -474,13 +476,13 @@ def test_load_multiday_plan_skips_an_animal_holding_no_sessions(tmp_path: Path) 
     """Verifies that an animal the dataset lists without any session contributes no plan entry."""
     animal_path = tmp_path.joinpath("305")
     animal_path.mkdir()
-    animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).touch()
+    animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).touch()
     dataset = SimpleNamespace(
         animals=(SimpleNamespace(animal="305", animal_path=animal_path),),
         get_sessions_for_animal=lambda animal: (),  # noqa: ARG005
     )
 
-    assert load_multiday_plan(dataset=dataset) == {}
+    assert _load_multiday_plan(dataset=dataset) == {}
 
 
 def test_load_multiday_plan_skips_an_animal_without_a_written_configuration(
@@ -488,11 +490,11 @@ def test_load_multiday_plan_skips_an_animal_without_a_written_configuration(
 ) -> None:
     """Verifies that reading the plan back reports only the animals whose configuration is on disk."""
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
-    dataset.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).unlink()
+    dataset.get_animal(animal="321").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).unlink()
 
-    assert set(load_multiday_plan(dataset=dataset)) == {"305"}
+    assert set(_load_multiday_plan(dataset=dataset)) == {"305"}
 
 
 def test_define_forging_dataset_rewrites_a_configuration_that_was_never_written(
@@ -507,15 +509,15 @@ def test_define_forging_dataset_rewrites_a_configuration_that_was_never_written(
     """
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
-    dataset.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).unlink()
+    dataset.get_animal(animal="321").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).unlink()
 
     redefined = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
 
-    plan = load_multiday_plan(dataset=redefined)
+    plan = _load_multiday_plan(dataset=redefined)
     assert set(plan) == {"305", "321"}
     written = MultiRecordingConfiguration.from_yaml(file_path=plan["321"][0])
     assert written.recording_io.recording_directories == (
@@ -534,17 +536,17 @@ def test_define_forging_dataset_passes_over_an_unconfigured_animal_whose_sources
     """
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root
     )
-    dataset.get_animal(animal="305").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).unlink()
+    dataset.get_animal(animal="305").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).unlink()
     shutil.rmtree(experiment_project.project_root.joinpath("305"))
 
     extended = define_forging_dataset(
-        name=DATASET_NAME, session_names=(names[2],), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=(names[2],), project_root=experiment_project.project_root
     )
 
-    assert set(load_multiday_plan(dataset=extended)) == {"321"}
-    assert not extended.get_animal(animal="305").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).is_file()
+    assert set(_load_multiday_plan(dataset=extended)) == {"321"}
+    assert not extended.get_animal(animal="305").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).is_file()
 
 
 def test_define_forging_dataset_extends_a_dataset_whose_forged_animal_lost_its_sources(
@@ -552,25 +554,25 @@ def test_define_forging_dataset_extends_a_dataset_whose_forged_animal_lost_its_s
 ) -> None:
     """Verifies that adding an animal succeeds while an animal the dataset already holds has no source data left."""
     names = experiment_project.names()
-    define_forging_dataset(name=DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root)
+    define_forging_dataset(name=_DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root)
 
     # The forged animal's sessions move to long-term storage, leaving the dataset holding it with no source data.
     shutil.rmtree(experiment_project.project_root.joinpath("305"))
 
     extended = define_forging_dataset(
-        name=DATASET_NAME, session_names=(names[2],), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=(names[2],), project_root=experiment_project.project_root
     )
 
     assert {dataset_animal.animal for dataset_animal in extended.animals} == {"305", "321"}
     assert len(extended.sessions) == 3
     # The frozen animal keeps the configuration written when it was added, and the added animal receives its own.
-    assert extended.get_animal(animal="305").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).is_file()
-    assert extended.get_animal(animal="321").animal_path.joinpath(MULTIDAY_CONFIGURATION_FILENAME).is_file()
+    assert extended.get_animal(animal="305").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).is_file()
+    assert extended.get_animal(animal="321").animal_path.joinpath(_MULTIDAY_CONFIGURATION_FILENAME).is_file()
 
 
 def test_discover_forging_jobs_reads_no_source_data(experiment_project: ForgingProject) -> None:
     """Verifies that job discovery resolves the whole universe after every source session has moved away."""
-    dataset_path = define_whole_project(experiment_project=experiment_project).dataset_data_path.parent
+    dataset_path = _define_whole_project(experiment_project=experiment_project).dataset_data_path.parent
     for animal_id in ("305", "321"):
         shutil.rmtree(experiment_project.project_root.joinpath(animal_id))
 
@@ -583,12 +585,12 @@ def test_discover_forging_jobs_reads_no_source_data(experiment_project: ForgingP
 
 def test_discover_forging_jobs_reports_the_whole_universe_as_possible(experiment_project: ForgingProject) -> None:
     """Verifies that batch discovery names every stage the hierarchy holds and treats each one as runnable."""
-    dataset_path = define_whole_project(experiment_project=experiment_project).dataset_data_path.parent
+    dataset_path = _define_whole_project(experiment_project=experiment_project).dataset_data_path.parent
 
     dataset, universe, possible = discover_forging_jobs(dataset_path=dataset_path)
 
     names = experiment_project.names()
-    assert dataset.name == DATASET_NAME
+    assert dataset.name == _DATASET_NAME
     assert universe == possible
     assert universe == [
         (MULTIDAY_DISCOVERY_JOB_NAME, "305"),
@@ -600,7 +602,7 @@ def test_discover_forging_jobs_reports_the_whole_universe_as_possible(experiment
     ]
 
 
-def define_whole_project(experiment_project: ForgingProject) -> DatasetData:
+def _define_whole_project(experiment_project: ForgingProject) -> DatasetData:
     """Defines the module's dataset over every session the project holds.
 
     Args:
@@ -610,43 +612,44 @@ def define_whole_project(experiment_project: ForgingProject) -> DatasetData:
         The resolved dataset.
     """
     return define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
 
 
 # Tests for the local pipeline run
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_run_forging_pipeline_completes_every_stage_across_a_worker_pool(
     experiment_project: ForgingProject,
     recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
     recorded_dispatch_order: list[tuple[str, str]],
     install_assembly_worker: Callable[[Any], None],
 ) -> None:
-    """Verifies that a full local run primes each animal's bootstrap, then runs that animal's discovery and every one
-    of its extractions before moving to the next animal, records every stage as succeeded, and re-exports each
-    session's own shared assets beside its assembled feather.
+    """Verifies that a full local run primes each animal's bootstrap, then runs that animal's discovery and every one of
+    its extractions before moving to the next animal, records every stage as succeeded, and re-exports each session's
+    own shared assets beside its assembled feather.
 
     The cross-recording steps are compared as one ordered timeline rather than counted per kind, because the order is
-    the guarantee: an extraction reads the ROI set its animal's discovery wrote, and every stage reads the bootstrap
-    the priming wrote ahead of that animal's first stage.
+    the guarantee: an extraction reads the ROI set its animal's discovery wrote, and every stage reads the bootstrap the
+    priming wrote ahead of that animal's first stage.
     """
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
 
     run_forging_pipeline(
-        name=DATASET_NAME, project_root=experiment_project.project_root, workers=4, display_progress=True
+        name=_DATASET_NAME, project_root=experiment_project.project_root, workers=4, display_progress=True
     )
 
     assert recorded_dispatch_order == [
-        (PRIMING_STEP, "305"),
+        (_PRIMING_STEP, "305"),
         (MultiRecordingJobNames.DISCOVER.value, "305"),
         (MultiRecordingJobNames.EXTRACT.value, names[0]),
         (MultiRecordingJobNames.EXTRACT.value, names[1]),
-        (PRIMING_STEP, "321"),
+        (_PRIMING_STEP, "321"),
         (MultiRecordingJobNames.DISCOVER.value, "321"),
         (MultiRecordingJobNames.EXTRACT.value, names[2]),
     ]
@@ -683,19 +686,20 @@ def test_run_forging_pipeline_assembles_sequentially_with_one_worker(
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
 
     run_forging_pipeline(
-        name=DATASET_NAME, project_root=experiment_project.project_root, workers=1, display_progress=True
+        name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1, display_progress=True
     )
 
     first = session_entry(dataset=dataset, name=names[0])
-    recorded = first.data_path.parent.joinpath(ARGUMENT_RECORD_FILENAME).read_text().splitlines()
-    assert recorded == [str(experiment_project.project_root.joinpath("305", names[0])), DATASET_NAME]
+    recorded = first.data_path.parent.joinpath(_ARGUMENT_RECORD_FILENAME).read_text().splitlines()
+    assert recorded == [str(experiment_project.project_root.joinpath("305", names[0])), _DATASET_NAME]
     assert set(tracker_states(dataset=dataset).values()) == {ProcessingStatus.SUCCEEDED}
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_run_forging_pipeline_assembles_at_the_default_worker_count(
     experiment_project: ForgingProject,
     recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
@@ -705,16 +709,16 @@ def test_run_forging_pipeline_assembles_at_the_default_worker_count(
     """Verifies that a run naming no worker count assembles every session across the parallel pool.
 
     The documented default asks for every available core by spelling the request as a negative number, so the request
-    itself is never a pool width. The host's resolved core count is pinned here so the parallel branch is the one
-    taken wherever this suite runs.
+    itself is never a pool width. The host's resolved core count is pinned here so the parallel branch is the one taken
+    wherever this suite runs.
     """
     monkeypatch.setattr(pipeline_module, "resolve_worker_count", lambda requested_workers: 16)  # noqa: ARG005
     install_assembly_worker(assemble_described_session)
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root)
 
     for entry in dataset.sessions:
         assert entry.data_path.is_file()
@@ -727,15 +731,17 @@ def test_run_forging_pipeline_registers_the_only_job_of_a_single_session_dataset
 ) -> None:
     """Verifies that a dataset whose whole universe is one outstanding job registers that job before running it.
 
-    A training session carries no cross-recording stages, so a dataset holding one of them has a universe of exactly
-    one assembly job. A tracker refuses a job it was never told to track, so a run that skipped the registration would
-    die on the first session it assembled rather than forge it.
+    A training session carries no cross-recording stages, so a dataset holding one of them has a universe of exactly one
+    assembly job. A tracker refuses a job it was never told to track, so a run that skipped the registration would die
+    on the first session it assembled rather than forge it.
     """
     install_assembly_worker(assemble_described_session)
     names = training_project.names()[:1]
-    dataset = define_forging_dataset(name=DATASET_NAME, session_names=names, project_root=training_project.project_root)
+    dataset = define_forging_dataset(
+        name=_DATASET_NAME, session_names=names, project_root=training_project.project_root
+    )
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=training_project.project_root, workers=1)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=training_project.project_root, workers=1)
 
     assert session_entry(dataset=dataset, name=names[0]).data_path.is_file()
     assert tracker_states(dataset=dataset) == {(FORGING_JOB_NAME, names[0]): ProcessingStatus.SUCCEEDED}
@@ -760,10 +766,10 @@ def test_run_forging_pipeline_resolves_the_assembly_worker_under_the_acquisition
 
     monkeypatch.setattr(pipeline_module, "resolve_forging_assembly_worker", _resolve)
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     assert requested == [dataset.acquisition_system]
 
@@ -775,9 +781,11 @@ def test_run_forging_pipeline_reexports_only_the_assets_a_training_session_carri
     """Verifies that a dataset of training sessions runs assembly alone and re-exports the descriptor by itself."""
     install_assembly_worker(assemble_described_session)
     names = training_project.names()
-    dataset = define_forging_dataset(name=DATASET_NAME, session_names=names, project_root=training_project.project_root)
+    dataset = define_forging_dataset(
+        name=_DATASET_NAME, session_names=names, project_root=training_project.project_root
+    )
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=training_project.project_root, workers=1)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=training_project.project_root, workers=1)
 
     states = tracker_states(dataset=dataset)
     assert set(states) == {(FORGING_JOB_NAME, name) for name in names}
@@ -787,6 +795,7 @@ def test_run_forging_pipeline_reexports_only_the_assets_a_training_session_carri
     assert not output_directory.joinpath(RawDataFiles.EXPERIMENT_CONFIGURATION).exists()
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_run_forging_pipeline_skips_the_stages_already_recorded_as_succeeded(
     experiment_project: ForgingProject,
     recorded_multiday_jobs: list[MultidayCall],
@@ -796,9 +805,9 @@ def test_run_forging_pipeline_skips_the_stages_already_recorded_as_succeeded(
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names[:2], project_root=experiment_project.project_root
     )
-    universe = build_forging_universe(dataset=dataset, multiday_plan=load_multiday_plan(dataset=dataset))
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=_load_multiday_plan(dataset=dataset))
     tracker = ProcessingTracker(file_path=forging_tracker_path(dataset=dataset))
     tracker.align_jobs(jobs=universe, universe=universe)
     for job in (
@@ -810,7 +819,7 @@ def test_run_forging_pipeline_skips_the_stages_already_recorded_as_succeeded(
         tracker.start_job(job_id=job_id)
         tracker.complete_job(job_id=job_id)
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=4)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=4)
 
     assert [call.specifier for call in recorded_multiday_jobs] == [names[1]]
     assert not session_entry(dataset=dataset, name=names[0]).data_path.exists()
@@ -830,13 +839,13 @@ def test_run_forging_pipeline_reports_a_fully_assembled_dataset(
     """Verifies that a second run over a finished dataset dispatches nothing and says so."""
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
-    define_forging_dataset(name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+    define_forging_dataset(name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     messages: list[str] = []
     monkeypatch.setattr(pipeline_module.console, "echo", lambda message, **_keywords: messages.append(message))
     install_assembly_worker(assemble_failing_session)
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     assert "Every session in the dataset is already assembled." in messages
     assert "Prepared 0 outstanding forging job(s) out of 8 total." in messages
@@ -854,12 +863,12 @@ def test_run_forging_pipeline_rejects_a_session_missing_a_required_asset(
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=(names[0],), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=(names[0],), project_root=experiment_project.project_root
     )
     experiment_project.sessions[0].raw_data.vr_configuration_path.unlink()
 
     with pytest.raises(FileNotFoundError, match="does not"):
-        run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+        run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     assert not session_entry(dataset=dataset, name=names[0]).data_path.exists()
     assert tracker_states(dataset=dataset)[FORGING_JOB_NAME, names[0]] == ProcessingStatus.FAILED
@@ -874,15 +883,16 @@ def test_run_forging_pipeline_rejects_an_undescribed_column(
     install_assembly_worker(assemble_undescribed_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=(names[0],), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=(names[0],), project_root=experiment_project.project_root
     )
 
     with pytest.raises(ValueError, match="columns are undescribed"):
-        run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=1)
+        run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=1)
 
     assert tracker_states(dataset=dataset)[FORGING_JOB_NAME, names[0]] == ProcessingStatus.FAILED
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_run_forging_pipeline_records_every_parallel_failure_before_re_raising(
     experiment_project: ForgingProject,
     recorded_multiday_jobs: list[MultidayCall],  # Requested so the cross-recording stages succeed.
@@ -892,11 +902,11 @@ def test_run_forging_pipeline_records_every_parallel_failure_before_re_raising(
     install_assembly_worker(assemble_failing_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
 
     with pytest.raises(RuntimeError, match="The assembly worker cannot process"):
-        run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, workers=4)
+        run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, workers=4)
 
     states = tracker_states(dataset=dataset)
     assert {states[FORGING_JOB_NAME, name] for name in names} == {ProcessingStatus.FAILED}
@@ -912,11 +922,13 @@ def test_run_forging_pipeline_rejects_an_unknown_job_id(
     """Verifies that a job identifier the dataset does not carry is refused rather than silently skipped."""
     install_assembly_worker(assemble_described_session)
     define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
 
     with pytest.raises(ValueError, match="does not match any forging job"):
-        run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, job_id="0123456789abcdef")
+        run_forging_pipeline(
+            name=_DATASET_NAME, project_root=experiment_project.project_root, job_id="0123456789abcdef"
+        )
 
 
 def test_run_forging_pipeline_runs_the_named_discovery_job_alone(
@@ -927,16 +939,16 @@ def test_run_forging_pipeline_runs_the_named_discovery_job_alone(
     """Verifies that dispatching a discovery identifier runs that animal's discovery and nothing else."""
     install_assembly_worker(assemble_described_session)
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
     job_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier="305")
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id, workers=6)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id, workers=6)
 
     assert len(recorded_multiday_jobs) == 1
     assert recorded_multiday_jobs[0].job_name is MultiRecordingJobNames.DISCOVER
     assert recorded_multiday_jobs[0].workers == 6
-    assert recorded_multiday_jobs[0].configuration_path == load_multiday_plan(dataset=dataset)["305"][0]
+    assert recorded_multiday_jobs[0].configuration_path == _load_multiday_plan(dataset=dataset)["305"][0]
     assert tracker_states(dataset=dataset)[MULTIDAY_DISCOVERY_JOB_NAME, "305"] == ProcessingStatus.SUCCEEDED
 
 
@@ -952,11 +964,11 @@ def test_run_forging_pipeline_normalizes_a_non_positive_worker_request(
     """
     install_assembly_worker(assemble_described_session)
     define_forging_dataset(
-        name=DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=experiment_project.names(), project_root=experiment_project.project_root
     )
     job_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_DISCOVERY_JOB_NAME, specifier="305")
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id, workers=0)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id, workers=0)
 
     assert [call.workers for call in recorded_multiday_jobs] == [-1]
 
@@ -970,16 +982,16 @@ def test_run_forging_pipeline_runs_the_named_extraction_job_alone(
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
     job_id = ProcessingTracker.generate_job_id(job_name=MULTIDAY_EXTRACTION_JOB_NAME, specifier=names[2])
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id)
 
     assert len(recorded_multiday_jobs) == 1
     assert recorded_multiday_jobs[0].job_name is MultiRecordingJobNames.EXTRACT
     assert recorded_multiday_jobs[0].specifier == names[2]
-    assert recorded_multiday_jobs[0].configuration_path == load_multiday_plan(dataset=dataset)["321"][0]
+    assert recorded_multiday_jobs[0].configuration_path == _load_multiday_plan(dataset=dataset)["321"][0]
 
 
 def test_run_forging_pipeline_runs_the_named_assembly_job_alone(
@@ -991,11 +1003,11 @@ def test_run_forging_pipeline_runs_the_named_assembly_job_alone(
     install_assembly_worker(assemble_described_session)
     names = experiment_project.names()
     dataset = define_forging_dataset(
-        name=DATASET_NAME, session_names=names, project_root=experiment_project.project_root
+        name=_DATASET_NAME, session_names=names, project_root=experiment_project.project_root
     )
     job_id = ProcessingTracker.generate_job_id(job_name=FORGING_JOB_NAME, specifier=names[1])
 
-    run_forging_pipeline(name=DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id)
+    run_forging_pipeline(name=_DATASET_NAME, project_root=experiment_project.project_root, job_id=job_id)
 
     assert recorded_multiday_jobs == []
     assert session_entry(dataset=dataset, name=names[1]).data_path.is_file()

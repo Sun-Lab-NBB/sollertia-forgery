@@ -133,8 +133,7 @@ def remote_state_path() -> Path:
 
     Notes:
         One directory holds both halves of what a remote run leaves behind, namely the state artifacts pulled from
-        the server and this host's own record of what it submitted. Keeping them together means a run's whole local
-        footprint is one directory to find, inspect, or remove.
+        the server and this host's own record of what it submitted.
 
     Returns:
         The path to the remote state directory under the Sollertia platform working directory.
@@ -147,8 +146,7 @@ def remote_state_directory(project: str) -> Path:
 
     Notes:
         The mirror reproduces the project directory by name, so an artifact pulled into it keeps the filename its
-        writer derived from the project. Every read tool resolves an artifact from the project directory it is given,
-        so a mirrored project is read exactly as a local one is.
+        writer derived from the project.
 
     Args:
         project: The name of the project whose remote state is mirrored.

@@ -1,4 +1,4 @@
-"""Tests the system-agnostic runtime log processing pipeline and the archive decoder that feeds it."""
+"""Contains tests for the system-agnostic runtime log processing pipeline and the archive decoder that feeds it."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def runtime_archive(training_session: SessionData, write_log_archive: Callable[.
         The path to the written archive.
     """
     return write_log_archive(
-        _archive_path(training_session),
+        _archive_path(session=training_session),
         int(RUNTIME_SOURCE_ID),
         [
             (100, bytes([_SYSTEM_STATE_CODE, 1])),
@@ -106,7 +106,7 @@ def parallel_archive(tmp_path: Path, write_log_archive: Callable[..., Path]) -> 
 
 
 def test_discovering_runtime_jobs_reports_the_single_source_job(training_session: SessionData) -> None:
-    """The universe is always the one runtime job keyed by the acquisition system's source id."""
+    """Verifies that the universe is always the one runtime job keyed by the acquisition system's source id."""
     session, universe, possible = discover_runtime_jobs(session_path=_session_path(training_session))
 
     assert session.session_name == training_session.session_name
@@ -118,7 +118,7 @@ def test_discovering_runtime_jobs_reports_the_single_source_job(training_session
 def test_discovering_runtime_jobs_admits_the_job_once_the_archive_exists(
     training_session: SessionData, runtime_archive: Path
 ) -> None:
-    """A present archive is the only condition the discovery step tests, so the possible subset fills in."""
+    """Verifies a present archive is the only condition the discovery step tests, so the possible subset fills in."""
     assert runtime_archive.is_file()
 
     _session, universe, possible = discover_runtime_jobs(session_path=_session_path(training_session))
@@ -127,14 +127,16 @@ def test_discovering_runtime_jobs_admits_the_job_once_the_archive_exists(
 
 
 def test_runtime_job_prerequisites_are_empty(training_session: SessionData) -> None:
-    """The single-job pipeline orders nothing, so every job maps to an empty prerequisite tuple."""
+    """Verifies that the single-job pipeline orders nothing, so every job maps to an empty prerequisite tuple."""
     session, universe, _possible = discover_runtime_jobs(session_path=_session_path(training_session))
 
     assert runtime_job_prerequisites(session=session, universe=universe) == {(RUNTIME_JOB_NAME, RUNTIME_SOURCE_ID): ()}
 
 
 def test_running_the_pipeline_writes_the_state_feathers(training_session: SessionData, runtime_archive: Path) -> None:
-    """The pipeline decodes the archive and hands it to the registered parser, which writes the state feathers."""
+    """Verifies that the pipeline decodes the archive and hands it to the registered parser, which writes the state
+    feathers.
+    """
     onset_us = int(LogArchiveReader(archive_path=runtime_archive).onset_timestamp_us)
 
     run_runtime_processing_pipeline(session_path=_session_path(training_session))
@@ -152,7 +154,7 @@ def test_running_the_pipeline_writes_the_state_feathers(training_session: Sessio
 def test_running_the_pipeline_records_the_job_as_succeeded(
     training_session: SessionData, runtime_archive: Path
 ) -> None:
-    """The runtime tracker carries exactly the one job the pipeline runs, marked complete."""
+    """Verifies that the runtime tracker carries exactly the one job the pipeline runs, marked complete."""
     assert runtime_archive.is_file()
 
     run_runtime_processing_pipeline(session_path=_session_path(training_session), workers=1)
@@ -168,8 +170,9 @@ def test_running_the_pipeline_records_the_job_as_succeeded(
 
 
 def test_running_the_pipeline_without_an_archive_names_the_expected_source(training_session: SessionData) -> None:
-    """An absent archive leaves the single job impossible, which this pipeline escalates to a failure naming the
-    source whose archive is missing."""
+    """Verifies that an absent archive leaves the single job impossible, which this pipeline escalates to a failure
+    naming the source whose archive is missing.
+    """
     with pytest.raises(FileNotFoundError, match=r"No runtime log archive was found\s+for source '1'"):
         run_runtime_processing_pipeline(session_path=_session_path(training_session))
 
@@ -177,14 +180,14 @@ def test_running_the_pipeline_without_an_archive_names_the_expected_source(train
 def test_a_failing_parser_marks_the_job_failed(
     session_factory: Callable[..., SessionData], write_log_archive: Callable[..., Path]
 ) -> None:
-    """A parser error is recorded on the tracked job and re-raised unchanged."""
+    """Verifies that a parser error is recorded on the tracked job and re-raised unchanged."""
     # An experiment session reads its experiment configuration snapshot, and this one was acquired without it, so the
     # registered parser fails for a real reason once the decode hands it the messages.
     session = session_factory(session_type=SessionTypes.MESOSCOPE_EXPERIMENT)
-    write_log_archive(_archive_path(session), int(RUNTIME_SOURCE_ID), [(100, bytes([_SYSTEM_STATE_CODE, 1]))])
+    write_log_archive(_archive_path(session=session), int(RUNTIME_SOURCE_ID), [(100, bytes([_SYSTEM_STATE_CODE, 1]))])
 
     with pytest.raises(FileNotFoundError, match="Unable to load experiment configuration for session"):
-        run_runtime_processing_pipeline(session_path=_session_path(session))
+        run_runtime_processing_pipeline(session_path=_session_path(session=session))
 
     tracker = ProcessingTracker(file_path=session.processed_data.runtime_tracker_path)
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=RUNTIME_SOURCE_ID)
@@ -195,7 +198,7 @@ def test_a_failing_parser_marks_the_job_failed(
 
 
 def test_single_batch_decode_returns_every_message_in_archive_order(runtime_archive: Path) -> None:
-    """A short archive fits one batch, so the decode reads it in one in-process pass."""
+    """Verifies that a short archive fits one batch, so the decode reads it in one in-process pass."""
     onset_us = int(LogArchiveReader(archive_path=runtime_archive).onset_timestamp_us)
 
     decoded = _decode_archive(archive_path=runtime_archive, workers=-1, display_progress=False)
@@ -210,7 +213,7 @@ def test_single_batch_decode_returns_every_message_in_archive_order(runtime_arch
 
 
 def test_a_single_worker_decodes_a_multi_batch_archive_in_process(parallel_archive: Path) -> None:
-    """A one-worker request keeps the decode in this process even when the reader offers several batches."""
+    """Verifies a one-worker request keeps the decode in this process even when the reader offers several batches."""
     assert len(LogArchiveReader(archive_path=parallel_archive).get_batches(workers=1)) > 1
 
     decoded = _decode_archive(archive_path=parallel_archive, workers=1, display_progress=False)
@@ -224,10 +227,13 @@ def test_a_single_worker_decodes_a_multi_batch_archive_in_process(parallel_archi
 
 
 @pytest.mark.parametrize("display_progress", [False, True])
+@pytest.mark.xdist_group(name="worker_pool")
 def test_the_parallel_decode_reassembles_the_archive_in_order(
     parallel_archive: Path, *, display_progress: bool
 ) -> None:
-    """Batches decoded across worker processes are placed back at their batch index, so the order is the archive's."""
+    """Verifies that batches decoded across worker processes are placed back at their batch index, so the order is the
+    archive's.
+    """
     reference = _decode_archive(archive_path=parallel_archive, workers=1, display_progress=False)
 
     decoded = _decode_archive(archive_path=parallel_archive, workers=2, display_progress=display_progress)
@@ -236,7 +242,9 @@ def test_the_parallel_decode_reassembles_the_archive_in_order(
 
 
 def test_decoding_one_batch_returns_its_timestamps_and_payloads(runtime_archive: Path) -> None:
-    """The unit of work a decode worker runs reads only the keys it is handed, with the onset supplied to it."""
+    """Verifies that the unit of work a decode worker runs reads only the keys it is handed, with the onset supplied to
+    it.
+    """
     reader = LogArchiveReader(archive_path=runtime_archive)
     onset_us = reader.onset_timestamp_us
     keys = reader.get_batches(workers=1)[0]

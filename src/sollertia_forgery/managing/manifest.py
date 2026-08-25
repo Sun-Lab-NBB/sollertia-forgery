@@ -4,7 +4,7 @@ captures the snapshot of a project's state.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 from collections import Counter
 
 import polars as pl
@@ -31,11 +31,12 @@ from ..shared_assets import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from datetime import datetime
 
 MANIFEST_JOB_NAME: str = "manifest_generation"
 """The job name used to identify manifest generation jobs in processing trackers."""
 
-PIPELINE_STATUS_COLUMNS: dict[ProcessingPipelines, str] = {
+_PIPELINE_STATUS_COLUMNS: dict[ProcessingPipelines, str] = {
     ProcessingPipelines.CHECKSUM: "integrity",
     ProcessingPipelines.RUNTIME: "runtime",
     ProcessingPipelines.MICROCONTROLLER: "microcontroller",
@@ -53,7 +54,7 @@ Notes:
     session carries a tracker for.
 """
 
-PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
+_PROJECT_MANIFEST_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
     "animal": pl.String,
     "date": pl.Datetime,
     "session": pl.String,
@@ -81,9 +82,6 @@ Notes:
 
 def project_manifest_path(project_directory: Path) -> Path:
     """Resolves the path to the project manifest .feather file under the target project's root directory.
-
-    This is the single source of truth for the manifest filename, so both the manifest writer and any consumer that
-    locates the manifest derive the same path.
 
     Args:
         project_directory: The path to the project's root directory.
@@ -138,26 +136,23 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Resolves the path to the manifest .feather file to be created and the .lock file used to ensure only a single
-    # process can be working on the manifest file at the same time.
     manifest_path = project_manifest_path(project_directory=project_directory)
     manifest_lock = manifest_path.with_suffix(manifest_path.suffix + ".lock")
 
-    # Initializes the processing tracker in the project directory alongside the manifest output. Applies stale
-    # entry detection so that foreign or outdated job entries are discarded before the new job is registered.
+    # Applies stale entry detection so that foreign or outdated job entries are discarded before the new job is
+    # registered.
     tracker = ProcessingTracker(file_path=project_directory.joinpath(ProcessingTrackers.MANIFEST))
     jobs = [(MANIFEST_JOB_NAME, project_directory.stem)]
     tracker.align_jobs(jobs=jobs, universe=jobs)
     job_id = ProcessingTracker.generate_job_id(job_name=MANIFEST_JOB_NAME, specifier=project_directory.stem)
 
-    job_rows: list[dict[str, Any]] = []
+    job_rows: list[dict[str, str | int | None]] = []
 
-    # Acquires the lock file, ensuring only this specific process can work with the manifest data.
     lock = FileLock(str(manifest_lock))
     with lock.acquire(timeout=20.0):
         tracker.start_job(job_id=job_id)
         try:
-            manifest: dict[str, list[Any]] = {
+            manifest: dict[str, list[str | datetime | bool | int | None]] = {
                 "animal": [],
                 "session": [],
                 # The session's location relative to the project root, as '<animal_id>/<session_name>'. Stored
@@ -173,21 +168,21 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 "notes": [],
                 # Determines whether the session's data is complete and ready for unsupervised processing.
                 "complete": [],
-                # Whether the checksum (data-integrity) pipeline finished for this session, stored as 1 when every
-                # job succeeded and 0 otherwise. Which jobs failed, and why, are read from the project job artifact.
+                # Determines whether the checksum (data-integrity) pipeline finished for this session, stored
+                # as 1 when every job succeeded and 0 otherwise. Which jobs failed, and why, are read from the
+                # project job artifact.
                 "integrity": [],
-                # Whether the two-photon (cindra) processing pipeline finished for this session.
+                # Determines whether the two-photon (cindra) processing pipeline finished for this session.
                 "two_photon": [],
-                # Whether the runtime processing pipeline finished for this session.
+                # Determines whether the runtime processing pipeline finished for this session.
                 "runtime": [],
-                # Whether the microcontroller processing pipeline finished for this session.
+                # Determines whether the microcontroller processing pipeline finished for this session.
                 "microcontroller": [],
-                # Whether the video (timestamp, tracking, motion energy) pipeline finished for this session.
+                # Determines whether the video (timestamp, tracking, motion energy) pipeline finished for this
+                # session.
                 "video": [],
             }
 
-            # Loops over each session of every animal in the project and extracts session ID information and
-            # information about which processing steps have been successfully applied to the session.
             for session_data in sessions:
                 # Skips sessions whose raw_data directory is empty. A fully acquired session carries its marker and
                 # acquired data under raw_data, so an empty raw_data marks an aborted or not-yet-acquired session
@@ -203,7 +198,7 @@ def generate_project_manifest(project_directory: Path, *, display_progress: bool
                 # row, so a reader pages it one job at a time.
                 job_rows.extend(session_jobs)
 
-            manifest_frame = pl.DataFrame(data=manifest, schema=PROJECT_MANIFEST_SCHEMA, strict=False)
+            manifest_frame = pl.DataFrame(data=manifest, schema=_PROJECT_MANIFEST_SCHEMA, strict=False)
 
             # Groups the rows by animal and orders each animal's sessions chronologically, since session names are
             # acquisition timestamps. The animal identifier is text, so the ordering is natural rather than
@@ -433,7 +428,7 @@ class ProjectManifest:
 
         return str(data_frame.select("system").item())
 
-    def summarize(self) -> dict[str, Any]:
+    def summarize(self) -> dict[str, int | list[str] | dict[str, int] | dict[str, dict[str, int]]]:
         """Returns a structured summary of the project manifest for programmatic consumption.
 
         Counts the sessions each pipeline finished, alongside the session type and acquisition system distributions.
@@ -447,12 +442,11 @@ class ProjectManifest:
         data = self._data
         total_rows = data.height
 
-        # Counts sessions marked complete from the boolean (UInt8) completeness column.
         complete_count = int(data.filter(pl.col("complete") == 1).height)
 
         # Counts the sessions each pipeline finished. Which jobs failed, and why, are read from the job artifact.
         pipeline_status_counts: dict[str, dict[str, int]] = {}
-        for pipeline, column in PIPELINE_STATUS_COLUMNS.items():
+        for pipeline, column in _PIPELINE_STATUS_COLUMNS.items():
             if column not in data.columns:
                 continue
             finished = int(data.filter(pl.col(column) == 1).height)
@@ -526,7 +520,7 @@ class ProjectManifest:
 
 def _build_session_row(
     session_data: SessionData, project_directory: Path
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+) -> tuple[dict[str, str | datetime | bool | int | None], list[dict[str, str | int | None]]]:
     """Builds every manifest column for a single session, alongside that session's job rows.
 
     Notes:
@@ -569,7 +563,7 @@ def _build_session_row(
     # reads (every registered descriptor declares them) need an attribute-defined ignore.
     descriptor = descriptor_class.from_yaml(file_path=session_data.raw_data.session_descriptor_path)
 
-    row: dict[str, Any] = {
+    row: dict[str, str | datetime | bool | int | None] = {
         "animal": session_data.animal_id,
         "session": session_data.session_name,
         "session_path": f"{session_data.animal_id}/{session_data.session_name}",
@@ -580,11 +574,11 @@ def _build_session_row(
         "complete": not descriptor.incomplete,  # type: ignore[attr-defined]
     }
 
-    session_jobs: list[dict[str, Any]] = []
+    session_jobs: list[dict[str, str | int | None]] = []
     for pipeline in SESSION_PIPELINES:
         tracker_path = resolve_session_tracker_path(session=session_data, pipeline=pipeline)
         status, pipeline_jobs = _read_pipeline_state(pipeline=pipeline, tracker_path=tracker_path)
-        row[PIPELINE_STATUS_COLUMNS[pipeline]] = int(status == TrackerStatus.COMPLETED)
+        row[_PIPELINE_STATUS_COLUMNS[pipeline]] = int(status == TrackerStatus.COMPLETED)
         session_jobs.extend(pipeline_jobs)
 
     # Each job row carries the session that recorded it, since the rows of every session are written to one artifact.
@@ -594,7 +588,7 @@ def _build_session_row(
 
 def _read_pipeline_state(
     pipeline: ProcessingPipelines, tracker_path: Path
-) -> tuple[TrackerStatus, list[dict[str, Any]]]:
+) -> tuple[TrackerStatus, list[dict[str, str | int | None]]]:
     """Reads one pipeline's processing tracker into a rolled-up status label and its per-job entries.
 
     Notes:
@@ -630,7 +624,7 @@ def _assert_status_column_coverage() -> None:
         RuntimeError: If a per-session pipeline declares no status column, or a column names a pipeline that no
             session carries a tracker for.
     """
-    declared = frozenset(PIPELINE_STATUS_COLUMNS)
+    declared = frozenset(_PIPELINE_STATUS_COLUMNS)
     carried = frozenset(SESSION_PIPELINES)
     if declared != carried:
         message = (

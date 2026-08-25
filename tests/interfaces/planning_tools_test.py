@@ -1,5 +1,5 @@
-"""Tests the aggregation and filtering the planning tools layer performs over a stored plan projection, alongside the
-dataset state status counts.
+"""Contains tests for the aggregation and filtering the planning tools layer performs over a stored plan projection,
+alongside the dataset state status counts.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
 """A projection holding both unit kinds, two pipelines for one session, and one job waiting on another."""
 
 
-def install_projection(project_root: Path) -> None:
+def _install_projection(project_root: Path) -> None:
     """Writes the stand-in projection at the location the tools read it from."""
     project_root.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(data=_PLANNED_JOBS, schema=PROJECT_PLAN_SCHEMA, strict=False).write_ipc(
@@ -89,7 +89,7 @@ def projected_project(tmp_path: Path) -> Path:
         The path to the project root the projection was written into.
     """
     project_root = tmp_path.joinpath("Proj")
-    install_projection(project_root=project_root)
+    _install_projection(project_root=project_root)
     return project_root
 
 

@@ -61,7 +61,7 @@ cannot stall the manager for good."""
 
 
 @dataclass(frozen=True, slots=True)
-class JobAllocation:
+class _JobAllocation:
     """Describes the cores the host can supply for one job of a type and how many of its jobs may run at once."""
 
     cores_per_job: int
@@ -83,7 +83,7 @@ class JobAllocation:
 
 
 @dataclass(slots=True)
-class ActiveJob[PendingJobT: PendingJob]:
+class _ActiveJob[PendingJobT: PendingJob]:
     """Tracks a single pending job currently executing as a ``Future`` on the shared process pool."""
 
     job: PendingJobT
@@ -111,7 +111,7 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """All submitted jobs keyed by ``(unit_path, job_id)`` dispatch key."""
     pending_jobs: deque[PendingJobT] = field(default_factory=deque)
     """Jobs awaiting dispatch, held in the order the next admission pass considers them."""
-    active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
+    active_jobs: list[_ActiveJob[PendingJobT]] = field(default_factory=list)
     """Jobs currently executing on the shared process pool."""
     core_budget: int = 1
     """The cores the batch may commit across all concurrently running jobs."""
@@ -154,7 +154,7 @@ def resolve_core_allocations(
     core_budget: int,
     job_limits: dict[str, int] | None = None,
     job_reservations: dict[str, int] | None = None,
-) -> dict[str, JobAllocation]:
+) -> dict[str, _JobAllocation]:
     """Resolves the cores the host can supply for one job of each queued job type and how many of its jobs run at once.
 
     Notes:
@@ -197,12 +197,12 @@ def resolve_core_allocations(
 
     limits = job_limits if job_limits is not None else {}
     reservations = job_reservations if job_reservations is not None else {}
-    allocations: dict[str, JobAllocation] = {}
+    allocations: dict[str, _JobAllocation] = {}
     for job_name in job_names:
         cores = max(1, min(job_cores[job_name], core_budget))
         limit = limits.get(job_name)
         parallel = max(1, core_budget // cores)
-        allocations[job_name] = JobAllocation(
+        allocations[job_name] = _JobAllocation(
             cores_per_job=cores,
             maximum_parallel=parallel if limit is None else min(parallel, limit),
             concurrency_limit=limit,
@@ -259,7 +259,7 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
                 # Reaps finished futures and frees their share of both budgets. Each result is drained and its
                 # exception discarded, because a worker records its own outcome on the tracker before returning and
                 # the tracker is what the status tool and the ordering logic both read.
-                still_active: list[ActiveJob[PendingJobT]] = []
+                still_active: list[_ActiveJob[PendingJobT]] = []
                 completed_any = False
                 for active in state.active_jobs:
                     if active.future.done():
@@ -315,6 +315,23 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     return tracker_jobs
 
 
+def apply_decode_thread_ceiling(cores: int) -> None:
+    """Bounds the default image-decode width of the calling process, from the cores one job holds.
+
+    Notes:
+        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
+        life of the process. The last write before that first decode is therefore the one every read in that worker
+        sees, and every write after it reaches nothing.
+
+        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
+        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
+
+    Args:
+        cores: The cores the job about to run holds.
+    """
+    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(TIFF_DECODE_CEILING, cores)))
+
+
 @contextlib.contextmanager
 def _pinned_pool_imports() -> Iterator[None]:
     """Pins the thread pools a spawned worker sizes while importing, then restores the environment.
@@ -341,23 +358,6 @@ def _pinned_pool_imports() -> Iterator[None]:
                 os.environ.pop(variable, None)
             else:
                 os.environ[variable] = value
-
-
-def apply_decode_thread_ceiling(cores: int) -> None:
-    """Bounds the default image-decode width of the calling process, from the cores one job holds.
-
-    Notes:
-        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
-        life of the process. The last write before that first decode is therefore the one every read in that worker
-        sees, and every write after it reaches nothing.
-
-        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
-        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
-
-    Args:
-        cores: The cores the job about to run holds.
-    """
-    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(TIFF_DECODE_CEILING, cores)))
 
 
 def _initialize_worker_threads(
@@ -543,7 +543,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
                 continue
 
             future = pool.submit(state.worker, job)
-            state.active_jobs.append(ActiveJob(job=job, future=future))
+            state.active_jobs.append(_ActiveJob(job=job, future=future))
             used_cores += job.core_weight
             used_memory += job.memory_mb
             running_counts[job.job_name] = running + 1

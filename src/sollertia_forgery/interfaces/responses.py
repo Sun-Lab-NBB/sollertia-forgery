@@ -22,7 +22,7 @@ so its page is deliberately shorter."""
 
 
 @dataclass(frozen=True, slots=True)
-class PageWindow:
+class _PageWindow:
     """Describes the slice of a matched item set one response carries."""
 
     start: int
@@ -39,7 +39,7 @@ class PageWindow:
         return None if self.length is None else self.start + self.length
 
 
-def resolve_page(total: int, limit: int, start_row: int) -> PageWindow:
+def resolve_page(total: int, limit: int, start_row: int) -> _PageWindow:
     """Resolves which slice of a matched item set a response carries.
 
     Notes:
@@ -61,16 +61,16 @@ def resolve_page(total: int, limit: int, start_row: int) -> PageWindow:
     """
     start = max(0, start_row)
     if start >= total:
-        return PageWindow(start=start, length=0, next_start_row=None)
+        return _PageWindow(start=start, length=0, next_start_row=None)
     if limit <= 0:
-        return PageWindow(start=start, length=None, next_start_row=None)
+        return _PageWindow(start=start, length=None, next_start_row=None)
 
     remaining = total - start
     length = min(limit, remaining)
-    return PageWindow(start=start, length=length, next_start_row=start + length if length < remaining else None)
+    return _PageWindow(start=start, length=length, next_start_row=start + length if length < remaining else None)
 
 
-def page_fields(window: PageWindow, total: int, listed: int) -> dict[str, Any]:
+def page_fields(window: _PageWindow, total: int, listed: int) -> dict[str, Any]:
     """Renders the paging fields a response reports alongside its items.
 
     Args:
@@ -185,7 +185,7 @@ def project_item(item: dict[str, Any], fields: Sequence[str], *, drop_empty: boo
         if field_name not in item:
             continue
         value = item[field_name]
-        if drop_empty and (value is None or (isinstance(value, list | dict | str) and len(value) == 0)):
+        if drop_empty and (value is None or (isinstance(value, list | dict | str) and not value)):
             continue
         narrowed[field_name] = value
     return narrowed

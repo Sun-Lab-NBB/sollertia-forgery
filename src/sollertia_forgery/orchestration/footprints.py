@@ -119,16 +119,6 @@ Notes:
 
 
 @dataclass(frozen=True, slots=True)
-class _RecordingGeometry:
-    """Describes the shape of a two-photon recording as its processing output reports it."""
-
-    regions: int
-    """The regions the single-recording pipeline detected."""
-    samples: int
-    """The samples each region's trace holds."""
-
-
-@dataclass(frozen=True, slots=True)
 class JobFootprint:
     """Describes the resources one job occupies while it runs, as this module's sizing pass resolved them.
 
@@ -259,35 +249,6 @@ def size_session_jobs(
     return footprints
 
 
-def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
-    """Locates the log archive every archive-reading job of one session consumes.
-
-    Notes:
-        The archive filename a source writes is the data-structures library's own contract, so the sources are handed
-        to its locator rather than having their filenames rebuilt here. One traversal resolves every source, which is
-        the same pass the acquisition libraries' own job resolvers make.
-
-    Args:
-        behavior_directory: The session's raw behavior data directory, whose tree holds every archive it recorded.
-        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose archive-reading members
-            carry the identifier of the source that recorded their archive.
-
-    Returns:
-        The path to the archive of every source the jobs read, keyed by that source identifier. Empty when the jobs
-        read no archive.
-
-    Raises:
-        FileNotFoundError: If the behavior data directory is absent, or if a source recorded no archive, in which case
-            the job reading it cannot run either.
-        OSError: If any directory beneath the behavior data directory cannot be read.
-        ValueError: If the tree holds more than one archive for a source, which leaves the job's input ambiguous.
-    """
-    sources = [specifier for job_name, specifier, _ in jobs if job_name in _ARCHIVE_JOB_NAMES]
-    if not sources:
-        return {}
-    return find_log_archives(log_directory=behavior_directory, source_ids=sources)
-
-
 def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
     """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
@@ -362,6 +323,45 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
         footprints[job_name, specifier] = footprint
 
     return footprints
+
+
+@dataclass(frozen=True, slots=True)
+class _RecordingGeometry:
+    """Describes the shape of a two-photon recording as its processing output reports it."""
+
+    regions: int
+    """The regions the single-recording pipeline detected."""
+    samples: int
+    """The samples each region's trace holds."""
+
+
+def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
+    """Locates the log archive every archive-reading job of one session consumes.
+
+    Notes:
+        The archive filename a source writes is the data-structures library's own contract, so the sources are handed
+        to its locator rather than having their filenames rebuilt here. One traversal resolves every source, which is
+        the same pass the acquisition libraries' own job resolvers make.
+
+    Args:
+        behavior_directory: The session's raw behavior data directory, whose tree holds every archive it recorded.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose archive-reading members
+            carry the identifier of the source that recorded their archive.
+
+    Returns:
+        The path to the archive of every source the jobs read, keyed by that source identifier. Empty when the jobs
+        read no archive.
+
+    Raises:
+        FileNotFoundError: If the behavior data directory is absent, or if a source recorded no archive, in which case
+            the job reading it cannot run either.
+        OSError: If any directory beneath the behavior data directory cannot be read.
+        ValueError: If the tree holds more than one archive for a source, which leaves the job's input ambiguous.
+    """
+    sources = [specifier for job_name, specifier, _ in jobs if job_name in _ARCHIVE_JOB_NAMES]
+    if not sources:
+        return {}
+    return find_log_archives(log_directory=behavior_directory, source_ids=sources)
 
 
 def _bytes_to_megabytes(byte_count: float) -> int:

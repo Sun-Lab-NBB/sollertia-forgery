@@ -1,5 +1,5 @@
-"""Tests the per-session pipeline identity assets: the tracker-path resolver, the pipeline tuple derived from it, the
-manifest schema invariants that both drive, and the Mesoscope-VR forging admission and dispatch assets.
+"""Contains tests for the per-session pipeline identity assets: the tracker-path resolver, the pipeline tuple derived
+from it, the manifest schema invariants that both drive, and the Mesoscope-VR forging admission and dispatch assets.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from sollertia_forgery.shared_assets import (
     ProcessingPipelines,
     resolve_session_tracker_path,
 )
-from sollertia_forgery.managing.manifest import PIPELINE_STATUS_COLUMNS
+from sollertia_forgery.managing.manifest import _PIPELINE_STATUS_COLUMNS
 from sollertia_forgery.mesoscope_vr.forging import MESOSCOPE_ADMISSION_PIPELINES, assemble_mesoscope_session
 
 if TYPE_CHECKING:
@@ -89,17 +89,17 @@ def test_every_session_pipeline_declares_a_manifest_status_column() -> None:
 
     The manifest module asserts this at import, so this test pins the invariant that assertion protects.
     """
-    assert set(PIPELINE_STATUS_COLUMNS) == set(SESSION_PIPELINES)
+    assert set(_PIPELINE_STATUS_COLUMNS) == set(SESSION_PIPELINES)
 
 
 def test_status_column_names_stay_distinct() -> None:
     """Verifies that every manifest status column name is distinct."""
-    assert len(set(PIPELINE_STATUS_COLUMNS.values())) == len(PIPELINE_STATUS_COLUMNS)
+    assert len(set(_PIPELINE_STATUS_COLUMNS.values())) == len(_PIPELINE_STATUS_COLUMNS)
 
 
 def test_checksum_reports_under_the_integrity_column() -> None:
     """Verifies that the checksum pipeline reports under the manifest's integrity column."""
-    assert PIPELINE_STATUS_COLUMNS[ProcessingPipelines.CHECKSUM] == "integrity"
+    assert _PIPELINE_STATUS_COLUMNS[ProcessingPipelines.CHECKSUM] == "integrity"
 
 
 def test_admission_requires_only_pipelines_a_session_records() -> None:

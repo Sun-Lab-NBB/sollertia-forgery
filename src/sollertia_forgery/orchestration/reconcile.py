@@ -27,7 +27,7 @@ _SLURM_EXECUTOR_SCHEME: str = "slurm"
 
 
 @dataclass(slots=True)
-class Reconciliation:
+class _Reconciliation:
     """Records what reconciliation decided about a batch's jobs.
 
     Notes:
@@ -45,7 +45,7 @@ class Reconciliation:
     itself drops the identifiers a unit does not track."""
 
 
-def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> Reconciliation:
+def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> _Reconciliation:
     """Decides what to do with each job of a batch prepared against this machine.
 
     Notes:
@@ -62,10 +62,10 @@ def reconcile_local_jobs(jobs: Sequence[GenericPendingJob]) -> Reconciliation:
     Returns:
         The reconciliation, which adopts nothing and dispatches every job.
     """
-    return Reconciliation(dispatchable=list(jobs), resettable=list(jobs))
+    return _Reconciliation(dispatchable=list(jobs), resettable=list(jobs))
 
 
-def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> Reconciliation:
+def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> _Reconciliation:
     """Decides what to do with each job of a batch prepared against the remote compute server.
 
     Notes:
@@ -89,7 +89,7 @@ def reconcile_remote_jobs(server: Server, jobs: Sequence[GenericPendingJob]) -> 
     claimed = _resolve_claimed_allocations(jobs=jobs)
     statuses = server.get_job_statuses(slurm_job_ids=sorted(set(claimed.values())))
 
-    reconciliation = Reconciliation()
+    reconciliation = _Reconciliation()
     for job in jobs:
         allocation = claimed.get(job.dispatch_key)
         if allocation is not None and statuses.get(allocation) not in TERMINAL_JOB_STATUSES:

@@ -26,7 +26,7 @@ _CHECKSUM_EXCLUDED_FILES: set[str] = {
     _CHECKSUM_TRACKER_LOCK_FILENAME,
 }
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
-tracker, and its lock file to prevent the tracker presence from altering the checksum value. Only includes files
+tracker, and its lock file to prevent the tracker's presence from altering the checksum value. Only includes files
 canonically found under the 'raw_data' session data directory."""
 
 
@@ -87,8 +87,8 @@ def run_checksum_processing_pipeline(
         )
         console.error(message=message, error=ValueError)
 
-    # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
-    # universe discards foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
+    # Aligning against the universe discards foreign or outdated job entries while preserving the state of the
+    # jobs this pipeline produces.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
     tracker.align_jobs(jobs=possible, universe=universe)
 
@@ -158,8 +158,8 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
     """Resolves the checksum pipeline's job universe and possible subset for the target session.
 
     Notes:
-        The checksum pipeline produces exactly one job, so the universe is always the single
-        ``(CHECKSUM_JOB_NAME, session_name)`` pair. Both pipeline modes share that job, because a session carries one
+        The checksum pipeline produces exactly one job, so the universe is always the single ``(CHECKSUM_JOB_NAME,
+        session_name)`` pair. Both pipeline modes share that job, because a session carries one
         integrity state whether the run establishes it or confirms it. That job is possible once the session holds
         raw data the checksum covers, which excludes the checksum file, the tracker, and the tracker lock. Discovery
         loads the session marker and walks the raw data directory, leaving the session as it found it.

@@ -36,7 +36,6 @@ config.THREADING_LAYER = "omp" if sys.platform == "darwin" else "tbb"  # type: i
 
 from ataraxis_base_utilities import console  # noqa: E402 - imported after the process-wide configuration above.
 
-# Ensures console and progress bars are enabled when this library is used.
 if not console.enabled:
     console.enable()
 if not console.progress_enabled:

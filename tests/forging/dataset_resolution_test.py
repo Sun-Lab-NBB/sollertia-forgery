@@ -1,5 +1,5 @@
-"""Tests the forging dataset resolution policy, the forging job universe and its ordering, the admission gate, and the
-forging pipeline's tracker-state helpers.
+"""Contains tests for the forging dataset resolution policy, the forging job universe and its ordering, the admission
+gate, and the forging pipeline's tracker-state helpers.
 """
 
 from __future__ import annotations
@@ -16,13 +16,10 @@ from sollertia_forgery.forging import (
     FORGING_JOB_NAME,
     MULTIDAY_DISCOVERY_JOB_NAME,
     MULTIDAY_EXTRACTION_JOB_NAME,
-    resolve_dataset,
     run_forging_pipeline,
-    build_forging_universe,
     define_forging_dataset,
     discover_project_datasets,
     forging_job_prerequisites,
-    verify_session_admissibility,
 )
 from sollertia_forgery.shared_assets import (
     SESSION_PIPELINES,
@@ -30,9 +27,10 @@ from sollertia_forgery.shared_assets import (
     resolve_session_tracker_path,
 )
 import sollertia_forgery.forging.dataset as dataset_module
-from sollertia_forgery.forging.dataset import _verify_session_compatibility
+from sollertia_forgery.forging.dataset import resolve_dataset, _verify_session_compatibility
 import sollertia_forgery.forging.pipeline as pipeline_module
-from sollertia_forgery.forging.pipeline import _reset_animal_jobs, _resolve_runnable_jobs
+from sollertia_forgery.forging.pipeline import _reset_animal_jobs, _resolve_runnable_jobs, _build_forging_universe
+from sollertia_forgery.forging.admission import verify_session_admissibility
 
 _COLUMN_DESCRIPTIONS: dict[str, str] = {"time_us": "Microsecond-precision sample timestamps."}
 """A minimal column-description binding, standing in for what the acquisition system's registry entry returns."""
@@ -586,7 +584,7 @@ def test_discover_project_datasets_loads_every_marked_directory(
     discovered = discover_project_datasets(project_root=project_root)
 
     assert [dataset.name for dataset in discovered] == ["first_dataset", "second_dataset"]
-    assert _group_sessions_by_animal(discovered[0]) == {"animal_a": {"session_1"}}
+    assert _group_sessions_by_animal(dataset=discovered[0]) == {"animal_a": {"session_1"}}
 
 
 def test_discover_project_datasets_reports_nothing_for_a_project_without_datasets(
@@ -899,7 +897,7 @@ def test_define_forging_dataset_applies_every_definition_argument(
         )
 
     assert recorded["session_names"] == ("session_1", "session_2")
-    assert recorded["force_recreate"] is True
+    assert recorded["force_recreate"]
 
 
 def test_run_forging_pipeline_never_redefines_the_hierarchy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -932,7 +930,7 @@ def test_build_forging_universe_covers_every_stage() -> None:
     """Verifies that the universe holds each animal's discovery alongside every extraction and assembly."""
     dataset = _dataset_stub("session_1", "session_2", "session_3")
 
-    assert build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN) == [
+    assert _build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN) == [
         (MULTIDAY_DISCOVERY_JOB_NAME, "animal_a"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_1"),
         (MULTIDAY_EXTRACTION_JOB_NAME, "session_2"),
@@ -948,13 +946,13 @@ def test_build_forging_universe_omits_multiday_jobs_without_a_plan() -> None:
     """Verifies that a dataset needing no multi-day processing carries assembly jobs alone."""
     dataset = _dataset_stub("session_1")
 
-    assert build_forging_universe(dataset=dataset, multiday_plan={}) == [(FORGING_JOB_NAME, "session_1")]
+    assert _build_forging_universe(dataset=dataset, multiday_plan={}) == [(FORGING_JOB_NAME, "session_1")]
 
 
 def test_forging_job_prerequisites_chains_each_session_through_its_own_animal() -> None:
     """Verifies that an extraction waits on its own animal's discovery and an assembly waits on its extraction."""
     dataset = _dataset_stub("session_1", "session_2", "session_3")
-    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
 
     ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
@@ -967,7 +965,7 @@ def test_forging_job_prerequisites_chains_each_session_through_its_own_animal() 
 def test_forging_job_prerequisites_leaves_a_training_assembly_unordered() -> None:
     """Verifies that a session with no multi-day stage carries no upstream job."""
     dataset = _dataset_stub("session_1", "session_2")
-    universe = build_forging_universe(dataset=dataset, multiday_plan={})
+    universe = _build_forging_universe(dataset=dataset, multiday_plan={})
 
     ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
@@ -978,7 +976,7 @@ def test_forging_job_prerequisites_leaves_a_training_assembly_unordered() -> Non
 def test_forging_job_prerequisites_covers_the_whole_universe() -> None:
     """Verifies that every job in the universe receives an ordering entry."""
     dataset = _dataset_stub("session_1", "session_2", "session_3")
-    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
 
     assert set(forging_job_prerequisites(dataset=dataset, universe=universe)) == set(universe)
 
@@ -986,7 +984,7 @@ def test_forging_job_prerequisites_covers_the_whole_universe() -> None:
 def test_every_multiday_session_reaches_its_own_animals_discovery() -> None:
     """Verifies that each assembly's upstream chain terminates at the discovery of the animal owning its session."""
     dataset = _dataset_stub("session_1", "session_2", "session_3")
-    universe = build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
+    universe = _build_forging_universe(dataset=dataset, multiday_plan=_MULTIDAY_PLAN)
     ordering = forging_job_prerequisites(dataset=dataset, universe=universe)
 
     for session, animal in _SESSION_ANIMALS.items():

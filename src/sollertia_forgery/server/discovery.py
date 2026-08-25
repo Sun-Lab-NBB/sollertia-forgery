@@ -29,7 +29,7 @@ _SESSION_MARKER_DEPTH: int = 4
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectMarkers:
+class _ProjectMarkers:
     """Stores the dataset directories and acquired sessions one remote project holds, as resolved from its marker
     files.
     """
@@ -40,7 +40,7 @@ class ProjectMarkers:
     """The project's acquired sessions, in natural sort order, excluding the sessions a dataset directory holds."""
 
 
-def discover_project_markers(project_path: Path, server: Server, *, include_sessions: bool = True) -> ProjectMarkers:
+def discover_project_markers(project_path: Path, server: Server, *, include_sessions: bool = True) -> _ProjectMarkers:
     """Discovers the dataset and session marker files a remote project holds.
 
     Notes:
@@ -58,7 +58,7 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
         include_sessions: Determines whether the search covers the project's acquired sessions alongside its datasets.
 
     Returns:
-        A ProjectMarkers instance holding the project's dataset directories and acquired sessions. The sessions are
+        A _ProjectMarkers instance holding the project's dataset directories and acquired sessions. The sessions are
         empty when the search did not cover them.
 
     Raises:
@@ -91,7 +91,7 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
     # The search orders the marker paths, where the separator that follows a directory's name orders a name against a
     # sibling that extends it. Both collections are therefore ordered again on the names they are reported by.
     dataset_names = {dataset.name for dataset in datasets}
-    return ProjectMarkers(
+    return _ProjectMarkers(
         datasets=tuple(natsorted(datasets)),
         sessions=tuple(
             natsorted(
@@ -102,7 +102,7 @@ def discover_project_markers(project_path: Path, server: Server, *, include_sess
     )
 
 
-def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSession, ...]:
+def _discover_project_sessions(project: str, server: Server) -> tuple[DatasetSession, ...]:
     """Discovers all sessions stored under the project's directory on the remote compute server's data root.
 
     Notes:
@@ -127,9 +127,6 @@ def discover_project_sessions(project: str, server: Server) -> tuple[DatasetSess
 def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
     """Discovers and reports all sessions stored under the project's directory on the remote compute server.
 
-    Serves as the entry point for discovering project data, connecting to the server and reporting the discovered
-    sessions to the terminal.
-
     Args:
         project: The name of the project whose data to discover.
 
@@ -138,14 +135,9 @@ def discover_project_data(project: str) -> tuple[DatasetSession, ...]:
     """
     console.echo(message=f"Discovering '{project}' project's sessions on the remote server...", level=LogLevel.INFO)
 
-    # Establishes communication with the compute server.
     configuration = get_server_configuration()
-    server = Server(configuration=configuration)
-
-    try:
-        discovered_sessions = discover_project_sessions(project=project, server=server)
-    finally:
-        server.close()
+    with Server(configuration=configuration) as server:
+        discovered_sessions = _discover_project_sessions(project=project, server=server)
 
     delay_terminal()
     console.echo(

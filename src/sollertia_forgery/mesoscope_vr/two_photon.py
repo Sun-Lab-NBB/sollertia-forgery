@@ -41,9 +41,7 @@ MESOSCOPE_MULTI_RECORDING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({Se
 
 Notes:
     Cross-recording cell tracking needs calcium imaging, which only an experiment session records, so every other
-    session type resolves no multi-recording configuration. Declaring the set alongside the resolver lets a caller
-    answer whether a dataset needs cross-recording plans at all from the dataset's own recorded session type, without
-    loading a session to be told the same thing.
+    session type resolves no multi-recording configuration.
 """
 
 
@@ -90,7 +88,7 @@ unrecognized genotype raises immediately and the caller resolves the mismatch be
 
 
 def locate_two_photon_data(session: SessionData) -> Path:
-    """Resolves the Mesoscope-VR session's raw two-photon imaging directory, which is the input to the cindra pipeline.
+    """Resolves the Mesoscope-VR session's raw two-photon imaging directory.
 
     Args:
         session: The loaded session whose raw two-photon imaging directory is resolved.
@@ -118,7 +116,7 @@ def resolve_single_recording_configuration(session: SessionData) -> SingleRecord
         FileNotFoundError: If the session's surgery metadata file is missing.
         ValueError: If the animal's genotype does not map to a recognized calcium indicator.
     """
-    return _build_single_recording_configuration(_read_session_genotype(session))
+    return _build_single_recording_configuration(genotype=_read_session_genotype(session=session))
 
 
 def resolve_multi_recording_configuration(session: SessionData) -> MultiRecordingConfiguration | None:
@@ -142,7 +140,7 @@ def resolve_multi_recording_configuration(session: SessionData) -> MultiRecordin
     """
     if session.session_type != SessionTypes.MESOSCOPE_EXPERIMENT:
         return None
-    return _build_multi_recording_configuration(_read_session_genotype(session))
+    return _build_multi_recording_configuration(genotype=_read_session_genotype(session=session))
 
 
 def _resolve_calcium_indicator(genotype: str) -> _CalciumIndicator:
@@ -221,7 +219,7 @@ def _build_single_recording_configuration(genotype: str) -> SingleRecordingConfi
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype)]
+    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype=genotype)]
     return SingleRecordingConfiguration(
         main=Main(
             two_channels=False,
@@ -315,7 +313,7 @@ def _build_multi_recording_configuration(genotype: str) -> MultiRecordingConfigu
     Raises:
         ValueError: If the genotype does not match a recognized calcium indicator.
     """
-    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype)]
+    parameters = _INDICATOR_PARAMETERS[_resolve_calcium_indicator(genotype=genotype)]
     return MultiRecordingConfiguration(
         recording_io=RecordingIO(
             repeat_selection=False,

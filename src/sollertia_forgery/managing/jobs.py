@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import polars as pl
 from ataraxis_data_structures import atomic_write
@@ -12,7 +12,7 @@ from ..shared_assets import natural_sort
 if TYPE_CHECKING:
     from pathlib import Path
 
-PROJECT_JOBS_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
+_PROJECT_JOBS_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
     "animal": pl.String,
     "session": pl.String,
     "pipeline": pl.String,
@@ -37,9 +37,6 @@ Notes:
 def project_jobs_path(project_directory: Path) -> Path:
     """Resolves the path to the project job artifact under the target project's root directory.
 
-    This is the single source of the artifact's filename, so the writer and every consumer that locates it derive the
-    same path.
-
     Args:
         project_directory: The path to the project's root directory.
 
@@ -49,14 +46,14 @@ def project_jobs_path(project_directory: Path) -> Path:
     return project_directory.joinpath(f"{project_directory.stem}_jobs.feather")
 
 
-def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) -> Path:
+def write_project_jobs(project_directory: Path, job_rows: list[dict[str, str | int | None]]) -> Path:
     """Writes the project job artifact from the rows the manifest's walk collected.
 
     Notes:
         Takes no lock of its own, because the manifest's writer calls this while holding the lock that serializes the
-        whole generation. That lock excludes other writers rather than readers, and the two artifacts are published by
-        two separate renames, so the writer lands this one first and leaves a reader at worst holding job rows for a
-        session the manifest does not list yet.
+        whole generation. That lock excludes other writers rather than readers, and the two artifacts are
+        published by two separate renames. The writer lands this one first, so a reader at worst holds job rows
+        for a session the manifest does not list yet.
 
         Stored uncompressed so a reader memory-maps it rather than decoding it, which is what puts opening it a page
         fault away from the reader instead of a full decode of every row.
@@ -74,7 +71,7 @@ def write_project_jobs(project_directory: Path, job_rows: list[dict[str, Any]]) 
     """
     jobs_path = project_jobs_path(project_directory=project_directory)
     frame = natural_sort(
-        frame=pl.DataFrame(data=job_rows, schema=PROJECT_JOBS_SCHEMA, strict=False),
+        frame=pl.DataFrame(data=job_rows, schema=_PROJECT_JOBS_SCHEMA, strict=False),
         by=["animal", "session", "pipeline", "job_name", "specifier"],
         nulls_last=True,
     )

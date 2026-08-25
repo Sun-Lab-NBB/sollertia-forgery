@@ -65,7 +65,7 @@ class OpenMPStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class OpenMPSummary:
+class _OpenMPSummary:
     """Summarizes a request to make the OpenMP runtime loadable, whether previewed as a dry run or carried out."""
 
     status: OpenMPStatus
@@ -105,14 +105,10 @@ def verify_openmp_runtime() -> None:
     """Aborts the runtime when Numba's OpenMP threading layer has no runtime to load on this macOS host.
 
     Notes:
-        Every pipeline that dispatches a parallelized worker pool calls this before it starts a job, so a host that
-        cannot run a parallelized
-        kernel fails while it has done no work rather than partway through a session. The error replaces the
-        threading-layer error Numba raises at the first parallelized call, which names no remedy. The platforms whose
-        threading layer needs no separately installed runtime return without checking anything.
-
-        The check belongs to the pipelines rather than to the package import, so importing this library to read the
-        dataset types it publishes costs nothing on a macOS host that never processes anything.
+        A host that cannot run a parallelized kernel fails while it has done no work rather than partway through a
+        session. The error replaces the threading-layer error Numba raises at the first parallelized call, which
+        names no remedy. The platforms whose threading layer needs no separately installed runtime return without
+        checking anything.
 
         This library selects the threading layer for the whole process, so the guarantee covers every kernel the
         process may compile, including the parallelized stages its dependencies own.
@@ -140,7 +136,7 @@ def resolve_openmp_runtime(
     link_path: Path | None = None,
     execute: bool = False,
     force: bool = False,
-) -> OpenMPSummary:
+) -> _OpenMPSummary:
     """Links a discovered OpenMP runtime into a directory the dynamic loader searches by default.
 
     The link is what makes Numba's OpenMP threading layer resolve on macOS, because the omppool extension shipped in
@@ -231,7 +227,7 @@ def _summarize_request(
     link: Path | None = None,
     searched: tuple[Path, ...] = (),
     loadable: bool = False,
-) -> OpenMPSummary:
+) -> _OpenMPSummary:
     """Builds the summary reporting one outcome of an OpenMP runtime request.
 
     Args:
@@ -245,7 +241,7 @@ def _summarize_request(
     Returns:
         The assembled summary.
     """
-    return OpenMPSummary(
+    return _OpenMPSummary(
         status=status,
         unresolved_reason=reason,
         runtime_path=runtime,

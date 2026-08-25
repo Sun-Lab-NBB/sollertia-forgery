@@ -1,5 +1,5 @@
-"""Tests the system-agnostic substrate: the per-session tracker locations, the shared utilities, and the terminal
-configuration the distribution applies when it is imported.
+"""Contains tests for the system-agnostic substrate: the per-session tracker locations, the shared utilities, and the
+terminal configuration the distribution applies when it is imported.
 """
 
 from __future__ import annotations
@@ -32,7 +32,9 @@ if TYPE_CHECKING:
 def test_every_per_session_pipeline_resolves_the_location_its_own_session_declares(
     experiment_session: SessionData,
 ) -> None:
-    """The reporting layer and the dispatch table both read this mapping, so it must name the session's own paths."""
+    """Verifies that the reporting layer and the dispatch table both read this mapping, so it must name the session's
+    own paths.
+    """
     resolved = {
         pipeline: resolve_session_tracker_path(session=experiment_session, pipeline=pipeline)
         for pipeline in SESSION_PIPELINES
@@ -48,7 +50,7 @@ def test_every_per_session_pipeline_resolves_the_location_its_own_session_declar
 
 
 def test_the_checksum_tracker_sits_beside_the_data_it_verifies(experiment_session: SessionData) -> None:
-    """That pipeline verifies the acquired data in place, so its record belongs under the acquired data."""
+    """Verifies that the pipeline verifies the acquired data in place, so its record belongs under the acquired data."""
     resolved = resolve_session_tracker_path(session=experiment_session, pipeline=ProcessingPipelines.CHECKSUM)
 
     assert resolved.parent == experiment_session.raw_data_path
@@ -58,7 +60,9 @@ def test_the_checksum_tracker_sits_beside_the_data_it_verifies(experiment_sessio
 def test_a_pipeline_that_processes_no_single_session_is_rejected(
     experiment_session: SessionData, pipeline: ProcessingPipelines
 ) -> None:
-    """One pipeline operates on a project and the other on a dataset, so neither records a per-session tracker."""
+    """Verifies that one pipeline operates on a project and the other on a dataset, so neither records a per-session
+    tracker.
+    """
     with pytest.raises(ValueError, match=f"tracker path of pipeline '{pipeline.value}'"):
         resolve_session_tracker_path(session=experiment_session, pipeline=pipeline)
 
@@ -67,7 +71,7 @@ def test_a_pipeline_that_processes_no_single_session_is_rejected(
 
 
 def test_the_terminal_delay_holds_the_runtime_for_its_declared_period() -> None:
-    """Consecutive printouts stay visually separated only if the delay actually elapses."""
+    """Verifies that consecutive printouts stay visually separated only if the delay actually elapses."""
     start = time.perf_counter()
 
     delay_terminal()
@@ -76,10 +80,11 @@ def test_the_terminal_delay_holds_the_runtime_for_its_declared_period() -> None:
 
 
 def test_a_natural_sort_orders_an_identifier_by_the_number_it_embeds() -> None:
-    """Every identifier this library orders on embeds a number in text, so a listing has to place 2 ahead of 10.
+    """Verifies that every identifier this library orders on embeds a number in text, so a listing has to place 2 ahead
+    of 10.
 
-    Ordering the same identifiers as plain text puts 10 ahead of 2, which is the inversion this function exists to
-    keep out of the project manifest, the project plan, the project jobs artifact, and the dataset state artifact.
+    Ordering the same identifiers as plain text puts 10 ahead of 2, which is the inversion this function exists to keep
+    out of the project manifest, the project plan, the project jobs artifact, and the dataset state artifact.
     """
     frame = pl.DataFrame({"animal": ["10", "2", "1"], "session": ["a", "b", "c"]})
 
@@ -91,16 +96,18 @@ def test_a_natural_sort_orders_an_identifier_by_the_number_it_embeds() -> None:
 
 
 def test_the_multi_recording_dataset_name_is_qualified_by_animal() -> None:
-    """An animal's multi-recording output stays separate from its peers only when the name carries the animal, and
-    the fold that reaches the directory is cindra's, so the name itself keeps the casing it was given."""
+    """Verifies that an animal's multi-recording output stays separate from its peers only when the name carries the
+    animal, and the fold that reaches the directory is cindra's, so the name itself keeps the casing it was given.
+    """
     assert multi_recording_dataset_name(animal_id="305", dataset_name="PlaceCells") == "305_PlaceCells"
 
 
 # Import-time terminal configuration
 
 
+@pytest.mark.xdist_group(name="console")
 def test_importing_the_library_turns_on_whichever_terminal_channel_is_off() -> None:
-    """Every pipeline reports through the console and its progress bars, so importing has to switch on both."""
+    """Verifies every pipeline reports through the console and its progress bars, so importing has to switch on both."""
     console.disable()
 
     importlib.reload(sollertia_forgery)

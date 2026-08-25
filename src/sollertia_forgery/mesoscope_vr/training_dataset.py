@@ -23,13 +23,9 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     Resolves the reference clock from the slowest camera, then combines the session's behavior and video sub-datasets
     onto that clock into a single Polars DataFrame, written as an uncompressed ``data.feather`` at ``output_path``. The
     behavior sub-dataset supplies the ``time_us`` and ``elapsed_minutes`` columns, and the video sub-dataset contributes
-    columns only when the session carries processed camera feathers. The meaning of each emitted column is documented by
-    ``DatasetColumn`` and donated to the dataset's ``data_descriptions.feather`` via ``MESOSCOPE_COLUMN_DESCRIPTIONS``.
+    columns only when the session carries processed camera feathers.
 
     Notes:
-        Training sessions carry no mesoscope imaging, so the assembler takes no dataset name, since a training session
-        has no cindra multi-recording output to resolve.
-
         The assembled feather is clipped to the session bounds, so it begins when the system first leaves the idle
         state and ends at the final runtime-state entry. That drops the setup span the cameras record before the
         session and the teardown span they record after it.
@@ -91,7 +87,7 @@ def assemble_training_dataset(source_session_path: Path, output_path: Path) -> N
     # that drifts off that clock raises rather than being padded. The video sub-dataset joins only when it produced
     # columns.
     sub_datasets = [behavior_data]
-    if video_data.width > 0:
+    if video_data.width:
         sub_datasets.append(video_data)
     result = reduce(pl.DataFrame.hstack, sub_datasets)
     result = clip_to_session_bounds(assembled_data=result, runtime_data_path=runtime_data_path)
