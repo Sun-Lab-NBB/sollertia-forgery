@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 _STAGE_DEFAULT_WORKERS: int = -1
 """The worker count that leaves the allocation to cindra's measured default for the stage being run. The orchestration
-layer names a positive count instead, which overrides the default with the width the job was admitted at."""
+layer names a positive count instead, which overrides the default with the width at which the job was admitted."""
 
 _ALL_PLANES: int = -1
 """The target-plane value that runs the per-plane stages for every virtual imaging plane the recording holds."""
@@ -61,9 +61,9 @@ def run_two_photon_processing_pipeline(
     Notes:
         The pipeline runs the single binarization job, one registration job and one processing job per virtual imaging
         plane, and the single combination job, all sharing one tracker. The virtual-plane count is a property of the
-        recording's acquisition parameters on disk. In local mode this invocation primes the recording, which writes
-        the shared bootstrap every per-job stage reads and reports the plane count back. In remote mode it only loads
-        the bootstrap the preparation step primed and fails when that bootstrap is absent, because a job that primed
+        recording's acquisition parameters on disk. In local mode this invocation primes the recording, writing the
+        shared bootstrap that every per-job stage reads and reporting the plane count back. In remote mode it only loads
+        the bootstrap primed by the preparation step and fails when that bootstrap is absent, because a job that primed
         alongside its peers would overwrite each peer plane's runtime data with its own stale snapshot. The full
         four-stage universe defines tracker alignment, so a partial invocation keeps every sibling job in the shared
         tracker.
@@ -77,7 +77,8 @@ def run_two_photon_processing_pipeline(
         ignored. This lets an external scheduler drive cross-job parallelism by dispatching each identifier
         concurrently.
 
-        The worker count reaches cindra as a call argument, so it applies to the single stage this invocation runs.
+        The worker count reaches cindra as a call argument, so it applies to every stage this invocation dispatches
+        rather than being baked into the configuration.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -88,22 +89,22 @@ def run_two_photon_processing_pipeline(
         process: Determines whether to run the per-plane ROI-detection and trace-extraction stage. Ignored in remote
             mode.
         combine: Determines whether to run the multi-plane combination stage. Ignored in remote mode.
-        target_plane: The imaging plane to run the per-plane stages for. Set to -1 to cover all planes. Ignored in
+        target_plane: The imaging plane for which to run the per-plane stages. Set to -1 to cover all planes. Ignored in
             remote mode, where the job to run is selected entirely by job_id.
         workers: The number of workers cindra allocates to each dispatched stage. Set to -1 to accept cindra's measured
             default for the stage it runs.
         display_progress: Determines whether to display progress bars during processing.
 
     Raises:
-        FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra acquisition
-            parameters file is available for the recording, if the acquisition system's resolver reports missing
-            inputs it needs to resolve the configuration, or, in remote mode, if the session carries no materialized
-            cindra configuration or no per-plane bootstrap for a preparation pass to have written.
+        FileNotFoundError: If the session's raw two-photon imaging directory does not exist, if no cindra
+            acquisition parameters file is available for the recording, or if the acquisition system's resolver
+            reports missing inputs it needs to resolve the configuration. In remote mode, also raised when the
+            session carries no materialized cindra configuration and no per-plane bootstrap.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, if the
             acquisition system's resolver cannot resolve a configuration for the session, or if job_id does not match
             any available job.
-        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
-            the acquisition parameters file is searched for.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
+            for the acquisition parameters file.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
     # Every cindra stage below reaches a parallelized kernel, so a host whose threading layer has no runtime to load
@@ -125,8 +126,8 @@ def run_two_photon_processing_pipeline(
 
     # A local run primes the recording single-threaded, while a remote run only loads the bootstrap its prepare step
     # primed, so the scheduler's concurrent per-plane jobs share one primed bootstrap. Loading it with persistence
-    # disabled also raises when no preparation pass ever primed the recording, which is the failure a remotely
-    # dispatched job must report rather than run through.
+    # disabled also raises when no preparation pass ever primed the recording, and a remotely dispatched job must
+    # report that failure rather than run past it.
     if job_id is None:
         plane_count = prime_recording(configuration_path=materialized_configuration_path).plane_count
     else:
@@ -179,7 +180,8 @@ def run_two_photon_processing_pipeline(
     if combine:
         jobs.append((str(SingleRecordingJobNames.COMBINE), ""))
 
-    # A request that names a stage no plane supports resolves no job at all, and the tracker refuses an empty request.
+    # A request that names a stage supported by no plane resolves no job at all, and the tracker refuses an empty
+    # request.
     if jobs:
         tracker.align_jobs(jobs=jobs, universe=universe)
 
@@ -208,7 +210,7 @@ def prime_two_photon_recording(session_path: Path) -> None:
     Notes:
         cindra requires the shared configuration and every plane's runtime data to be written by one single-threaded
         step before any job reads them, because every per-job stage loads that bootstrap rather than writing it. This
-        is that step, and it is what a preparation pass calls before the pipeline's jobs are resolved.
+        is that step.
 
         Priming is idempotent, so a session that already carries a complete bootstrap is read rather than rewritten and
         this call returns without touching what its jobs recorded there. That keeps repeated preparation of the same
@@ -222,8 +224,8 @@ def prime_two_photon_recording(session_path: Path) -> None:
             is not present.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
-        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
-            the acquisition parameters file is searched for.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
+            for the acquisition parameters file.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
     # Priming precedes every stage of the recording, so a host that cannot open the threading layer is reported
@@ -245,11 +247,11 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
     Notes:
         cindra owns this pipeline's job model, so the universe is the single binarization job, one registration job and
         one processing job per virtual imaging plane, and the single combination job. The virtual-plane count is a
-        property of the recording's acquisition parameters (ROI x physical plane for MROI data), read from the copy the
-        bootstrap wrote and falling back to the raw parameters file when the session has yet to be primed.
+        property of the recording's acquisition parameters (ROI x physical plane for MROI data). It is read from the
+        copy the bootstrap wrote, falling back to the raw parameters file when the session has yet to be primed.
 
-        Possibility here states what this session can run rather than what it has already produced, so every stage the
-        recording declares is possible and the possible subset equals the universe. A freshly acquired session
+        Possibility here states what this session can run rather than what it has already produced, so every stage that
+        the recording declares is possible and the possible subset equals the universe. A freshly acquired session
         therefore reports its whole four-stage universe, and the tracker and the prerequisite graph decide when each
         stage's turn comes rather than the output tree's current contents.
 
@@ -266,7 +268,7 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
 
     Raises:
         FileNotFoundError: If neither the session's cindra output directory nor its raw two-photon imaging directory
-            carries the acquisition parameters the recording's imaging planes follow from.
+            carries the acquisition parameters from which the recording's imaging planes follow.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member.
     """
     session = SessionData.load(session_path=session_path)
@@ -278,7 +280,7 @@ def discover_two_photon_jobs(session_path: Path) -> tuple[SessionData, list[tupl
         message = (
             f"Unable to resolve two-photon processing jobs for session '{session.session_name}'. Neither the "
             f"session's cindra output directory nor its raw two-photon imaging directory '{data_path}' carries the "
-            f"acquisition parameters the recording's virtual imaging planes follow from, so the session holds no "
+            f"acquisition parameters that define the recording's virtual imaging planes, so the session holds no "
             f"calcium-imaging data to process."
         )
         console.error(message=message, error=FileNotFoundError)
@@ -296,7 +298,7 @@ def two_photon_job_prerequisites(
     Notes:
         cindra publishes the ordering as ``SINGLE_RECORDING_PHASES``, and this call reads the chain from that model.
         Registration and processing are both per-plane, so a processing job waits on the registration job for its own
-        plane alone. That is what lets one plane reach detection while another is still being registered.
+        plane alone. One plane therefore reaches detection while another is still being registered.
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
@@ -318,7 +320,7 @@ def _configuration_path(session: SessionData) -> Path:
 
     Returns:
         The path to the session's single-recording configuration file inside its cindra directory, which is the same
-        location cindra's own priming step writes that file to.
+        location to which cindra's own priming step writes that file.
     """
     return session.processed_data.cindra_data_path.joinpath(SINGLE_RECORDING_CONFIGURATION_FILENAME)
 
@@ -347,8 +349,8 @@ def _resolve_primed_plane_count(session: SessionData) -> int | None:
         configuration and an incomplete set of per-plane runtime files both mean the recording has yet to be primed,
         which is reported as an absent count rather than an error.
 
-        A configuration that is present while the raw imaging data it names is not raises instead, because that
-        describes a broken session rather than an unprimed one.
+        A configuration that names raw imaging data absent from disk raises instead, because that describes a broken
+        session rather than an unprimed one.
 
     Args:
         session: The loaded session whose bootstrap to read.
@@ -361,8 +363,8 @@ def _resolve_primed_plane_count(session: SessionData) -> int | None:
             is not present.
         ValueError: If the session's acquisition system is not a supported AcquisitionSystems member, or if the
             acquisition system's resolver cannot resolve a configuration for the session.
-        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while
-            the acquisition parameters file is searched for.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
+            for the acquisition parameters file.
     """
     if not _configuration_path(session=session).is_file():
         return None
@@ -418,8 +420,8 @@ def _resolve_configuration(
         FileNotFoundError: If the session's raw two-photon imaging directory or its cindra acquisition parameters file
             is not present, or, in remote mode, if the session carries no materialized cindra configuration.
         ValueError: If the acquisition system's resolver cannot resolve a configuration for the session.
-        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while the
-            acquisition parameters file is searched for.
+        OSError: If any directory under the session's raw two-photon imaging directory cannot be read while searching
+            for the acquisition parameters file.
     """
     output_path = session.processed_data_path
     cindra_directory = session.processed_data.cindra_data_path

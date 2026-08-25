@@ -57,8 +57,7 @@ def assemble_behavior_dataset(
         raw_data_path: The path to the session's raw data directory containing the hardware state configuration.
         reference_time: The reference time vector to which to align the assembled dataset.
         drop_time_columns: Determines whether to drop the ``time_us`` and ``elapsed_minutes`` columns from the
-            assembled dataset before returning it to the caller. This option should be enabled if the time columns are
-            resolved as part of a different dataset that is later combined with the behavior dataset.
+            assembled dataset before returning it to the caller.
 
     Returns:
         A DataFrame aligned to the reference time vector with the columns ``time_us``, ``elapsed_minutes``,
@@ -70,6 +69,8 @@ def assemble_behavior_dataset(
             missing.
         ValueError: If the hardware state configuration is missing the required ``system_state_codes`` mapping, or
             (when brake data is present) the required ``minimum_brake_strength`` value.
+        InvalidOperationError: If the session's system state feather carries a state code absent from the hardware
+            state configuration's ``system_state_codes`` mapping.
     """
     # The hardware state stores the mapping name-first, so it is inverted into the code-keyed lookup the Enum cast
     # needs.

@@ -28,7 +28,7 @@ from ..orchestration import (
 )
 
 _REMOTE_STATUS_AXES: tuple[str, ...] = ("batch_id", "pipeline", "job_name", "status", "unit_path")
-"""The job attributes a caller may filter a remote batch by, and the axes a status breakdown counts."""
+"""The job attributes by which a caller may filter a remote batch, and the axes a status breakdown counts."""
 
 _REMOTE_STATUS_SEMI_FIELDS: tuple[str, ...] = (
     "batch_id",
@@ -40,7 +40,7 @@ _REMOTE_STATUS_SEMI_FIELDS: tuple[str, ...] = (
     "status",
     "unit_name",
 )
-"""The job fields a semi-detail listing carries, which is the job's identity, the allocation it runs as, and its
+"""The job fields a semi-detail listing carries, which is the job's identity, the allocation that runs it, and its
 scheduler state."""
 
 _REMOTE_STATUS_DETAIL_FIELDS: tuple[str, ...] = (
@@ -81,8 +81,6 @@ def remote_batch_status(
 ) -> dict[str, Any]:
     """Reports the scheduler state of the outstanding remote batches, in three widening stages.
 
-    ``get_processing_status_tool`` delegates a ``remote`` request here.
-
     A bare call covers every outstanding batch, queries the scheduler for all of them in one accounting call, and
     reports the counts alongside a ``breakdown`` naming every batch, pipeline, job type, state, and unit. Naming a
     filter adds a page of jobs, and opting into detail adds the resources each allocation requested and the log files
@@ -102,7 +100,7 @@ def remote_batch_status(
         pipelines: Restricts the listing to these pipelines.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry their requested resources and their log paths.
 
@@ -138,7 +136,7 @@ def remote_batch_status(
         with connect_to_server() as server:
             statuses = query_submissions(server=server, submissions=[entry for _, entry in submissions])
 
-            # Closes every batch the scheduler has finished with before it leaves the ledger, so a settled batch is
+            # Closes every batch the scheduler has finished before it leaves the ledger, so a settled batch is
             # answerable from a durable snapshot rather than forgotten the moment it stops being outstanding.
             closed = close_settled_batches(host=RemoteHost(server=server), batches=batches, statuses=statuses)
     except Exception as exception:
@@ -199,8 +197,6 @@ def remote_batch_status(
 def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
     """Cancels the allocations of the outstanding remote batches.
 
-    ``cancel_processing_tool`` delegates a ``remote`` request here.
-
     Cancels queued and running allocations alike in one command. A dependent of a canceled allocation is canceled by
     the scheduler in turn, because its dependency can no longer complete successfully. The batches are resolved from
     the submission ledger, so a batch submitted before this server started is cancelable too.
@@ -213,7 +209,8 @@ def remote_batch_cancel(batch_ids: list[str] | None = None) -> dict[str, Any]:
     Returns:
         A response dict with ``canceled``, a ``canceled_jobs`` count of every allocation the cancellation named,
         including the ones that had already finished, the ``batch_ids`` it covered, and a ``message``. Returns an error
-        when no batch is outstanding.
+        when no batch is outstanding, when the named batches hold no allocation, or when the scheduler cannot be
+        reached.
     """
     ledger = read_ledger()
     if not ledger.batches:
@@ -247,12 +244,12 @@ def _unknown_batch_message(unknown: list[str], ledger: SubmissionLedger) -> str:
     """Builds the error message returned when a caller names a batch the ledger does not hold.
 
     Notes:
-        A batch the ledger held earlier is absent precisely because it finished, so the message names where its
+        A batch that the ledger held earlier is absent precisely because it finished, so the message names where its
         outcome is read instead of only reporting the identifier as unknown.
 
     Args:
         unknown: The identifiers the ledger does not hold.
-        ledger: The ledger the identifiers were resolved against.
+        ledger: The ledger against which the identifiers were resolved.
 
     Returns:
         The error message.

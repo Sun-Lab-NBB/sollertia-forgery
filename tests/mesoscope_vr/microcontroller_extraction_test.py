@@ -1,4 +1,4 @@
-"""Tests for the shared event-stream merge primitive and the Mesoscope-VR module parsers that consume it."""
+"""Contains tests for the shared event-stream merge primitive and the Mesoscope-VR module parsers that consume it."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ _TORQUE_PER_ADC_UNIT: float = 0.00506377
 _LICK_THRESHOLD: int = 600
 """The lick detection threshold the shared hardware state fixture records."""
 
-_MessageRow = tuple[int, int, bytes | None, str | None]
+type _MessageRow = tuple[int, int, bytes | None, str | None]
 
 
 def _module_dataframe(rows: Sequence[_MessageRow]) -> pl.DataFrame:
@@ -112,7 +112,7 @@ def _data_rows(
         event_code: The axci event code every built row records.
         timestamps: The acquisition timestamps, in microseconds, of the recorded events.
         values: The per-message payload values, one for each timestamp.
-        dtype_name: The numpy dtype name the payload bytes are serialized with.
+        dtype_name: The numpy dtype name with which the payload bytes are serialized.
 
     Returns:
         The built message rows.
@@ -134,7 +134,7 @@ def _partition(*row_groups: Sequence[_MessageRow]) -> dict[int, pl.DataFrame]:
         The event-code-keyed partition the pipeline hands to a module parser.
     """
     rows = [row for group in row_groups for row in group]
-    return partition_events(module_dataframe=_module_dataframe(rows))
+    return partition_events(module_dataframe=_module_dataframe(rows=rows))
 
 
 def _configure_hardware_state(session: SessionData, **overrides: Any) -> None:
@@ -154,7 +154,7 @@ def _read(output_directory: Path, data_file: BehaviorDataFiles) -> pl.DataFrame:
     """Reads back one behavior feather a Mesoscope-VR module parser wrote.
 
     Args:
-        output_directory: The processed microcontroller-data directory the parser wrote into.
+        output_directory: The processed microcontroller-data directory into which the parser wrote.
         data_file: The canonical filename of the behavior feather to read.
 
     Returns:
@@ -168,10 +168,10 @@ def output_directory(experiment_session: SessionData) -> Path:
     """Creates and returns the session's processed microcontroller-data directory.
 
     Args:
-        experiment_session: The acquired Mesoscope-VR session the parsers run against.
+        experiment_session: The acquired Mesoscope-VR session against which the parsers run.
 
     Returns:
-        The created output directory every module parser writes its behavior feather into.
+        The created output directory into which every module parser writes its behavior feather.
     """
     path = experiment_session.processed_data.microcontroller_data_path
     path.mkdir(parents=True, exist_ok=True)
@@ -230,7 +230,7 @@ def test_get_eligible_modules_returns_every_configured_module(experiment_session
 
 
 def test_get_eligible_modules_drops_unconfigured_and_unused_modules(experiment_session: SessionData) -> None:
-    _configure_hardware_state(experiment_session, cm_per_pulse=None, delivered_gas_puffs=False)
+    _configure_hardware_state(session=experiment_session, cm_per_pulse=None, delivered_gas_puffs=False)
 
     eligible = get_eligible_modules(session=experiment_session)
 
@@ -266,8 +266,8 @@ def test_parse_encoder_writes_cumulative_traveled_distance(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
     partition = _partition(
-        _data_rows(_PRIMARY_EVENT_CODE, [10, 30], [1, 2], "uint32"),
-        _data_rows(_SECONDARY_EVENT_CODE, [20], [1], "uint32"),
+        _data_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[10, 30], values=[1, 2], dtype_name="uint32"),
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20], values=[1], dtype_name="uint32"),
     )
 
     parse_encoder(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -282,7 +282,9 @@ def test_parse_encoder_writes_cumulative_traveled_distance(
 def test_parse_encoder_substitutes_a_missing_counterclockwise_stream(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
-    partition = _partition(_data_rows(_SECONDARY_EVENT_CODE, [20], [3], "uint32"))
+    partition = _partition(
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20], values=[3], dtype_name="uint32")
+    )
 
     parse_encoder(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
@@ -295,7 +297,7 @@ def test_parse_encoder_substitutes_a_missing_counterclockwise_stream(
 def test_parse_encoder_substitutes_a_missing_clockwise_stream(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
-    partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10], [2], "uint32"))
+    partition = _partition(_data_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[10], values=[2], dtype_name="uint32"))
 
     parse_encoder(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
@@ -308,7 +310,9 @@ def test_parse_encoder_normalizes_negative_zero_distance(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
     # Negating a zero-pulse clockwise sample yields a negative zero, which the parser rewrites to a positive zero.
-    partition = _partition(_data_rows(_SECONDARY_EVENT_CODE, [20], [0], "uint32"))
+    partition = _partition(
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20], values=[0], dtype_name="uint32")
+    )
 
     parse_encoder(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
@@ -318,8 +322,8 @@ def test_parse_encoder_normalizes_negative_zero_distance(
 
 
 def test_parse_encoder_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, cm_per_pulse=None)
-    partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10], [1], "uint32"))
+    _configure_hardware_state(session=experiment_session, cm_per_pulse=None)
+    partition = _partition(_data_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[10], values=[1], dtype_name="uint32"))
 
     parse_encoder(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
@@ -356,7 +360,7 @@ def test_parse_mesoscope_frame_appends_a_trailing_low_sample(
     assert result["time_us"].to_list() == [10, 20, 30, 31]
     assert result["ttl_state"].to_list() == [1, 0, 1, 0]
     # The appended sample has to carry the state column's own width, or the whole column widens to a signed 64-bit
-    # integer and the feather no longer matches the schema the pulse train is written with when it ends low.
+    # integer and the feather no longer matches the schema the pulse train carries when it ends low.
     assert result.schema["ttl_state"] == pl.UInt8
 
 
@@ -382,7 +386,7 @@ def test_parse_mesoscope_frame_names_both_missing_polarities(
 
 
 def test_parse_mesoscope_frame_skips_an_unused_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, recorded_mesoscope_ttl=False)
+    _configure_hardware_state(session=experiment_session, recorded_mesoscope_ttl=False)
     partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
 
     parse_mesoscope_frame(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -401,7 +405,7 @@ def test_parse_brake_writes_engagement_torques(experiment_session: SessionData, 
 
     parse_brake(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
-    result = _read(output_directory, BehaviorDataFiles.BRAKE)
+    result = _read(output_directory=output_directory, data_file=BehaviorDataFiles.BRAKE)
     assert result["time_us"].to_list() == [10, 20, 30]
     assert result["brake_torque_N_cm"].to_list() == pytest.approx(
         [_MAXIMUM_BRAKE_STRENGTH, _MINIMUM_BRAKE_STRENGTH, _MAXIMUM_BRAKE_STRENGTH]
@@ -409,7 +413,7 @@ def test_parse_brake_writes_engagement_torques(experiment_session: SessionData, 
 
 
 def test_parse_brake_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, maximum_brake_strength=None)
+    _configure_hardware_state(session=experiment_session, maximum_brake_strength=None)
     partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
 
     parse_brake(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -424,10 +428,10 @@ def test_parse_valve_writes_cumulative_volume_and_tone_state(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
     partition = _partition(
-        _state_rows(_SECONDARY_EVENT_CODE, [5, 20, 40]),
+        _state_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[5, 20, 40]),
         _state_rows(_PRIMARY_EVENT_CODE, [10, 30]),
         _state_rows(_TONE_ON_EVENT_CODE, [15]),
-        _state_rows(_TONE_OFF_EVENT_CODE, [25]),
+        _state_rows(event_code=_TONE_OFF_EVENT_CODE, timestamps=[25]),
     )
 
     parse_valve(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -445,7 +449,7 @@ def test_parse_valve_appends_a_trailing_tone_off_sample(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
     partition = _partition(
-        _state_rows(_SECONDARY_EVENT_CODE, [5, 20]),
+        _state_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[5, 20]),
         _state_rows(_PRIMARY_EVENT_CODE, [10]),
         _state_rows(_TONE_ON_EVENT_CODE, [15]),
     )
@@ -458,9 +462,8 @@ def test_parse_valve_appends_a_trailing_tone_off_sample(
     assert result["time_us"].to_list() == [5, 15, 16, 20]
     assert result["tone_state"].to_list() == [1, 1, 0, 0]
     assert result["dispensed_water_volume_uL"].to_list() == [0.0, 0.0, 0.0, pulse_volume]
-    # The appended closing sample has to carry the tone column's own width, or the whole column widens to a signed
-    # 64-bit integer and the feather no longer matches the schema a session whose tone ended on its own is written
-    # with.
+    # The appended closing sample has to carry the tone column's own width. A wider sample widens the whole column to a
+    # signed 64-bit integer, so the feather stops matching the schema of a session whose tone ended on its own.
     assert result.schema["tone_state"] == pl.UInt8
 
 
@@ -476,7 +479,7 @@ def test_parse_valve_writes_a_single_row_when_the_valve_never_opened(
 
 
 def test_parse_valve_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, valve_scale_coefficient=None)
+    _configure_hardware_state(session=experiment_session, valve_scale_coefficient=None)
     partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
 
     parse_valve(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -529,7 +532,7 @@ def test_parse_gas_puff_writes_a_single_row_when_no_puff_was_delivered(
 
 
 def test_parse_gas_puff_skips_an_unused_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, delivered_gas_puffs=False)
+    _configure_hardware_state(session=experiment_session, delivered_gas_puffs=False)
     partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
 
     parse_gas_puff(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -542,12 +545,17 @@ def test_parse_gas_puff_skips_an_unused_module(experiment_session: SessionData, 
 
 def test_parse_lick_thresholds_the_sensor_voltage(experiment_session: SessionData, output_directory: Path) -> None:
     partition = _partition(
-        _data_rows(_PRIMARY_EVENT_CODE, [30, 10, 20, 40], [100, 700, 650, _LICK_THRESHOLD], "uint16")
+        _data_rows(
+            event_code=_PRIMARY_EVENT_CODE,
+            timestamps=[30, 10, 20, 40],
+            values=[100, 700, 650, _LICK_THRESHOLD],
+            dtype_name="uint16",
+        )
     )
 
     parse_lick(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
-    result = _read(output_directory, BehaviorDataFiles.LICK)
+    result = _read(output_directory=output_directory, data_file=BehaviorDataFiles.LICK)
     # The partition is written chronologically, so the voltages follow their timestamps rather than the input order.
     assert result["time_us"].to_list() == [10, 20, 30, 40]
     assert result["voltage_12_bit_adc"].to_list() == [700, 650, 100, _LICK_THRESHOLD]
@@ -569,7 +577,7 @@ def test_parse_lick_data_rejects_an_unset_threshold(output_directory: Path) -> N
 
 
 def test_parse_lick_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, lick_threshold=None)
+    _configure_hardware_state(session=experiment_session, lick_threshold=None)
     partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10], [700], "uint16"))
 
     parse_lick(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -584,8 +592,8 @@ def test_parse_torque_writes_signed_torque_returning_to_rest(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
     partition = _partition(
-        _data_rows(_PRIMARY_EVENT_CODE, [10, 30], [10, 0], "uint16"),
-        _data_rows(_SECONDARY_EVENT_CODE, [20], [5], "uint16"),
+        _data_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[10, 30], values=[10, 0], dtype_name="uint16"),
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20], values=[5], dtype_name="uint16"),
     )
 
     parse_torque(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -600,8 +608,8 @@ def test_parse_torque_writes_signed_torque_returning_to_rest(
 
 def test_parse_torque_appends_a_trailing_rest_sample(experiment_session: SessionData, output_directory: Path) -> None:
     partition = _partition(
-        _data_rows(_PRIMARY_EVENT_CODE, [10], [10], "uint16"),
-        _data_rows(_SECONDARY_EVENT_CODE, [20, 30], [0, 5], "uint16"),
+        _data_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[10], values=[10], dtype_name="uint16"),
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20, 30], values=[0, 5], dtype_name="uint16"),
     )
 
     parse_torque(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -619,7 +627,9 @@ def test_parse_torque_appends_a_trailing_rest_sample(experiment_session: Session
 def test_parse_torque_substitutes_a_missing_counterclockwise_stream(
     experiment_session: SessionData, output_directory: Path
 ) -> None:
-    partition = _partition(_data_rows(_SECONDARY_EVENT_CODE, [20], [4], "uint16"))
+    partition = _partition(
+        _data_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[20], values=[4], dtype_name="uint16")
+    )
 
     parse_torque(event_partition=partition, output_directory=output_directory, session=experiment_session)
 
@@ -642,7 +652,7 @@ def test_parse_torque_substitutes_a_missing_clockwise_stream(
 
 
 def test_parse_torque_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, torque_per_adc_unit=None)
+    _configure_hardware_state(session=experiment_session, torque_per_adc_unit=None)
     partition = _partition(_data_rows(_PRIMARY_EVENT_CODE, [10], [4], "uint16"))
 
     parse_torque(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -655,8 +665,8 @@ def test_parse_torque_skips_an_unconfigured_module(experiment_session: SessionDa
 
 def test_parse_screen_alternates_state_on_every_toggle(experiment_session: SessionData, output_directory: Path) -> None:
     partition = _partition(
-        _state_rows(_PRIMARY_EVENT_CODE, [20, 40]),
-        _state_rows(_SECONDARY_EVENT_CODE, [10, 30]),
+        _state_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[20, 40]),
+        _state_rows(event_code=_SECONDARY_EVENT_CODE, timestamps=[10, 30]),
     )
 
     parse_screen(event_partition=partition, output_directory=output_directory, session=experiment_session)
@@ -672,7 +682,7 @@ def test_parse_screen_starts_from_the_recorded_initial_state(
 ) -> None:
     _configure_hardware_state(experiment_session, screens_initially_on=True)
     partition = _partition(
-        _state_rows(_PRIMARY_EVENT_CODE, [20]),
+        _state_rows(event_code=_PRIMARY_EVENT_CODE, timestamps=[20]),
         _state_rows(_SECONDARY_EVENT_CODE, [10]),
     )
 
@@ -709,7 +719,7 @@ def test_parse_screen_carries_the_recorded_initial_state_into_the_single_row_wit
 
 
 def test_parse_screen_skips_an_unconfigured_module(experiment_session: SessionData, output_directory: Path) -> None:
-    _configure_hardware_state(experiment_session, screens_initially_on=None)
+    _configure_hardware_state(session=experiment_session, screens_initially_on=None)
     partition = _partition(_state_rows(_PRIMARY_EVENT_CODE, [10]))
 
     parse_screen(event_partition=partition, output_directory=output_directory, session=experiment_session)

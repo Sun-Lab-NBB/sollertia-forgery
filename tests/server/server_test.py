@@ -1,4 +1,6 @@
-"""Tests the remote compute server transport, the SLURM batch script builder, and the accounting status parser."""
+"""Contains tests for the remote compute server transport, the SLURM batch script builder, and the accounting status
+parser.
+"""
 
 from __future__ import annotations
 
@@ -10,10 +12,15 @@ import datetime
 
 import pytest
 
-from sollertia_forgery.server import TERMINAL_JOB_STATUSES, Job, Server, JobStatus, CommandResult
+from sollertia_forgery.server import (
+    TERMINAL_JOB_STATUSES,
+    Job,
+    Server,
+    JobStatus,
+)
 from sollertia_forgery.server.job import _SlurmScript
 import sollertia_forgery.server.server as server_module
-from sollertia_forgery.server.server import _parse_job_status
+from sollertia_forgery.server.server import _CommandResult, _parse_job_status
 
 if TYPE_CHECKING:
     from conftest import StubSSHTransport
@@ -25,7 +32,7 @@ def _build_job(working_directory: Path, **overrides: Any) -> Job:
     """Builds one job whose script, log, and working paths all sit under the given server-side directory.
 
     Args:
-        working_directory: The server-side directory the job's script is uploaded into.
+        working_directory: The server-side directory into which the job's script is uploaded.
         overrides: The job arguments replacing the defaults this helper supplies.
 
     Returns:
@@ -46,7 +53,7 @@ def _fail_inside_the_block(server: Server) -> None:
     """Raises inside the server's context block, so the exit path runs on a failure rather than on a clean end.
 
     Args:
-        server: The connected server the block is entered on.
+        server: The connected server on which the block is entered.
 
     Raises:
         RuntimeError: Always, from inside the context block.
@@ -231,14 +238,14 @@ def test_server_close_is_idempotent(connected_server: Server, stub_ssh_transport
     """Verifies that closing an already closed connection leaves the instance closed and issues no further work."""
     connected_server.close()
 
-    assert stub_ssh_transport.closed is True
-    assert connected_server._open is False
+    assert stub_ssh_transport.closed
+    assert not connected_server._open
 
     stub_ssh_transport.closed = False
     connected_server.close()
 
-    assert stub_ssh_transport.closed is False
-    assert connected_server._open is False
+    assert not stub_ssh_transport.closed
+    assert not connected_server._open
 
 
 def test_server_context_manager_closes_the_connection(
@@ -246,11 +253,11 @@ def test_server_context_manager_closes_the_connection(
 ) -> None:
     """Verifies that the context manager yields the connected instance and closes it however the block ends."""
     with Server(configuration=server_configuration) as server:
-        assert server._open is True
+        assert server._open
         entered = server
 
-    assert entered._open is False
-    assert stub_ssh_transport.closed is True
+    assert not entered._open
+    assert stub_ssh_transport.closed
 
 
 def test_server_context_manager_closes_the_connection_on_failure(
@@ -262,8 +269,8 @@ def test_server_context_manager_closes_the_connection_on_failure(
     with pytest.raises(RuntimeError, match=r"work failed"):
         _fail_inside_the_block(server=server)
 
-    assert server._open is False
-    assert stub_ssh_transport.closed is True
+    assert not server._open
+    assert stub_ssh_transport.closed
 
 
 def test_server_raises_permission_error_when_credentials_are_rejected(
@@ -276,8 +283,8 @@ def test_server_raises_permission_error_when_credentials_are_rejected(
         Server(configuration=server_configuration)
 
     assert unreachable_transport.attempts == 1
-    # The transport an authenticated-then-rejected handshake leaves running is unreachable through close(), whose
-    # guard never clears, so the constructor has to release it itself.
+    # The transport that an authenticated-then-rejected handshake leaves running is unreachable through close(),
+    # whose guard never clears, so the constructor has to release it itself.
     assert unreachable_transport.closes == 1
 
 
@@ -357,7 +364,7 @@ def test_submit_job_raises_when_the_script_cannot_be_made_executable(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
     """Verifies that a failed permission change aborts the submission and reports the server's own error text."""
-    stub_ssh_transport.respond("chmod ", stderr="chmod: Operation not permitted\n", return_code=1)
+    stub_ssh_transport.respond(prefix="chmod ", stderr="chmod: Operation not permitted\n", return_code=1)
     job = _build_job(working_directory=connected_server.root.joinpath("scratch"))
 
     with pytest.raises(RuntimeError, match=r"chmod: Operation not permitted"):
@@ -371,7 +378,7 @@ def test_submit_job_raises_when_the_scheduler_rejects_the_script(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
     """Verifies that an acknowledgement naming no allocation aborts the submission and leaves the job unidentified."""
-    stub_ssh_transport.respond("sbatch ", stderr="sbatch: error: invalid partition\n", return_code=1)
+    stub_ssh_transport.respond(prefix="sbatch ", stderr="sbatch: error: invalid partition\n", return_code=1)
     job = _build_job(working_directory=connected_server.root.joinpath("scratch"))
 
     with pytest.raises(RuntimeError, match=r"sbatch: error: invalid partition"):
@@ -384,7 +391,7 @@ def test_submit_job_raises_when_the_scheduler_rejects_the_script(
 
 
 def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
-    """Verifies that an allocation the scheduler still holds is cancelled."""
+    """Verifies that an allocation that the scheduler still holds is cancelled."""
     stub_ssh_transport.job_statuses["1000"] = "RUNNING"
 
     connected_server.abort_job(slurm_job_id="1000")
@@ -395,7 +402,7 @@ def test_abort_job_cancels_a_running_allocation(connected_server: Server, stub_s
 def test_abort_job_leaves_a_settled_allocation_alone(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation the scheduler has already finished is not cancelled again."""
+    """Verifies that an allocation that the scheduler has already finished is not cancelled again."""
     stub_ssh_transport.job_statuses["1000"] = "COMPLETED"
 
     connected_server.abort_job(slurm_job_id="1000")
@@ -434,12 +441,12 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
 ) -> None:
     """Verifies that step rows, unparsable rows, and unrequested rows are skipped and a stuck job reports as blocked."""
     stub_ssh_transport.respond(
-        "sacct ",
-        stdout=(
-            "malformed-row-without-a-separator\n1000.batch|COMPLETED\n9999|COMPLETED\n1000|PENDING\n1001|COMPLETED\n"
-        ),
+        prefix="sacct ",
+        stdout="malformed-row-without-a-separator\n1000.batch|COMPLETED\n9999|COMPLETED\n1000|PENDING\n1001|COMPLETED\n",
     )
-    stub_ssh_transport.respond("squeue ", stdout="1000|DependencyNeverSatisfied\n7777|DependencyNeverSatisfied\n")
+    stub_ssh_transport.respond(
+        prefix="squeue ", stdout="1000|DependencyNeverSatisfied\n7777|DependencyNeverSatisfied\n"
+    )
 
     statuses = connected_server.get_job_statuses(slurm_job_ids=("1000", "1001", "1002"))
 
@@ -453,11 +460,11 @@ def test_get_job_statuses_reads_allocation_rows_and_the_blocked_queue(
 def test_get_job_statuses_reports_a_pending_allocation_the_queue_calls_blocked(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """Verifies that an allocation accounting calls pending and the queue calls unsatisfiable reports as blocked.
+    """Verifies that an allocation called pending by accounting and unsatisfiable by the queue reports as blocked.
 
     Accounting reports a permanently blocked allocation as pending, so the queue's reason field is the only thing
-    that retires it. Every identifier of an ordinary batch is one accounting knows, so the queue has to be read for
-    that batch rather than only for one holding an allocation accounting cannot place.
+    that retires it. Every identifier of an ordinary batch is one that accounting knows, so the queue has to be read
+    for that batch rather than only for one holding an allocation that accounting cannot place.
     """
     stub_ssh_transport.job_statuses.update({"1000": "PENDING", "1001": "RUNNING"})
     stub_ssh_transport.blocked_job_ids.add("1000")
@@ -493,7 +500,7 @@ def test_get_blocked_job_ids_keeps_only_permanently_blocked_rows(
 ) -> None:
     """Verifies that the queue scan reads this user's whole queue and keeps only the unsatisfiable dependencies."""
     stub_ssh_transport.respond(
-        "squeue ",
+        prefix="squeue ",
         stdout="1000|DependencyNeverSatisfied\n1001|Resources\nmalformed-row\n1002|DependencyNeverSatisfied\n",
     )
 
@@ -521,7 +528,7 @@ def test_parse_job_status_normalizes_decorated_accounting_states(state: str, exp
 
 
 def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
-    """Verifies that the terminal set holds every settled state and neither of the two a job still leaves."""
+    """Verifies that the terminal set holds every settled state and neither of the two that a job still leaves."""
     settled = frozenset(
         {
             JobStatus.COMPLETED,
@@ -548,7 +555,7 @@ def test_terminal_job_statuses_exclude_the_states_a_job_still_leaves() -> None:
 
 
 def test_pull_raises_for_an_absent_remote_path(connected_server: Server, tmp_path: Path) -> None:
-    """Verifies that downloading a path the server does not hold names the missing path."""
+    """Verifies that downloading a path that the server does not hold names the missing path."""
     with pytest.raises(FileNotFoundError, match=re.escape("/data/sollertia/absent does not exist on the server")):
         connected_server.pull(local_path=tmp_path.joinpath("unused"), remote_path=Path("/data/sollertia/absent"))
 
@@ -572,7 +579,7 @@ def test_pull_downloads_a_directory_tree(
 def test_pull_downloads_a_single_file_and_creates_its_parent(
     connected_server: Server, stub_ssh_transport: StubSSHTransport, tmp_path: Path
 ) -> None:
-    """Verifies that a file download creates the local directory the file is placed into."""
+    """Verifies that a file download creates the local directory into which the file is placed."""
     source = stub_ssh_transport.local_path("/data/sollertia/outputs/manifest.txt")
     source.parent.mkdir(parents=True)
     source.write_text("manifest")
@@ -585,7 +592,7 @@ def test_pull_downloads_a_single_file_and_creates_its_parent(
 
 
 def test_push_raises_for_an_absent_local_path(connected_server: Server, tmp_path: Path) -> None:
-    """Verifies that uploading a path this host does not hold names the missing path."""
+    """Verifies that uploading a path that this host does not hold names the missing path."""
     missing = tmp_path.joinpath("absent.txt")
 
     # The console wraps the rendered message at a width that depends on the temporary path length, so the full
@@ -615,7 +622,7 @@ def test_push_uploads_a_directory_tree(
 def test_push_uploads_a_single_file_into_a_created_directory(
     connected_server: Server, stub_ssh_transport: StubSSHTransport, tmp_path: Path
 ) -> None:
-    """Verifies that a file upload creates the server-side directory the file is placed into."""
+    """Verifies that a file upload creates the server-side directory into which the file is placed."""
     source = tmp_path.joinpath("plan.txt")
     source.write_text("plan")
 
@@ -670,7 +677,7 @@ def test_create_raises_when_the_server_refuses_the_directory(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
     """Verifies that a refused directory creation reports the server's own error text."""
-    stub_ssh_transport.respond("mkdir -p ", stderr="mkdir: Permission denied\n", return_code=1)
+    stub_ssh_transport.respond(prefix="mkdir -p ", stderr="mkdir: Permission denied\n", return_code=1)
 
     with pytest.raises(RuntimeError, match=r"mkdir: Permission denied"):
         connected_server.create(remote_path=Path("/data/sollertia/blocked"))
@@ -732,8 +739,8 @@ def test_exists_reports_presence(connected_server: Server, stub_ssh_transport: S
     """Verifies that existence is reported for a present path and denied for an absent one."""
     stub_ssh_transport.local_path("/data/sollertia/present").mkdir(parents=True)
 
-    assert connected_server.exists(remote_path=Path("/data/sollertia/present")) is True
-    assert connected_server.exists(remote_path=Path("/data/sollertia/absent")) is False
+    assert connected_server.exists(remote_path=Path("/data/sollertia/present"))
+    assert not connected_server.exists(remote_path=Path("/data/sollertia/absent"))
 
 
 def test_is_directory_separates_directories_from_files_and_absences(
@@ -743,9 +750,9 @@ def test_is_directory_separates_directories_from_files_and_absences(
     stub_ssh_transport.local_path("/data/sollertia/present").mkdir(parents=True)
     stub_ssh_transport.local_path("/data/sollertia/present/file.txt").write_text("payload")
 
-    assert connected_server.is_directory(remote_path=Path("/data/sollertia/present")) is True
-    assert connected_server.is_directory(remote_path=Path("/data/sollertia/present/file.txt")) is False
-    assert connected_server.is_directory(remote_path=Path("/data/sollertia/absent")) is False
+    assert connected_server.is_directory(remote_path=Path("/data/sollertia/present"))
+    assert not connected_server.is_directory(remote_path=Path("/data/sollertia/present/file.txt"))
+    assert not connected_server.is_directory(remote_path=Path("/data/sollertia/absent"))
 
 
 def test_list_directory_returns_entry_names(connected_server: Server, stub_ssh_transport: StubSSHTransport) -> None:
@@ -764,11 +771,11 @@ def test_execute_command_returns_both_streams_and_the_exit_code(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
     """Verifies that an invocation's output, error, and exit code are all reported back to the caller."""
-    stub_ssh_transport.respond("slf prepare", stdout="prepared\n", stderr="deprecated\n", return_code=3)
+    stub_ssh_transport.respond(prefix="slf prepare", stdout="prepared\n", stderr="deprecated\n", return_code=3)
 
     result = connected_server.execute_command(command="slf prepare --project TestProject")
 
-    assert result == CommandResult(stdout="prepared\n", stderr="deprecated\n", return_code=3)
+    assert result == _CommandResult(stdout="prepared\n", stderr="deprecated\n", return_code=3)
     assert stub_ssh_transport.commands == ["slf prepare --project TestProject"]
 
 
@@ -827,7 +834,9 @@ def test_find_paths_passes_the_searched_path_as_a_start_point_rather_than_a_patt
 def test_find_paths_rejects_a_record_the_search_did_not_produce(
     connected_server: Server, stub_ssh_transport: StubSSHTransport
 ) -> None:
-    """A login shell that greets the connection writes into the stream the answer arrives on, which is not an answer."""
+    """Verifies that a login shell that greets the connection writes into the stream on which the answer arrives,
+    which is not an answer.
+    """
     stub_ssh_transport.local_path("/data/sollertia/TestProject").mkdir(parents=True)
     stub_ssh_transport.respond(
         prefix="find -L ",

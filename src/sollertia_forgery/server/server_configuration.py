@@ -32,7 +32,7 @@ class ServerConfiguration(YamlConfig):
     password: str = ""
     """The password to use for server authentication."""
     host: str = ""
-    """The hostname or IP address of the server to connect to."""
+    """The hostname or IP address used to reach the server."""
     root: str = ""
     """The absolute path, on the remote compute server, to the single root directory that stores all Sollertia data
     (raw and processed). All server-side data operations resolve their paths relative to this root."""
@@ -55,7 +55,7 @@ def create_server_configuration_file(
     Args:
         username: The username to use for server authentication.
         password: The password to use for server authentication.
-        host: The hostname or IP address of the server to connect to.
+        host: The hostname or IP address used to reach the server.
         root: The absolute path, on the remote compute server, to the root directory that stores all Sollertia data.
         environment: The name of the shared conda environment, on the remote compute server, in which
             sollertia-forgery and all of its processing dependencies are installed.
@@ -119,7 +119,7 @@ def get_server_configuration() -> ServerConfiguration:
 
 
 def get_server_configuration_path() -> Path:
-    """Returns the path under which the ``server_configuration.yaml`` file is stored.
+    """Returns the path to the ``server_configuration.yaml`` file under the Sollertia platform working directory.
 
     Returns:
         The path to the configuration file under the Sollertia platform working directory, resolved without reading
@@ -133,8 +133,7 @@ def remote_state_path() -> Path:
 
     Notes:
         One directory holds both halves of what a remote run leaves behind, namely the state artifacts pulled from
-        the server and this host's own record of what it submitted. Keeping them together means a run's whole local
-        footprint is one directory to find, inspect, or remove.
+        the server and this host's own record of what it submitted.
 
     Returns:
         The path to the remote state directory under the Sollertia platform working directory.
@@ -147,8 +146,7 @@ def remote_state_directory(project: str) -> Path:
 
     Notes:
         The mirror reproduces the project directory by name, so an artifact pulled into it keeps the filename its
-        writer derived from the project. Every read tool resolves an artifact from the project directory it is given,
-        so a mirrored project is read exactly as a local one is.
+        writer derived from the project.
 
     Args:
         project: The name of the project whose remote state is mirrored.

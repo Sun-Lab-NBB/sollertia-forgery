@@ -162,8 +162,7 @@ def resolve_slowest_camera_clock(video_data_path: Path) -> NDArray[np.uint64]:
     Reads each present camera's timestamp feather from the processed video-data directory, computes its mean frame rate
     as the recorded frame count divided by the timestamp span, and returns the timestamps of the camera with the lowest
     mean rate verbatim. The slowest camera is chosen because every other data source can be interpolated onto its
-    coarser grid without inventing samples between its frames. Training sessions carry no fluorescence clock, so this
-    camera clock stands in as the reference the behavior and video sub-datasets align to.
+    coarser grid without inventing samples between its frames.
 
     Args:
         video_data_path: The path to the processed video-data directory holding the per-camera timestamp feathers.
@@ -221,9 +220,9 @@ def _interpolate_linear(
     """Linearly interpolates a continuous per-frame camera value onto the reference time vector.
 
     Args:
-        frame_time: The camera's per-frame acquisition timestamps, the source clock the values are sampled at.
+        frame_time: The camera's per-frame acquisition timestamps, the source clock at which the values are sampled.
         values: The per-frame values to interpolate.
-        reference_time: The reference time vector to interpolate the values onto.
+        reference_time: The reference time vector onto which to interpolate the values.
 
     Returns:
         The interpolated values, carried at the source feather precision. A not-a-number source value propagates to

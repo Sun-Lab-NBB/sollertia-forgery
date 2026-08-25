@@ -37,22 +37,22 @@ def prepare_batch(
     Notes:
         Materialization runs on the host that holds the data, since estimating a job's cost and reading a tracker both
         need the data itself. The resulting artifacts are then read onto this machine and the batch is built here, so
-        the graph a run dispatches is resolved in one place whichever host prepared it.
+        the graph that a run dispatches is resolved in one place whichever host prepared it.
 
-        Planning re-estimates nothing a unit's cache already holds unless a caller asks for it, because the figures a
-        submission was sized against must not change underneath it. Recorded status is always refreshed, since that is
-        the part that changes between runs.
+        Planning re-estimates nothing a unit's cache already holds unless a caller asks for it, because a submission's
+        sizing figures must not change underneath it. Recorded status is always refreshed, since that is the part that
+        changes between runs.
 
-        A job the unit cannot run never reaches its processing tracker, so its absence from the state artifact is what
-        rules it out. A job whose upstream stage this run can neither dispatch nor find already succeeded is reported
-        as blocked rather than dispatched.
+        A job that the unit cannot run never reaches its processing tracker, so its absence from the state artifact
+        is what rules it out. A job whose upstream stage this run can neither dispatch nor find already succeeded is
+        reported as blocked rather than dispatched.
 
     Args:
         host: The host holding the units, which materializes the artifacts and delivers them here.
         pipeline: The batch pipeline to prepare.
-        unit_paths: The processing unit directories on that host to prepare jobs for. Every unit must belong to one
-            project, since the artifacts a batch is resolved from are written per project.
-        options: The pipeline-specific parameters to run the prepared jobs with.
+        unit_paths: The processing unit directories on that host whose jobs to prepare. Every unit must belong to one
+            project, since the artifacts from which a batch is resolved are written per project.
+        options: The pipeline-specific parameters given to the prepared jobs.
         replan: Determines whether to re-estimate the resource figures the units' caches already hold.
 
     Returns:
@@ -102,10 +102,10 @@ def prepare_batch(
 
 
 def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
-    """Resolves the project the named units belong to.
+    """Resolves the project that owns the named units.
 
     Args:
-        unit_paths: The processing unit directories to resolve the project of.
+        unit_paths: The processing unit directories whose project is resolved.
         unit_kind: Whether the units are sessions or datasets, which sets how far above a unit its project sits.
 
     Returns:
@@ -123,7 +123,7 @@ def resolve_project_root(unit_paths: Sequence[Path], unit_kind: str) -> Path:
     if len(roots) > 1:
         message = (
             f"Unable to resolve a batch spanning the projects {sorted(str(root) for root in roots)}. The plan and "
-            f"state artifacts a batch is resolved from are written per project, so every unit of one batch must "
+            f"state artifacts that resolve a batch are written per project, so every unit of one batch must "
             f"belong to the same project."
         )
         console.error(message=message, error=ValueError)

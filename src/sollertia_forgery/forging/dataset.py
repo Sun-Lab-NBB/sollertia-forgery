@@ -39,16 +39,15 @@ def resolve_dataset(
 ) -> DatasetData:
     """Creates, loads, extends, or rebuilds a dataset hierarchy based on the provided session set.
 
-    The provided session list names the sessions the dataset must contain. A session the dataset already holds is
+    The provided session list names the sessions the dataset must contain. A session that the dataset already holds is
     left alone and a session it does not hold is appended.
 
     Notes:
-        The provided list names the set of sessions the dataset must contain, so a session named more than once in it
-        is resolved once and joins the dataset once.
+        A session named more than once in the provided list is resolved once and joins the dataset once.
 
-        An animal already in the dataset is frozen. Providing a session it does not hold is rejected, because
-        widening an animal's session set often requires rebuilding the entire animal's dataset. Adding an animal
-        the dataset does not hold stays safe.
+        An animal already in the dataset is frozen. Providing a session it does not hold is rejected, because widening
+        an animal's session set often requires rebuilding the entire animal's dataset. Adding an animal that the dataset
+        does not hold stays safe.
 
         Naming an animal in recreate_animals opts that animal out of the freeze. The animal is dropped from the
         dataset with its directory tree and rebuilt from the sessions provided for it, while every other animal
@@ -72,8 +71,9 @@ def resolve_dataset(
         The resolved DatasetData instance.
 
     Raises:
-        ValueError: If the arguments contradict each other or leave the dataset without a definition to build from.
-            Also raised when an animal named for rebuilding is absent from the dataset or has no provided sessions.
+        ValueError: If the arguments contradict each other or leave the dataset with no definition from which to build.
+            Also raised when an animal is named for rebuilding more than once, or when one named for rebuilding is
+            absent from the dataset or has no provided sessions.
             A provided session that would widen a frozen animal's session set raises too, as does one whose session
             type or acquisition system differs from the dataset's. A provided session whose type joins no dataset for
             its acquisition system, or that has a required pipeline still outstanding, raises too.
@@ -178,10 +178,10 @@ def _create_dataset(
 ) -> DatasetData:
     """Creates a fresh dataset hierarchy by resolving the provided session names under the project root.
 
-    Every included session must have completed the pipelines its acquisition system requires and must share the first
-    session's session type and acquisition system, and when ``required_session_type`` is provided, the first session's
-    type must also match it. The dataset's acquisition system determines the column descriptions baked into the
-    created dataset.
+    Every included session must have completed the pipelines that its acquisition system requires and must share the
+    first session's session type and acquisition system, and when ``required_session_type`` is provided, the first
+    session's type must also match it. The dataset's acquisition system determines the column descriptions baked into
+    the created dataset.
 
     Args:
         name: The unique name for the dataset.
@@ -197,8 +197,8 @@ def _create_dataset(
         FileNotFoundError: If a session name does not resolve to any directory under the project root.
         RuntimeError: If a session name resolves to more than one directory under the project root.
         ValueError: If ``required_session_type`` is provided and the first session's type differs from it, or if any
-            subsequent session's session type or acquisition system differs from the first session's. Also raised
-            when a session's type joins no dataset for its acquisition system, or when it has a pipeline it requires
+            subsequent session's session type or acquisition system differs from the first session's. Also raised when a
+            session's type joins no dataset for its acquisition system, or when a pipeline that the session requires is
             still outstanding.
     """
     session_paths = _resolve_session_paths(sessions=sessions, project_root=project_root)
@@ -270,8 +270,8 @@ def _update_dataset(
     """Brings an existing dataset in line with the provided session list, rebuilding the animals named for it.
 
     Notes:
-        The whole request is screened before the hierarchy is touched, so a rejected request leaves the dataset as
-        it stands. A rebuilt animal is removed before anything is added, so a session it keeps across the rebuild
+        The whole request is screened before the hierarchy is touched, so a rejected request leaves the dataset as it
+        stands. A rebuilt animal is removed before anything is added, so a session that it keeps across the rebuild
         clears its existing entry before it is appended again.
 
     Args:
@@ -420,12 +420,12 @@ def _verify_session_compatibility(dataset: DatasetData, session_paths: list[Path
     session type and acquisition system.
 
     Args:
-        dataset: The dataset the sessions are added to.
+        dataset: The dataset to which the sessions are added.
         session_paths: The source session directories to verify.
 
     Raises:
-        ValueError: If a session's type joins no dataset for its acquisition system, if any pipeline it requires has
-            not completed, or if its session type or acquisition system differs from the dataset's.
+        ValueError: If a session's type joins no dataset for its acquisition system, if any pipeline that it requires
+            has not completed, or if its session type or acquisition system differs from the dataset's.
     """
     for session_path in session_paths:
         session_data = SessionData.load(session_path=session_path)
@@ -460,7 +460,7 @@ def _copy_animal_surgery_files(
 
     Args:
         dataset_name: The name of the dataset, used for reporting.
-        dataset: The DatasetData instance the animals belong to.
+        dataset: The DatasetData instance to which the animals belong.
         source_session_paths: The resolved source session directory paths whose animals to cover.
 
     Raises:

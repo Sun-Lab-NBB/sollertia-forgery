@@ -1,4 +1,4 @@
-"""Provides the job descriptors both execution backends dispatch, alongside the graph algorithms that order them."""
+"""Provides the job descriptors dispatched by both execution backends, and the graph algorithms that order them."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ class PendingJob:
     Notes:
         Subclasses extend this dataclass with the additional fields their worker callables need. The base fields carry
         everything the shared graph and the shared execution manager need. That is the unit and job a record names, the
-        tracker it is recorded on, the cores and memory it occupies, and the jobs it waits for.
+        tracker on which it is recorded, the cores and memory it occupies, and its prerequisite jobs.
     """
 
     tracker_path: Path
@@ -27,7 +27,7 @@ class PendingJob:
     job_id: str
     """The unique hexadecimal identifier for this job in the tracker."""
     unit_path: Path = field(default_factory=Path)
-    """The path to the processing unit this job operates on, which is the session root for a session job and the
+    """The path to the processing unit on which this job operates, which is the session root for a session job and the
     dataset root for a dataset job. This is what scopes a job identifier to one unit."""
     job_name: str = ""
     """The pipeline job type name registered in the ``ProcessingTracker``, which is what groups this job with the
@@ -44,8 +44,8 @@ class PendingJob:
 
     @property
     def dispatch_key(self) -> tuple[str, str]:
-        """Returns the composite key that uniquely identifies this job across the entire batch, combining the unit it
-        operates on with the job identifier.
+        """Returns the composite key that uniquely identifies this job across the entire batch, combining its unit
+        with the job identifier.
         """
         return str(self.unit_path), self.job_id
 
@@ -67,13 +67,13 @@ class GenericPendingJob(PendingJob):
 
     Notes:
         Extends the shared ``PendingJob`` base with the descriptor set every registered pipeline worker needs, so one
-        descriptor serves every pipeline. The shared worker routes on ``pipeline`` and each session pipeline's worker
-        reads ``unit_path`` and ``job_id``. Fields a pipeline does not use stay at their defaults, and a descriptor
-        missing a field the engine requires is rejected before dispatch.
+        descriptor serves every pipeline. The shared worker routes on ``pipeline``, every worker reads ``unit_path``,
+        and a multi-job pipeline's worker reads ``job_id`` as well. Fields that a pipeline does not use stay at their
+        defaults, and a descriptor missing a field the engine requires is rejected before dispatch.
     """
 
     pipeline: str = ""
-    """The pipeline this job belongs to, which the shared worker routes on so one pool serves every pipeline."""
+    """The pipeline that owns this job. The shared worker routes on it, so one pool serves every pipeline."""
     name: str = ""
     """The human-readable unit name used for logging and status reporting."""
     specifier: str = ""
@@ -90,8 +90,8 @@ class GenericPendingJob(PendingJob):
     so reconciliation resolves a running job's allocation from the batch rather than from a tracker it would have to
     open, which on a remote host would mean reading one across the transport mid-run."""
     options: dict[str, Any] = field(default_factory=dict)
-    """The pipeline-specific parameters the caller chose for this job, such as the mode a multi-mode pipeline runs in.
-    The mapping is carried through to the pipeline's own worker, which interprets whichever keys it declares. A
+    """The pipeline-specific parameters the caller chose for this job, such as the mode in which a multi-mode pipeline
+    runs. The mapping is carried through to the pipeline's own worker, which interprets whichever keys it declares. A
     pipeline that takes no parameters leaves it empty."""
 
 
@@ -108,16 +108,16 @@ class BatchDocument:
     pipeline: str = ""
     """The pipeline this batch dispatches."""
     host: str = ""
-    """The host this batch was prepared against, which is the one holding the data its jobs read. Execution reads the
-    host from here, so a batch runs where it was prepared."""
+    """The host against which this batch was prepared, which is the one holding the data its jobs read. Execution reads
+    the host from here, so a batch runs where it was prepared."""
     options: dict[str, Any] = field(default_factory=dict)
-    """The pipeline-specific parameters every job of this batch runs with."""
+    """The pipeline-specific parameters given to every job of this batch."""
     units: list[dict[str, Any]] = field(default_factory=list)
     """One entry per named unit, carrying its path, its name, and its job counts, or the reason it contributed none."""
     jobs: list[dict[str, Any]] = field(default_factory=list)
     """The dispatchable job descriptors, holding every job this run can carry out."""
     blocked_jobs: list[dict[str, Any]] = field(default_factory=list)
-    """The jobs this run can neither dispatch nor find already succeeded, each naming what it waits on."""
+    """The jobs this run can neither dispatch nor find already succeeded, each naming its unmet prerequisites."""
 
 
 def build_batch_document(
@@ -134,16 +134,16 @@ def build_batch_document(
 
     Notes:
         The state rows are the pipelines' own tracker registries, so a job absent from them is one the unit cannot
-        produce and is never dispatched. A job the state records as succeeded is left out, which is what makes
-        preparing a unit twice queue only the work still outstanding.
+        produce and is never dispatched. A job that the state records as succeeded is left out, so preparing a unit
+        twice queues only the work still outstanding.
 
         A recorded prerequisite naming a job with no state row is dropped rather than treated as unsatisfied, since
-        the unit can never produce it. A prerequisite this run neither dispatches nor finds already succeeded blocks
-        its dependents instead, and blocking propagates.
+        the unit can never produce it. A prerequisite that this run neither dispatches nor finds already succeeded
+        blocks its dependents instead, and blocking propagates.
 
     Args:
         pipeline: The pipeline being prepared.
-        host: The name of the host the artifacts were materialized and read from.
+        host: The name of the host on which the artifacts were materialized and read.
         unit_column: The state and plan column naming each row's unit, which is ``dataset`` for a dataset pipeline and
             ``session`` for a session pipeline.
         plan_rows: The project's plan rows, carrying each job's cores, memory, and recorded ordering.
@@ -183,7 +183,7 @@ def build_batch_document(
             continue
 
         outstanding = [
-            build_job_descriptor(
+            _build_job_descriptor(
                 state_row=row,
                 plan_row=unit_plan[job_id],
                 unit_path=unit_path,
@@ -198,7 +198,7 @@ def build_batch_document(
             for job_id, row in unit_state.items()
             if job_id not in succeeded
         ]
-        submittable, unit_blocked = partition_blocked_jobs(jobs=outstanding, succeeded=succeeded)
+        submittable, unit_blocked = _partition_blocked_jobs(jobs=outstanding, succeeded=succeeded)
         jobs.extend(submittable)
         blocked.extend(unit_blocked)
         units.append(
@@ -215,7 +215,7 @@ def build_batch_document(
     )
 
 
-def build_job_descriptor(
+def _build_job_descriptor(
     state_row: dict[str, Any],
     plan_row: dict[str, Any],
     unit_path: Path,
@@ -225,16 +225,16 @@ def build_job_descriptor(
     trackable_ids: set[str],
     tracker_path: str = "",
 ) -> dict[str, Any]:
-    """Renders one job as the descriptor both backends dispatch.
+    """Renders one job as the descriptor that both backends dispatch.
 
     Args:
         state_row: The job's row in the state table, carrying the status and the executor its tracker recorded.
         plan_row: The job's row in the plan table.
-        unit_path: The path to the unit the job operates on.
+        unit_path: The path to the unit on which the job operates.
         unit_name: The name of that unit.
-        pipeline: The pipeline the job belongs to.
-        options: The pipeline-specific parameters to run the job with.
-        trackable_ids: The job identifiers the unit tracks, which the recorded ordering is narrowed to.
+        pipeline: The pipeline that owns the job.
+        options: The pipeline-specific parameters given to the job.
+        trackable_ids: The job identifiers the unit tracks, to which the recorded ordering is narrowed.
         tracker_path: Where the unit's tracker sits, or empty when this backend never opens it.
 
     Returns:
@@ -280,7 +280,7 @@ def index_rows_by_unit(rows: list[dict[str, Any]], key: str) -> dict[str, dict[s
     return indexed
 
 
-def partition_blocked_jobs(
+def _partition_blocked_jobs(
     jobs: list[dict[str, Any]], succeeded: set[str]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Splits a unit's outstanding jobs into the ones this run may dispatch and the ones it may not.
@@ -294,7 +294,7 @@ def partition_blocked_jobs(
         succeeded: The identifiers of the unit's jobs already recorded as succeeded.
 
     Returns:
-        A tuple of the dispatchable descriptors and the blocked entries, each naming the prerequisites it waits on.
+        A tuple of the dispatchable descriptors and the blocked entries, each naming its unsatisfied prerequisites.
     """
     runnable: dict[str, dict[str, Any]] = {descriptor["job_id"]: descriptor for descriptor in jobs}
     blocked: dict[str, list[str]] = {}
@@ -340,7 +340,7 @@ def resolve_dispatch_priorities[PendingJobT: PendingJob](
     Notes:
         A job's priority is the cores committed by every job that cannot run until it succeeds, summed over its
         transitive dependents. Weighing the dependents by their cores rather than counting them separates a job
-        holding back three wide stages from one holding back a single narrow stage. A job nothing waits on weighs
+        holding back three wide stages from one holding back a single narrow stage. A job with no dependents weighs
         zero, whatever its own size.
 
         Ordering by this weight is what keeps a batch working on its critical path. Admitting by size alone lets a
@@ -348,7 +348,7 @@ def resolve_dispatch_priorities[PendingJobT: PendingJob](
         leaves finish and the chain has yet to start. The dependents are collected as a set, so a stage reachable
         along several paths at once is counted a single time.
 
-        A prerequisite naming a job outside this batch is skipped, since a job the batch does not hold cannot be
+        A prerequisite naming a job outside this batch is skipped, since a job that the batch does not hold cannot be
         ordered against the ones it does. Cyclic prerequisites resolve to a finite weight rather than recursing
         without end, which leaves a malformed pipeline ordering poorly instead of stalling the batch.
 
@@ -386,7 +386,7 @@ def resolve_dispatch_priorities[PendingJobT: PendingJob](
 
 
 def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT]) -> list[PendingJobT]:
-    """Orders a batch's jobs so every job follows the jobs it waits on.
+    """Orders a batch's jobs so every job follows its prerequisites.
 
     Notes:
         A scheduler names a dependency by the identifier it assigned to the upstream allocation, so an upstream job
@@ -405,7 +405,7 @@ def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT
     depths: dict[tuple[str, str], int] = {}
 
     def _depth(key: tuple[str, str], visiting: set[tuple[str, str]]) -> int:
-        """Resolves how many in-batch prerequisites the given dispatch key sits behind, memoizing each depth."""
+        """Resolves how many in-batch prerequisites stand ahead of the given dispatch key, memoizing each depth."""
         cached = depths.get(key)
         if cached is not None:
             return cached
@@ -432,7 +432,7 @@ def resolve_submission_order[PendingJobT: PendingJob](jobs: Sequence[PendingJobT
 
 
 def build_pending_job(job: dict[str, Any]) -> GenericPendingJob:
-    """Builds one job descriptor into the pending job both backends dispatch.
+    """Builds one job descriptor into the pending job that both backends dispatch.
 
     Args:
         job: A job descriptor carrying ``job_id``, ``unit_path``, ``cores``, and ``memory_mb``, and optionally

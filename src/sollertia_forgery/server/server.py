@@ -37,12 +37,12 @@ _EXPECTED_FIELD_COUNT: int = 2
 """The number of pipe-separated fields a parsable accounting or queue row carries."""
 
 _REPORTED_ERROR_CHARACTERS: int = 2000
-"""The number of characters of a failed command's error output an error message carries. A command that cannot read
-many directories reports one line per directory, which is worth naming but not worth printing whole."""
+"""The number of characters of a failed command's error output that an error message carries. A command that cannot
+read many directories reports one line per directory, which is worth naming but not worth printing whole."""
 
 
 @dataclass(frozen=True, slots=True)
-class CommandResult:
+class _CommandResult:
     """Stores the result of executing a command on the remote server."""
 
     stdout: str
@@ -54,7 +54,10 @@ class CommandResult:
 
 
 class JobStatus(StrEnum):
-    """Defines the set of status codes returned by SLURM for managed jobs."""
+    """Defines the set of status codes this library resolves for managed jobs.
+
+    These are the states SLURM reports, plus the ``BLOCKED`` and ``UNKNOWN`` states resolved locally.
+    """
 
     PENDING = "PENDING"
     """The job is queued and waiting for resources."""
@@ -102,7 +105,7 @@ TERMINAL_JOB_STATUSES: frozenset[JobStatus] = frozenset(
         JobStatus.BLOCKED,
     }
 )
-"""The statuses a job never leaves, which is what tells a caller a polled submission has settled.
+"""The statuses a job never leaves. Reaching one tells a caller that a polled submission has settled.
 
 Notes:
     ``UNKNOWN`` is absent, since accounting reports it for a submission it has not yet registered as well as for one
@@ -138,7 +141,6 @@ class Server:
 
         timer = PrecisionTimer(precision=TimerPrecisions.SECOND)
 
-        # Establishes the SSH connection to the specified processing server.
         attempt = 0
         while True:
             console.echo(
@@ -162,8 +164,7 @@ class Server:
                 )
                 console.echo(message=f"Connected to {self._configuration.host}", level=LogLevel.SUCCESS)
 
-                # Initializes the SFTP client using the established SSH connection. This client is reused for all
-                # file transfer operations during the lifetime of the Server instance.
+                # The client is reused for every file transfer operation during the Server instance's lifetime.
                 sftp: SFTPClient = client.open_sftp()
             except paramiko.AuthenticationException:
                 client.close()
@@ -217,8 +218,6 @@ class Server:
     def submit_job(self, job: Job, *, verbose: bool = True) -> Job:
         """Submits the input job to the managed remote compute server via the SLURM job manager.
 
-        This method is the entry point for all headless jobs that are executed on the remote compute server.
-
         Args:
             job: The Job instance that defines the job to be executed.
             verbose: Determines whether to emit the submission start and success messages. The warning issued for a
@@ -233,8 +232,6 @@ class Server:
         if verbose:
             console.echo(message=f"Submitting '{job.job_name}' job to the remote server {self.host}...")
 
-        # If the Job object already has a job ID, this indicates that the job has already been submitted to the server.
-        # In this case returns it to the caller with no further modifications.
         if job.job_id is not None:
             console.echo(
                 message=f"The '{job.job_name}' job has already been submitted to the server.",
@@ -307,7 +304,7 @@ class Server:
         SLURM-assigned ID.
 
         Notes:
-            This method uses the 'sacct' command to determine the current state of the job, returning the actual status
+            Uses the 'sacct' command to determine the current state of the job, returning the actual status
             (e.g., PENDING, RUNNING, COMPLETED, FAILED) assigned by the SLURM manager. A pending allocation is
             additionally checked against the queue's reason field, so a job whose dependency can no longer be satisfied
             is reported as BLOCKED.
@@ -333,7 +330,7 @@ class Server:
             slurm_job_ids: The SLURM-assigned job IDs to query.
 
         Returns:
-            A dictionary mapping every requested job ID to its status. An allocation accounting does not know reports
+            A dictionary mapping every requested job ID to its status. An allocation unknown to accounting reports
             as ``UNKNOWN``.
         """
         requested = [str(job_id) for job_id in slurm_job_ids]
@@ -366,8 +363,8 @@ class Server:
         """Returns the identifiers of this user's queued allocations whose dependencies can no longer be satisfied.
 
         Notes:
-            Queries the user's whole queue, since naming an allocation the queue no longer holds makes the command
-            report an error for it.
+            Queries the user's whole queue, since naming an allocation that the queue no longer holds makes the
+            command report an error for it.
 
         Returns:
             The SLURM-assigned job IDs the queue reports as permanently blocked.
@@ -383,8 +380,8 @@ class Server:
     def pull(self, local_path: Path, remote_path: Path) -> None:
         """Downloads a file or directory from the remote server to the local machine.
 
-        This method automatically detects whether the remote path points to a file or directory and handles the
-        transfer accordingly. For directories, all contents are recursively downloaded.
+        Detects whether the remote path points to a file or directory and handles the transfer
+        accordingly. For directories, all contents are recursively downloaded.
 
         Args:
             local_path: The path on the local machine where the file or directory will be saved.
@@ -405,31 +402,11 @@ class Server:
             local_path.parent.mkdir(parents=True, exist_ok=True)
             self._sftp.get(localpath=str(local_path), remotepath=str(remote_path))
 
-    def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
-        """Recursively downloads a directory from the remote server.
-
-        Args:
-            local_path: The local directory path where contents will be saved.
-            remote_path: The remote directory path to download.
-        """
-        local_path.mkdir(parents=True, exist_ok=True)
-
-        remote_items = self._sftp.listdir_attr(path=str(remote_path))
-
-        for item in remote_items:
-            remote_item_path = remote_path / item.filename
-            local_item_path = local_path / item.filename
-
-            if stat.S_ISDIR(item.st_mode):
-                self._pull_directory(local_path=local_item_path, remote_path=remote_item_path)
-            else:
-                self._sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
-
     def push(self, local_path: Path, remote_path: Path) -> None:
         """Uploads a file or directory from the local machine to the remote server.
 
-        This method automatically detects whether the local path points to a file or directory and handles the
-        transfer accordingly. For directories, all contents are recursively uploaded.
+        Detects whether the local path points to a file or directory and handles the transfer
+        accordingly. For directories, all contents are recursively uploaded.
 
         Args:
             local_path: The path to the file or directory on the local machine to upload.
@@ -447,23 +424,6 @@ class Server:
         else:
             self._create_directory(remote_path=remote_path.parent, parents=True)
             self._sftp.put(localpath=str(local_path), remotepath=str(remote_path))
-
-    def _push_directory(self, local_path: Path, remote_path: Path) -> None:
-        """Recursively uploads a directory to the remote server.
-
-        Args:
-            local_path: The local directory path to upload.
-            remote_path: The remote directory path where contents will be saved.
-        """
-        self._create_directory(remote_path=remote_path, parents=True)
-
-        for local_item_path in local_path.iterdir():
-            remote_item_path = remote_path / local_item_path.name
-
-            if local_item_path.is_dir():
-                self._push_directory(local_path=local_item_path, remote_path=remote_item_path)
-            else:
-                self._sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
 
     def create(self, remote_path: Path, *, is_dir: bool = True, parents: bool = True) -> None:
         """Creates a file or directory on the remote server.
@@ -488,36 +448,8 @@ class Server:
 
             if not self.exists(remote_path=remote_path):
                 # Opening the path for writing and immediately closing it leaves an empty file behind.
-                with self._sftp.open(str(remote_path), mode="w"):
+                with self._sftp.open(filename=str(remote_path), mode="w"):
                     pass
-
-    def _create_directory(self, remote_path: Path, *, parents: bool = True) -> None:
-        """Creates a directory on the remote server.
-
-        Notes:
-            Creating a nested path is delegated to the shell, which resolves the whole chain in one round trip. Walking
-            the chain over the file-transfer protocol instead costs one query per level, which a batch creating a
-            directory per job pays many times over.
-
-        Args:
-            remote_path: The absolute path to the directory to create on the remote server.
-            parents: Determines whether missing parent directories are created alongside the requested directory.
-        """
-        remote_path_str = str(remote_path)
-
-        if parents:
-            result = self.execute_command(command=f"mkdir -p {shlex.quote(remote_path_str)}")
-            if result.return_code != 0:
-                message = (
-                    f"Unable to create the directory {remote_path_str} on the remote compute server. "
-                    f"{result.stderr.strip()}"
-                )
-                console.error(message=message, error=RuntimeError)
-        else:
-            try:
-                self._sftp.stat(path=remote_path_str)
-            except FileNotFoundError:
-                self._sftp.mkdir(path=remote_path_str)
 
     def remove(self, remote_path: Path, *, is_dir: bool, recursive: bool = False) -> None:
         """Removes a file or directory from the remote server.
@@ -535,30 +467,6 @@ class Server:
                 self._sftp.rmdir(path=str(remote_path))
         else:
             self._sftp.unlink(path=str(remote_path))
-
-    def _recursive_remove(self, remote_path: Path) -> None:
-        """Recursively removes a directory and all its contents from the remote server.
-
-        Args:
-            remote_path: The path to the remote directory to recursively remove.
-        """
-        try:
-            items = self._sftp.listdir_attr(path=str(remote_path))
-
-            for item in items:
-                item_path = remote_path / item.filename
-
-                if stat.S_ISDIR(item.st_mode):
-                    self._recursive_remove(remote_path=item_path)
-                else:
-                    self._sftp.unlink(path=str(item_path))
-
-            self._sftp.rmdir(path=str(remote_path))
-
-        except Exception as error:
-            console.echo(
-                message=f"Unable to remove the specified directory {remote_path}: {error!s}", level=LogLevel.WARNING
-            )
 
     def exists(self, remote_path: Path) -> bool:
         """Returns True if the target file or directory exists on the remote server.
@@ -614,8 +522,8 @@ class Server:
         Notes:
             The search runs as one shell command rather than as a walk over the file-transfer protocol, which trades
             one query per directory and per candidate for a single round trip. Symbolic links are followed, and a link
-            whose target does not resolve is reported as absent, so the answer matches the one exists() gives for the
-            same path.
+            whose target does not resolve is reported as absent, so the answer matches the one that exists() gives
+            for the same path.
 
         Args:
             remote_path: The absolute path to the directory to search on the remote server.
@@ -631,7 +539,8 @@ class Server:
 
         Raises:
             FileNotFoundError: If the searched path is not a directory on the remote server.
-            RuntimeError: If the search command failed, which leaves it having covered only part of the tree.
+            RuntimeError: If the search command failed, which leaves it having covered only part of the tree, or if
+                the search reported an entry that does not sit under the searched directory.
         """
         if not self.is_directory(remote_path=remote_path):
             message = (
@@ -682,8 +591,8 @@ class Server:
             if not record:
                 continue
             match = Path(record)
-            # The search echoes the directory it was given back at the head of every record, so a record that does not
-            # carry it is output the search did not produce and the answer it belongs to cannot be trusted.
+            # The search echoes the directory it was given at the head of every record, so a record that does not
+            # carry it is output that the search did not produce, and the answer containing it cannot be trusted.
             if not match.is_relative_to(remote_path):
                 message = (
                     f"Unable to search {remote_path} on the remote compute server. The search reported the entry "
@@ -694,27 +603,27 @@ class Server:
             matches.append(match)
         return natsorted(matches)
 
-    def execute_command(self, command: str) -> CommandResult:
+    def execute_command(self, command: str) -> _CommandResult:
         """Executes the specified command on the remote server and returns the result.
 
         Notes:
-            Both streams are drained concurrently. They share the channel's flow-control window, so draining either to
-            its end before the other lets a command that fills that window with the stream nothing is reading block
-            forever, leaving this call waiting on output the command cannot finish writing.
+            Both streams are drained concurrently. They share the channel's flow-control window, so draining either
+            to its end before the other lets a command fill that window with the unread stream and block forever.
+            This call then waits on output the command cannot finish writing.
 
         Args:
             command: The shell command to execute on the remote server.
 
         Returns:
-            A CommandResult instance containing stdout, stderr, and the return code of the executed command.
+            A _CommandResult instance containing stdout, stderr, and the return code of the executed command.
         """
-        _, stdout, stderr = self._client.exec_command(command)
+        _, stdout, stderr = self._client.exec_command(command=command)
         with ThreadPoolExecutor(max_workers=1) as reader:
             pending_errors = reader.submit(stderr.read)
             output = stdout.read()
             errors = pending_errors.result()
 
-        return CommandResult(
+        return _CommandResult(
             stdout=output.decode(),
             stderr=errors.decode(),
             return_code=stdout.channel.recv_exit_status(),
@@ -722,7 +631,6 @@ class Server:
 
     def close(self) -> None:
         """Closes the SFTP and SSH connections to the server."""
-        # Prevents closing already closed connections
         if self._open:
             self._sftp.close()
             self._client.close()
@@ -761,6 +669,95 @@ class Server:
     def dlc_projects_directory(self) -> Path:
         """Returns the absolute path to the DeepLabCut project directory under the server's data root."""
         return self.root.joinpath("deeplabcut_projects")
+
+    def _pull_directory(self, local_path: Path, remote_path: Path) -> None:
+        """Recursively downloads a directory from the remote server.
+
+        Args:
+            local_path: The local directory path where contents will be saved.
+            remote_path: The remote directory path to download.
+        """
+        local_path.mkdir(parents=True, exist_ok=True)
+
+        remote_items = self._sftp.listdir_attr(path=str(remote_path))
+
+        for item in remote_items:
+            remote_item_path = remote_path / item.filename
+            local_item_path = local_path / item.filename
+
+            if stat.S_ISDIR(item.st_mode):
+                self._pull_directory(local_path=local_item_path, remote_path=remote_item_path)
+            else:
+                self._sftp.get(localpath=str(local_item_path), remotepath=str(remote_item_path))
+
+    def _push_directory(self, local_path: Path, remote_path: Path) -> None:
+        """Recursively uploads a directory to the remote server.
+
+        Args:
+            local_path: The local directory path to upload.
+            remote_path: The remote directory path where contents will be saved.
+        """
+        self._create_directory(remote_path=remote_path, parents=True)
+
+        for local_item_path in local_path.iterdir():
+            remote_item_path = remote_path / local_item_path.name
+
+            if local_item_path.is_dir():
+                self._push_directory(local_path=local_item_path, remote_path=remote_item_path)
+            else:
+                self._sftp.put(localpath=str(local_item_path), remotepath=str(remote_item_path))
+
+    def _create_directory(self, remote_path: Path, *, parents: bool = True) -> None:
+        """Creates a directory on the remote server.
+
+        Notes:
+            Creating a nested path is delegated to the shell, which resolves the whole chain in one round trip. Walking
+            the chain over the file-transfer protocol instead costs one query per level, which a batch creating a
+            directory per job pays many times over.
+
+        Args:
+            remote_path: The absolute path to the directory to create on the remote server.
+            parents: Determines whether missing parent directories are created alongside the requested directory.
+        """
+        remote_path_str = str(remote_path)
+
+        if parents:
+            result = self.execute_command(command=f"mkdir -p {shlex.quote(remote_path_str)}")
+            if result.return_code != 0:
+                message = (
+                    f"Unable to create the directory {remote_path_str} on the remote compute server. "
+                    f"{result.stderr.strip()}"
+                )
+                console.error(message=message, error=RuntimeError)
+        else:
+            try:
+                self._sftp.stat(path=remote_path_str)
+            except FileNotFoundError:
+                self._sftp.mkdir(path=remote_path_str)
+
+    def _recursive_remove(self, remote_path: Path) -> None:
+        """Recursively removes a directory and all its contents from the remote server.
+
+        Args:
+            remote_path: The path to the remote directory to recursively remove.
+        """
+        try:
+            items = self._sftp.listdir_attr(path=str(remote_path))
+
+            for item in items:
+                item_path = remote_path / item.filename
+
+                if stat.S_ISDIR(item.st_mode):
+                    self._recursive_remove(remote_path=item_path)
+                else:
+                    self._sftp.unlink(path=str(item_path))
+
+            self._sftp.rmdir(path=str(remote_path))
+
+        except Exception as error:
+            console.echo(
+                message=f"Unable to remove the specified directory {remote_path}: {error!s}", level=LogLevel.WARNING
+            )
 
 
 def _parse_job_status(state: str) -> JobStatus:

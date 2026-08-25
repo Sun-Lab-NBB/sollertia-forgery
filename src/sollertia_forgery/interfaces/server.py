@@ -179,10 +179,8 @@ def print_slurm_info(
         )
         console.error(message=message, error=ValueError)
 
-    # Initializes communication with the server.
     configuration = get_server_configuration()
 
-    # Resolves the username from the server configuration file if an explicit override is not provided.
     if user is None:
         user = configuration.username
 
@@ -238,19 +236,18 @@ def _report_job_accounting(
     Raises:
         RuntimeError: If the 'sacct' command fails on the server.
     """
-    # A named job is reported on its own, which is what lets a caller bypass the user and date filtering.
+    # A named job is reported on its own, so a caller bypasses the user and date filtering.
     if job_id is not None:
         command = f'sacct -j {job_id} -o "{_SACCT_FORMAT}" --parsable2 --units=G'
         console.echo(message=f"Fetching job accounting data for job ID '{job_id}'...", level=LogLevel.INFO)
     else:
-        # Builds the command with optional user filtering.
         if all_users:
             command = f'sacct -a -o "{_SACCT_FORMAT}" --parsable2 --units=G'
         else:
             command = f'sacct -u {user} -o "{_SACCT_FORMAT}" --parsable2 --units=G'
-        if start_time:
+        if start_time is not None:
             command += f" --starttime={start_time}"
-        if end_time:
+        if end_time is not None:
             command += f" --endtime={end_time}"
 
         if all_users:
@@ -280,7 +277,7 @@ def _report_job_accounting(
         console.echo(message="Job accounting (sacct) data for all users:")
     else:
         console.echo(message=f"Job accounting (sacct) data for the user '{user}':")
-    click.echo(formatted_output)
+    console.echo(message=formatted_output, raw=True)
 
 
 def _report_queue_status(server: Server, user: str, *, all_users: bool) -> None:
@@ -322,7 +319,7 @@ def _report_queue_status(server: Server, user: str, *, all_users: bool) -> None:
         console.echo(message="Queue status (squeue) for all users:")
     else:
         console.echo(message=f"Queue status (squeue) for the user '{user}':")
-    click.echo(formatted_output)
+    console.echo(message=formatted_output, raw=True)
 
 
 def _format_slurm_output(raw_output: str) -> str:
@@ -347,7 +344,6 @@ def _format_slurm_output(raw_output: str) -> str:
     if not rows:
         return "No data available."
 
-    # Uses 'tabulate' to format the output, with the first row as headers.
     headers = rows[0]
     data = rows[1:]
 
@@ -370,7 +366,6 @@ def _format_sacct_output(raw_output: str) -> str:
     if not lines:
         return "No data available."
 
-    # Parses pipe-delimited rows.
     rows = [line.split("|") for line in lines if line.strip()]
     if len(rows) < _MINIMUM_SACCT_ROWS:
         return "No data available."
@@ -391,7 +386,6 @@ def _format_sacct_output(raw_output: str) -> str:
         if ".extern" in job_id:
             continue
 
-        # Extracts the base job ID (without the '.batch' suffix if present).
         base_job_id = job_id.split(".")[0]
 
         if base_job_id in parent_jobs:

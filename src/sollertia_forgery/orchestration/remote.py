@@ -37,7 +37,7 @@ Notes:
     than to describe how long a stage takes.
 """
 
-BATCH_DIRECTORY_NAME: str = "processing_batches"
+_BATCH_DIRECTORY_NAME: str = "processing_batches"
 """The directory under the server's data root that holds one subdirectory per submitted batch."""
 
 _MEGABYTES_PER_GIGABYTE: int = 1024
@@ -51,16 +51,16 @@ def remote_batch_directory(server: Server, batch_id: str) -> Path:
     """Resolves the server-side directory holding one batch's job scripts and logs.
 
     Args:
-        server: The server the batch runs on.
+        server: The server that runs the batch.
         batch_id: The identifier of the batch.
 
     Returns:
         The path to the batch's directory on the server.
     """
-    return server.root.joinpath(BATCH_DIRECTORY_NAME, batch_id)
+    return server.root.joinpath(_BATCH_DIRECTORY_NAME, batch_id)
 
 
-def prepare_remote_batch(
+def _prepare_remote_batch(
     server: Server, pipeline: str, unit_paths: Sequence[str], options: dict[str, Any] | None = None
 ) -> BatchDocument:
     """Resolves a pipeline's submittable jobs for the named units on the remote compute server.
@@ -72,15 +72,15 @@ def prepare_remote_batch(
     Args:
         server: The connected server holding the units.
         pipeline: The batch pipeline to prepare.
-        unit_paths: The processing unit directories on the server to prepare jobs for.
-        options: The pipeline-specific parameters to run the prepared jobs with.
+        unit_paths: The processing unit directories on the server whose jobs to prepare.
+        options: The pipeline-specific parameters given to the prepared jobs.
 
     Returns:
         The prepared batch document.
 
     Raises:
-        ValueError: If the named pipeline is not a supported batch pipeline, or if the named units do not share one
-            project.
+        ValueError: If the named pipeline is not a supported batch pipeline, if no unit is named, or if the named
+            units do not share one project.
         FileNotFoundError: If the server holds no plan table for the units' project.
         RuntimeError: If a server-side command fails.
     """
@@ -106,22 +106,23 @@ def submit_batch(
         job of the same batch, since the allocations it already accepted stay queued.
 
         The record is merged into whatever the ledger already holds for this batch, so re-running a batch the scheduler
-        accepted only part of keeps the allocations the first attempt queued. An entry this call re-submitted is
+        only partly accepted keeps the allocations the first attempt queued. An entry this call re-submitted is
         replaced rather than duplicated.
 
         An adopted job's allocation seeds the dependency map before anything is submitted, so a dependent of a job that
         is already running waits on the allocation running it rather than on a second one.
 
-        The concurrency ceilings the local engine applies do not reach the scheduler. Expressing one natively needs a
-        job array, whose tasks share a single memory request, so the scheduler is left to sequence the whole batch.
+        The concurrency ceilings that the local engine applies do not reach the scheduler. Expressing one natively
+        needs a job array, whose tasks share a single memory request, so the scheduler is left to sequence the whole
+        batch.
 
     Args:
-        server: The connected server to submit to.
+        server: The connected server that receives the submission.
         jobs: The job descriptors to submit.
-        batch_id: The identifier of the batch, which names the directory the scripts and logs are written into.
+        batch_id: The identifier of the batch, which names the directory that holds the scripts and logs.
         adopted: The allocation already running each adopted job, keyed by dispatch key. These jobs are not submitted,
-            and their allocations are what their dependents wait on.
-        covered_batch_ids: Every prepared batch this submission dispatches, which closure snapshots an outcome for.
+            and their dependents wait on those allocations.
+        covered_batch_ids: Every prepared batch this submission dispatches. Closure snapshots an outcome for each.
             Leave empty for a submission covering the batch ``batch_id`` names alone.
         walltime_minutes: The wall-time every allocation requests.
         verbose: Determines whether to report each submission as it is accepted.
@@ -182,7 +183,7 @@ def query_submissions(server: Server, submissions: Sequence[RemoteSubmission]) -
         forgotten the moment it settles.
 
     Args:
-        server: The connected server the batch runs on.
+        server: The connected server that runs the batch.
         submissions: The submissions to query.
 
     Returns:
@@ -196,7 +197,7 @@ def cancel_submissions(server: Server, submissions: Sequence[RemoteSubmission]) 
     running ones alone.
 
     Args:
-        server: The connected server the batch runs on.
+        server: The connected server that runs the batch.
         submissions: The submissions to cancel.
 
     Returns:
@@ -218,11 +219,11 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
     Args:
         server: The connected server holding the project.
         project: The name of the project whose state to mirror.
-        local_directory: The local directory to mirror the artifacts into.
+        local_directory: The local directory that receives the mirrored artifacts.
         regenerate: Determines whether to regenerate the artifacts on the server before pulling them.
 
     Returns:
-        The local paths the artifacts were written to, holding one entry per artifact the server carried.
+        Where the artifacts were written, holding one entry per artifact the server carried.
 
     Raises:
         FileNotFoundError: If the server holds no directory for the named project.
@@ -236,8 +237,8 @@ def sync_project_state(server: Server, project: str, local_directory: Path, *, r
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # Only the datasets are mirrored, so the search is held to the depth their markers sit at rather than reading
-    # every session directory the project holds.
+    # Only the datasets are mirrored, so the search is held to the depth at which their markers sit rather than
+    # reading every session directory the project holds.
     datasets = list(discover_project_markers(project_path=project_path, server=server, include_sessions=False).datasets)
     if regenerate:
         _regenerate_remote_state(server=server, project_path=project_path, datasets=datasets)
@@ -304,13 +305,13 @@ def _submit_ordered_jobs(
         allocation when the scheduler rejects a later job.
 
     Args:
-        server: The connected server to submit to.
+        server: The connected server that receives the submission.
         ordered: The jobs to submit, in dependency order.
-        batch_directory: The server-side directory the scripts and logs are written into.
+        batch_directory: The server-side directory that holds the scripts and logs.
         walltime_minutes: The wall-time every allocation requests.
-        submissions: The list each accepted allocation's record is appended to.
+        submissions: The list that receives each accepted allocation's record.
         allocation_of_job: The mapping from each submitted job's dispatch key to its allocation identifier, which is
-            what a dependent job's dependency directive is resolved from.
+            what resolves a dependent job's dependency directive.
         verbose: Determines whether to report each submission as it is accepted.
 
     Raises:
@@ -376,7 +377,7 @@ def _resolve_slurm_job_name(job: GenericPendingJob, index: int) -> str:
         The allocation name.
     """
     readable = "-".join(part for part in (job.name or job.unit_path.name, job.job_name, job.specifier) if part)
-    return f"{index:04d}-{_SLURM_NAME_SANITIZER.sub('_', readable)}"
+    return f"{index:04d}-{_SLURM_NAME_SANITIZER.sub(repl='_', string=readable)}"
 
 
 def _regenerate_remote_state(server: Server, project_path: Path, datasets: Sequence[Path]) -> None:

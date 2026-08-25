@@ -1,4 +1,4 @@
-"""Provides the shared fixtures the sollertia-forgery test suite builds its on-disk artifacts and its stubs from."""
+"""Provides the shared fixtures that build the on-disk artifacts and the stubs for the sollertia-forgery test suite."""
 
 from __future__ import annotations
 
@@ -55,17 +55,17 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 FIXTURES_DIRECTORY: Path = Path(__file__).parent / "fixtures"
-"""The directory holding the static reference files the suite pins its golden comparisons against. Resolving it here
-keeps a test's own depth under the suite root out of the path."""
+"""The directory holding the static reference files against which the suite pins its golden comparisons. Resolving it
+here keeps a test's own depth under the suite root out of the path."""
 
 PROJECT_NAME: str = "TestProject"
 """The name of the project every hierarchy fixture builds under the temporary data root."""
 
 EXPERIMENT_ANIMAL_ID: str = "305"
-"""The animal identifier the experiment-session fixture records under."""
+"""The experiment-session fixture's animal identifier."""
 
 TRAINING_ANIMAL_ID: str = "321"
-"""The animal identifier the training-session fixture records under, kept distinct so a project holds two animals."""
+"""The training-session fixture's animal identifier, kept distinct so a project holds two animals."""
 
 PYTHON_VERSION: str = "3.14.0"
 """The acquisition-time Python version every created session records in its marker."""
@@ -104,7 +104,7 @@ def isolated_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     directory rather than in whatever this host already holds.
 
     Args:
-        tmp_path: The temporary directory the platform state is placed under.
+        tmp_path: The temporary directory under which the platform state is placed.
         monkeypatch: The fixture used to redirect the user data directory the platform resolves.
 
     Returns:
@@ -121,10 +121,10 @@ def isolated_working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.fixture
 def data_root(tmp_path: Path) -> Path:
-    """Creates the temporary data root every project fixture anchors its hierarchy on.
+    """Creates the temporary data root on which every project fixture anchors its hierarchy.
 
     Args:
-        tmp_path: The temporary directory the data root is created inside.
+        tmp_path: The temporary directory inside which the data root is created.
 
     Returns:
         The path to the created data root directory.
@@ -139,7 +139,7 @@ def project(data_root: Path) -> ProjectData:
     """Creates the project directory structure through the shared hierarchy's own creator.
 
     Args:
-        data_root: The temporary data root the project is created under.
+        data_root: The temporary data root under which the project is created.
 
     Returns:
         The created project view, whose configuration directory exists on disk.
@@ -164,7 +164,7 @@ def project_root(project: ProjectData) -> Path:
 def hardware_state() -> MesoscopeHardwareState:
     """Builds a Mesoscope-VR hardware state marking every optional module as configured and used.
 
-    Every module the microcontroller pipeline can parse reports as eligible, and the system state codes cover the
+    Every module that the microcontroller pipeline can parse reports as eligible, and the system state codes cover the
     idle, rest, and run states the behavior assembler reads.
 
     Returns:
@@ -189,8 +189,8 @@ def hardware_state() -> MesoscopeHardwareState:
 def experiment_configuration() -> MesoscopeExperimentConfiguration:
     """Builds a minimal Mesoscope-VR experiment configuration carrying one trial structure and one state.
 
-    The configuration supplies the schema an experiment session's snapshot has to satisfy. The cue sequence a
-    runtime archive records is supplied by the test that needs one.
+    The configuration supplies the schema that an experiment session's snapshot has to satisfy. The cue sequence
+    that a runtime archive records is supplied by the test that needs one.
 
     Returns:
         The experiment configuration instance.
@@ -248,21 +248,18 @@ def session_factory(
 ) -> Callable[..., SessionData]:
     """Returns a builder that creates one acquired session through the shared hierarchy's own creator.
 
-    The builder stages the experiment configuration and the VR task template where the creator sources them from,
-    creates the session, writes the descriptor its type registers alongside the hardware state snapshot, and returns
-    the session reloaded from disk so both its raw and processed paths resolve absolutely.
+    The builder stages the experiment configuration and the VR task template where the creator finds them. It then
+    creates the session, writes the descriptor that its type registers alongside the hardware state snapshot, and
+    returns the session reloaded from disk so both its raw and processed paths resolve absolutely.
 
-    Args:
-        project: The created project the session is placed under.
-        isolated_working_directory: The isolated platform state, requested so the task templates directory the
-            builder registers is written under this test's own temporary directory rather than onto the host.
-        hardware_state: The hardware state snapshot written into the session's raw data.
-        experiment_configuration: The experiment configuration staged for the creator to copy into the session.
-        task_template: The VR task template staged for the creator to copy into the session.
+    Args: project: The created project under which the session is placed. isolated_working_directory: The isolated
+    platform state, requested so the task templates directory that the builder registers is written under this test's
+    own temporary directory rather than onto the host. hardware_state: The hardware state snapshot written into the
+    session's raw data. experiment_configuration: The experiment configuration staged for the creator to copy into the
+    session. task_template: The VR task template staged for the creator to copy into the session.
 
-    Returns:
-        A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and an
-        optional experiment name, and returning the loaded session.
+    Returns: A callable taking the animal identifier, the session type, the experimenter notes, an incomplete flag, and
+    an optional experiment name, and returning the loaded session.
     """
 
     def _create(
@@ -274,17 +271,16 @@ def session_factory(
         experiment_name: str | None = None,
     ) -> SessionData:
         # A corridor-task session type is rejected at creation unless it names an experiment, since the shared
-        # hierarchy resolves the VR task template from it. The builder therefore names one for those types whatever
-        # the caller asked for, while the caller's own argument still decides whether the experiment configuration and
-        # task template snapshots are written below. That keeps a test that exercises a session missing those
-        # snapshots able to build one.
+        # hierarchy resolves the VR task template from it. The builder therefore names one for those types no matter
+        # what the caller asked, while the caller's own argument still decides whether the experiment configuration and
+        # task template snapshots are written below. That lets a test still build a session missing those snapshots.
         declared_experiment = experiment_name
         if declared_experiment is None and SessionTypes(session_type) in SESSION_TYPES_USING_VR_TASK:
             declared_experiment = "unconfigured_experiment"
 
-        # The shared hierarchy now sources both snapshots itself, copying the experiment configuration out of the
-        # project's configuration directory and the task template out of the host's templates directory, so both have
-        # to be staged before the session is created rather than written into raw data afterwards.
+        # The shared hierarchy sources both snapshots itself, copying the experiment configuration out of the
+        # project's configuration directory and the task template out of the host's templates directory. Both are
+        # therefore staged before the session is created.
         if declared_experiment is not None:
             project.create()
             experiment_configuration.to_yaml(
@@ -322,7 +318,7 @@ def session_factory(
 
         hardware_state.to_yaml(file_path=created.raw_data.hardware_state_path)
 
-        # A caller that named no experiment wants a session carrying no experiment snapshots, which the creator now
+        # A caller that named no experiment wants a session carrying no experiment snapshots, which the creator
         # always writes for a corridor-task type. Removing them here restores that shape, so a test can still build a
         # session whose experiment configuration or VR task template is absent.
         if experiment_name is None:
@@ -371,8 +367,8 @@ def training_session(session_factory: Callable[..., SessionData]) -> SessionData
 def write_tracker() -> Callable[..., ProcessingTracker]:
     """Returns a builder that writes one processing tracker holding jobs in the requested states.
 
-    The builder aligns the tracker against the given universe, then drives each named job into the state the caller
-    asked for. A job named in none of the state arguments stays scheduled.
+    The builder aligns the tracker against the given universe, then drives each named job into the state that the
+    caller requested. A job named in none of the state arguments stays scheduled.
 
     Returns:
         A callable taking the tracker path, the job universe, the succeeded, failed, and running job keys, and the
@@ -422,7 +418,7 @@ def mark_session_processed(write_tracker: Callable[..., ProcessingTracker]) -> C
     """Returns a helper that records every per-session pipeline of one session as fully succeeded.
 
     Each pipeline receives a tracker at the location the session resolves for it, holding one succeeded job. This is
-    the state forging admission requires before a session may enter a dataset.
+    the state that forging admission requires before a session may enter a dataset.
 
     Args:
         write_tracker: The builder that writes each pipeline's tracker.
@@ -455,7 +451,7 @@ def project_manifest(
     the manifest holds one finished session beside one untouched session.
 
     Args:
-        project_root: The project the manifest is generated for.
+        project_root: The project for which the manifest is generated.
         experiment_session: The experiment session marked as fully processed.
         training_session: The training session left unprocessed.
         mark_session_processed: The helper that writes the experiment session's succeeded trackers.
@@ -473,9 +469,9 @@ def project_manifest(
 
 @pytest.fixture
 def write_log_archive() -> Callable[..., Path]:
-    """Returns a writer that builds a real DataLogger log archive the archive reader decodes.
+    """Returns a writer that builds a real DataLogger log archive that the archive reader decodes.
 
-    The archive opens with the onset message the reader anchors every absolute timestamp on, followed by one entry
+    The archive opens with the onset message on which the reader anchors every absolute timestamp, then one entry
     per supplied message. Each entry carries the source identifier byte, the elapsed microseconds, and the payload.
 
     Returns:
@@ -541,9 +537,15 @@ def write_grayscale_video() -> Callable[..., Path]:
         A callable taking the output path, the frame stack, and the container frame rate, and returning the path.
     """
 
-    def _write(path: Path, frames: NDArray[np.uint8], *, fps: int = 30) -> Path:
+    def _write(path: Path, frames: NDArray[np.uint8], *, frames_per_second: int = 30) -> Path:
         height, width = frames.shape[1:]
-        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height), isColor=True)
+        writer = cv2.VideoWriter(
+            filename=str(path),
+            fourcc=cv2.VideoWriter_fourcc(*"mp4v"),
+            fps=frames_per_second,
+            frameSize=(width, height),
+            isColor=True,
+        )
         for frame in frames:
             writer.write(cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR))
         writer.release()
@@ -570,8 +572,8 @@ def moving_block_frames() -> NDArray[np.uint8]:
 def write_dlc_predictions() -> Callable[..., Path]:
     """Returns a writer that builds a DeepLabCut prediction file in the table-format layout the pupil stage reads.
 
-    The columns carry the scorer, bodypart, and coordinate levels DeepLabCut emits, so the file is read back through
-    the same reader a real prediction file goes through.
+    The columns carry the scorer, bodypart, and coordinate levels DeepLabCut emits, so the reader that reads a real
+    prediction file reads this file back.
 
     Returns:
         A callable taking the output path, the mapping of bodypart to its per-frame array of horizontal position,
@@ -604,7 +606,7 @@ def server_configuration(isolated_working_directory: Path) -> ServerConfiguratio
     """Writes a fully configured server configuration under the isolated working directory.
 
     Args:
-        isolated_working_directory: The working directory the configuration file is created under.
+        isolated_working_directory: The working directory under which the configuration file is created.
 
     Returns:
         The configuration the created file holds.
@@ -622,17 +624,17 @@ def server_configuration(isolated_working_directory: Path) -> ServerConfiguratio
 
 
 class StubSSHTransport:
-    """Stands in for the paramiko stack a Server connects over, backed by a temporary server-side filesystem.
+    """Stands in for the paramiko stack over which a Server connects, backed by a temporary server-side filesystem.
 
     Every file-transfer operation runs against a real directory tree, so pushing, pulling, listing, and existence
-    checks answer truthfully. Shell invocations are recorded, and the scheduler primitives the server issues are
+    checks answer truthfully. Shell invocations are recorded, and the scheduler primitives that the server issues are
     answered from the state this class holds.
 
     Args:
         remote_root: The local directory that stands in for the whole server-side filesystem.
 
     Attributes:
-        remote_root: The directory every absolute server path is resolved under.
+        remote_root: The directory under which every absolute server path is resolved.
         commands: Every shell invocation the server issued, in order.
         uploads: The local and server paths of every file the server uploaded.
         downloads: The local and server paths of every file the server downloaded.
@@ -640,7 +642,7 @@ class StubSSHTransport:
         job_statuses: The accounting state reported for each allocation identifier.
         blocked_job_ids: The allocation identifiers the queue reports as permanently blocked.
         connections: The host and user pairs the transport was asked to authenticate.
-        closed: Whether the connection was closed.
+        closed: Determines whether the connection was closed.
     """
 
     def __init__(self, remote_root: Path) -> None:
@@ -663,9 +665,8 @@ class StubSSHTransport:
         Lets a test tell the order of two operations apart, since a command that rewrites what a later step reads is
         indistinguishable from one that does not when the stub only records the invocation.
 
-        Args:
-            prefix: The leading text of the invocations this effect answers.
-            effect: The callable standing in for what the real command changes on the server.
+        Args: prefix: The leading text of the invocations this effect answers. effect: The callable standing in for what
+        the real command changes on the server.
         """
         self._side_effects[prefix] = effect
 
@@ -744,14 +745,12 @@ class StubSSHTransport:
 
         Reproduces the predicates the server issues: symbolic links are followed, a link whose target does not resolve
         is not reported, and only the depths between the requested bounds are searched. Records are emitted in reverse
-        name order, because the real command emits directory order and a stub that sorted would let an implementation
-        that never sorts pass.
+        name order, because the real command emits directory order and a stub that sorted would let a never-sorting
+        implementation pass.
 
-        Args:
-            command: The search invocation the server issued.
+        Args: command: The search invocation the server issued.
 
-        Returns:
-            A tuple of the NUL-separated records, the standard error, and the exit code.
+        Returns: A tuple of the NUL-separated records, the standard error, and the exit code.
         """
         tokens = shlex.split(command)
         start = Path(tokens[2])
@@ -814,7 +813,7 @@ class _StubSFTPClient:
     """Serves the file-transfer half of the stubbed connection out of the transport's temporary filesystem.
 
     Args:
-        transport: The transport whose server-side filesystem every operation runs against.
+        transport: The transport whose server-side filesystem backs every operation.
     """
 
     def __init__(self, transport: StubSSHTransport) -> None:
@@ -865,9 +864,9 @@ class _StubSFTPClient:
             for entry in sorted(self._transport.local_path(path).iterdir())
         ]
 
-    def open(self, path: str, mode: str = "r") -> Any:
+    def open(self, filename: str, mode: str = "r") -> Any:
         """Opens one server-side file, creating its parent directories for a write."""
-        resolved = self._transport.local_path(path)
+        resolved = self._transport.local_path(filename)
         resolved.parent.mkdir(parents=True, exist_ok=True)
         return resolved.open(mode)
 
@@ -880,7 +879,7 @@ class _StubSSHClient:
     """Serves the shell half of the stubbed connection out of the transport's recorded state.
 
     Args:
-        transport: The transport every invocation is recorded against.
+        transport: The transport that records every invocation.
     """
 
     def __init__(self, transport: StubSSHTransport) -> None:
@@ -912,13 +911,13 @@ class _StubSSHClient:
 
 @pytest.fixture
 def stub_ssh_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StubSSHTransport:
-    """Replaces the paramiko stack the server module reaches for with a temporary-filesystem transport.
+    """Replaces the paramiko stack that the server module uses with a temporary-filesystem transport.
 
     Requesting this fixture lets a Server be constructed and driven without a network, while every file-transfer
     operation runs against a real directory tree under the test's temporary directory.
 
     Args:
-        tmp_path: The temporary directory the server-side filesystem is created under.
+        tmp_path: The temporary directory under which the server-side filesystem is created.
         monkeypatch: The fixture used to replace the paramiko binding the server module holds.
 
     Returns:
@@ -948,7 +947,7 @@ def connected_server(
     """Opens a real Server over the stubbed transport, so server-side behavior runs without a network.
 
     Args:
-        stub_ssh_transport: The transport the connection is established over.
+        stub_ssh_transport: The transport over which the connection is established.
         server_configuration: The configuration naming the stubbed host and the server-side data root.
 
     Yields:
@@ -967,8 +966,9 @@ def stub_subprocess_run(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         monkeypatch: The fixture used to replace the runner.
 
     Returns:
-        A recorder carrying the ``calls`` list of invoked argument sequences and the ``result`` completed process
-        every call answers, which a test may reassign before the code under test runs.
+        A recorder carrying the ``calls`` list of ``(argument list, keyword mapping)`` pairs, one per invocation, and
+        the ``result`` completed process that every call answers, which a test may reassign before the code under
+        test runs.
     """
     recorder = SimpleNamespace(
         calls=[],
@@ -1021,7 +1021,7 @@ class FrozenClock:
         """Moves the clock forward and returns the epoch it now reports.
 
         Args:
-            microseconds: The number of microseconds to move the clock forward by.
+            microseconds: The number of microseconds the clock moves forward.
 
         Returns:
             The epoch the clock reports after the move.
@@ -1032,7 +1032,7 @@ class FrozenClock:
 
 @pytest.fixture
 def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> FrozenClock:
-    """Pins the wall clock every ledger, submission, and closure record is stamped with.
+    """Pins the wall clock that stamps every ledger, submission, and closure record.
 
     Args:
         monkeypatch: The fixture used to replace the timestamp source each module holds.
@@ -1048,7 +1048,7 @@ def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> FrozenClock:
 
 @dataclass
 class BatchIdentifiers:
-    """Issues the sequential identifiers every prepared batch is recorded under.
+    """Issues the sequential seeds from which every prepared batch identifier is derived.
 
     Attributes:
         issued: The identifiers handed out so far, in the order they were issued.
@@ -1075,7 +1075,8 @@ def deterministic_batch_ids(monkeypatch: pytest.MonkeyPatch) -> BatchIdentifiers
         monkeypatch: The fixture used to replace the identifier source the batch registry holds.
 
     Returns:
-        The issuer, whose ``issued`` list names every batch recorded during the test in order.
+        The issuer, whose ``issued`` list holds the unpadded seed of every batch recorded during the test, in order.
+        Each recorded identifier is its seed right-padded to sixteen characters.
     """
     identifiers = BatchIdentifiers()
     monkeypatch.setattr(

@@ -47,7 +47,7 @@ dataset.
 
 Notes:
     Every pipeline resolves its own job universe from the acquisition manifests, so a completed tracker already means
-    every source the session recorded was processed. Admission therefore checks which pipelines completed rather than
+    every source recorded by the session was processed. Admission therefore checks which pipelines completed rather than
     counting sources.
 
     A training session records no imaging, so the two-photon pipeline is absent from its requirement. A session type
@@ -61,13 +61,6 @@ _TRAINING_SESSION_TYPES: frozenset[SessionTypes] = frozenset({SessionTypes.RUN_T
 
 def assemble_mesoscope_session(source_session_path: Path, output_path: Path, dataset_name: str) -> None:
     """Assembles a single Mesoscope-VR session's unified data feather, routing by session type.
-
-    Notes:
-        Mesoscope experiment sessions are routed to the experiment-session assembler, which combines the fluorescence,
-        behavior, runtime, and video sub-datasets on the fluorescence clock. Run and lick training sessions are routed
-        to the training-session assembler, which combines the behavior and video sub-datasets on the slowest camera's
-        clock. Dataset forging supports experiment and training sessions, so a window-checking session is rejected
-        here.
 
     Args:
         source_session_path: The path to the source session's root directory in the project hierarchy.

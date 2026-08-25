@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 RENAME_JOB_NAME: str = "camera_timestamp_rename"
 """The job name used to identify the single timestamp renaming job in the video processing tracker. The job uses an
 empty specifier because it publishes every camera's parsed feather in one pass. It is the pipeline's only job that
-depends on another: it links the feathers the per-camera parse jobs write, so it must run after them."""
+depends on another: it links the feathers that the per-camera parse jobs write, so it must run after them."""
 
 TRACKING_JOB_NAME: str = "pose_tracking"
 """The job name used to identify the single video-tracking job in the video processing tracker. The job uses an empty
@@ -84,9 +84,9 @@ def run_video_processing_pipeline(
         mirroring the cindra pipeline's resolution. The parse and energy jobs honor ``target_camera`` to narrow that
         pass to a single camera. In remote mode (a ``job_id`` is provided) only the single job matching that identifier
         runs, chosen entirely by the identifier, so the flags and ``target_camera`` are ignored. This lets an external
-        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way each parse or
-        energy job fans its per-recording decoding across the worker pool, while the rename and tracking jobs run
-        single-core.
+        scheduler drive cross-job parallelism by dispatching each job identifier concurrently. Either way a parse job
+        fans its archive decoding across the worker pool once the archive is large enough, an energy job fans its
+        recording decoding the same way, and the rename and tracking jobs run single-core.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -100,8 +100,9 @@ def run_video_processing_pipeline(
             motion-energy stages. Set to -1 to process every camera with a discovered log archive for the timestamp
             stage, and every camera registered in the manifest for the motion-energy stage. Ignored by the tracking
             job, and in remote mode (when job_id is provided), where the job to run is selected entirely by job_id.
-        workers: The number of worker processes the extraction binding may use per archive, and that the motion-energy
-            job decodes each recording with. Set to -1 to use all available CPU cores (minus reserved cores).
+        workers: The number of worker processes that the extraction binding may use per archive, and that the
+            motion-energy job uses to decode each recording. Set to -1 to use all available CPU cores (minus reserved
+            cores).
         display_progress: Determines whether to display progress during each archive's parsing and each recording's
             motion-energy measurement.
 
@@ -109,7 +110,12 @@ def run_video_processing_pipeline(
         ValueError: If the camera manifest registers no cameras, if the raw behavior data tree holds more than one
             camera manifest, if no camera log archives are discovered for the timestamp stage, or if job_id does not
             match an available job. Also raised when target_camera has no discovered log archive while the timestamp
-            stage runs, or is not registered in the camera manifest while the motion-energy stage runs.
+            stage runs, or is not registered in the camera manifest while the motion-energy stage runs, when a
+            camera's recording cannot be opened, reports no frames, cannot decode the frame preceding a decode chunk,
+            or ends early at a chunk other than the last, and when two cameras resolve the same canonical timestamp
+            filename.
+        OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and the
+            log archives are located.
         FileNotFoundError: If the camera manifest is missing, or if the job_id selects a timestamp-parsing job whose
             camera has no log archive.
         RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
@@ -124,12 +130,12 @@ def run_video_processing_pipeline(
         level=LogLevel.INFO,
     )
 
-    # Resolves every camera the acquisition-time manifest registers and the archive backing each of them. The manifest
-    # defines the full job universe, decoupling tracker alignment from whichever archives are currently on disk. Both
-    # the manifest and the archives it describes live in the raw behavior-data directory, which collects the messages
-    # every DataLogger-backed source emits during acquisition. The raw camera-data directory holds the recordings
-    # themselves, which this pipeline's motion-energy job reads, alongside the pose predictions its tracking job
-    # reads.
+    # Resolves every camera that the acquisition-time manifest registers and the archive backing each of them. The
+    # manifest defines the full job universe, decoupling tracker alignment from whichever archives are currently on
+    # disk. Both the manifest and the archives it describes live in the raw behavior-data directory, which collects the
+    # messages that every DataLogger-backed source emits during acquisition. The raw camera-data directory holds the
+    # recordings themselves, which this pipeline's motion-energy job reads, alongside the pose predictions its tracking
+    # job reads.
     log_directory = session.raw_data.behavior_data_path
     camera_jobs = _resolve_camera_jobs(data_directory=log_directory)
     camera_names = {source.source_id: source.name for source in camera_jobs.sources}
@@ -247,7 +253,7 @@ def run_video_processing_pipeline(
     # before any job code of ours runs, so the caps have to be in place here rather than inside the workers. Scoping
     # them to the pool rather than setting them at import keeps the rest of the library multithreaded. numba latches
     # its own ceiling while it is imported and rejects an environment variable that disagrees afterwards, so it is
-    # pinned instead by the initializer every child runs through its runtime setter.
+    # pinned instead by the initializer that every child runs through its runtime setter.
     with limit_worker_threads(), ExitStack() as pool_scope:
         shared_executor = (
             pool_scope.enter_context(
@@ -331,7 +337,7 @@ def video_job_prerequisites(
 
     Args:
         session: The loaded session, accepted for the shared dispatch contract and not read by this ordering.
-        universe: The job set to build ordering over, as returned by ``discover_video_jobs`` (either the universe or
+        universe: The job set that the ordering covers, as returned by ``discover_video_jobs`` (either the universe or
             its possible subset).
 
     Returns:
@@ -346,19 +352,19 @@ def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
     """Resolves the camera timestamp-extraction jobs the acquisition-time manifest defines for one session.
 
     Notes:
-        The ataraxis-video-system resolver owns this discovery end to end. It locates the single camera manifest every
-        VideoSystem writes alongside its log archives, reads the source identifier and colloquial name of every camera
-        the manifest registers, and indexes the log archive backing each of them. The pipeline composes its own rename,
-        tracking, and motion-energy jobs on top of the universe it returns.
+        The ataraxis-video-system resolver owns this discovery end to end. It locates the single camera manifest that
+        every VideoSystem writes alongside its log archives, reads the source identifier and colloquial name of every
+        camera that the manifest registers, and indexes the log archive backing each of them. The pipeline composes its
+        own rename, tracking, and motion-energy jobs on top of the universe it returns.
 
-        The colloquial names recorded at acquisition time (for example, ``left_camera``) determine every output
-        filename this pipeline writes and locate each camera's recording on disk, so the manifest is the only camera
-        configuration the pipeline needs.
+        The colloquial names recorded at acquisition time (for example, ``left_camera``) determine the canonical
+        motion-energy and renamed-timestamp filenames this pipeline publishes and locate each camera's recording on
+        disk, so the manifest is the only camera configuration the pipeline needs.
 
         The resolver answers a tree holding no manifest with an empty universe rather than an error, and refuses a
         directory that is not there at all. A session that ran no DataLogger-backed source has no behavior data
         directory, which carries no manifest exactly as an empty directory would, so both outcomes are reported here as
-        the one condition this pipeline cannot proceed past: the manifest that defines its job universe is absent.
+        the one condition that stops this pipeline: the manifest that defines its job universe is absent.
 
     Args:
         data_directory: The path to the session's raw behavior data directory
@@ -372,6 +378,8 @@ def _resolve_camera_jobs(data_directory: Path) -> JobUniverse:
     Raises:
         FileNotFoundError: If the raw behavior data directory holds no camera manifest.
         ValueError: If the camera manifest registers no cameras, or the directory tree holds more than one manifest.
+        OSError: If any directory under the raw behavior data directory cannot be read while the camera manifest and the
+            log archives are located.
     """
     camera_jobs = resolve_jobs(log_directory=data_directory) if data_directory.is_dir() else None
     if camera_jobs is None or camera_jobs.manifest_path is None:
@@ -409,9 +417,9 @@ def _dispatch_job(
         camera_names: The mapping of camera source IDs to their colloquial manifest names.
         video_data_directory: The processed video-data directory where parsed feathers, their canonical hardlinks, the
             tracking outputs, and the motion-energy feathers are all written.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
-        workers: The number of worker processes the extraction binding may use, and that the energy job decodes
-            each recording with.
+        tracker: The video tracker recording this job's state transitions.
+        workers: The number of worker processes that the extraction binding may use, and that the energy job uses to
+            decode each recording.
         display_progress: Determines whether the extraction binding displays a progress bar and whether the energy
             job reports per-chunk completion.
         executor: An optional process pool shared across parse and energy jobs so neither spawns its own. The renaming
@@ -430,9 +438,8 @@ def _dispatch_job(
         console.echo(message=f"Running '{job_name}' job{source_fragment} (ID: {job_id})...", level=LogLevel.INFO)
 
     if job_name == CAMERA_EXTRACTION_JOB_NAME:
-        # The ataraxis-video-system binding extracts the timestamps, writes the
-        # 'camera_{source_id}_timestamps.feather' into the video data directory, and records this job's start,
-        # completion, or failure on the tracker.
+        # The ataraxis-video-system binding extracts the timestamps, writes the 'camera_{source_id}_timestamps.feather'
+        # into the video data directory, and records this job's start, completion, or failure on the tracker.
         execute_job(
             log_path=log_paths[specifier],
             output_directory=video_data_directory,
@@ -494,12 +501,13 @@ def _link_parsed_timestamps(
 ) -> None:
     """Hardlinks every parsed feather under its canonical name within the video data directory as one tracked job.
 
-    Each ``camera_{source_id}_timestamps.feather`` the parsing job wrote into the video data directory is hardlinked
-    to its canonical ``{name}_timestamps.feather`` in the same directory. The hardlink shares the parsed feather's
-    inode, so the canonical copy adds no extra bytes and stays in sync while the original parsed feather is preserved.
-    Should hardlinking be unavailable, the feather is copied instead. A camera whose manifest name already equals its
-    parsed filename needs no link and is left as-is. Cameras whose parsed feather is absent (for example, because their
-    parse job has not run) are skipped, and any stale canonical link is replaced, so the job is safe to re-run.
+    Each ``camera_{source_id}_timestamps.feather`` that the parsing job wrote into the video data directory is
+    hardlinked to its canonical ``{name}_timestamps.feather`` in the same directory. The hardlink shares the parsed
+    feather's inode, so the canonical copy adds no extra bytes and stays in sync while the original parsed feather is
+    preserved. Should hardlinking be unavailable, the feather is copied instead. A camera whose manifest name already
+    equals its parsed filename needs no link and is left as-is. Cameras whose parsed feather is absent (for example,
+    because their parse job has not run) are skipped, and any stale canonical link is replaced, so the job is safe to
+    re-run.
 
     Args:
         video_data_directory: The processed video-data directory holding the parsed feathers and receiving their
@@ -507,7 +515,7 @@ def _link_parsed_timestamps(
         camera_names: The mapping of camera source IDs to their colloquial manifest names, from which the canonical
             timestamp feather filenames are built.
         job_id: The unique hexadecimal identifier for the rename job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
     """
     with tracker.run_job(job_id=job_id):
         _verify_canonical_names(video_data_directory=video_data_directory, camera_names=camera_names)
@@ -546,11 +554,12 @@ def _verify_canonical_names(video_data_directory: Path, camera_names: dict[str, 
 
     Notes:
         A manifest name is a free-form operator string that nothing upstream constrains, so two cameras may carry one
-        name and a camera may carry the name the parsed feather of another camera already occupies. Publishing either
-        would overwrite one camera's timestamps with another's, so the whole job is refused before it links anything.
+        name and a camera may carry the name that the parsed feather of another camera already occupies. Publishing
+        either would overwrite one camera's timestamps with another's, so the whole job is refused before it links
+        anything.
 
     Args:
-        video_data_directory: The processed video-data directory the canonical names are published into.
+        video_data_directory: The processed video-data directory that receives the canonical names.
         camera_names: The mapping of camera source IDs to their colloquial manifest names.
 
     Raises:
@@ -579,7 +588,7 @@ def _verify_canonical_names(video_data_directory: Path, camera_names: dict[str, 
         message = (
             f"Unable to publish the parsed camera timestamp feathers under their canonical names. The camera manifest "
             f"records the name(s) {shared_names} for more than one camera, so their canonical filenames collide and "
-            f"one camera's timestamps would be published under a name the other also answers to. Give every camera a "
+            f"one camera's timestamps would be published under a name that the other also carries. Give every camera a "
             f"distinct name in the manifest."
         )
         console.error(message=message, error=ValueError)
@@ -613,9 +622,9 @@ def _run_pose_tracking(
 
     Args:
         session: The loaded session whose acquisition system selects the tracking function.
-        video_data_directory: The processed video-data directory the tracking outputs are written into.
+        video_data_directory: The processed video-data directory that receives the tracking outputs.
         job_id: The unique hexadecimal identifier for the tracking job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
+        tracker: The video tracker recording this job's state transitions.
     """
     with tracker.run_job(job_id=job_id):
         resolve_video_tracking(system=session.acquisition_system)(
@@ -644,14 +653,14 @@ def _run_motion_energy(
         session: The loaded session whose raw camera-data directory supplies the recording.
         camera_name: The colloquial manifest name of the camera to measure, which names both its recording and its
             output feather.
-        video_data_directory: The processed video-data directory the motion-energy feather is written into.
+        video_data_directory: The processed video-data directory that receives the motion-energy feather.
         job_id: The unique hexadecimal identifier for this camera's energy job.
-        tracker: The video ProcessingTracker instance for recording job state transitions.
-        workers: The number of worker processes to decode the recording with.
+        tracker: The video tracker recording this job's state transitions.
+        workers: The number of worker processes that decode the recording.
         display_progress: Determines whether per-chunk completion is reported as the recording is measured.
-        executor: An optional process pool to decode the recording's chunks in. When None, a pool is created and torn
-            down for this recording. A recording that plans a single decode chunk runs in-process either way and
-            touches no pool.
+        executor: An optional process pool that decodes the recording's chunks. When None, a pool is created and torn
+            down for this recording. A recording that plans a single decode chunk runs in-process either way and touches
+            no pool.
     """
     # Resolved inside the tracked job so that a missing recording and a decode failure alike are recorded against a
     # job that actually started, rather than leaving the tracker unable to explain why the job never ran.

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _CONFIGURATION_RELATIVE_PATH: tuple[str, str] = ("configuration", "server_configuration.yaml")
-"""The working-directory-relative location the server configuration file is written to."""
+"""The working-directory-relative location to which the server configuration file is written."""
 
 
 # Tests for ServerConfiguration dataclass
@@ -27,26 +27,26 @@ _CONFIGURATION_RELATIVE_PATH: tuple[str, str] = ("configuration", "server_config
 
 def test_server_configuration_default_initialization() -> None:
     """Verifies default initialization of ServerConfiguration."""
-    config = ServerConfiguration()
+    configuration = ServerConfiguration()
 
-    assert config.username == ""
-    assert config.password == ""
-    assert config.host == ""
-    assert config.root == ""
-    assert config.environment == ""
+    assert configuration.username == ""
+    assert configuration.password == ""
+    assert configuration.host == ""
+    assert configuration.root == ""
+    assert configuration.environment == ""
 
 
 def test_server_configuration_custom_initialization() -> None:
     """Verifies custom initialization of ServerConfiguration."""
-    config = ServerConfiguration(
+    configuration = ServerConfiguration(
         username="test_user",
         password="test_pass",  # noqa: S106 - literal test credential.
         host="test.server.com",
     )
 
-    assert config.username == "test_user"
-    assert config.password == "test_pass"  # noqa: S105 - literal test credential.
-    assert config.host == "test.server.com"
+    assert configuration.username == "test_user"
+    assert configuration.password == "test_pass"  # noqa: S105 - literal test credential.
+    assert configuration.host == "test.server.com"
 
 
 def test_server_configuration_yaml_roundtrip(tmp_path: Path) -> None:
@@ -83,10 +83,10 @@ def test_create_server_configuration_file(isolated_working_directory: Path) -> N
         environment="forge",
     )
 
-    config_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
-    assert config_file.exists()
+    configuration_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
+    assert configuration_file.exists()
 
-    loaded = ServerConfiguration.from_yaml(file_path=config_file)
+    loaded = ServerConfiguration.from_yaml(file_path=configuration_file)
     assert loaded.username == "test_user"
     assert loaded.password == "test_pass"  # noqa: S105 - literal test credential.
     assert loaded.host == "test.server.com"
@@ -109,10 +109,10 @@ def test_get_server_configuration_returns_the_written_credentials(
         environment="forge",
     )
 
-    config = get_server_configuration()
+    configuration = get_server_configuration()
 
-    assert config.username == "test_user"
-    assert config.host == "test.server.com"
+    assert configuration.username == "test_user"
+    assert configuration.host == "test.server.com"
 
 
 def test_get_server_configuration_raises_error_if_missing(
@@ -130,7 +130,7 @@ def test_get_server_configuration_rejects_a_configuration_missing_one_field(
     """Verifies that a configuration filling in every field but one is refused rather than partially used.
 
     A blank root builds every server-side path relative to the login account's home directory, and a blank
-    environment runs every allocation under whatever the login shell defaults to, so a configuration missing one
+    environment runs every allocation under the login shell's own default, so a configuration missing one
     field is as unusable as one missing all of them.
     """
     fields = {
@@ -149,8 +149,8 @@ def test_get_server_configuration_rejects_a_configuration_missing_one_field(
 
 def test_get_server_configuration_raises_error_if_unconfigured(isolated_working_directory: Path) -> None:
     """Verifies that get_server_configuration raises ValueError for a YAML with placeholder credentials."""
-    config_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
-    ServerConfiguration().to_yaml(file_path=config_file)
+    configuration_file = isolated_working_directory.joinpath(*_CONFIGURATION_RELATIVE_PATH)
+    ServerConfiguration().to_yaml(file_path=configuration_file)
 
     with pytest.raises(ValueError, match=r"(?i)unconfigured"):
         get_server_configuration()

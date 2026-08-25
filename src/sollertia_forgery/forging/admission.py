@@ -35,7 +35,7 @@ def verify_session_admissibility(session: SessionData) -> None:
     Raises:
         ValueError: If the session's acquisition system is unknown, if the session's type joins no dataset for that
             system, or if any required pipeline has not completed. The error names the pipelines that are outstanding
-            and the state each is in.
+            and the state of each.
     """
     requirements = resolve_forging_admission_pipelines(system=session.acquisition_system)
 
@@ -60,7 +60,7 @@ def verify_session_admissibility(session: SessionData) -> None:
     if outstanding:
         message = (
             f"Unable to admit session '{session.session_name}' into a forged dataset. A session joins a dataset only "
-            f"once every pipeline its acquisition system requires has completed, but the following are outstanding: "
+            f"once every pipeline required by its acquisition system has completed, but the following are outstanding: "
             f"{outstanding}. Process the session through them, then define the dataset again."
         )
         console.error(message=message, error=ValueError)

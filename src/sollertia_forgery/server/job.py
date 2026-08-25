@@ -26,9 +26,6 @@ class Job:
     """Defines a non-interactive SLURM-managed job to be executed on the remote compute server.
 
     Notes:
-        Instances of this class should be submitted to an initialized Server instance's submit_job() method to be
-        executed on the remote compute server.
-
         A job that names dependencies runs only after every named allocation completes successfully, and is canceled
         outright once any of them can no longer do so. Sequencing a pipeline this way lets the submitting process exit
         as soon as the whole graph is queued.
@@ -71,11 +68,9 @@ class Job:
         # at submission.
         self.remote_script_path: str = str(working_directory.joinpath(f"{job_name}.sh"))
 
-        # Defines the attributes the Server instance fills in when it submits the job.
-        self.job_id: str | None = None  # This is set by the Server that submits the job.
+        self.job_id: str | None = None
         self.job_name: str = job_name  # Supports more informative terminal prints.
 
-        # Builds the SLURM command object filled with the configuration information.
         self._command: _SlurmScript = _SlurmScript(
             cpus_per_task=cpu_threads,
             job_name=job_name,
@@ -108,8 +103,7 @@ class Job:
             unexpected behavior.
 
             Commands added through this method run under shell error checking, so the job exits with the status of the
-            first command that fails. The scheduler reads that status, which is what lets a dependent job be sequenced
-            behind this one.
+            first command that fails. The scheduler reads that status and sequences a dependent job behind this one.
 
         Args:
             command: The command string to append to the job's command sequence, for example
@@ -119,9 +113,7 @@ class Job:
 
     @property
     def command_script(self) -> str:
-        """Returns the managed job rendered as a shell-script-writable string, which the Server instance submits to the
-        remote compute server.
-        """
+        """Returns the managed job rendered as a shell-script-writable string."""
         return self._command.render()
 
 
@@ -140,8 +132,8 @@ class _SlurmScript:
         error: The absolute path to the stderr log file on the compute server.
         memory: The memory allocation string in SLURM format, e.g. ``"10G"``.
         time: The maximum wall-time for the job.
-        dependencies: The SLURM-assigned identifiers this job waits for, which are rendered as one ``afterok``
-            directive.
+        dependencies: The SLURM-assigned identifiers of the allocations that must complete before this job runs,
+            rendered as one ``afterok`` directive.
         cleanup_path: The absolute path to the script file itself, removed when the job exits.
 
     Attributes:
@@ -170,7 +162,7 @@ class _SlurmScript:
             f"#SBATCH --output={output}",
             f"#SBATCH --error={error}",
             f"#SBATCH --mem={memory}",
-            f"#SBATCH --time={self._format_time(time)}",
+            f"#SBATCH --time={self._format_time(time_delta=time)}",
         ]
         if dependencies:
             self._directives.append(f"#SBATCH --dependency=afterok:{':'.join(dependencies)}")

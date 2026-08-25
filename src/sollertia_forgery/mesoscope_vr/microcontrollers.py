@@ -72,8 +72,7 @@ class _ModuleSpecification:
     flag set to False marks the module as unused. Required fields carry recorded state values such as
     ``screens_initially_on``, which stay meaningful when False, so the two groups are checked separately."""
     event_codes: tuple[int, ...]
-    """The axci event codes the module's parse function reads. The system-agnostic microcontroller pipeline builds the
-    module's extraction filter from these codes, so a code absent here is never extracted from the log archive."""
+    """The axci event codes the module's parse function reads."""
 
     def check_eligibility(self, hardware_state: MesoscopeHardwareState) -> bool:
         """Determines whether the hardware state marks this module as used and fully configured.
@@ -85,7 +84,7 @@ class _ModuleSpecification:
             explicit usage flag are skipped when that flag is not set.
 
         Args:
-            hardware_state: The session hardware configuration to validate against.
+            hardware_state: The session hardware configuration against which to validate.
 
         Returns:
             True if the module was used and all of its required fields are configured.
@@ -121,8 +120,8 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
     _GAS_PUFF_MODULE: _ModuleSpecification(
         required_fields=(),
         usage_flags=("delivered_gas_puffs",),
-        # The gas-puff valve shares the water-valve firmware and therefore also emits the tone codes (54, 55), but the
-        # gas-puff parser does not read them, so extracting them would be wasted work.
+        # The gas-puff valve shares the water-valve firmware, so it emits one tone-off code (55) at setup even with no
+        # tone buzzer wired, but the gas-puff parser does not read it, so extracting it would be wasted work.
         event_codes=(_PRIMARY_EVENT_CODE, _SECONDARY_EVENT_CODE),
     ),
     _LICK_MODULE: _ModuleSpecification(
@@ -145,8 +144,8 @@ _MODULE_REGISTRY: dict[tuple[int, int], _ModuleSpecification] = {
 hardware state fields, usage flags, and extracted event codes for a specific hardware module instance."""
 
 
-# Public parser entry points wired into the microcontroller parser registry ('registries.py'). The uniform
-# (event_partition, output_directory, session) signature is what the registry dispatches on.
+# Public parser entry points wired into the microcontroller parser registry ('registries.py'). The registry dispatches
+# on the uniform (event_partition, output_directory, session) signature.
 def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Path, session: SessionData) -> None:
     """Parses the wheel-encoder module (type 2, id 1) into the session's encoder behavior feather.
 
@@ -158,9 +157,9 @@ def parse_encoder(event_partition: dict[int, pl.DataFrame], output_directory: Pa
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
-        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
-            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
-            not a whole multiple of its message count.
+        ValueError: If either rotation event code carries no data payload, or stores a null payload inside an
+            otherwise decodable stream. Also raised when a code spreads its payloads across more than one dtype,
+            or decodes into a value count that is not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_ENCODER_MODULE, hardware_state=hardware_state):
@@ -274,9 +273,10 @@ def parse_lick(event_partition: dict[int, pl.DataFrame], output_directory: Path,
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
-        ValueError: If the hardware state carries no lick detection threshold, or if the lick event code carries no
-            data payload, stores a null payload inside an otherwise decodable stream, spreads its payloads across more
-            than one dtype, or decodes into a value count that is not a whole multiple of its message count.
+        ValueError: If the hardware state carries no lick detection threshold, or if the lick event code carries
+            no data payload or stores a null payload inside an otherwise decodable stream. Also raised when the
+            code spreads its payloads across more than one dtype, or decodes into a value count that is not a
+            whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_LICK_MODULE, hardware_state=hardware_state):
@@ -299,9 +299,9 @@ def parse_torque(event_partition: dict[int, pl.DataFrame], output_directory: Pat
 
     Raises:
         FileNotFoundError: If the session's hardware state YAML file is absent.
-        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
-            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
-            not a whole multiple of its message count.
+        ValueError: If either rotation event code carries no data payload, or stores a null payload inside an
+            otherwise decodable stream. Also raised when a code spreads its payloads across more than one dtype,
+            or decodes into a value count that is not a whole multiple of its message count.
     """
     hardware_state = _resolve_hardware_state(session=session)
     if not _is_module_eligible(module_key=_TORQUE_MODULE, hardware_state=hardware_state):
@@ -338,13 +338,6 @@ def parse_screen(event_partition: dict[int, pl.DataFrame], output_directory: Pat
 def get_eligible_modules(session: SessionData) -> set[tuple[int, int]]:
     """Returns the Mesoscope-VR hardware modules the target session configured for use.
 
-    Notes:
-        This is the Mesoscope-VR system's donation to the microcontroller eligibility registry ('registries.py'). The
-        system-agnostic microcontroller pipeline narrows each controller's extraction filter to the modules returned
-        here, so a module the session records as unused is left out of both the extraction stage and the parse job
-        universe. Every parser applies the same eligibility check before writing its feather, so the pipeline and the
-        parsers agree on which modules a session carries.
-
     Args:
         session: The loaded session whose hardware state determines module eligibility.
 
@@ -363,10 +356,7 @@ def get_module_event_codes() -> dict[tuple[int, int], tuple[int, ...]]:
     """Returns the axci event codes each Mesoscope-VR hardware module's parser reads.
 
     Notes:
-        This is the Mesoscope-VR system's donation to the microcontroller event-code registry ('registries.py'). The
-        system-agnostic microcontroller pipeline builds each controller's extraction filter from this mapping,
-        narrowed to the modules the session marks eligible, so a code absent here is never extracted. The mapping is
-        rebuilt on every call, so callers may mutate the returned dictionary freely.
+        The mapping is rebuilt on every call, so callers may mutate the returned dictionary freely.
 
     Returns:
         A mapping from each ``(module_type, module_id)`` pair this system parses to the tuple of event codes its
@@ -385,7 +375,7 @@ def _is_module_eligible(module_key: tuple[int, int], hardware_state: MesoscopeHa
 
     Args:
         module_key: The ``(module_type, module_id)`` pair identifying the hardware module.
-        hardware_state: The session hardware configuration to check against.
+        hardware_state: The session hardware configuration against which to check.
 
     Returns:
         True if the module is eligible for processing, False otherwise.
@@ -433,9 +423,9 @@ def _parse_encoder_data(
         hardware_state: The hardware configuration providing the ``cm_per_pulse`` conversion factor.
 
     Raises:
-        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
-            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
-            not a whole multiple of its message count.
+        ValueError: If either rotation event code carries no data payload, or stores a null payload inside an
+            otherwise decodable stream. Also raised when a code spreads its payloads across more than one dtype,
+            or decodes into a value count that is not a whole multiple of its message count.
     """
     cm_per_pulse = np.float64(hardware_state.cm_per_pulse)
 
@@ -710,9 +700,10 @@ def _parse_lick_data(
 
     Raises:
         ValueError: If the hardware state carries no lick detection threshold, which means the module eligibility
-            filter and the parser registry disagree. Also if the lick event code carries no data payload, stores a
-            null payload inside an otherwise decodable stream, spreads its payloads across more than one dtype, or
-            decodes into a value count that is not a whole multiple of its message count.
+            filter and the parser registry disagree. Also raised when the lick event code carries no data payload
+            or stores a null payload inside an otherwise decodable stream. Also raised when it spreads its
+            payloads across more than one dtype, or decodes into a value count that is not a whole multiple of
+            its message count.
     """
     if hardware_state.lick_threshold is None:
         message = (
@@ -754,9 +745,9 @@ def _parse_torque_data(
         hardware_state: The hardware configuration providing the torque conversion factor.
 
     Raises:
-        ValueError: If either rotation event code carries no data payload, stores a null payload inside an otherwise
-            decodable stream, spreads its payloads across more than one dtype, or decodes into a value count that is
-            not a whole multiple of its message count.
+        ValueError: If either rotation event code carries no data payload, or stores a null payload inside an
+            otherwise decodable stream. Also raised when a code spreads its payloads across more than one dtype,
+            or decodes into a value count that is not a whole multiple of its message count.
     """
     torque_per_adc_unit = np.float64(hardware_state.torque_per_adc_unit)
 

@@ -28,11 +28,10 @@ _VIDEO_SUFFIX: str = ".mp4"
 ``.mp4``, and the acquisition runtime places it in the session's raw camera-data directory."""
 
 _SPATIAL_BIN_SIZE: int = 3
-"""The edge length, in pixels, of the square block each frame is mean-binned over before differencing. A small block
-averages out the single-pixel sensor and codec noise that the later absolute difference would otherwise rectify into a
-positive bias, while staying small enough to leave the movement the measure captures intact. An odd edge keeps the box
-filter's anchor on the pixel at each block's center, which is what lets the strided sampling read those block means
-correctly."""
+"""The edge length, in pixels, of the square block over which each frame is mean-binned before differencing. A small
+block averages out the single-pixel sensor and codec noise that the later absolute difference would otherwise rectify
+into a positive bias, while staying small enough to leave the measured movement intact. An odd edge keeps the box
+filter's anchor on the pixel at each block's center, so the strided sampling reads those block means correctly."""
 
 _MINIMUM_CHUNK_FRAMES: int = 4000
 """The smallest frame count a parallel decode chunk is allowed to cover. Seeking into a chunk decodes from the
@@ -44,11 +43,11 @@ _SINGLE_PLANE_DIMENSIONS: int = 2
 and a frame with more dimensions has one of its planes extracted instead."""
 
 _MONOCHROME_PLANE_INDEX: int = 1
-"""The channel taken from a multi-plane frame, the single plane the motion-energy analysis runs on. A monochrome
+"""The channel taken from a multi-plane frame, the single plane on which the motion-energy analysis runs. A monochrome
 source's channels are identical, so any one carries the image."""
 
 
-class MotionEnergyColumn(StrEnum):
+class _MotionEnergyColumn(StrEnum):
     """Defines every column written into a camera's motion-energy feather by the video-processing pipeline.
 
     Notes:
@@ -67,7 +66,7 @@ class MotionEnergyColumn(StrEnum):
 
 
 def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_name: str) -> Path | None:
-    """Resolves the recording a camera produced within the session's raw camera-data directory.
+    """Resolves the recording that a camera produced within the session's raw camera-data directory.
 
     Each recording reaches the session's raw camera-data directory named ``{session_name}_{camera_name}.mp4``, so the
     recording is resolved by reconstructing that exact name rather than by pattern-matching the camera name against the
@@ -77,7 +76,7 @@ def resolve_camera_video(camera_data_directory: Path, session_name: str, camera_
     Args:
         camera_data_directory: The session's raw camera-data directory (``session.raw_data.camera_data_path``), which
             holds the recordings themselves.
-        session_name: The name of the session the recording belongs to, which prefixes every recording filename.
+        session_name: The name of the session that owns the recording, which prefixes every recording filename.
         camera_name: The colloquial camera name recorded in the acquisition-time camera manifest.
 
     Returns:
@@ -121,9 +120,9 @@ def compute_camera_motion_energy(
     Args:
         video_path: The path to the camera recording to analyze.
         output_path: The path of the motion-energy feather to write.
-        workers: The number of worker processes to decode with. Set to -1 to use all available CPU cores (minus
-            reserved cores).
-        executor: An optional process pool to submit the decode chunks into, shared across cameras so the cost of
+        workers: The number of worker processes that decode the recording. Set to -1 to use all available CPU cores
+            (minus reserved cores).
+        executor: An optional process pool that receives the decode chunks, shared across cameras so the cost of
             spawning worker processes is paid once. When None, a pool is created and torn down for this recording. A
             recording that plans a single decode chunk runs in-process either way and touches no pool.
         display_progress: Determines whether per-chunk completion is reported as the analysis runs.
@@ -166,8 +165,8 @@ def compute_camera_motion_energy(
     # other per-frame feathers follow.
     pl.DataFrame(
         data={
-            MotionEnergyColumn.MOTION_ENERGY: energy,
-            MotionEnergyColumn.FRAME_LUMINANCE: luminance,
+            _MotionEnergyColumn.MOTION_ENERGY: energy,
+            _MotionEnergyColumn.FRAME_LUMINANCE: luminance,
         }
     ).write_ipc(file=output_path, compression="uncompressed")
 
@@ -197,7 +196,7 @@ def _read_frame_count(video_path: Path) -> int:
                 f"decoding, which usually means the file is truncated or its codec is unavailable."
             )
             console.error(message=message, error=ValueError)
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frame_count = int(capture.get(propId=cv2.CAP_PROP_FRAME_COUNT))
     finally:
         capture.release()
 
@@ -216,7 +215,7 @@ def _plan_chunks(frame_count: int, workers: int) -> list[tuple[int, int]]:
 
     Args:
         frame_count: The number of frames in the recording.
-        workers: The resolved number of worker processes available to decode with.
+        workers: The resolved number of worker processes available to decode the recording.
 
     Returns:
         A list of ``(start_frame, frame_count)`` pairs covering the recording with no gap and no overlap.
@@ -244,7 +243,7 @@ def _submit_chunks(
     """Submits every decode chunk into a process pool and collects the results in chunk order.
 
     Args:
-        executor: The process pool to submit the chunks into.
+        executor: The process pool that receives the chunks.
         video_path: The path to the camera recording.
         chunks: The planned ``(start_frame, frame_count)`` chunks.
         display_progress: Determines whether per-chunk completion is reported.
@@ -311,8 +310,8 @@ def _join_chunks(
     if energy.size != planned_total:
         console.echo(
             message=(
-                f"The recording '{video_path.name}' yielded {energy.size} frames against the {planned_total} its "
-                f"container reported. Motion energy covers the frames that decoded."
+                f"The recording '{video_path.name}' yielded {energy.size} frames against the {planned_total} "
+                f"reported by its container. Motion energy covers the frames that decoded."
             ),
             level=LogLevel.WARNING,
         )

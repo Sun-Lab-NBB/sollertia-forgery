@@ -1,4 +1,4 @@
-"""Tests for the system-agnostic camera video-processing pipeline and its job discovery."""
+"""Contains tests for the system-agnostic camera video-processing pipeline and its job discovery."""
 
 from __future__ import annotations
 
@@ -35,7 +35,8 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _FACE_SOURCE_ID: int = 51
-"""The manifest source identifier of the camera every fixture gives both an archive and a recording."""
+"""The manifest source identifier of the first registered camera, for which most tests stage an archive or a
+recording."""
 
 _BODY_SOURCE_ID: int = 62
 """The manifest source identifier of the second registered camera, used to prove per-camera job independence."""
@@ -72,10 +73,10 @@ _EYE_POINTS: tuple[str, ...] = ("eye_right", "eye_bottom", "eye_left", "eye_top"
 
 
 def _write_manifest(directory: Path, cameras: Mapping[int, str]) -> Path:
-    """Writes the acquisition-time camera manifest the pipeline reads its job universe from.
+    """Writes the acquisition-time camera manifest from which the pipeline reads its job universe.
 
     Args:
-        directory: The raw behavior-data directory the manifest is written into.
+        directory: The raw behavior-data directory that receives the manifest.
         cameras: The mapping of camera source identifier to colloquial camera name to register.
 
     Returns:
@@ -111,7 +112,7 @@ def _ring(center: tuple[float, float], radius: float, count: int, frame_count: i
         center: The horizontal and vertical center of the ring, in pixels.
         radius: The ring radius, in pixels.
         count: The number of points spaced evenly around the ring.
-        frame_count: The number of frames each point is predicted for.
+        frame_count: The number of frames for which each point is predicted.
 
     Returns:
         A list holding one ``(frame_count, 3)`` array of horizontal position, vertical position, and likelihood per
@@ -133,14 +134,14 @@ def camera_session(experiment_session: SessionData) -> SessionData:
     """Registers two cameras in the session's acquisition-time manifest.
 
     Args:
-        experiment_session: The created Mesoscope-VR experiment session the manifest is written under.
+        experiment_session: The created Mesoscope-VR experiment session under which the manifest is written.
 
     Returns:
         The same session, whose raw behavior-data directory now carries the camera manifest.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _BODY_CAMERA},
     )
     return experiment_session
 
@@ -149,7 +150,7 @@ def camera_session(experiment_session: SessionData) -> SessionData:
 def write_frame_archive(write_log_archive: Callable[..., Path]) -> Callable[..., Path]:
     """Returns a writer that builds one camera's raw log archive holding the requested number of frame messages.
 
-    Every camera frame message carries an empty payload, which is what the extraction binding counts as one acquired
+    Every camera frame message carries an empty payload. The extraction binding counts each payload as one acquired
     frame.
 
     Args:
@@ -169,7 +170,7 @@ def write_frame_archive(write_log_archive: Callable[..., Path]) -> Callable[...,
 
 @pytest.fixture
 def write_recording(write_grayscale_video: Callable[..., Path]) -> Callable[[SessionData, str], Path]:
-    """Returns a writer that encodes one camera's recording under the name the analysis resolves it by.
+    """Returns a writer that encodes one camera's recording under the name by which the analysis resolves it.
 
     Args:
         write_grayscale_video: The shared writer that encodes the frame stack.
@@ -187,7 +188,7 @@ def write_recording(write_grayscale_video: Callable[..., Path]) -> Callable[[Ses
 
 
 def _session_path(session: SessionData) -> Path:
-    """Resolves the root session directory every pipeline entry point takes as its path argument.
+    """Resolves the root session directory that every pipeline entry point takes as its path argument.
 
     Args:
         session: The loaded session.
@@ -199,7 +200,7 @@ def _session_path(session: SessionData) -> Path:
 
 
 def _video_directory(session: SessionData) -> Path:
-    """Resolves the processed video-data directory every pipeline job writes into.
+    """Resolves the processed video-data directory into which every pipeline job writes.
 
     Args:
         session: The loaded session.
@@ -221,7 +222,7 @@ def _job_status(session: SessionData, job_name: str, specifier: str) -> Processi
     Returns:
         The recorded status, or None when the tracker does not hold the job.
     """
-    tracker = ProcessingTracker(file_path=_video_directory(session).joinpath(ProcessingTrackers.VIDEO))
+    tracker = ProcessingTracker(file_path=_video_directory(session=session).joinpath(ProcessingTrackers.VIDEO))
     job_id = ProcessingTracker.generate_job_id(job_name=job_name, specifier=specifier)
     job_state = tracker.snapshot().get(job_id)
     return job_state.status if job_state is not None else None
@@ -239,7 +240,7 @@ def test_unflagged_run_executes_every_stage(
     behavior_directory = camera_session.raw_data.behavior_data_path
     write_frame_archive(behavior_directory, _FACE_SOURCE_ID)
     write_frame_archive(behavior_directory, _BODY_SOURCE_ID)
-    # An archive belonging to a source the camera manifest does not register must be ignored rather than parsed.
+    # An archive belonging to a source that the camera manifest does not register must be ignored rather than parsed.
     write_frame_archive(behavior_directory, 101)
     for camera_name in (_FACE_CAMERA, _BODY_CAMERA):
         write_recording(camera_session, camera_name)
@@ -253,13 +254,20 @@ def test_unflagged_run_executes_every_stage(
         assert pl.read_ipc(parsed).height == _RECORDING_FRAMES
         assert canonical.stat().st_ino == parsed.stat().st_ino
         assert pl.read_ipc(video_directory.joinpath(f"{camera_name}{MOTION_ENERGY_SUFFIX}")).height == _RECORDING_FRAMES
-        assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
-        assert _job_status(camera_session, ENERGY_JOB_NAME, str(source_id)) == ProcessingStatus.SUCCEEDED
+        assert (
+            _job_status(session=camera_session, job_name=CAMERA_EXTRACTION_JOB_NAME, specifier=str(source_id))
+            == ProcessingStatus.SUCCEEDED
+        )
+        assert (
+            _job_status(session=camera_session, job_name=ENERGY_JOB_NAME, specifier=str(source_id))
+            == ProcessingStatus.SUCCEEDED
+        )
     assert not video_directory.joinpath("camera_101_timestamps.feather").exists()
     assert _job_status(camera_session, RENAME_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
     assert _job_status(camera_session, TRACKING_JOB_NAME, "") == ProcessingStatus.SUCCEEDED
 
 
+@pytest.mark.xdist_group(name="worker_pool")
 def test_multiple_workers_share_one_pool_across_the_run(
     camera_session: SessionData,
     write_frame_archive: Callable[..., Path],
@@ -336,7 +344,7 @@ def test_timestamp_stage_rejects_a_target_camera_without_an_archive(
     camera_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies naming a camera whose archive is absent errors rather than silently parsing nothing."""
+    """Verifies naming a camera errors when its archive is absent, rather than silently parsing nothing."""
     write_frame_archive(camera_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
     with pytest.raises(ValueError, match=f"requested camera source ID {_BODY_SOURCE_ID}"):
@@ -394,7 +402,7 @@ def test_remote_mode_runs_only_the_requested_timestamp_job(
     assert video_directory.joinpath(f"camera_{_BODY_SOURCE_ID}_timestamps.feather").is_file()
     assert not video_directory.joinpath(f"camera_{_FACE_SOURCE_ID}_timestamps.feather").exists()
     assert _job_status(camera_session, CAMERA_EXTRACTION_JOB_NAME, str(_BODY_SOURCE_ID)) == ProcessingStatus.SUCCEEDED
-    # The stage flag and the target camera are ignored, so the energy job the flags name never reaches the tracker.
+    # The stage flag and the target camera are ignored, so the energy job named by the flags never reaches the tracker.
     assert _job_status(camera_session, ENERGY_JOB_NAME, str(_FACE_SOURCE_ID)) is None
 
 
@@ -499,7 +507,7 @@ def test_rename_job_preserves_a_feather_already_named_canonically(
     Unlinking the canonical name in that case would destroy the parsed feather the job is meant to publish.
     """
     canonical_name = f"camera_{_FACE_SOURCE_ID}"
-    _write_manifest(experiment_session.raw_data.behavior_data_path, {_FACE_SOURCE_ID: canonical_name})
+    _write_manifest(directory=experiment_session.raw_data.behavior_data_path, cameras={_FACE_SOURCE_ID: canonical_name})
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
 
     run_video_processing_pipeline(session_path=_session_path(experiment_session), timestamp=True, workers=1)
@@ -519,8 +527,8 @@ def test_rename_job_refuses_a_manifest_naming_two_cameras_alike(
     camera's timestamps would never be published under a name of their own.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: _FACE_CAMERA, _BODY_SOURCE_ID: _FACE_CAMERA},
     )
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
@@ -535,14 +543,14 @@ def test_rename_job_refuses_a_camera_named_after_another_cameras_parsed_feather(
     experiment_session: SessionData,
     write_frame_archive: Callable[..., Path],
 ) -> None:
-    """Verifies a camera whose canonical filename is another camera's parsed feather is refused.
+    """Verifies a camera is refused when its canonical filename is another camera's parsed feather.
 
     Publishing it would unlink that camera's only copy of its timestamps and re-point the name at this camera's data,
     which the job would then report as a success.
     """
     _write_manifest(
-        experiment_session.raw_data.behavior_data_path,
-        {_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
+        directory=experiment_session.raw_data.behavior_data_path,
+        cameras={_FACE_SOURCE_ID: f"camera_{_BODY_SOURCE_ID}", _BODY_SOURCE_ID: _BODY_CAMERA},
     )
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _FACE_SOURCE_ID)
     write_frame_archive(experiment_session.raw_data.behavior_data_path, _BODY_SOURCE_ID)
@@ -651,7 +659,7 @@ def test_prerequisites_order_the_rename_job_after_every_parse_job(camera_session
 
 @pytest.mark.parametrize("filename", ["sync_log.npz", "51_frames.npz", "51_log_extra.npz"])
 def test_archive_discovery_ignores_a_foreign_archive_name(camera_session: SessionData, filename: str) -> None:
-    """Verifies an archive whose name is not a registered camera's is passed over rather than parsed as one.
+    """Verifies an archive whose name matches no registered camera is passed over rather than parsed as one.
 
     A name that carries no source identifier, and a name that carries one without the archive suffix, must both leave
     the registered camera without an archive rather than yielding it the wrong file.

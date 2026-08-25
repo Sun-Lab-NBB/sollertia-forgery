@@ -1,4 +1,6 @@
-"""Tests the job plan caches, the project plan projection, and the registry that records a prepared batch."""
+"""Contains tests for the job plan caches, the project plan projection, and the registry that records a
+prepared batch.
+"""
 
 from __future__ import annotations
 
@@ -18,27 +20,31 @@ from sollertia_forgery.orchestration import (
     DATASET_UNIT,
     SESSION_UNIT,
     PROJECT_PLAN_SCHEMA,
-    JobPlan,
-    BatchDocument,
     planning as planning_module,
-    batch_path,
     batch_directory,
-    dataset_plan_path,
     project_plan_path,
-    session_plan_path,
     read_batch_outcome,
     resolve_batch_host,
-    read_prepared_batch,
-    record_batch_outcome,
     resolve_dataset_plan,
     resolve_session_plan,
     generate_project_plan,
     read_prepared_batches,
     record_prepared_batch,
-    forget_prepared_batches,
 )
 from sollertia_forgery.shared_assets import ProcessingPipelines
+from sollertia_forgery.orchestration.graph import BatchDocument
+from sollertia_forgery.orchestration.batches import (
+    _batch_path,
+    read_prepared_batch,
+    record_batch_outcome,
+    _forget_prepared_batches,
+)
 from sollertia_forgery.orchestration.dispatch import _JOB_CORE_ALLOCATIONS, PipelineDispatch
+from sollertia_forgery.orchestration.planning import (
+    _JobPlan,
+    _dataset_plan_path,
+    _session_plan_path,
+)
 from sollertia_forgery.orchestration.footprints import JobFootprint
 
 if TYPE_CHECKING:
@@ -58,13 +64,10 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
     Being handed an open handle rather than a destination path is what publishing through a temporary file offers, so
     this stand-in leaves its partial bytes in the temporary the publication discards rather than in the destination.
 
-    Args:
-        _frame: The frame the writer was called on, which this stand-in never serializes.
-        file: The open file object the artifact is written to.
-        **_keywords: The serialization options the caller passed, which this stand-in ignores.
+    Args: _frame: The frame passed to the writer, which this stand-in never serializes. file: The open file object
+    receiving the artifact. **_keywords: The serialization options the caller passed, which this stand-in ignores.
 
-    Raises:
-        RuntimeError: Always, standing in for a writer that dies partway through.
+    Raises: RuntimeError: Always, standing in for a writer that dies partway through.
     """
     file.write(b"partial")
     message = "the artifact writer died mid-write"
@@ -72,18 +75,15 @@ def write_partial_then_fail(_frame: pl.DataFrame, file: Any, **_keywords: Any) -
 
 
 def write_processed_recording(session: SessionData, *, regions: int, samples: int) -> Path:
-    """Writes the single-recording outputs a dataset's assembly job is sized from.
+    """Writes the single-recording outputs from which a dataset's assembly job is sized.
 
     The assembly stage reads the trace array's header and the presence of the combination stage's archive, so writing
     both is what makes the session's own fluorescence resolvable without decoding anything.
 
-    Args:
-        session: The session whose processed data receives the outputs.
-        regions: The regions the recording's traces hold.
-        samples: The samples each trace holds.
+    Args: session: The session whose processed data receives the outputs. regions: The regions the recording's traces
+    hold. samples: The samples each trace holds.
 
-    Returns:
-        The path to the session's cindra output directory.
+    Returns: The path to the session's cindra output directory.
     """
     directory = session.processed_data.cindra_data_path
     directory.mkdir(parents=True, exist_ok=True)
@@ -96,7 +96,7 @@ def write_processed_recording(session: SessionData, *, regions: int, samples: in
 
 
 def define_planned_dataset(project_root: Path, session: SessionData) -> DatasetData:
-    """Creates the single-session forged dataset hierarchy the dataset planning tests operate on."""
+    """Creates the single-session forged dataset hierarchy on which the dataset planning tests operate."""
     return DatasetData.create(
         name="ds_planned",
         project=project_root.stem,
@@ -112,7 +112,7 @@ def refuse_to_size(_unit: Any, _jobs: list[tuple[str, str, int]]) -> dict[tuple[
     """Stands in for a sizing pass whose job input cannot be read, naming the input the way the real pass does.
 
     Args:
-        _unit: The unit the jobs operate on, which this stand-in never reads.
+        _unit: The unit on which the jobs operate, which this stand-in never reads.
         _jobs: The jobs to size, which this stand-in never sizes.
 
     Raises:
@@ -185,7 +185,7 @@ def plan_unit(
     *,
     regenerate_plan: bool = False,
     display_progress: bool = False,
-) -> JobPlan:
+) -> _JobPlan:
     """Plans a stand-in unit of either kind through the private core against the supplied dispatch entries."""
     return planning_module._resolve_unit_plan(
         dispatches=dispatches,
@@ -202,7 +202,7 @@ def plan_session(
     *,
     regenerate_plan: bool = False,
     display_progress: bool = False,
-) -> JobPlan:
+) -> _JobPlan:
     """Plans a stand-in session through the private core against the supplied dispatch entries."""
     return plan_unit(
         unit_path=unit.processed_data_path.parent,
@@ -232,14 +232,14 @@ def test_a_plan_records_every_resolved_job_and_persists_it(tmp_path: Path) -> No
     # The declared allocation reaches the sizing pass and comes back unchanged for a stage that holds one width, so
     # the recorded figure is the real allocation table's rather than the stand-in's.
     assert plan.entry_map()[("checksum", CHECKSUM_JOB_NAME, "")].cores == _JOB_CORE_ALLOCATIONS[CHECKSUM_JOB_NAME]
-    assert JobPlan.from_yaml(file_path=session_plan_path(session=session)).entry_map() == plan.entry_map()
+    assert _JobPlan.from_yaml(file_path=_session_plan_path(session=session)).entry_map() == plan.entry_map()
 
 
 def test_a_plan_records_the_width_the_sizing_pass_resolved(tmp_path: Path) -> None:
     """Verifies that a stage whose library picks a width per job records that width rather than the declared one.
 
-    The declared allocation reaches the sizing pass as the width to fall back on, so a pass that answers with one of
-    its own is what the plan entry, and therefore the scheduler, carries.
+    The declared allocation reaches the sizing pass as the fallback width, so the plan entry, and therefore the
+    scheduler, carries the width the pass itself picked.
     """
     session = make_session(root=tmp_path.joinpath("session"))
     dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
@@ -260,8 +260,8 @@ def test_a_plan_records_the_width_the_sizing_pass_resolved(tmp_path: Path) -> No
 def test_recorded_figures_are_frozen_across_replanning(tmp_path: Path) -> None:
     """Verifies that a second plan leaves every recorded figure untouched, whatever the estimator now reports.
 
-    The cores and memory a job is submitted with must match the figures it was planned against, so the first write
-    freezes the entry.
+    The cores and memory with which a job is submitted must match the figures against which it was planned, so the
+    first write freezes the entry.
     """
     session = make_session(root=tmp_path.joinpath("session"))
     plan_session(
@@ -284,10 +284,10 @@ def test_recorded_figures_are_frozen_across_replanning(tmp_path: Path) -> None:
 def test_replanning_never_re_reads_the_input_of_a_job_the_plan_already_holds(tmp_path: Path) -> None:
     """Verifies that a replan sizes the outstanding jobs alone, leaving the recorded ones' inputs unread.
 
-    A recorded figure is frozen whatever a second pass would report, so re-reading the raw data it was modeled from
-    buys nothing and costs a full pass over every container the pipeline opens. It also breaks the replan outright
-    once that raw data has been archived, since a refused sizing pass drops the whole pipeline out of the plan and a
-    unit left with no pipeline is rejected.
+    A recorded figure is frozen whatever a second pass would report, so re-reading the raw data from which it was
+    modeled buys nothing and costs a full pass over every container the pipeline opens. It also breaks the replan
+    outright once that raw data has been archived, since a refused sizing pass drops the whole pipeline out of the
+    plan and a unit left with no pipeline is rejected.
     """
     session = make_session(root=tmp_path.joinpath("session"))
     plan_session(
@@ -368,7 +368,7 @@ def test_a_pipeline_resolving_nothing_is_skipped_rather_than_failing_the_plan(tm
 
 
 def test_a_unit_no_pipeline_resolves_stops_the_plan(tmp_path: Path) -> None:
-    """Verifies that a unit every resolver rejects names no plan file and fails with the reasons they gave."""
+    """Verifies that a unit rejected by every resolver names no plan file and fails with the reasons they gave."""
     session = make_session(root=tmp_path.joinpath("session"))
 
     # Matches the unwrapped opening of the message, since the console formatter wraps long lines.
@@ -384,10 +384,10 @@ def test_a_unit_no_pipeline_resolves_stops_the_plan(tmp_path: Path) -> None:
 
 
 def test_a_pipeline_whose_input_cannot_be_read_is_dropped_rather_than_planned(tmp_path: Path) -> None:
-    """Verifies that a pipeline the sizing pass refuses leaves the other pipelines' jobs planned.
+    """Verifies that a pipeline refused by the sizing pass leaves the other pipelines' jobs planned.
 
-    Every job is modeled from the data it will read, so a sizing pass that cannot read one of a pipeline's inputs
-    states that the pipeline cannot say what this unit costs. That pipeline drops out of the plan entirely rather than
+    Every job is modeled from the data it will read, so a sizing pass that cannot read one of a pipeline's inputs states
+    that the pipeline cannot say what this unit costs. That pipeline drops out of the plan entirely rather than
     contributing a figure nothing measured, and it takes the same reporting path a rejected resolver takes.
     """
     session = make_session(root=tmp_path.joinpath("session"))
@@ -421,7 +421,7 @@ def test_a_unit_no_pipeline_can_size_stops_the_plan(tmp_path: Path) -> None:
         plan_session(unit=session, dispatches=[dispatch])
 
     assert "camera_77.npz" in " ".join(str(failure.value).split())
-    assert not session_plan_path(session=session).exists()
+    assert not _session_plan_path(session=session).exists()
 
 
 def test_the_projection_carries_both_unit_kinds_in_the_declared_schema(
@@ -513,8 +513,8 @@ def test_the_projection_orders_its_animals_the_way_their_identifiers_are_read(
 ) -> None:
     """Verifies that the projection orders animal 2 ahead of animal 10 rather than behind it.
 
-    Every identifier this table sorts on embeds a number in text, so ordering the rows as plain text disagrees with
-    the order the same animals are read and written in everywhere else in the project.
+    Every identifier on which this table sorts embeds a number in text, so ordering the rows as plain text disagrees
+    with the order in which the same animals are read and written everywhere else in the project.
     """
     project = tmp_path.joinpath("Project")
     early = make_session(root=project.joinpath("2", "2026-01-02-03-04-05-000006"), animal_id="2")
@@ -606,8 +606,8 @@ def test_a_failed_projection_leaves_the_previously_published_one_readable(
 
 
 def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) -> None:
-    """A missing project holds neither a unit to read nor a location to write to, so it is named here rather than
-    surfacing as a walk failure partway through the projection.
+    """Verifies that a missing project holds neither a unit to read nor a writable location, so it is named here
+    rather than surfacing as a walk failure partway through the projection.
     """
     with pytest.raises(FileNotFoundError, match="does not name an existing directory"):
         generate_project_plan(project_directory=tmp_path.joinpath("NeverCreated"))
@@ -616,11 +616,11 @@ def test_projecting_a_project_that_does_not_exist_is_rejected(tmp_path: Path) ->
 def test_the_dataset_cache_lands_at_the_dataset_root(tmp_path: Path) -> None:
     """Verifies that a dataset's plan sits at its root beside its marker, so the dataset stays self-contained."""
     dataset = make_dataset(root=tmp_path.joinpath("ds_a"))
-    assert dataset_plan_path(dataset=dataset).parent == tmp_path.joinpath("ds_a")
+    assert _dataset_plan_path(dataset=dataset).parent == tmp_path.joinpath("ds_a")
 
 
 def test_planning_registers_the_possible_jobs_on_the_pipeline_tracker(tmp_path: Path) -> None:
-    """Verifies that planning creates the pipeline trackers a remote batch's job artifact is resolved from."""
+    """Verifies that planning creates the pipeline trackers from which a remote batch's job artifact is resolved."""
     session = make_session(root=tmp_path.joinpath("2024_11_04"))
     dispatch = make_dispatch(pipeline=ProcessingPipelines.CHECKSUM, unit=session, universe=_CHECKSUM_JOBS)
 
@@ -654,9 +654,9 @@ def test_replanning_keeps_the_recorded_state_of_a_job_the_unit_cannot_run_this_t
     """Verifies that a job outside this run's possible subset keeps the state its tracker already recorded.
 
     Alignment discards every registry entry outside the universe it is handed, treating it as a job the pipeline's
-    definition no longer defines. Declaring the possible subset as that universe would therefore delete the record of
-    a job that has already succeeded, the moment its input is temporarily out of reach, and the deleted work would be
-    run again.
+    definition no longer defines. Declaring the possible subset as that universe would therefore delete the record of a
+    job that has already succeeded, the moment its input is temporarily out of reach, and the deleted work would be run
+    again.
     """
     session = make_session(root=tmp_path.joinpath("2024_11_04"))
     universe = [(CHECKSUM_JOB_NAME, ""), (CHECKSUM_JOB_NAME, "unreachable")]
@@ -692,7 +692,7 @@ def test_a_pipeline_supporting_no_job_records_its_figures_without_writing_a_trac
 
 
 def test_priming_is_handed_the_unit_root_rather_than_the_directory_holding_it(tmp_path: Path) -> None:
-    """Verifies that a pipeline whose job model lives in state a dependency writes is primed against the unit itself.
+    """Verifies a pipeline whose job model lives in state written by a dependency is primed against the unit itself.
 
     Priming loads the unit from the path it is handed, so any other path raises. Both priming and resolution run
     inside the same guard, which swallows that refusal into the skip report and takes the whole pipeline out of the
@@ -774,7 +774,7 @@ def test_planning_an_acquired_session_records_the_pipelines_that_resolve_jobs(
     # The session carries acquisition markers but no imaging, so the checksum stage plans and two-photon is skipped.
     assert (ProcessingPipelines.CHECKSUM.value, CHECKSUM_JOB_NAME, experiment_session.session_name) in plan.entry_map()
     assert ProcessingPipelines.TWO_PHOTON.value not in {entry.pipeline for entry in plan.entries}
-    assert JobPlan.from_yaml(file_path=session_plan_path(session=experiment_session)).entry_map() == plan.entry_map()
+    assert _JobPlan.from_yaml(file_path=_session_plan_path(session=experiment_session)).entry_map() == plan.entry_map()
 
 
 def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path, training_session: SessionData) -> None:
@@ -790,7 +790,7 @@ def test_planning_a_defined_dataset_records_its_forging_jobs(project_root: Path,
     assert plan.unit_name == "ds_planned"
     assert {entry.pipeline for entry in plan.entries} == {ProcessingPipelines.FORGING.value}
     assert [entry.specifier for entry in plan.entries] == [training_session.session_name]
-    assert JobPlan.from_yaml(file_path=dataset_plan_path(dataset=dataset)).entry_map() == plan.entry_map()
+    assert _JobPlan.from_yaml(file_path=_dataset_plan_path(dataset=dataset)).entry_map() == plan.entry_map()
 
 
 def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
@@ -799,9 +799,9 @@ def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
     """Verifies that a dataset whose assembly job has nothing to read is dropped rather than planned at a floor.
 
     The assembly stage is charged the shape of the session's own fluorescence, so a session that has not reached the
-    end of the single-recording pipeline states nothing the stage could be sized from. Recording it at an unmodeled
-    figure would hand a scheduler a reservation nothing measured, so the whole dataset drops out of the plan and the
-    refusal names the session it could not read.
+    end of the single-recording pipeline states nothing from which the stage could be sized. Recording it at an
+    unmodeled figure would hand a scheduler a reservation nothing measured, so the whole dataset drops out of the
+    plan and the refusal names the session it could not read.
     """
     dataset = define_planned_dataset(project_root=project_root, session=training_session)
 
@@ -810,7 +810,7 @@ def test_a_dataset_whose_session_carries_no_processed_output_is_refused(
         resolve_dataset_plan(dataset_path=dataset.dataset_data_path.parent)
 
     assert training_session.session_name in " ".join(str(failure.value).split())
-    assert not dataset_plan_path(dataset=dataset).exists()
+    assert not _dataset_plan_path(dataset=dataset).exists()
 
 
 def test_the_projection_reports_the_units_that_carry_no_plan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -867,7 +867,7 @@ def test_a_recorded_batch_is_read_back_whole(isolated_working_directory: Path, d
     batch_id = record_prepared_batch(document=document)
 
     assert batch_id == "batch00".ljust(16, "0")
-    assert batch_path(batch_id=batch_id) == batch_directory().joinpath(f"{batch_id}.yaml")
+    assert _batch_path(batch_id=batch_id) == batch_directory().joinpath(f"{batch_id}.yaml")
     assert batch_directory().is_relative_to(isolated_working_directory)
     assert read_prepared_batch(batch_id=batch_id) == document
     assert deterministic_batch_ids.issued == ["batch00"]
@@ -877,8 +877,8 @@ def test_an_unheld_batch_identifier_resolves_to_nothing(isolated_working_directo
     """Verifies that a host that never recorded a batch answers for it, so a caller reports it as missing."""
     assert read_prepared_batch(batch_id="never_recorded") is None
     assert read_batch_outcome(batch_id="never_recorded") is None
-    assert record_batch_outcome(batch_id="never_recorded", outcome={"succeeded": 1}) is False
-    assert forget_prepared_batches(batch_ids=["never_recorded"]) == []
+    assert not record_batch_outcome(batch_id="never_recorded", outcome={"succeeded": 1})
+    assert _forget_prepared_batches(batch_ids=["never_recorded"]) == []
 
 
 def test_reading_several_batches_reports_the_identifiers_this_host_lacks(
@@ -903,7 +903,7 @@ def test_a_finished_batch_answers_with_what_its_jobs_recorded(
     batch_id = record_prepared_batch(document=make_document())
 
     assert read_batch_outcome(batch_id=batch_id) is None
-    assert record_batch_outcome(batch_id=batch_id, outcome={"succeeded": 3, "failed": 1}) is True
+    assert record_batch_outcome(batch_id=batch_id, outcome={"succeeded": 3, "failed": 1})
     assert read_batch_outcome(batch_id=batch_id) == {"succeeded": 3, "failed": 1}
     # Recording an outcome leaves the document itself untouched, so the batch stays executable and readable.
     assert read_prepared_batch(batch_id=batch_id) == make_document()
@@ -916,12 +916,16 @@ def test_forgetting_a_batch_removes_its_record_and_its_lock(
     """Verifies that retiring a batch takes its whole footprint, leaving the outstanding records alone."""
     first = record_prepared_batch(document=make_document())
     second = record_prepared_batch(document=make_document())
+    outstanding = record_prepared_batch(document=make_document())
 
-    removed = forget_prepared_batches(batch_ids=[first, "never_recorded", second])
+    removed = _forget_prepared_batches(batch_ids=[first, "never_recorded", second])
 
     assert removed == [first, second]
-    assert not batch_path(batch_id=first).is_file()
-    assert not batch_path(batch_id=first).with_suffix(".yaml.lock").is_file()
+    # The batch this call did not name keeps both its document and its lock.
+    assert read_prepared_batch(batch_id=outstanding) is not None
+    assert _batch_path(batch_id=outstanding).is_file()
+    assert not _batch_path(batch_id=first).is_file()
+    assert not _batch_path(batch_id=first).with_suffix(".yaml.lock").is_file()
     assert read_prepared_batch(batch_id=second) is None
 
 

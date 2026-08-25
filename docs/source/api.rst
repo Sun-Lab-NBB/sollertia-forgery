@@ -9,6 +9,16 @@ Dataset Forging
    :undoc-members:
    :show-inheritance:
 
+.. Documents the package constants explicitly, since the automodule directive above discovers module-level data
+   through the source of the module it documents, and therefore skips a constant that this package re-exports. Each
+   directive names the defining module rather than the re-exporting package, because autodoc reads the attribute
+   docstring from that module's source and otherwise falls back to the docstring of the value's own type.
+.. autodata:: sollertia_forgery.forging.state.DATASET_STATE_FILENAME
+.. autodata:: sollertia_forgery.forging.pipeline.FORGING_JOB_NAME
+.. autodata:: sollertia_forgery.forging.pipeline.FORGING_JOB_CONCURRENCY_LIMITS
+.. autodata:: sollertia_forgery.forging.pipeline.MULTIDAY_DISCOVERY_JOB_NAME
+.. autodata:: sollertia_forgery.forging.pipeline.MULTIDAY_EXTRACTION_JOB_NAME
+
 Project Management
 ==================
 
@@ -16,6 +26,10 @@ Project Management
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.managing.checksum.CHECKSUM_JOB_NAME
+.. autodata:: sollertia_forgery.managing.manifest.MANIFEST_JOB_NAME
 
 Runtime Log Processing
 ======================
@@ -25,6 +39,9 @@ Runtime Log Processing
    :undoc-members:
    :show-inheritance:
 
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.runtime.pipeline.RUNTIME_JOB_NAME
+
 Microcontroller Log Processing
 ==============================
 
@@ -33,6 +50,10 @@ Microcontroller Log Processing
    :undoc-members:
    :show-inheritance:
 
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.microcontrollers.pipeline.PARSE_JOB_NAME
+.. autodata:: ataraxis_communication_interface.orchestration.jobs.CONTROLLER_EXTRACTION_JOB_NAME
+
 Video Processing
 ================
 
@@ -40,6 +61,12 @@ Video Processing
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.video.pipeline.ENERGY_JOB_NAME
+.. autodata:: sollertia_forgery.video.pipeline.RENAME_JOB_NAME
+.. autodata:: sollertia_forgery.video.pipeline.TRACKING_JOB_NAME
+.. autodata:: ataraxis_video_system.orchestration.jobs.CAMERA_EXTRACTION_JOB_NAME
 
 Two-Photon Processing
 =====================
@@ -57,6 +84,16 @@ Job Orchestration
    :undoc-members:
    :show-inheritance:
 
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.orchestration.dispatch.BATCH_PIPELINES
+.. autodata:: sollertia_forgery.orchestration.local.RESERVED_CORES
+.. autodata:: sollertia_forgery.orchestration.planning.SESSION_UNIT
+.. autodata:: sollertia_forgery.orchestration.planning.DATASET_UNIT
+.. autodata:: sollertia_forgery.orchestration.planning.PROJECT_PLAN_SCHEMA
+.. autodata:: sollertia_forgery.orchestration.reconcile.LOCAL_HOST_LABEL
+.. autodata:: sollertia_forgery.orchestration.reconcile.REMOTE_HOST_LABEL
+.. autodata:: sollertia_forgery.orchestration.remote.REMOTE_JOB_WALLTIME_MINUTES
+
 Compute Server Transport
 ========================
 
@@ -64,6 +101,9 @@ Compute Server Transport
    :members:
    :undoc-members:
    :show-inheritance:
+
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.server.server.TERMINAL_JOB_STATUSES
 
 Command-Line Interface
 ======================
@@ -88,10 +128,17 @@ Mesoscope-VR Assets
    :undoc-members:
    :show-inheritance:
 
-Shared Substrate
-================
-
-.. automodule:: sollertia_forgery.shared_assets
+.. Documents the column enumerations explicitly, since each names the columns carried by a forged dataset, and the
+   automodule directive above reaches only what the package re-exports.
+.. autoclass:: sollertia_forgery.mesoscope_vr.metadata.DatasetColumn
    :members:
    :undoc-members:
-   :show-inheritance:
+.. autoclass:: sollertia_forgery.mesoscope_vr.video_tracking.PupilColumn
+   :members:
+   :undoc-members:
+
+.. Documents the package constants explicitly, for the reason given above the Dataset Forging directives.
+.. autodata:: sollertia_forgery.mesoscope_vr.forging.MESOSCOPE_ADMISSION_PIPELINES
+.. autodata:: sollertia_forgery.mesoscope_vr.metadata.MESOSCOPE_COLUMN_DESCRIPTIONS
+.. autodata:: sollertia_forgery.mesoscope_vr.runtime.RUNTIME_SOURCE_ID
+.. autodata:: sollertia_forgery.mesoscope_vr.two_photon.MESOSCOPE_MULTI_RECORDING_SESSION_TYPES

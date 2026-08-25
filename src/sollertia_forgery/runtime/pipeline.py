@@ -66,7 +66,7 @@ def run_runtime_processing_pipeline(
         ValueError: If the session's acquisition system is unknown (not a valid AcquisitionSystems member), or if the
             runtime log archive carries no valid onset timestamp message.
     """
-    # A stage this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
+    # A stage that this pipeline dispatches may reach a parallelized kernel, so a host whose threading layer has no
     # runtime to load fails here rather than partway through a session.
     verify_openmp_runtime()
     session, universe, possible = discover_runtime_jobs(session_path=session_path)
@@ -92,8 +92,8 @@ def run_runtime_processing_pipeline(
         )
         console.error(message=message, error=FileNotFoundError)
 
-    # The archive filename a source writes is the data-structures library's own contract, so the same indexing pass
-    # discovery ran resolves the path rather than this pipeline rebuilding the name from the source id.
+    # The archive filename that a source writes is the data-structures library's own contract, so the path comes from
+    # the same indexing helper that discovery used rather than from a name this pipeline rebuilds from the source id.
     archive_path = discover_log_archives(log_directory=log_directory)[source_id]
     job_identifier = ProcessingTracker.generate_job_id(job_name=RUNTIME_JOB_NAME, specifier=source_id)
 
@@ -124,10 +124,10 @@ def discover_runtime_jobs(session_path: Path) -> tuple[SessionData, list[tuple[s
         logger wrote and reads no message, leaving every output file untouched. An absent archive yields an empty
         possible subset, so a batch layer can align the tracker slot against the universe and skip the job.
 
-        The archives are indexed through the data-structures library, which owns the name each source writes its
-        archive under, so a session that recorded no runtime archive is reported without this pipeline restating that
+        The archives are indexed through the data-structures library, which owns the name under which each source writes
+        its archive, so a session that recorded no runtime archive is reported without this pipeline restating that
         naming rule. The index covers the logger's own output directory, which is where a session's archives are
-        assembled side by side, and the pipeline resolves the archive it runs on through that same index.
+        assembled side by side, and the pipeline resolves its own archive through that same helper.
 
     Args:
         session_path: The path to the root session directory containing the session data hierarchy.
@@ -202,7 +202,7 @@ def _decode_archive(archive_path: Path, *, workers: int, display_progress: bool)
         )
 
     return pl.DataFrame(
-        {
+        data={
             "time_us": pl.Series(name="time_us", values=timestamps, dtype=pl.UInt64),
             "payload": pl.Series(name="payload", values=payloads, dtype=pl.Binary),
         }
@@ -240,8 +240,8 @@ def _decode_batches(
 
     # Each decode child re-imports and sizes its library thread pools before any of this code runs inside it, so the
     # caps are placed around the pool's construction rather than inside its workers. numba latches its own ceiling
-    # while it is imported and rejects an environment variable that disagrees afterwards, so it is pinned instead by
-    # the initializer every child runs through its runtime setter.
+    # while it is imported and rejects an environment variable that disagrees afterwards, so each child pins it
+    # through its own runtime setter in the pool initializer instead.
     with (
         limit_worker_threads(),
         ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker_threads) as executor,

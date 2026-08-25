@@ -1,9 +1,8 @@
-"""Provides the shared MCP server instance that the interface tool modules register their tools on."""
+"""Provides the shared MCP server instance on which the interface tool modules register their tools."""
 
 from __future__ import annotations
 
 from mcp.server import MCPServer
 
 mcp: MCPServer = MCPServer(name="sollertia-forgery")
-"""Stores the MCP server instance that exposes tools to AI agents. Every interface tool module registers its tools
-on this shared instance."""
+"""Stores the MCP server instance that exposes tools to AI agents."""

@@ -1,4 +1,6 @@
-"""Tests the paging primitives every read tool shares and the three stages the project read tools report in."""
+"""Contains tests for the paging primitives every read tool shares, the three stages in which read_project_jobs_tool
+reports, and the project dataset listing.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +12,11 @@ from ataraxis_time import PrecisionTimer, TimerPrecisions
 from sollertia_shared_assets import DATASET_MARKER_FILENAME
 
 from sollertia_forgery.video import ENERGY_JOB_NAME
-from sollertia_forgery.managing import CHECKSUM_JOB_NAME, PROJECT_JOBS_SCHEMA, project_jobs_path
+from sollertia_forgery.managing import (
+    CHECKSUM_JOB_NAME,
+    project_jobs_path,
+)
+from sollertia_forgery.managing.jobs import _PROJECT_JOBS_SCHEMA
 from sollertia_forgery.shared_assets import ProcessingPipelines
 from sollertia_forgery.interfaces.responses import (
     _DEFAULT_ITEM_LIMIT,
@@ -34,7 +40,7 @@ _JOB_COUNT: int = 7
 
 @pytest.fixture
 def project_directory(tmp_path: Path) -> Path:
-    """Returns the project directory every read tool in this module is pointed at."""
+    """Returns the project directory at which every read tool in this module is pointed."""
     return tmp_path.joinpath("Proj")
 
 
@@ -89,7 +95,7 @@ def _install_jobs(project_directory: Path, count: int = _JOB_COUNT) -> Path:
         )
     )
     path = project_jobs_path(project_directory=project_directory)
-    pl.DataFrame(data=rows, schema=PROJECT_JOBS_SCHEMA, strict=False).write_ipc(file=path, compression="uncompressed")
+    pl.DataFrame(data=rows, schema=_PROJECT_JOBS_SCHEMA, strict=False).write_ipc(file=path, compression="uncompressed")
     return path
 
 
@@ -149,10 +155,10 @@ def test_the_default_page_shrinks_when_detail_is_requested() -> None:
 
 
 def test_counting_values_reports_absent_subjects_as_a_category() -> None:
-    """Verifies that a null is itself a value a caller filters on, so it is counted rather than dropped.
+    """Verifies that a null is itself a value on which a caller filters, so it is counted rather than dropped.
 
-    A breakdown is read top to bottom as the list of values an axis can be filtered on, so the counts are reported in
-    value order rather than in the order the column happens to hold them.
+    A breakdown is read top to bottom as the list of values on which an axis can be filtered, so the counts are
+    reported in value order rather than in the order the column happens to hold them.
     """
     counts = count_values(values=["a", "a", None, "b"])
 
@@ -161,7 +167,7 @@ def test_counting_values_reports_absent_subjects_as_a_category() -> None:
 
 
 def test_filtering_on_a_column_the_table_does_not_hold_names_the_columns_it_does() -> None:
-    """Verifies that a filter naming a column the artifact lacks is answered rather than left to fail on the read."""
+    """Verifies that a filter naming a column missing from the artifact is answered rather than failing on the read."""
     frame = pl.DataFrame({"status": ["FAILED"], "pipeline": ["video"]})
 
     response = reject_unknown(frame=frame, column="state", values=["FAILED"], subject="job")
@@ -173,7 +179,7 @@ def test_filtering_on_a_column_the_table_does_not_hold_names_the_columns_it_does
 
 
 def test_the_elapsed_runtime_a_response_reports_is_measured_in_seconds() -> None:
-    """Verifies that an operation timed in milliseconds is reported in the seconds every response carries it in."""
+    """Verifies that an operation timed in milliseconds is reported in the seconds every response uses."""
     timer = PrecisionTimer(precision=TimerPrecisions.MILLISECOND)
     timer.reset()
     timer.delay(delay=100, allow_sleep=True, block=False)
@@ -239,6 +245,7 @@ def test_semi_detail_omits_the_provenance_that_detail_adds(project_directory: Pa
     assert "job_id" in semi
     assert full["error_message"] == "it failed"
     assert full["executor_id"] == "slurm:1"
+    assert full["started_at"] == 1
 
 
 def test_a_scheduled_job_omits_the_fields_it_has_no_value_for(project_directory: Path) -> None:
@@ -322,7 +329,7 @@ def test_a_session_resolves_to_every_dataset_holding_it(project_directory: Path)
 
 
 def test_an_animal_resolves_to_every_dataset_holding_it(project_directory: Path) -> None:
-    """Verifies that an animal filter answers which datasets a subject participates in."""
+    """Verifies that an animal filter answers the datasets in which a subject participates."""
     _install_dataset(project_directory=project_directory, name="ds_a", members=[("305", "s1"), ("321", "s2")])
     _install_dataset(project_directory=project_directory, name="ds_b", members=[("305", "s1")])
 
@@ -339,7 +346,7 @@ def test_detail_reports_an_absent_state_snapshot_rather_than_guessing(project_di
     full = list_project_datasets_tool(project_path=str(project_directory), detailed=True)["datasets"][0]
 
     assert "state_exists" not in semi
-    assert full["state_exists"] is False
+    assert not full["state_exists"]
     assert full["animals"] == ["305"]
 
 

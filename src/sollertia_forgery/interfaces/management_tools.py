@@ -54,9 +54,9 @@ _MANIFEST_AXES: tuple[str, ...] = (
     "video",
     "two_photon",
 )
-"""The manifest columns a caller may filter sessions by, and the axes its breakdown counts. Every one holds a
-low-cardinality value, which is what makes a breakdown over it worth reading. The five pipeline columns each hold a 0
-or a 1, so their breakdown reports how many sessions have finished that pipeline."""
+"""The manifest columns by which a caller may filter sessions, and the axes its breakdown counts. Every one holds a
+low-cardinality value, so a breakdown over it is worth reading. The five pipeline columns each hold a 0 or a 1, so their
+breakdown reports how many sessions have finished that pipeline."""
 
 _MANIFEST_SEMI_FIELDS: tuple[str, ...] = (
     "animal",
@@ -79,7 +79,7 @@ _MANIFEST_DETAIL_FIELDS: tuple[str, ...] = ("notes",)
 """The session field detail adds, which is the free-text experimenter notes."""
 
 _JOB_AXES: tuple[str, ...] = ("animal", "pipeline", "job_name", "status")
-"""The job columns a caller may filter by, and the axes the job breakdown counts."""
+"""The job columns by which a caller may filter, and the axes the job breakdown counts."""
 
 _JOB_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "pipeline", "job_name", "specifier", "status", "job_id")
 """The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset targets,
@@ -153,9 +153,9 @@ def read_project_manifest_tool(
 ) -> dict[str, Any]:
     """Reads a project's sessions out of its stored manifest, in three widening stages.
 
-    A bare call reports the totals and a ``breakdown`` naming which values each filterable axis holds, which is what
-    tells you what there is to filter on. Naming any filter, or asking for the listing, adds a page of sessions.
-    Opting into detail adds the experimenter notes.
+    A bare call reports the totals and a ``breakdown`` naming which values each filterable axis holds, so it names every
+    available filter. Naming any filter, or asking for the listing, adds a page of sessions. Opting into detail adds the
+    experimenter notes.
 
     Each pipeline column is a gross done indicator, so this answers which sessions are ready and nothing finer. Which
     jobs a pipeline holds, how each fared, and why one failed are read with ``read_project_jobs_tool``.
@@ -170,15 +170,15 @@ def read_project_manifest_tool(
         host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
             compute server. A remote read mirrors the project's artifacts onto this machine and reads the
             mirror, so it reports what the project currently records without regenerating anything.
-        animal: The animal identifier to restrict the listing to.
-        session_type: The session type to restrict the listing to, as reported by the ``type`` breakdown axis.
-        system: The acquisition system to restrict the listing to.
+        animal: Restricts the listing to one animal.
+        session_type: Restricts the listing to one session type, as reported by the ``type`` breakdown axis.
+        system: Restricts the listing to one acquisition system.
         pipeline_done: Determines whether each named pipeline must be finished, as ``1`` for done and ``0`` for not
             done. Column names come from the breakdown, and a value of ``0`` lists the sessions whose named pipeline is
             outstanding. Which jobs of that pipeline failed, and why, are read with ``read_project_jobs_tool``.
         limit: The sessions to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero
             lists every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list sessions when no filter is named.
         detailed: Determines whether the listed sessions carry their experimenter notes.
 
@@ -232,7 +232,7 @@ def read_project_manifest_tool(
         limit=resolve_detail_limit(limit=limit, detailed=detailed),
         start_row=start_row,
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["sessions"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response
@@ -259,8 +259,8 @@ def read_project_jobs_tool(
     holds, which is how you find what needs attention without listing anything. Naming a filter adds a page of jobs
     carrying identity and status. Opting into detail adds the executor, the timestamps, and any recorded error.
 
-    This is the tool for reading job state across a whole project. It reads the stored artifact rather than the
-    trackers, so a snapshot pulled from another host answers without any access to the data it describes.
+    Reads the stored artifact rather than the trackers, so a snapshot pulled from another host answers without
+    any access to the data it describes.
 
     Args:
         project_path: The absolute path to the project's root data directory, which is a path ON THE SERVER for
@@ -268,14 +268,14 @@ def read_project_jobs_tool(
         host: Where the project sits, either ``local`` for this machine or ``remote`` for the configured
             compute server. A remote read mirrors the project's artifacts onto this machine and reads the
             mirror, so it reports what the project currently records without regenerating anything.
-        animal: The animal identifier to restrict the listing to.
-        session: The session name to restrict the listing to.
-        pipelines: The pipelines to restrict the listing to.
-        job_names: The job type names to restrict the listing to, such as ``motion_energy``.
-        status: The tracker status to restrict the listing to, such as ``FAILED``.
+        animal: Restricts the listing to one animal.
+        session: Restricts the listing to one session.
+        pipelines: Restricts the listing to these pipelines.
+        job_names: Restricts the listing to these job type names, such as ``motion_energy``.
+        status: Restricts the listing to one tracker status, such as ``FAILED``.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match, which is how a caller reading under a tight filter takes the whole result at once.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry the executor, timestamps, and error text.
 
@@ -334,7 +334,7 @@ def read_project_jobs_tool(
     window = resolve_page(
         total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response

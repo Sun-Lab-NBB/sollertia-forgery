@@ -1,5 +1,5 @@
-"""Provides the pipeline-identity enumeration and resolves the processing tracker each per-session pipeline records its
-jobs on.
+"""Provides the pipeline-identity enumeration and resolves the processing tracker on which each per-session pipeline
+records its jobs.
 """
 
 from __future__ import annotations
@@ -21,9 +21,11 @@ class ProcessingPipelines(StrEnum):
     its datasets.
 
     Notes:
-        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum,
-        which additionally carries ``CINDRA_MULTI_RECORDING`` for a stage cindra owns end to end. The values here are
-        short pipeline identifiers, so a caller resolves a tracker filename through that enum.
+        The member names mirror the corresponding members of sollertia-shared-assets' ``ProcessingTrackers`` enum. The
+        values here are short pipeline identifiers, so a caller resolves a tracker filename through that enum. Cindra's
+        multi-recording stage has no member in either enum, since its tracker is written once per dataset inside a
+        dataset-named directory that no fixed per-session path addresses. This library resolves that stage's paths
+        through cindra's own ``resolve_dataset_path`` instead.
     """
 
     MANIFEST = "manifest"
@@ -52,10 +54,6 @@ _SESSION_TRACKER_LOCATIONS: dict[ProcessingPipelines, Callable[[SessionData], Pa
 """Maps each per-session pipeline to the accessor that resolves its processing tracker from a loaded session.
 
 Notes:
-    The reporting layer that snapshots every pipeline's state and the dispatch table that runs one pipeline's jobs
-    both read this mapping, so the two agree on where a pipeline records its jobs. A pipeline writes its own tracker
-    from the output directory it owns, so this mapping serves the consumers that read a tracker across pipelines.
-
     The checksum tracker sits under the acquired data, since that pipeline verifies the acquired data in place. Every
     other pipeline records beside the output it produces.
 """
@@ -71,7 +69,7 @@ Notes:
 
 
 def resolve_session_tracker_path(session: SessionData, pipeline: ProcessingPipelines) -> Path:
-    """Resolves the processing tracker one per-session pipeline records its jobs on.
+    """Resolves the processing tracker on which one per-session pipeline records its jobs.
 
     Args:
         session: The loaded session whose tracker location to resolve.

@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import DatasetData
 
 _MEGABYTES_PER_GIGABYTE: int = 1024
-"""The megabytes one gigabyte holds, which every reportable estimate is rounded up to a multiple of."""
+"""The megabytes one gigabyte holds. Every reportable estimate is rounded up to a multiple of that figure."""
 
 _BYTES_PER_MEGABYTE: int = 1024 * 1024
 """The divisor converting a byte count into megabytes."""
@@ -64,8 +64,8 @@ _ARCHIVE_DIRECTORY_RATIO: float = 4.0
 directory entry per logged message, which dominates the decoded payload itself."""
 
 _MODULE_TABLE_RATIO: float = 3.4
-"""The resident memory a module parse job holds per byte of the archive its module came from. One module holds a
-share of its controller's archive, and partitioning and merging its event streams materializes that share several
+"""The resident memory a module parse job holds per byte of the archive from which its module came. One module holds
+a share of its controller's archive, and partitioning and merging its event streams materializes that share several
 times over, so the whole archive bounds the job from above."""
 
 _POSE_PREDICTION_RATIO: float = 6.0
@@ -82,8 +82,8 @@ strided view that retains its full-frame base, and the current and previous binn
 
 _CHECKSUM_READER_MEMORY_MB: int = 285
 """The resident memory one checksum worker holds, covering its fixed read chunk and the interpreter and import graph
-the worker starts with. The figure holds steady across sessions of any size, because a worker streams its file in
-fixed chunks and never holds more than one at a time."""
+loaded at its start. The figure holds steady across sessions of any size, because a worker streams its file in fixed
+chunks and never holds more than one at a time."""
 
 _TRACE_ARRAY_DIMENSIONS: int = 2
 """The axes a cindra trace array carries, which are its regions and its samples."""
@@ -94,17 +94,17 @@ none replaces another, so each stays live in the assembled frame for the rest of
 
 _ASSEMBLY_WRITE_COPIES: int = 1
 """The copies of the assembled fluorescence volume charged at the write. The write streams the frame it was handed
-rather than rebuilding it, so the columns the assembly already holds are what the stage peaks at."""
+rather than rebuilding it, so the stage peaks at the columns the assembly already holds."""
 
 _SUB_DATASET_BYTES_PER_SAMPLE: int = 512
-"""The memory the behavior, runtime, and video sub-datasets hold per sample of the clock they are placed on. Each
-emits one array per column and the interpolation that aligns them holds double-precision transients."""
+"""The memory the behavior, runtime, and video sub-datasets hold per sample of the clock on which they are placed.
+Each emits one array per column and the interpolation that aligns them holds double-precision transients."""
 
 _PERCENT_PER_FRACTION: float = 100.0
 """The divisor converting a percentage into a fraction."""
 
 _POSE_PREDICTION_PATTERN: str = "*.h5"
-"""The glob the pose-tracking sizing model discovers a session's prediction files by. The predictions are written
+"""The glob the pose-tracking sizing model uses to discover a session's prediction files. The predictions are written
 upstream of this platform, so they are matched by their container extension rather than by a name this library sets."""
 
 _ARCHIVE_JOB_NAMES: frozenset[str] = frozenset(
@@ -119,27 +119,17 @@ Notes:
 
 
 @dataclass(frozen=True, slots=True)
-class _RecordingGeometry:
-    """Describes the shape of a two-photon recording as its processing output reports it."""
-
-    regions: int
-    """The regions the single-recording pipeline detected."""
-    samples: int
-    """The samples each region's trace holds."""
-
-
-@dataclass(frozen=True, slots=True)
 class JobFootprint:
     """Describes the resources one job occupies while it runs, as this module's sizing pass resolved them.
 
     Notes:
-        Carries the two fields every dependency's own sizing record carries, so a stage a library owns and a stage
-        this package owns describe themselves the same way. Both halves follow from the job's input, and a job whose
-        input cannot be read raises rather than reporting a footprint nothing measured.
+        Carries the two fields every dependency's own sizing record carries, so a stage that a library owns and a
+        stage that this package owns describe themselves the same way. Both halves follow from the job's input, and a
+        job whose input cannot be read raises rather than reporting a footprint nothing measured.
     """
 
     cores: int
-    """The cores the job is dispatched at."""
+    """The cores the job occupies."""
     memory_mb: int
     """The reportable memory the job holds at its peak, in megabytes."""
 
@@ -156,7 +146,7 @@ def resolve_host_memory_mb() -> int:
 def size_session_jobs(
     pipeline: ProcessingPipelines, session: SessionData, jobs: list[tuple[str, str, int]]
 ) -> dict[tuple[str, str], JobFootprint]:
-    """Sizes every possible job of one session, reporting the cores it is dispatched at and the memory it holds there.
+    """Sizes every possible job of one session, reporting the cores it occupies and the memory it holds there.
 
     Notes:
         Reads on-disk metadata alone, so sizing a session never decodes a frame. The two extraction stages read their
@@ -167,29 +157,29 @@ def size_session_jobs(
         run. Estimates cover anonymous memory, the term that forces a host to swap and a scheduler to kill a job, so
         the reclaimable pages a memory-mapped stage leaves resident are excluded.
 
-        The stages a dependency owns are sized by that dependency's own sizing pass, which reads the job's input once
-        and answers both halves of its model from that read. It picks the width the stage actually runs at, which for
-        the extraction stages is one core for an archive below their parallel threshold and their declared allocation
-        above it, and it estimates the memory at that width. Taking both figures whole is what keeps a retune of
-        either half reaching slf without a change here, and it is what stops this package from reserving a width the
-        library would never open.
+        The stages that a dependency owns are sized by that dependency's own sizing pass, which reads the job's input
+        once and answers both halves of its model from that read. It picks the width at which the stage actually
+        runs, which for the extraction stages is one core for an archive below their parallel threshold and their
+        declared allocation above it, and it estimates the memory at that width. Taking both figures whole is what
+        keeps a retune of either half reaching slf without a change here, and it is what stops this package from
+        reserving a width the library would never open.
 
         Every other stage is this package's own, so it is modeled here in the same shape, where one call answers both
-        halves from the job's input. A stage whose cost holds one width whatever data it reads reports the allocation
+        halves from the job's input. A stage whose cost holds one width, whatever data it reads, reports the allocation
         its type declared, which reaches this pass alongside the job.
 
-        No stage answers with a floor. A job whose input cannot be read is a job that cannot run, so the refusal the
-        read raises propagates to the caller, which drops the target it belongs to rather than planning it at a
+        No stage answers with a floor. A job whose input cannot be read is a job that cannot run, so the refusal
+        raised by the read propagates to the caller, which drops the target holding it rather than planning it at a
         figure nothing measured.
 
     Args:
-        pipeline: The pipeline the jobs belong to.
-        session: The loaded session the jobs operate on.
+        pipeline: The pipeline that owns the jobs.
+        session: The loaded session on which the jobs operate.
         jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at and the memory
-        it holds there, in megabytes.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job occupies and the memory it
+        holds there, in megabytes.
 
     Raises:
         FileNotFoundError: If a job's input cannot be read, in which case the job that reads it cannot run either.
@@ -226,7 +216,7 @@ def size_session_jobs(
     )
 
     # Locating a source's archive belongs to the library that writes it, and one pass answers every archive-reading
-    # job the session holds. A source the pass cannot resolve raises there, which is the same refusal each sizing
+    # job the session holds. A source that the pass cannot resolve raises there, which is the same refusal each sizing
     # model raises for an input it cannot read.
     archives = _resolve_job_archives(behavior_directory=behavior_directory, jobs=jobs)
 
@@ -259,35 +249,6 @@ def size_session_jobs(
     return footprints
 
 
-def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
-    """Locates the log archive every archive-reading job of one session consumes.
-
-    Notes:
-        The archive filename a source writes is the data-structures library's own contract, so the sources are handed
-        to its locator rather than having their filenames rebuilt here. One traversal resolves every source, which is
-        the same pass the acquisition libraries' own job resolvers make.
-
-    Args:
-        behavior_directory: The session's raw behavior data directory, whose tree holds every archive it recorded.
-        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose archive-reading members
-            carry the identifier of the source that recorded their archive.
-
-    Returns:
-        The path to the archive of every source the jobs read, keyed by that source identifier. Empty when the jobs
-        read no archive.
-
-    Raises:
-        FileNotFoundError: If the behavior data directory is absent, or if a source recorded no archive, in which case
-            the job reading it cannot run either.
-        OSError: If any directory beneath the behavior data directory cannot be read.
-        ValueError: If the tree holds more than one archive for a source, which leaves the job's input ambiguous.
-    """
-    sources = [specifier for job_name, specifier, _ in jobs if job_name in _ARCHIVE_JOB_NAMES]
-    if not sources:
-        return {}
-    return find_log_archives(log_directory=behavior_directory, source_ids=sources)
-
-
 def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) -> dict[tuple[str, str], JobFootprint]:
     """Sizes every possible forging job from the processed data it will read, reporting its cores and its memory.
 
@@ -298,20 +259,20 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
 
         Every job is routed to a model rather than to a blanket allowance, since a remote scheduler reserves memory
         per job. The two cross-recording stages belong to cindra, so both halves of their figures are cindra's own
-        sizing pass, which refuses a dataset any recording leaves short rather than sizing it from the recordings
-        that happen to be complete. That refusal propagates, because a stage cindra will not size is a stage the
+        sizing pass, which refuses a dataset that any recording leaves short rather than sizing it from the recordings
+        that happen to be complete. That refusal propagates, because a stage that cindra will not size is a stage the
         dataset cannot run until its recordings are complete.
 
         The per-session assembly stage is this package's own, so no dependency models it and its projection stays
         here. Its width holds one value whatever data it reads, so it reports the allocation its type declared.
 
     Args:
-        dataset: The resolved dataset the jobs operate on.
+        dataset: The resolved dataset on which the jobs operate.
         jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples.
 
     Returns:
-        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job is dispatched at and the memory
-        it holds there, in megabytes.
+        A dictionary mapping each ``(job_name, specifier)`` pair to the cores the job occupies and the memory it
+        holds there, in megabytes.
 
     Raises:
         FileNotFoundError: If a job's processed input cannot be read, in which case the job that reads it cannot run
@@ -364,6 +325,45 @@ def size_dataset_jobs(dataset: DatasetData, jobs: list[tuple[str, str, int]]) ->
     return footprints
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordingGeometry:
+    """Describes the shape of a two-photon recording as its processing output reports it."""
+
+    regions: int
+    """The regions the single-recording pipeline detected."""
+    samples: int
+    """The samples each region's trace holds."""
+
+
+def _resolve_job_archives(behavior_directory: Path, jobs: list[tuple[str, str, int]]) -> dict[str, Path]:
+    """Locates the log archive every archive-reading job of one session consumes.
+
+    Notes:
+        The archive filename that a source writes is the data-structures library's own contract, so the sources are
+        handed to its locator rather than having their filenames rebuilt here. One traversal resolves every source,
+        which is the same pass the acquisition libraries' own job resolvers make.
+
+    Args:
+        behavior_directory: The session's raw behavior data directory, whose tree holds every archive it recorded.
+        jobs: The possible jobs as ``(job_name, specifier, declared_cores)`` triples, whose archive-reading members
+            carry the identifier of the source that recorded their archive.
+
+    Returns:
+        The path to the archive of every source the jobs read, keyed by that source identifier. Empty when the jobs
+        read no archive.
+
+    Raises:
+        FileNotFoundError: If the behavior data directory is absent, or if a source recorded no archive, in which case
+            the job reading it cannot run either.
+        OSError: If any directory beneath the behavior data directory cannot be read.
+        ValueError: If the tree holds more than one archive for a source, which leaves the job's input ambiguous.
+    """
+    sources = [specifier for job_name, specifier, _ in jobs if job_name in _ARCHIVE_JOB_NAMES]
+    if not sources:
+        return {}
+    return find_log_archives(log_directory=behavior_directory, source_ids=sources)
+
+
 def _bytes_to_megabytes(byte_count: float) -> int:
     """Converts a byte count into whole megabytes, rounding up so an estimate never understates its demand.
 
@@ -377,16 +377,16 @@ def _bytes_to_megabytes(byte_count: float) -> int:
 
 
 def _round_to_gigabyte(memory_mb: int) -> int:
-    """Rounds a memory figure up to a whole gigabyte, which is the quantum every estimate is reported at.
+    """Rounds a memory figure up to a whole gigabyte, which is the quantum at which every estimate is reported.
 
     Notes:
         A scheduler reserves memory in whole gigabytes, so an estimate landing mid-gigabyte is rounded there by
         whatever consumes it. Rounding here instead keeps the figure a plan records identical to the figure a
-        submission requests, which is what lets a planned batch and a submitted one be compared directly.
+        submission requests, so a planned batch and a submitted one compare directly.
 
-        A figure a dependency already sized is rounded here as well. Those models report at their own quantum, which
-        is finer than a gigabyte, so this is the boundary where every figure reaches one scale whichever model
-        produced it.
+        A figure that a dependency already sized is rounded here as well. The acquisition libraries report at a 256
+        megabyte quantum while cindra already reports at a whole gigabyte, so this is the boundary where every figure
+        reaches one scale whichever model produced it.
 
     Args:
         memory_mb: The memory to round, in megabytes.
@@ -401,8 +401,8 @@ def _apply_tolerance(memory_mb: int) -> int:
     """Applies the shared estimate tolerance to a modeled memory figure and rounds it to a whole gigabyte.
 
     Notes:
-        The tolerance is cindra's, which the sibling acquisition libraries carry at the same value, so every stage of
-        a mixed batch is weighed on one scale.
+        The tolerance is cindra's, which the video library carries at the same value while the communication library
+        carries a wider one, so a mixed batch is weighed on close but not identical scales.
 
     Args:
         memory_mb: The modeled memory in megabytes, before any margin.
@@ -512,8 +512,8 @@ def _size_rename_job(cores: int) -> JobFootprint:
 
     Notes:
         The stage performs a fixed handful of filesystem operations and reads no recording, so it holds a worker and
-        nothing besides. There is no input to scale with, which is what makes the worker itself the whole model
-        rather than a floor standing in for one.
+        nothing besides. No input scales the estimate, so the worker itself is the whole model rather than a floor
+        standing in for one.
 
     Args:
         cores: The cores the job is allocated, which its type declares.
@@ -565,7 +565,7 @@ def _size_motion_energy_job(frame_pixels: int, cores: int) -> JobFootprint:
         type declared and the per-core decoder and child cost is charged at that width.
 
     Args:
-        frame_pixels: The pixels the frame this job decodes holds.
+        frame_pixels: The pixels held by the frame this job decodes.
         cores: The cores the job is allocated, which bounds how many chunks it decodes at once.
 
     Returns:
@@ -589,13 +589,13 @@ def _size_two_photon_job(
     """Sizes one two-photon job through cindra's own per-stage sizing pass.
 
     Notes:
-        cindra reads the recording once and answers both halves of its model from that read, so the width a stage
-        runs at is the measured knee of its own scaling curve rather than a figure this package repeats. Taking both
-        figures whole is what keeps a retune of either half reaching slf without a change here.
+        cindra reads the recording once and answers both halves of its model from that read, so the width at which a
+        stage runs is the measured knee of its own scaling curve rather than a figure this package repeats. Taking
+        both figures whole is what keeps a retune of either half reaching slf without a change here.
 
         cindra rejects a stage it cannot size, either because the recording carries no readable raw imaging data or
         because a per-plane specifier names a plane the recording does not hold. Both refusals propagate, since a
-        recording cindra will not size is a recording whose stages cannot run.
+        recording that cindra will not size is a recording whose stages cannot run.
 
     Args:
         job_name: The tracker job name identifying the stage.
@@ -611,7 +611,8 @@ def _size_two_photon_job(
     Raises:
         FileNotFoundError: If the recording carries neither pipeline output nor readable raw imaging data, in which
             case no stage of it can run.
-        ValueError: If the specifier names an imaging plane the recording does not hold.
+        ValueError: If the specifier names an imaging plane the recording does not hold, or if both inputs were
+            readable and still describe no whole imaging plane.
     """
     sizing = size_single_recording_job(
         job_name=SingleRecordingJobNames(job_name),
@@ -632,12 +633,12 @@ def _size_multi_recording_job(
     """Sizes one cross-recording job through cindra's own per-stage sizing pass.
 
     Notes:
-        Both cross-recording stages read every recording of the animal they run over, so the whole recording set is
-        handed to cindra whichever stage is being sized, and both halves of the figure come back from that one read.
+        Both cross-recording stages read every recording of the animal over which they run, so the whole recording set
+        is handed to cindra whichever stage is being sized, and both halves of the figure come back from that one read.
 
-        cindra refuses a set any recording leaves short rather than sizing it from the recordings that happen to be
-        complete, and that refusal propagates. A dataset whose recordings carry no combined output cannot run either
-        stage yet, so it is dropped from the workflow rather than planned at a floor.
+        cindra refuses a set that any recording leaves short rather than sizing it from the recordings that happen to
+        be complete, and that refusal propagates. A dataset whose recordings carry no combined output cannot run
+        either stage yet, so it is dropped from the workflow rather than planned at a floor.
 
     Args:
         job_name: The cindra stage the job runs.
@@ -651,17 +652,18 @@ def _size_multi_recording_job(
         The job's footprint, holding cindra's own width for the stage and its memory at that width.
 
     Raises:
-        FileNotFoundError: If no recording the job spans carries a combined metadata archive, in which case neither
+        FileNotFoundError: If the job spans no recording, if any recording it spans carries no combined metadata
+            archive, or if any recording reports no regions in its combined trace array, in which case neither
             cross-recording stage can run.
         ValueError: If the dataset's acquisition system donates no multi-recording configuration, which leaves the
-            stage with no parameters to be sized against.
+            stage without the parameters its sizing needs.
     """
     if configuration is None:
         message = (
             f"Unable to size the '{job_name.value}' job of '{specifier}'. The dataset resolved no multi-recording "
             f"configuration, either because its acquisition system tracks no regions across the sessions it holds "
-            f"or because none of those sessions remains under the project root, so the stage has no parameters to "
-            f"be sized against and no data to run over."
+            f"or because none of those sessions remains under the project root, so the stage carries neither sizing "
+            f"parameters nor input data."
         )
         console.error(message=message, error=ValueError)
     sizing = size_multi_recording_job(
@@ -712,7 +714,7 @@ def _size_module_parse_job(behavior_directory: Path, cores: int) -> JobFootprint
 
     Notes:
         One module holds a share of its controller's archive, and the whole archive bounds that share from above, so
-        the widest archive the session recorded is what the job is charged. The stage is a single pass over one
+        the widest archive that the session recorded is what the job is charged. The stage is a single pass over one
         module's extracted table, so it runs at the allocation its type declared.
 
     Args:
@@ -741,11 +743,11 @@ def _widest_file_memory_mb(candidates: Collection[Path], expansion_ratio: float,
     """Models memory from the largest of the files a stage may read, for a stage whose input is one of several.
 
     Notes:
-        The candidates are discovered by the party that owns their naming, which is the acquisition system for a
-        prediction file and the data-structures library for a log archive, so no naming rule is repeated here.
+        A log archive is discovered by the data-structures library that owns its naming, while a prediction file is
+        matched here by its container extension alone, because it is written upstream of this platform.
 
     Args:
-        candidates: The files the stage may read, one of which the estimate is drawn from.
+        candidates: The files the stage may read, one of which supplies the estimate.
         expansion_ratio: The resident memory a job holds per byte of the file it reads.
         description: The phrase naming the input, which the refusal reports when the stage has nothing to read.
 
@@ -769,10 +771,10 @@ def _widest_file_memory_mb(candidates: Collection[Path], expansion_ratio: float,
 
 @cache
 def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Path:
-    """Resolves the output root a session's two-photon processing was configured with.
+    """Resolves the output root given to a session's two-photon processing.
 
     Notes:
-        This is the root cindra creates its own output directory under, so every location beneath it is resolved
+        This is the root under which cindra creates its own output directory, so every location beneath it is resolved
         through cindra's own resolvers rather than by rebuilding its layout here.
 
         Cached, because one dataset's estimates resolve the same session from several stages and each resolution
@@ -780,7 +782,7 @@ def _two_photon_output_root(project_root: Path, animal: str, session: str) -> Pa
 
     Args:
         project_root: The path to the project's root directory.
-        animal: The animal the session belongs to.
+        animal: The animal that owns the session.
         session: The session name whose output root is resolved.
 
     Returns:
@@ -793,12 +795,12 @@ def _animal_recording_directories(dataset: DatasetData, animal: str, project_roo
     """Resolves the cindra output directory of every recording one animal contributes to a dataset.
 
     Notes:
-        This is the recording set the animal's materialized multi-recording configuration names, resolved from the
+        This is the recording set named by the animal's materialized multi-recording configuration, resolved from the
         project root rather than read back from that file, so a dataset whose configurations have not been written
         yet is still sizable. A session that has moved to long-term storage contributes no directory.
 
     Args:
-        dataset: The resolved dataset the animal belongs to.
+        dataset: The resolved dataset that holds the animal.
         animal: The animal whose recordings are resolved.
         project_root: The path to the project's root directory.
 
@@ -827,7 +829,7 @@ def _resolve_recording_geometry(project_root: Path, animal: str, session: str) -
 
     Args:
         project_root: The path to the project's root directory.
-        animal: The animal the session belongs to.
+        animal: The animal that owns the session.
         session: The session name whose processed output is read.
 
     Returns:
@@ -869,7 +871,7 @@ def _resolve_tracking_configuration(dataset: DatasetData, project_root: Path) ->
     """Resolves the multi-recording configuration the dataset's acquisition system donates.
 
     Notes:
-        Read from the system registry rather than from the file ``define_forging_dataset`` materializes, so the
+        Read from the system registry rather than from the file that ``define_forging_dataset`` materializes, so the
         parameters are available for a dataset whose configurations have not been written yet.
 
         Resolved from the first session still present under the project root, because a dataset outlives the source
@@ -909,8 +911,8 @@ def _resolve_tracked_regions(
         again to the widest single recording the animal holds.
 
     Args:
-        dataset: The resolved dataset the session belongs to.
-        animal: The animal the session belongs to.
+        dataset: The resolved dataset that holds the session.
+        animal: The animal that owns the session.
         session: The session name whose tracked regions are resolved.
         project_root: The path to the project's root directory.
         configuration: The resolved multi-recording configuration, which reports the prevalence a cluster must reach.
@@ -923,8 +925,8 @@ def _resolve_tracked_regions(
         geometry
         # A session that has moved to long-term storage cannot be loaded at all, so it is skipped before its geometry
         # is read rather than failing the whole animal's estimate. A dataset outlives the source data of the animals it
-        # has already forged, and the recording set this bound is drawn from skips a relocated session on the same
-        # terms, so reading one here would make an estimate depend on data the dataset no longer needs.
+        # has already forged, and the recording set from which this bound is drawn skips a relocated session on the
+        # same terms, so reading one here would make an estimate depend on data the dataset no longer needs.
         for entry in entries
         if project_root.joinpath(animal, entry.session).is_dir()
         and (geometry := _resolve_recording_geometry(project_root=project_root, animal=animal, session=entry.session))
@@ -964,8 +966,8 @@ def _size_forging_job(
     """Sizes one per-session assembly job from the processed output it reads.
 
     Notes:
-        The assembled frame retains every fluorescence column it attaches, and the write that closes the job rechunks
-        the frame into a second copy of the whole thing, so the shape of the session's own fluorescence is what the
+        The assembled frame retains every fluorescence column it attaches, and the write that closes the job streams
+        the frame it was handed rather than rebuilding it, so the shape of the session's own fluorescence is what the
         job is charged. The stage is this package's own, and its fan-out is a fixed handful of threads, so it runs at
         the allocation its type declared.
 
@@ -973,8 +975,8 @@ def _size_forging_job(
         to a floor.
 
     Args:
-        dataset: The resolved dataset the session belongs to.
-        animal: The animal the session belongs to.
+        dataset: The resolved dataset that holds the session.
+        animal: The animal that owns the session.
         session: The session name whose assembly job is sized.
         project_root: The path to the project's root directory.
         configuration: The dataset's resolved multi-recording configuration, or None when its acquisition system

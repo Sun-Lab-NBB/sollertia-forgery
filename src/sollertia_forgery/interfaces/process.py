@@ -241,7 +241,7 @@ def runtime_command(shared: _SharedProcessingParameters) -> None:
     type=int,
     default=-1,
     show_default=True,
-    help="The imaging plane to run the per-plane stages for. Set to -1 to cover all planes.",
+    help="The imaging plane that the per-plane stages process. Set to -1 to cover all planes.",
 )
 @_pass_shared_parameters
 def two_photon_command(

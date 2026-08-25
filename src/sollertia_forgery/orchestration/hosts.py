@@ -35,24 +35,24 @@ if TYPE_CHECKING:
 
 
 class ExecutionHost(Protocol):
-    """Declares the operations preparation runs against the host that holds a project's data.
+    """Declares the operations that preparation runs against the host that holds a project's data.
 
     Notes:
-        Every implementation runs the same underlying functions, so the artifacts a caller reads describe the same
-        project state either way. A local host calls them in this process and a remote host runs the command line that
-        calls them on the server, which is what keeps one preparation path serving both.
+        Every implementation runs the same underlying functions, so the artifacts that a caller reads describe the
+        same project state either way. A local host calls them in this process and a remote host runs the command
+        line that calls them on the server, so one preparation path serves both.
 
         One operation differs by design. ``resolve_tracker_paths`` yields an empty mapping on a remote host, because
-        the trackers a remotely dispatched job records on are read and written on the server alone.
+        a remotely dispatched job's trackers are read and written on the server alone.
     """
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         ...
 
     def materialize(self, project_root: Path, unit_paths: Sequence[Path], unit_kind: str, *, replan: bool) -> None:
-        """Rewrites every artifact a batch is resolved from, for the named units and their project."""
+        """Rewrites every artifact from which a batch is resolved, for the named units and their project."""
         ...
 
     def plan(
@@ -90,7 +90,7 @@ class ExecutionHost(Protocol):
         *,
         force_recreate: bool,
     ) -> None:
-        """Builds the dataset hierarchy a forging batch is resolved against."""
+        """Builds the dataset hierarchy against which a forging batch is resolved."""
         ...
 
     def resolve_tracker_paths(self, pipeline: str, unit_paths: Sequence[Path]) -> dict[str, str]:
@@ -112,12 +112,12 @@ class LocalHost:
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         return "local"
 
     @classmethod
     def materialize(cls, project_root: Path, unit_paths: Sequence[Path], unit_kind: str, *, replan: bool) -> None:
-        """Rewrites every artifact a batch is resolved from, for the named units and their project.
+        """Rewrites every artifact from which a batch is resolved, for the named units and their project.
 
         Notes:
             Three steps run in a fixed order. Planning each unit records what its jobs will cost and registers them on
@@ -126,10 +126,10 @@ class LocalHost:
 
             The order matters, because planning is what registers a unit's jobs and the state step reads those
             registries. Planning also re-estimates nothing a unit's cache already holds unless a caller asks for it,
-            which is what keeps the figures a submission was sized against from changing underneath it.
+            so a submission's sizing figures never change underneath it.
 
-            A unit no pipeline resolves any job for is reported and skipped, leaving the units that did resolve jobs
-            planned.
+            A unit for which no pipeline resolves a job is reported and skipped, leaving the units that did resolve
+            jobs planned.
 
         Args:
             project_root: The path to the project's root directory.
@@ -146,11 +146,10 @@ class LocalHost:
 
         Notes:
             Estimation reads each unit's raw acquisition data, so it costs far more than reading the cache it writes.
-            Only the jobs a unit's cache does not already hold are estimated unless a caller asks for the recorded
-            figures to be replaced, which is what keeps a figure a submission was sized against from moving underneath
-            it.
+            Only the jobs that a unit's cache does not already hold are estimated unless a caller asks for the
+            recorded figures to be replaced, so a submission's sizing figures never move underneath it.
 
-            A unit no pipeline resolves any job for is reported in its own entry rather than aborting the others.
+            A unit for which no pipeline resolves a job is reported in its own entry rather than aborting the others.
 
         Args:
             project_root: The path to the project's root directory.
@@ -228,7 +227,7 @@ class LocalHost:
 
         Args:
             path: The path to the artifact.
-            destination: The directory a copy would land in, unused here.
+            destination: The directory in which a copy would land, unused here.
 
         Returns:
             The artifact's own path, or None when it is absent.
@@ -276,7 +275,7 @@ class LocalHost:
         *,
         force_recreate: bool,
     ) -> None:
-        """Builds the dataset hierarchy a forging batch is resolved against.
+        """Builds the dataset hierarchy against which a forging batch is resolved.
 
         Args:
             project_root: The path to the project holding the sessions and the dataset.
@@ -308,7 +307,7 @@ class LocalHost:
 
         Args:
             pipeline: The pipeline whose tracker to locate.
-            unit_paths: The unit root directories to locate trackers for.
+            unit_paths: The unit root directories whose trackers to locate.
 
         Returns:
             The tracker path of each unit, keyed by the unit path as a string.
@@ -332,13 +331,13 @@ class RemoteHost:
     Notes:
         Each operation issues the command line that calls the same function a local host calls in-process, so the two
         hosts write the same artifacts from the same code. Reading a table copies it into a temporary directory and
-        parses it here, because the graph a batch dispatches is always built on this machine.
+        parses it here, because the graph that a batch dispatches is always built on this machine.
 
     Args:
         server: The connected compute server holding the project.
 
     Attributes:
-        _server: The connected server every operation is issued through.
+        _server: The connected server through which every operation is issued.
     """
 
     def __init__(self, server: Server) -> None:
@@ -350,16 +349,16 @@ class RemoteHost:
 
     @property
     def label(self) -> str:
-        """Returns the name this host is reported under."""
+        """Returns the name under which this host is reported."""
         return "remote"
 
     @property
     def server(self) -> Server:
-        """Returns the connected server this host operates through."""
+        """Returns the connected server through which this host operates."""
         return self._server
 
     def materialize(self, project_root: Path, unit_paths: Sequence[Path], unit_kind: str, *, replan: bool) -> None:
-        """Rewrites every artifact a batch is resolved from, for the named units and their project.
+        """Rewrites every artifact from which a batch is resolved, for the named units and their project.
 
         Notes:
             The steps ship as one invocation, chained so each runs only after the one before it succeeded. Naming no
@@ -390,8 +389,8 @@ class RemoteHost:
 
         Notes:
             The per-unit figures are read back out of the projection rather than parsed from the command's output, so a
-            remote plan reports the same numbers a local one returns. A unit the projection holds no row for planned
-            nothing.
+            remote plan reports the same numbers a local one returns. A unit for which the projection holds no row
+            planned nothing.
 
         Args:
             project_root: The path to the project's root directory on the server.
@@ -452,10 +451,10 @@ class RemoteHost:
 
         Args:
             path: The path to the artifact on the server.
-            destination: The local directory the copy lands in.
+            destination: The local directory in which the copy lands.
 
         Returns:
-            The local path the copy landed at, or None when the server holds no such artifact.
+            The local path at which the copy landed, or None when the server holds no such artifact.
         """
         if not self._server.exists(remote_path=path):
             return None
@@ -524,7 +523,7 @@ class RemoteHost:
         *,
         force_recreate: bool,
     ) -> None:
-        """Builds the dataset hierarchy a forging batch is resolved against, on the server.
+        """Builds the dataset hierarchy against which a forging batch is resolved, on the server.
 
         Notes:
             The invocation calls ``define_forging_dataset`` inside the server's processing environment, because the
@@ -614,7 +613,7 @@ def environment_commands(environment: str, commands: Sequence[Sequence[str]]) ->
     """Wraps several commands so they run in order inside the server's shared processing environment.
 
     Notes:
-        The commands are chained so each runs only after the one before it succeeded, which lets one round trip carry a
+        The commands are chained so each runs only after the one before it succeeded, so one round trip carries a
         sequence whose later steps depend on its earlier ones.
 
     Args:
@@ -759,8 +758,8 @@ def _parse_removals(output: str) -> list[dict[str, Any]]:
     """Reads the removals a server-side cleanup reported.
 
     Notes:
-        Each line pairs the bytes a path held with the path itself, which is what lets a remote cleanup report the same
-        figures a local one returns. A line that does not parse is skipped, so unrelated output never becomes a removal.
+        Each line pairs the bytes a path held with the path itself, so a remote cleanup reports the same figures a
+        local one returns. A line that does not parse is skipped, so unrelated output never becomes a removal.
 
     Args:
         output: The cleanup command's standard output.
@@ -787,8 +786,9 @@ def _definition_command(
     """Renders the command that builds a dataset hierarchy on the server.
 
     Notes:
-        Each argument is embedded as a JSON literal, which the Python parser reads as the same literal. A name
-        carrying a space or a quote therefore survives both the parser and the shell quoting applied around it.
+        Every string argument is embedded as a JSON literal, which the Python parser reads as the same literal, while
+        the boolean is interpolated as its Python repr. A name carrying a space or a quote therefore survives both the
+        parser and the shell quoting applied around it.
 
     Args:
         project_root: The path, on the server, to the project holding the sessions and the dataset.
@@ -817,11 +817,11 @@ def _raise_command_failure(commands: Sequence[Sequence[str]], return_code: int, 
 
     Args:
         commands: The commands the invocation carried.
-        return_code: The status the invocation exited with.
+        return_code: The exit status of the invocation.
         stderr: The invocation's standard error.
 
     Raises:
-        RuntimeError: Always, since this reports a failure the caller cannot proceed past.
+        RuntimeError: Always, since this reports a failure that stops the caller.
     """
     rendered = " && ".join(shlex.join(command) for command in commands)
     message = f"The server-side invocation '{rendered}' exited with code {return_code}. {stderr.strip()}"

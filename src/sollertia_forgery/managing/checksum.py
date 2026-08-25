@@ -8,6 +8,8 @@ from ataraxis_base_utilities import LogLevel, console, resolve_worker_count
 from sollertia_shared_assets import SessionData, RawDataFiles, ProcessingTrackers
 from ataraxis_data_structures import ProcessingTracker, calculate_directory_checksum
 
+from ..shared_assets import verify_openmp_runtime
+
 CHECKSUM_JOB_NAME: str = "checksum_resolution"
 """The job name identifying the checksum resolution job in the checksum processing tracker
 (``ProcessingTrackers.CHECKSUM``), where this pipeline records the job's state."""
@@ -24,7 +26,7 @@ _CHECKSUM_EXCLUDED_FILES: set[str] = {
     _CHECKSUM_TRACKER_LOCK_FILENAME,
 }
 """The set of filenames excluded from checksum calculation. Includes the checksum file itself, the processing
-tracker, and its lock file to prevent the tracker presence from altering the checksum value. Only includes files
+tracker, and its lock file to prevent the tracker's presence from altering the checksum value. Only includes files
 canonically found under the 'raw_data' session data directory."""
 
 
@@ -41,7 +43,7 @@ def run_checksum_processing_pipeline(
     Notes:
         This is a single-stage pipeline that produces exactly one job, which resolves the whole raw_data directory.
         The job runs in one of two modes. Verification compares the recomputed checksum against the stored value and
-        records a failure on any mismatch, which is what marks the data as corrupted. Regeneration overwrites the
+        records a failure on any mismatch. That failure marks the data as corrupted. Regeneration overwrites the
         stored value with the freshly computed one, re-baselining a session whose raw data changed by intent.
 
         Every path this pipeline reads and writes lives under raw_data, while every other session pipeline writes
@@ -66,13 +68,18 @@ def run_checksum_processing_pipeline(
             tracker is touched so the session's last recorded verdict survives.
         OSError: If any directory or file under the session's raw_data directory cannot be read, which the pipeline
             records as a job failure before re-raising.
+        RuntimeError: If the host is macOS and carries no loadable OpenMP runtime for the Numba threading layer.
     """
+    # The checksum pool's initializer sizes the numeric backends, which brings up the Numba threading layer, so a host
+    # whose layer has no runtime to load fails here rather than partway through a session.
+    verify_openmp_runtime()
+
     session, universe, possible = discover_checksum_jobs(session_path=session_path)
     job_id = ProcessingTracker.generate_job_id(job_name=CHECKSUM_JOB_NAME, specifier=session.session_name)
 
     # A session holding nothing the checksum covers is refused before the tracker is touched, so its last recorded
-    # integrity verdict survives. Leaving the refusal to start_job would rest it on the tracker not yet holding the
-    # job, which stops being true the moment a previous run registered it.
+    # integrity verdict survives. Leaving the refusal to align_jobs would surface it as a generic empty-job-list
+    # error naming neither the session nor its missing raw data.
     if not possible:
         message = (
             f"Unable to resolve the data integrity checksum for the session '{session.session_name}'. The session's "
@@ -80,20 +87,20 @@ def run_checksum_processing_pipeline(
         )
         console.error(message=message, error=ValueError)
 
-    # Initializes the processing tracker in the raw_data directory alongside the checksum file. Aligning against the
-    # universe discards foreign or outdated job entries while preserving the state of the jobs this pipeline produces.
+    # Aligning against the universe discards foreign or outdated job entries while preserving the state of the
+    # jobs this pipeline produces.
     tracker = ProcessingTracker(file_path=session.raw_data.checksum_tracker_path)
     tracker.align_jobs(jobs=possible, universe=universe)
 
     checksum_path = session.raw_data.checksum_path
 
-    # Verification needs a stored value to compare against, so its absence is a hard error rather than a mismatch.
+    # Verification needs a stored value for the comparison, so its absence is a hard error rather than a mismatch.
     # Regeneration writes that value, so it runs on a session that has never been checksummed.
     if not regenerate_checksum and not checksum_path.is_file():
         message = (
             f"Unable to verify the data integrity checksum for the session '{session.session_name}'. No checksum "
             f"file exists at '{checksum_path}'. Regenerate the session's checksum to establish the stored value "
-            f"this verification compares against."
+            f"against which this verification compares."
         )
         console.error(message=message, error=FileNotFoundError)
 
@@ -151,8 +158,8 @@ def discover_checksum_jobs(session_path: Path) -> tuple[SessionData, list[tuple[
     """Resolves the checksum pipeline's job universe and possible subset for the target session.
 
     Notes:
-        The checksum pipeline produces exactly one job, so the universe is always the single
-        ``(CHECKSUM_JOB_NAME, session_name)`` pair. Both pipeline modes share that job, because a session carries one
+        The checksum pipeline produces exactly one job, so the universe is always the single ``(CHECKSUM_JOB_NAME,
+        session_name)`` pair. Both pipeline modes share that job, because a session carries one
         integrity state whether the run establishes it or confirms it. That job is possible once the session holds
         raw data the checksum covers, which excludes the checksum file, the tracker, and the tracker lock. Discovery
         loads the session marker and walks the raw data directory, leaving the session as it found it.
@@ -199,7 +206,7 @@ def _has_checksummable_data(raw_data_path: Path) -> bool:
 
     Notes:
         Stops at the first qualifying file, so the cost is a partial directory walk rather than a full census. A
-        session holding only the excluded bookkeeping files has nothing to checksum, which is what distinguishes an
+        session holding only the excluded bookkeeping files has nothing to checksum. That absence distinguishes an
         acquired session from one whose raw data never arrived.
 
     Args:

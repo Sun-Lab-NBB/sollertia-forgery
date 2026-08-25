@@ -1,4 +1,6 @@
-"""Tests the aggregation and filtering the planning tools layer performs over a stored plan projection."""
+"""Contains tests for the aggregation and filtering that the planning tools layer performs over a stored plan
+projection, alongside the dataset state status counts.
+"""
 
 from __future__ import annotations
 
@@ -68,8 +70,8 @@ _PLANNED_JOBS: list[dict[str, Any]] = [
 """A projection holding both unit kinds, two pipelines for one session, and one job waiting on another."""
 
 
-def install_projection(project_root: Path) -> None:
-    """Writes the stand-in projection at the location the tools read it from."""
+def _install_projection(project_root: Path) -> None:
+    """Writes the stand-in projection at the location from which the tools read it."""
     project_root.mkdir(parents=True, exist_ok=True)
     pl.DataFrame(data=_PLANNED_JOBS, schema=PROJECT_PLAN_SCHEMA, strict=False).write_ipc(
         file=project_plan_path(project_directory=project_root), compression="uncompressed"
@@ -81,13 +83,13 @@ def projected_project(tmp_path: Path) -> Path:
     """Provides a project root carrying the stand-in plan projection.
 
     Args:
-        tmp_path: The temporary directory the project root is created under.
+        tmp_path: The temporary directory under which the project root is created.
 
     Returns:
-        The path to the project root the projection was written into.
+        The path to the project root into which the projection was written.
     """
     project_root = tmp_path.joinpath("Proj")
-    install_projection(project_root=project_root)
+    _install_projection(project_root=project_root)
     return project_root
 
 
@@ -157,7 +159,7 @@ def test_opting_into_detail_adds_the_expensive_fields(projected_project: Path) -
 
 
 def test_an_unknown_pipeline_filter_names_what_is_available(projected_project: Path) -> None:
-    """Verifies that a filter the projection cannot satisfy reports the available values rather than nothing."""
+    """Verifies that a filter that the projection cannot satisfy reports the available values rather than nothing."""
     response = read_project_plan_tool(project_path=str(projected_project), pipelines=["bogus"])
 
     assert not response["success"]

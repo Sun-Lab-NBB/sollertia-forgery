@@ -1,12 +1,12 @@
 # Configuration file for the Sphinx documentation builder.
-import importlib_metadata
+import importlib.metadata
 
 # -- Project information -----------------------------------------------------
 project = 'sollertia-forgery'
 copyright = '2026, Sun (NeuroAI) lab'
-authors = ['Ivan Kondratyev', 'Natalie Yeung', 'Kushaan Gupta']
+author = 'Ivan Kondratyev, Natalie Yeung, Kushaan Gupta'
 # Extracts the project version from the metadata .toml file.
-release = importlib_metadata.version("sollertia-forgery")
+release = importlib.metadata.version("sollertia-forgery")
 
 # -- General configuration ---------------------------------------------------
 extensions = [
@@ -16,7 +16,6 @@ extensions = [
     'sphinx_autodoc_typehints',  # To parse typehints into documentation
 ]
 
-templates_path = ['_templates']
 exclude_patterns = []
 
 # Google-style docstring parsing configuration for napoleon extension
@@ -33,7 +32,6 @@ napoleon_use_param = True
 napoleon_use_rtype = True
 
 # Additional sphinx-typehints configuration
-sphinx_autodoc_typehints = True
 always_document_param_types = False
 typehints_document_rtype = True
 typehints_use_rtype = True

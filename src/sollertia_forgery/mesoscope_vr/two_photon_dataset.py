@@ -104,20 +104,20 @@ def assemble_cindra_dataset(
             missing, its frame count disagrees with the cindra frame count, or the produced alignment does not
             contain exactly the expected number of rows.
     """
-    # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the
-    # authoritative target the pulse alignment below is reconciled against.
+    # Queries the number of frames processed by cindra via a memory-mapped header read. This count is the authoritative
+    # target against which the pulse alignment below is reconciled.
     _, frame_count = np.load(
         file=resolve_array_path(root_path=cindra_data_path, array=RecordingArrays.CELL_FLUORESCENCE), mmap_mode="r"
     ).shape
 
-    # Reads the per-plane sampling rate in Hz from the combined metadata cindra's combination stage wrote. The reader
-    # is cindra's own, which loads the metadata alone and no array, so the archive's layout is stated once by the
-    # library that writes it. The scanning rate derives the expected scan pulse duration window in milliseconds used
-    # to filter the logged scan pulses.
+    # Reads the per-plane sampling rate in Hz from the combined metadata written by cindra's combination stage. The
+    # reader is cindra's own, which loads the metadata alone and no array, so the archive's layout is stated once by the
+    # library that writes it. The scanning rate derives the expected scan pulse duration window in milliseconds used to
+    # filter the logged scan pulses.
     scanning_frequency = CombinedData.load(root_path=cindra_data_path).sampling_rate
     expected_duration_ms = rate_to_interval(rate=scanning_frequency, to_units=TimeUnits.MILLISECOND, as_float=True)
-    min_duration = expected_duration_ms - _SCAN_PULSE_TOLERANCE_MS
-    max_duration = expected_duration_ms + _SCAN_PULSE_TOLERANCE_MS
+    minimum_duration = expected_duration_ms - _SCAN_PULSE_TOLERANCE_MS
+    maximum_duration = expected_duration_ms + _SCAN_PULSE_TOLERANCE_MS
 
     # Loads the mesoscope frame acquisition timestamps collected by the microcontroller logging system during the
     # session's data acquisition.
@@ -159,7 +159,9 @@ def assemble_cindra_dataset(
 
     # Primary alignment path: keeps only those pulses whose duration falls within the expected scan-pulse window.
     frame_aligned_data: pl.DataFrame = (
-        paired_pulses.filter(pl.col("duration_ms").is_between(lower_bound=min_duration, upper_bound=max_duration))
+        paired_pulses.filter(
+            pl.col("duration_ms").is_between(lower_bound=minimum_duration, upper_bound=maximum_duration)
+        )
         .select(
             pl.col("pulse_id").alias("frame"),
             pl.col("pulse_start").alias("time_us"),
@@ -275,7 +277,7 @@ def _discard_unacquired_pulse_runs(frame_aligned_data: pl.DataFrame, raw_data_pa
 
     periods = np.diff(pulse_times)
     breaks = np.flatnonzero(periods > np.median(periods) * _PULSE_RUN_GAP_FACTOR)
-    if breaks.size == 0:
+    if not breaks.size:
         return frame_aligned_data
 
     sizes = _resolve_acquisition_sizes(raw_data_path=raw_data_path)
@@ -356,7 +358,7 @@ def _match_runs_to_acquisitions(run_lengths: list[int], acquisition_sizes: list[
         acquisition.
     """
     run_count, acquisition_count = len(run_lengths), len(acquisition_sizes)
-    if acquisition_count == 0 or acquisition_count > run_count:
+    if not acquisition_count or acquisition_count > run_count:
         return None
 
     best: tuple[int, list[tuple[int, int]]] = (_UNMATCHED_COST, [])
@@ -434,8 +436,7 @@ def _align_pulses_to_scanimage(
     """Aligns microcontroller-logged TTL pulses to ScanImage-acquired frames using ScanImage's per-frame metadata
     archive.
 
-    Serves as the fallback path taken when the duration-tolerance filter on TTL pulses produces fewer rows than the
-    cindra fluorescence frame count. Pulses with no ScanImage frame inside the tolerance window are dropped as noise.
+    Pulses with no ScanImage frame inside the tolerance window are dropped as noise.
 
     Args:
         paired_pulses: The DataFrame of unfiltered paired rising/falling TTL edges with the columns ``pulse_id``,

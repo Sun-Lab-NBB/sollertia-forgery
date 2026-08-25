@@ -1,4 +1,4 @@
-"""Tests for the Mesoscope-VR video sub-dataset assembler and its training-session camera-clock resolver."""
+"""Contains tests for the Mesoscope-VR video sub-dataset assembler and its training-session camera-clock resolver."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import SessionData
 
 _CLOCK_ORIGIN: int = 1_700_000_000_000_000
-"""The microsecond epoch every synthetic camera clock starts at."""
+"""The microsecond epoch at which every synthetic camera clock starts."""
 
 
 def _clock(*offsets_us: int) -> NDArray[np.uint64]:
@@ -87,10 +87,10 @@ def _write_pupil(path: Path, diameter: Sequence[float], blinking: Sequence[bool]
 
 @pytest.fixture
 def video_data_path(tmp_path: Path) -> Path:
-    """Creates the processed video-data directory the assembler and the clock resolver read.
+    """Creates the processed video-data directory read by the assembler and the clock resolver.
 
     Args:
-        tmp_path: The temporary directory the video-data directory is created under.
+        tmp_path: The temporary directory under which the video-data directory is created.
 
     Returns:
         The created directory path.
@@ -130,7 +130,7 @@ def test_assemble_video_dataset_interpolates_the_body_camera_onto_the_reference_
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 10.0, 20.0],
         frame_luminance=[100.0, 110.0, 120.0],
     )
@@ -149,12 +149,12 @@ def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_co
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[1.0, 3.0, 5.0],
         frame_luminance=[10.0, 20.0, 30.0],
     )
     _write_pupil(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
         diameter=[20.0, 30.0, 40.0],
         blinking=[True, False, True],
     )
@@ -169,7 +169,8 @@ def test_assemble_video_dataset_interpolates_the_face_camera_energy_and_pupil_co
     ]
     assert assembled[f"{PUPIL_CAMERA_NAME}_motion_energy"].to_list() == pytest.approx([2.0, 4.0, 5.0])
     assert assembled[PupilColumn.PUPIL_DIAMETER_PX].to_list() == pytest.approx([25.0, 35.0, 40.0])
-    # A boolean state cannot be blended, so each flag takes the value of the frame that precedes the reference sample.
+    # A boolean state cannot be blended, so each flag takes the value of the last frame acquired at or before the
+    # reference sample.
     assert assembled.schema[PupilColumn.BLINKING_STATE] == pl.UInt8
     assert assembled[PupilColumn.BLINKING_STATE].to_list() == [1, 0, 1]
 
@@ -180,12 +181,12 @@ def test_assemble_video_dataset_skips_a_camera_whose_clock_is_absent(
     # Only the body camera recorded, yet the face camera's energy feather is present from an earlier partial run.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 8.0],
         frame_luminance=[1.0, 9.0],
     )
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[0.0, 1.0],
         frame_luminance=[2.0, 3.0],
     )
@@ -200,7 +201,7 @@ def test_assemble_video_dataset_skips_a_face_camera_carrying_no_pupil_feather(
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_ENERGY),
         motion_energy=[0.0, 4.0],
         frame_luminance=[1.0, 5.0],
     )
@@ -215,7 +216,7 @@ def test_assemble_video_dataset_rejects_an_energy_feather_disagreeing_with_the_c
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_TIMESTAMPS), _clock(0, 1000, 2000))
     _write_energy(
-        video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
+        path=video_data_path.joinpath(VideoDataFiles.BODY_CAMERA_ENERGY),
         motion_energy=[0.0, 4.0],
         frame_luminance=[1.0, 5.0],
     )
@@ -229,7 +230,9 @@ def test_assemble_video_dataset_rejects_a_pupil_feather_disagreeing_with_the_clo
 ) -> None:
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(0, 1000))
     _write_pupil(
-        video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL), diameter=[20.0, 30.0, 40.0], blinking=[True] * 3
+        path=video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_PUPIL),
+        diameter=[20.0, 30.0, 40.0],
+        blinking=[True] * 3,
     )
 
     with pytest.raises(ValueError, match=re.escape("has 3 rows, but the")):
@@ -290,8 +293,8 @@ def test_resolve_slowest_camera_clock_rejects_a_clock_whose_frames_run_backwards
     video_data_path: Path, write_camera_timestamps: Callable[[Path, NDArray[np.uint64]], Path]
 ) -> None:
     # The timestamps are unsigned, so an out-of-order feather's endpoint difference wraps to a span of roughly six
-    # hundred thousand years. That reads as the slowest camera in the session and would be handed back as the
-    # reference clock every other data source is interpolated onto, so the span is measured in floating point.
+    # hundred thousand years. That reads as the slowest camera in the session and would be handed back as the reference
+    # clock onto which every other data source is interpolated, so the span is measured in floating point.
     write_camera_timestamps(video_data_path.joinpath(VideoDataFiles.FACE_CAMERA_TIMESTAMPS), _clock(5000, 1000))
 
     with pytest.raises(FileNotFoundError, match=re.escape("spanning a positive duration")):

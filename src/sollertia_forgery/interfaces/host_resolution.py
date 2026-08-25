@@ -1,4 +1,4 @@
-"""Provides the shared host resolution every tool that takes a ``host`` parameter routes through."""
+"""Provides the shared host resolution used by every tool that takes a ``host`` parameter."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from ..orchestration import ExecutionHost
 
 HOST_LABELS: frozenset[str] = frozenset({LOCAL_HOST_LABEL, REMOTE_HOST_LABEL})
-"""The hosts a tool may be pointed at, which is this machine or the configured compute server."""
+"""The hosts a tool may target, which is this machine or the configured compute server."""
 
 
 def unsupported_host_message(host: str) -> str:
@@ -42,7 +42,7 @@ def resolve_execution_host(host: str) -> Iterator[ExecutionHost]:
         host: Either ``local`` for this machine or ``remote`` for the configured compute server.
 
     Yields:
-        The execution host the operation runs against.
+        The execution host against which the operation runs.
     """
     if host == REMOTE_HOST_LABEL:
         with connect_to_server() as server:
@@ -52,14 +52,12 @@ def resolve_execution_host(host: str) -> Iterator[ExecutionHost]:
 
 
 def resolve_readable_project(project_path: str, host: str) -> Path:
-    """Resolves the directory a read tool opens a project's artifacts from.
+    """Resolves the directory from which a read tool opens a project's artifacts.
 
     Notes:
-        A remote project is mirrored onto this machine and read from the mirror, which is what lets one reader serve
-        both hosts. The mirror keeps the project directory's name, so every artifact keeps the filename its writer
-        derived from the project. Mirroring leaves the server's artifacts as they stand, so regeneration stays a
-        deliberate act performed by ``generate_project_manifest_tool``, ``generate_dataset_state_tool``, and a
-        batch's closure.
+        A remote project is mirrored onto this machine and read from the mirror, so one reader serves both hosts. The
+        mirror keeps the project directory's name, so every artifact keeps the filename its writer derived from the
+        project. Mirroring leaves the server's artifacts as they stand, so a read never regenerates them.
 
     Args:
         project_path: The path to the project's root directory. A local read opens this path as given. A remote read

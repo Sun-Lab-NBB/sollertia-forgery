@@ -24,34 +24,34 @@ _LOCK_TIMEOUT_SECONDS: float = 20.0
 
 @dataclass(frozen=True, slots=True)
 class RemoteSubmission:
-    """Records one prepared job and the scheduler allocation it was submitted as.
+    """Records one prepared job and the scheduler allocation carrying it.
 
     Notes:
-        The job identifier says which stage of which unit this is and the allocation identifier is what the scheduler
-        is queried with, so a status read needs both.
+        The job identifier says which stage of which unit this is, and the scheduler is queried by the allocation
+        identifier, so a status read needs both.
     """
 
     job_id: str = ""
-    """The job identifier, which is both the key the project job artifact records this job under and the key that
-    joins a pulled artifact to this record."""
+    """The job identifier, which is both the key under which the project job artifact records this job and the key
+    that joins a pulled artifact to this record."""
     slurm_job_id: str = ""
     """The identifier the scheduler assigned to this allocation."""
     slurm_job_name: str = ""
     """The name the allocation carries in the scheduler's queue."""
     pipeline: str = ""
-    """The pipeline this job belongs to."""
+    """The pipeline that owns this job."""
     job_name: str = ""
     """The tracker job name identifying this job's stage."""
     specifier: str = ""
     """The specifier differentiating this job from others of its stage within the same unit."""
     unit_path: str = ""
-    """The path, on the server, to the processing unit this job operates on."""
+    """The path, on the server, to the processing unit on which this job operates."""
     unit_name: str = ""
-    """The name of the processing unit this job operates on."""
+    """The name of the processing unit on which this job operates."""
     cores: int = 1
     """The cores the allocation requested."""
     memory_mb: int = 0
-    """The memory estimate this allocation was sized from, in megabytes. The scheduler request itself is this figure
+    """The memory estimate that sized this allocation, in megabytes. The scheduler request itself is this figure
     rounded up to whole gigabytes and floored at one."""
     output_log: str = ""
     """The path, on the server, to the file collecting this allocation's standard output."""
@@ -67,11 +67,11 @@ class SubmissionBatch:
     """The identifier the preparation issued, which also names the batch's directory on the server."""
     batch_ids: list[str] = field(default_factory=list)
     """Every prepared batch this submission dispatched, since one submission may span several. Empty for a record
-    written before the field existed, which covers the single batch ``batch_id`` names."""
+    written before the field existed, which covers the single batch that ``batch_id`` names."""
     batch_directory: str = ""
     """The path, on the server, to the directory holding this batch's scripts and logs."""
     submitted_at: int = 0
-    """The UTC timestamp (microsecond-precision epoch) the batch was submitted at."""
+    """The UTC timestamp (microsecond-precision epoch) at which the batch was submitted."""
     walltime_minutes: int = 0
     """The wall-time every allocation of this batch requested."""
     submissions: list[RemoteSubmission] = field(default_factory=list)
@@ -79,12 +79,12 @@ class SubmissionBatch:
 
     @property
     def pipelines(self) -> list[str]:
-        """Returns the pipelines this batch holds jobs for."""
+        """Returns the pipelines whose jobs this batch holds."""
         return sorted({submission.pipeline for submission in self.submissions})
 
     @property
     def covered_batch_ids(self) -> list[str]:
-        """Returns every prepared batch this submission dispatched, which is what closure snapshots an outcome for."""
+        """Returns every prepared batch this submission dispatched. Closure snapshots an outcome for each."""
         return list(self.batch_ids) if self.batch_ids else [self.batch_id]
 
 
@@ -107,7 +107,7 @@ class SubmissionLedger(YamlConfig):
         return next((batch for batch in self.batches if batch.batch_id == batch_id), None)
 
 
-def ledger_path() -> Path:
+def _ledger_path() -> Path:
     """Returns the path to the submission ledger.
 
     This is the single source of the ledger's location, so every reader and writer derives the same path.
@@ -124,7 +124,7 @@ def read_ledger() -> SubmissionLedger:
     Returns:
         The recorded ledger.
     """
-    path = ledger_path()
+    path = _ledger_path()
     if not path.is_file():
         return SubmissionLedger()
     return SubmissionLedger.from_yaml(file_path=path)
@@ -154,8 +154,8 @@ def batch_is_settled(batch: SubmissionBatch, statuses: dict[str, JobStatus]) -> 
     """Returns True when every allocation the batch holds has reached a state it never leaves.
 
     Notes:
-        An allocation the status map does not cover counts as unfinished, so a partial query never reports a batch it
-        did not fully observe as settled.
+        An allocation that the status map does not cover counts as unfinished, so a partial query never reports as
+        settled a batch it did not fully observe.
 
     Args:
         batch: The batch to test.
@@ -166,15 +166,15 @@ def batch_is_settled(batch: SubmissionBatch, statuses: dict[str, JobStatus]) -> 
     )
 
 
-def retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
+def _retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
     """Drops every batch whose allocations have all reached a state they never leave.
 
     Notes:
         A finished batch is dropped because the ledger names outstanding allocations alone. What its jobs produced is
         read from the project job artifact.
 
-        An allocation the query did not cover counts as unfinished, so a partial query never retires a batch it did
-        not fully observe.
+        An allocation that the query did not cover counts as unfinished, so a partial query never retires a batch it
+        did not fully observe.
 
     Args:
         statuses: The observed state of each allocation, keyed by its scheduler identifier.
@@ -200,7 +200,7 @@ def retire_settled_batches(statuses: dict[str, JobStatus]) -> list[str]:
 
 
 def forget_batches(batch_ids: Sequence[str]) -> list[str]:
-    """Drops the named batches from the ledger, whatever state their allocations are in.
+    """Drops the named batches from the ledger, whatever state their allocations hold.
 
     Args:
         batch_ids: The identifiers of the batches to drop.
@@ -221,7 +221,7 @@ def forget_batches(batch_ids: Sequence[str]) -> list[str]:
 
 
 def resolve_batches(ledger: SubmissionLedger, batch_ids: Sequence[str] | None = None) -> list[SubmissionBatch]:
-    """Resolves the batches a status or cancellation applies to.
+    """Resolves the batches to which a status or cancellation applies.
 
     Args:
         ledger: The recorded ledger.
@@ -249,7 +249,7 @@ def _save_ledger(ledger: SubmissionLedger) -> None:
     Args:
         ledger: The ledger to write.
     """
-    path = ledger_path()
+    path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     ledger.to_yaml(file_path=path)
 
@@ -263,6 +263,6 @@ def _ledger_lock() -> FileLock:
     Raises:
         Timeout: If the lock cannot be acquired within the timeout period.
     """
-    path = ledger_path()
+    path = _ledger_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     return FileLock(str(path.with_suffix(path.suffix + ".lock"))).acquire(timeout=_LOCK_TIMEOUT_SECONDS)  # type: ignore[return-value]

@@ -49,16 +49,18 @@ def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]
     """Starts the agentic Model Context Protocol server using the requested transport.
 
     The 'stdio' transport exchanges messages over the standard input and output streams of this process, which is the
-    transport local agent clients are expected to use. The 'sse' and 'streamable-http' transports instead serve the
+    transport that local agent clients are expected to use. The 'sse' and 'streamable-http' transports instead serve the
     same tools over the network, which is how remote agent clients reach a server running on the processing host.
     """
+    # Importing at module level runs '_register_tool_modules', which imports every MCP tool module and the
+    # pipelines they reach, so every 'slf' subcommand would pay that cost at startup.
     from .mcp_server import run_server  # noqa: PLC0415
 
-    # The stdio transport sends the JSON-RPC messages over stdout, which is also the stream the console writes all
-    # messages up to the WARNING level to. Since the MCP tools drive the processing pipelines, which echo status
-    # updates as they work, the console has to be silenced: any echoed line lands inside a JSON-RPC message and makes
-    # it unparsable for the connected client. The network transports leave stdout unused, so the console stays on and
-    # reports that the server has started.
+    # The stdio transport sends the JSON-RPC messages over stdout, which is also where the console writes every message
+    # up to the WARNING level. Since the MCP tools drive the processing pipelines, which echo status updates as they
+    # work, the console has to be silenced: any echoed line lands inside a JSON-RPC message and makes it unparsable for
+    # the connected client. The network transports leave stdout unused, so the console stays on and reports that the
+    # server has started.
     if transport == "stdio":
         console.disable()
     else:
@@ -88,7 +90,7 @@ def run_mcp_server_command(transport: Literal["stdio", "sse", "streamable-http"]
     type=click.Path(exists=False, file_okay=True, dir_okay=False, path_type=Path),
     required=False,
     default=None,
-    help="The path to write the link to. Omit to derive it from the directory the dynamic loader searches by default.",
+    help="The path receiving the link. Omit to derive it from the directory the dynamic loader searches by default.",
 )
 @click.option(
     "-f",

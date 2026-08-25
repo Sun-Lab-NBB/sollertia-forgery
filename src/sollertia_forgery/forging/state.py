@@ -1,4 +1,4 @@
-"""Provides the dataset state artifact that serializes every forging job the dataset's tracker records into one
+"""Provides the dataset state artifact that serializes every forging job recorded by the dataset's tracker into one
 shippable table.
 """
 
@@ -26,22 +26,21 @@ if TYPE_CHECKING:
     from sollertia_shared_assets import DatasetData
 
 DATASET_STATE_FILENAME: str = "dataset_state.feather"
-"""The filename of the dataset state artifact, written at the dataset's root beside its forging tracker. The remote
-backend resolves the same artifact from a server path, without loading the dataset."""
+"""The filename of the dataset state artifact, written at the dataset's root beside its forging tracker."""
 
 _LOCK_TIMEOUT_SECONDS: float = 20.0
 """The period a writer waits for the state file's lock before giving up, matching the project manifest's writer."""
 
-ANIMAL_SCOPE: str = "animal"
+_ANIMAL_SCOPE: str = "animal"
 """The scope label of a forging job specified by the animal it processes."""
 
-SESSION_SCOPE: str = "session"
+_SESSION_SCOPE: str = "session"
 """The scope label of a forging job specified by the session it processes."""
 
-DATASET_JOB_SCOPES: dict[str, str] = {
-    MULTIDAY_DISCOVERY_JOB_NAME: ANIMAL_SCOPE,
-    MULTIDAY_EXTRACTION_JOB_NAME: SESSION_SCOPE,
-    FORGING_JOB_NAME: SESSION_SCOPE,
+_DATASET_JOB_SCOPES: dict[str, str] = {
+    MULTIDAY_DISCOVERY_JOB_NAME: _ANIMAL_SCOPE,
+    MULTIDAY_EXTRACTION_JOB_NAME: _SESSION_SCOPE,
+    FORGING_JOB_NAME: _SESSION_SCOPE,
 }
 """Maps each forging job name to the unit its specifier names.
 
@@ -51,7 +50,7 @@ Notes:
     assuming the specifier names a session.
 """
 
-DATASET_STATE_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
+_DATASET_STATE_SCHEMA: dict[str, pl.datatypes.classes.DataTypeClass | pl.DataType] = {
     "dataset": pl.String,
     "animal": pl.String,
     "session": pl.String,
@@ -98,12 +97,12 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
             reads a single tracker, so no progress bar is displayed.
 
     Returns:
-        The path the state artifact was written to.
+        The path to which the state artifact was written.
 
     Raises:
         Timeout: If the state file's lock cannot be acquired within the timeout period.
         ValueError: If the dataset's forging tracker records a job name that declares no scope in
-            ``DATASET_JOB_SCOPES``.
+            ``_DATASET_JOB_SCOPES``.
     """
     state_path = dataset_state_path(dataset=dataset)
     lock = FileLock(str(state_path.with_suffix(state_path.suffix + ".lock")))
@@ -111,7 +110,7 @@ def generate_dataset_state(dataset: DatasetData, *, display_progress: bool = Fal
     with lock.acquire(timeout=_LOCK_TIMEOUT_SECONDS):
         rows = _build_job_rows(dataset=dataset)
         frame = natural_sort(
-            frame=pl.DataFrame(data=rows, schema=DATASET_STATE_SCHEMA, strict=False),
+            frame=pl.DataFrame(data=rows, schema=_DATASET_STATE_SCHEMA, strict=False),
             by=["animal", "session", "job_name"],
             nulls_last=True,
         )
@@ -156,24 +155,24 @@ def _build_job_rows(dataset: DatasetData) -> list[dict[str, str | int | None]]:
 
     animal_of_session = {entry.session: entry.animal for entry in dataset.sessions}
 
-    unscoped = natsorted({entry["job_name"] for entry in jobs if entry["job_name"] not in DATASET_JOB_SCOPES})
+    unscoped = natsorted({entry["job_name"] for entry in jobs if entry["job_name"] not in _DATASET_JOB_SCOPES})
     if unscoped:
         message = (
             f"Unable to serialize the state of dataset '{dataset.name}'. Its forging tracker records job name(s) "
-            f"{unscoped}, which declare no scope. Every forging job name must declare the unit its specifier names "
-            f"in DATASET_JOB_SCOPES."
+            f"{unscoped}, which declare no scope. Every forging job name must declare, in _DATASET_JOB_SCOPES, the "
+            f"unit that its specifier names."
         )
         console.error(message=message, error=ValueError)
 
     rows: list[dict[str, str | int | None]] = []
     for entry in jobs:
-        scope = DATASET_JOB_SCOPES[entry["job_name"]]
+        scope = _DATASET_JOB_SCOPES[entry["job_name"]]
         specifier = entry["specifier"]
-        session = specifier if scope == SESSION_SCOPE else None
+        session = specifier if scope == _SESSION_SCOPE else None
         rows.append(
             {
                 "dataset": dataset.name,
-                "animal": specifier if scope == ANIMAL_SCOPE else animal_of_session.get(specifier),
+                "animal": specifier if scope == _ANIMAL_SCOPE else animal_of_session.get(specifier),
                 "session": session,
                 "scope": scope,
                 "job_id": entry["job_id"],

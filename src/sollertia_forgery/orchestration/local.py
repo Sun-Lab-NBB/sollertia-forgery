@@ -31,7 +31,7 @@ forward this to ``resolve_worker_count``, which applies it only to a non-positiv
 budget up to the logical core count."""
 
 _WORKER_THREAD_CEILING: int = 1
-"""The number of threads each pool worker pins its library thread pools to. Every job type either runs
+"""The number of threads to which each pool worker pins its library thread pools. Every job type either runs
 single-threaded, raises its own thread count once it starts, or fans out into a sub-pool whose children each cost the
 single core the allocation budgeted for them."""
 
@@ -42,33 +42,34 @@ size cannot be resized once the worker has imported the library that owns them.
 Notes:
     polars builds its thread pool as it is imported, exposes no runtime setter, and is not one of the pools
     ``threadpool_limits`` manages, so the only moment its width can be chosen is before the child process imports it.
-    Every job type that uses polars in the executor process itself declares a single core, so one thread is the width
-    that matches what those jobs were admitted at.
+    One pool serves every job type, so the width has to be chosen once for all of them rather than per job. The job
+    types that lean on polars for their own work are therefore pinned to one thread whatever core weight they hold,
+    and a wider allocation buys those stages no extra dataframe threads.
 
     The BLAS and OpenMP variables are deliberately absent, which is why this narrower tuple stands in for the shared
     ``limit_worker_threads`` context that pins all of them. Their pools are resized at runtime for the duration of
     each job, which holds every job to its own core weight rather than to one width shared by every job a worker
-    runs. A BLAS backend that reads its variable at load also treats the value it read as the widest pool it will
-    ever allocate buffers for, so pinning it here would cap the compute stages at one thread for the life of the
+    runs. A BLAS backend that reads its variable at load also treats the value it read as the widest pool for which
+    it will ever allocate buffers, so pinning it here would cap the compute stages at one thread for the life of the
     worker and leave the per-job resize with nothing to raise.
 """
 
 _LIVENESS_WAIT_SECONDS: float = 10 * 60
-"""The longest the manager blocks on a running job before looking at its state again. A job finishing is the only
-event the loop acts on, so this bound never governs a healthy batch and exists so a future that never resolves
-cannot stall the manager for good."""
+"""The longest the manager blocks on a running job before looking at its state again. The loop acts on a job
+finishing alone, so this bound never governs a healthy batch and exists so a future that never resolves cannot stall
+the manager for good."""
 
 
 @dataclass(frozen=True, slots=True)
-class JobAllocation:
+class _JobAllocation:
     """Describes the cores the host can supply for one job of a type and how many of its jobs may run at once."""
 
     cores_per_job: int
     """The cores the host can supply for one job of this type, resolved from the widest job the type holds. Sizing is
     per job rather than per type, so dispatch caps each job at this width instead of running every job at it, and a
-    job the sizing pass placed below it keeps the narrower width its own model chose."""
+    job that the sizing pass placed below it keeps the narrower width its own model chose."""
     maximum_parallel: int
-    """The jobs of this type that may run at once, which is what the core budget alone would allow narrowed by any
+    """The jobs of this type that may run at once, which is what the core budget alone would allow, narrowed by any
     concurrency limit the type declares. Reported for the caller's planning, since admission weighs each running job
     against both budgets and the limit directly."""
     concurrency_limit: int | None = None
@@ -76,13 +77,13 @@ class JobAllocation:
     Reported alongside the resolved concurrency so a caller reading a maximum below the core budget's own can tell
     which term produced it. This ceiling holds however much capacity is idle."""
     concurrency_reservation: int | None = None
-    """The concurrency this type is held to while other work can use the capacity it gives up, or None when it
+    """The concurrency reserved for this type while other work can use the capacity it gives up, or None when it
     competes at its full width. A reserved type runs at this count while other jobs are runnable and widens toward
     ``maximum_parallel`` once nothing else claims the room, so both numbers describe it."""
 
 
 @dataclass(slots=True)
-class ActiveJob[PendingJobT: PendingJob]:
+class _ActiveJob[PendingJobT: PendingJob]:
     """Tracks a single pending job currently executing as a ``Future`` on the shared process pool."""
 
     job: PendingJobT
@@ -110,7 +111,7 @@ class JobExecutionState[PendingJobT: PendingJob]:
     """All submitted jobs keyed by ``(unit_path, job_id)`` dispatch key."""
     pending_jobs: deque[PendingJobT] = field(default_factory=deque)
     """Jobs awaiting dispatch, held in the order the next admission pass considers them."""
-    active_jobs: list[ActiveJob[PendingJobT]] = field(default_factory=list)
+    active_jobs: list[_ActiveJob[PendingJobT]] = field(default_factory=list)
     """Jobs currently executing on the shared process pool."""
     core_budget: int = 1
     """The cores the batch may commit across all concurrently running jobs."""
@@ -126,13 +127,13 @@ class JobExecutionState[PendingJobT: PendingJob]:
     by tracker job name. Admission offers that capacity to every other runnable job first and then releases the
     reservation over whatever remains, so a reserved type widens rather than idling the host."""
     dispatch_priorities: dict[tuple[str, str], int] = field(default_factory=dict)
-    """The cores each job's transitive dependents commit, keyed by dispatch key, which is the weight admission
-    considers candidates in. Resolved once from the job set when the manager starts, since the batch's dependency
+    """The cores each job's transitive dependents commit, keyed by dispatch key, which is the weight by which
+    admission orders candidates. Resolved once from the job set when the manager starts, since the batch's dependency
     graph does not change while it runs."""
     pool_size: int = 1
     """The number of worker processes the pool spawns."""
     thread_ceiling: int = _WORKER_THREAD_CEILING
-    """The thread count each worker pins its library thread pools to."""
+    """The thread count to which each worker pins its library thread pools."""
     succeeded_job_keys: set[tuple[str, str]] = field(default_factory=set)
     """The dispatch keys of the jobs known to have succeeded, seeded from the trackers and extended as jobs finish."""
     failed_job_keys: set[tuple[str, str]] = field(default_factory=set)
@@ -153,7 +154,7 @@ def resolve_core_allocations(
     core_budget: int,
     job_limits: dict[str, int] | None = None,
     job_reservations: dict[str, int] | None = None,
-) -> dict[str, JobAllocation]:
+) -> dict[str, _JobAllocation]:
     """Resolves the cores the host can supply for one job of each queued job type and how many of its jobs run at once.
 
     Notes:
@@ -162,21 +163,21 @@ def resolve_core_allocations(
         representative, because sizing is per job and one type can hold jobs of several widths. Dispatch then caps
         each job at the count resolved here rather than dispatching every job of the type at it, so a narrower job
         keeps the width its own sizing pass chose. The concurrency that follows is the budget divided by that count,
-        narrowed again by any ceiling the type declares for itself. The core term the engine treats as a guide, since
-        admission weighs every running job against the same budget at that job's own width, while the declared ceiling
-        admission enforces exactly.
+        narrowed again by any ceiling the type declares for itself. The engine treats the core term as a guide, since
+        admission weighs every running job against the same budget at that job's own width, while it enforces the
+        declared ceiling exactly.
 
         A job type with no registered allocation stops the batch, since dispatching it would run it at a width
         nobody chose.
 
     Args:
         job_cores: The cores the widest job of each type occupies, keyed by tracker job name, which is the
-            representative width the type's allocation is resolved from.
+            representative width from which the type's allocation is resolved.
         job_names: The job type names present in the batch.
         core_budget: The cores the batch may commit across all concurrently running jobs.
         job_limits: The concurrent-job ceilings the job types declare beyond the budgets, keyed by tracker job name.
             Only the types that declare one appear, and passing nothing bounds every type by the budgets alone.
-        job_reservations: The concurrency the job types are held to while other work can use the capacity they give
+        job_reservations: The concurrency reserved for the job types while other work can use the capacity they give
             up, keyed by tracker job name. Only the types that declare one appear, and passing nothing lets every
             type compete at its full width.
 
@@ -196,12 +197,12 @@ def resolve_core_allocations(
 
     limits = job_limits if job_limits is not None else {}
     reservations = job_reservations if job_reservations is not None else {}
-    allocations: dict[str, JobAllocation] = {}
+    allocations: dict[str, _JobAllocation] = {}
     for job_name in job_names:
         cores = max(1, min(job_cores[job_name], core_budget))
         limit = limits.get(job_name)
         parallel = max(1, core_budget // cores)
-        allocations[job_name] = JobAllocation(
+        allocations[job_name] = _JobAllocation(
             cores_per_job=cores,
             maximum_parallel=parallel if limit is None else min(parallel, limit),
             concurrency_limit=limit,
@@ -258,7 +259,7 @@ def job_execution_manager[PendingJobT: PendingJob](state: JobExecutionState[Pend
                 # Reaps finished futures and frees their share of both budgets. Each result is drained and its
                 # exception discarded, because a worker records its own outcome on the tracker before returning and
                 # the tracker is what the status tool and the ordering logic both read.
-                still_active: list[ActiveJob[PendingJobT]] = []
+                still_active: list[_ActiveJob[PendingJobT]] = []
                 completed_any = False
                 for active in state.active_jobs:
                     if active.future.done():
@@ -314,6 +315,23 @@ def group_jobs_by_tracker[PendingJobT: PendingJob](
     return tracker_jobs
 
 
+def apply_decode_thread_ceiling(cores: int) -> None:
+    """Bounds the default image-decode width of the calling process, from the cores one job holds.
+
+    Notes:
+        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
+        life of the process. The last write before that first decode is therefore the one every read in that worker
+        sees, and every write after it reaches nothing.
+
+        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
+        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
+
+    Args:
+        cores: The cores the job about to run holds.
+    """
+    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(TIFF_DECODE_CEILING, cores)))
+
+
 @contextlib.contextmanager
 def _pinned_pool_imports() -> Iterator[None]:
     """Pins the thread pools a spawned worker sizes while importing, then restores the environment.
@@ -342,23 +360,6 @@ def _pinned_pool_imports() -> Iterator[None]:
                 os.environ[variable] = value
 
 
-def apply_decode_thread_ceiling(cores: int) -> None:
-    """Bounds the default image-decode width of the calling process, from the cores one job holds.
-
-    Notes:
-        tifffile resolves this variable the first time a decode asks for a default width and holds the result for the
-        life of the process. The value a pool worker writes as it starts is therefore the one every read in that
-        worker sees, and a later write in the same process reaches nothing.
-
-        cindra names its own decode width on each read, so the image conversion stage sizes its pool from the cores
-        the batch allocated it rather than from this bound. What this bounds is any other TIFF read a worker performs.
-
-    Args:
-        cores: The cores the job about to run holds.
-    """
-    os.environ["TIFFFILE_NUM_THREADS"] = str(max(1, min(TIFF_DECODE_CEILING, cores)))
-
-
 def _initialize_worker_threads(
     thread_ceiling: int = _WORKER_THREAD_CEILING,
     console_disabled: bool = False,  # noqa: FBT001, FBT002 - pool initargs are positional.
@@ -372,12 +373,12 @@ def _initialize_worker_threads(
         unpinned environment when the worker imported it. A job that needs more threads raises its own count once it
         starts, which numba permits up to that latched ceiling.
 
-        The OpenCV core thread count is pinned here rather than there, because it is a runtime setter that library
-        declines to reach for. Its FFmpeg decoder reads a variable of its own and is covered by the shared pin.
+        The OpenCV core thread count is pinned here rather than there, because that library declines to reach for its
+        runtime setter. Its FFmpeg decoder reads a variable of its own and is covered by the shared pin.
 
         The shared pin writes the image-decode width at the same count as every other backend, so the decode ceiling
         is reapplied over it and a worker starting at a wider count still opens no wider a decode pool than a decode
-        gains from.
+        uses.
 
         A spawned worker re-imports the library rather than inheriting the parent's modules, so it comes up with a
         freshly enabled console however the parent left its own. Since the worker also inherits the parent's standard
@@ -385,7 +386,7 @@ def _initialize_worker_threads(
         that silenced its own is mirrored.
 
     Args:
-        thread_ceiling: The number of threads each library thread pool is pinned to.
+        thread_ceiling: The number of threads to which each library thread pool is pinned.
         console_disabled: Determines whether the parent process silenced its console, which the worker mirrors.
     """
     ceiling = max(1, thread_ceiling)
@@ -428,7 +429,7 @@ def _refresh_job_outcomes[PendingJobT: PendingJob](state: JobExecutionState[Pend
         earlier batch and were never queued in this one. That is how a run asking only for a pipeline's later stages
         still resolves its ordering.
 
-        Each tracker's jobs are recorded under the unit that tracker belongs to, matching how a job's dispatch key is
+        Each tracker's jobs are recorded under the unit that owns that tracker, matching how a job's dispatch key is
         formed, so one unit's completed stage never satisfies another unit's. Units are paired with their trackers
         rather than read from them, because a tracker file states which jobs it holds and not which unit holds it.
 
@@ -460,9 +461,9 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
         A job type that declares a concurrency limit is held to it by a third admission term, counted from the
         running set the same way. The budgets bound what the host can supply, which leaves a job type whose pace is
         set by storage throughput free to open far more streams than the array serves. The limit bounds that
-        directly, so those types stay at the concurrency they gain from rather than the concurrency the cores allow.
-        Idle capacity never lifts that ceiling, since a type held by it waits on a resource the idle capacity does
-        not supply.
+        directly, so those types stay at the concurrency their throughput justifies rather than the concurrency
+        the cores allow. Idle capacity never lifts that ceiling, since a type held by it waits on a resource the
+        idle capacity does not supply.
 
         A job type that declares a reservation is held to it only while other jobs can use the capacity it gives up.
         Admission runs a second pass over what the first deferred, with the reservations released, so a reserved
@@ -483,7 +484,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
 
     Args:
         state: The active job execution state. Its pending queue is rebuilt from the jobs that were not admitted.
-        pool: The process pool the admitted jobs are submitted into.
+        pool: The process pool that receives the admitted jobs.
     """
     used_cores = sum(active.job.core_weight for active in state.active_jobs)
     used_memory = sum(active.job.memory_mb for active in state.active_jobs)
@@ -499,8 +500,8 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
         )
     )
 
-    # The first pass holds every reservation, which offers the capacity a reserved type gives up to every other
-    # runnable job. The second pass releases the reservations over whatever capacity that left, so a reserved type
+    # The first pass holds every reservation, which offers to every other runnable job the capacity a reserved type
+    # gives up. The second pass releases the reservations over whatever capacity that left, so a reserved type
     # widens instead of idling the host once nothing else can use the room. A batch holding no reserved type at all
     # settles in the first pass, since the second would only rescan jobs no term newly admits.
     passes = (True, False) if state.concurrency_reservations else (True,)
@@ -542,7 +543,7 @@ def _admit_pending_jobs[PendingJobT: PendingJob](
                 continue
 
             future = pool.submit(state.worker, job)
-            state.active_jobs.append(ActiveJob(job=job, future=future))
+            state.active_jobs.append(_ActiveJob(job=job, future=future))
             used_cores += job.core_weight
             used_memory += job.memory_mb
             running_counts[job.job_name] = running + 1

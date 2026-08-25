@@ -1,5 +1,5 @@
-"""Provides the Model Context Protocol (MCP) tools for defining the dataset hierarchy a forging batch runs against and
-for snapshotting the state of its forging jobs.
+"""Provides the Model Context Protocol (MCP) tools for defining the dataset hierarchy against which a forging batch runs
+and for snapshotting the state of its forging jobs.
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ _DATASET_SEMI_FIELDS: tuple[str, ...] = (
 counts, since reading them opens one stored table per dataset."""
 
 _STATE_AXES: tuple[str, ...] = ("scope", "animal", "job_name", "status")
-"""The snapshot columns a caller may filter by, and the axes its breakdown counts."""
+"""The snapshot columns by which a caller may filter, and the axes its breakdown counts."""
 
 _STATE_SEMI_FIELDS: tuple[str, ...] = ("animal", "session", "scope", "job_name", "specifier", "status", "job_id")
 """The job fields a semi-detail listing carries. ``job_id`` is included because it is the identifier a reset
@@ -79,14 +79,13 @@ def define_forging_dataset_tool(
     Every forging job runs against a hierarchy this tool established, so a dataset is defined here before its jobs
     are prepared, and preparing a dataset this tool has not built reports an error. A per-animal configuration is
     written only for the animals whose acquisition system resolves a multi-recording configuration, which is the
-    case for sessions carrying two-photon imaging data. The batch layer names the cores a cross-recording job runs
-    under on the command that dispatches it, so the configuration file carries the recording set and the progress flag
-    alone.
+    case for sessions carrying two-photon imaging data. The configuration file carries the recording set, the
+    qualified dataset name, and the progress flag.
 
-    Provided sessions the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
-    animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged
-    for the sessions it keeps. Name that animal in ``recreate_animals`` to rebuild it from the provided sessions
-    while every other animal keeps its data, which also returns that animal's tracked jobs to the scheduled state.
+    Provided sessions that the dataset does not hold are appended, so a dataset grows by naming the sessions to add. An
+    animal already in the dataset is frozen, because widening its session set invalidates the outputs already forged for
+    the sessions it keeps. Name that animal in ``recreate_animals`` to rebuild it from the provided sessions while every
+    other animal keeps its data, which also returns that animal's tracked jobs to the scheduled state.
 
     Args:
         project_path: The path to the project's root directory holding the animal and session data directories. The
@@ -102,9 +101,9 @@ def define_forging_dataset_tool(
             provided session list. Mutually exclusive with ``recreate_animals``.
 
     Returns:
-        A response dict with the ``dataset_name``, the ``dataset_path`` the hierarchy was built at, the
-        ``tracker_path`` its jobs record on, the ``session_count`` and ``animal_count`` the dataset now holds, and
-        the ``animals`` it covers. Returns an error when the resolution policy rejects the request.
+        A response dict with the ``dataset_name``, the ``dataset_path`` at which the hierarchy was built, the
+        ``tracker_path`` recording its jobs, the ``session_count`` and ``animal_count`` the dataset now holds, and the
+        ``animals`` it covers. Returns an error when the resolution policy rejects the request.
     """
     if host not in HOST_LABELS:
         return error_response(message=unsupported_host_message(host=host))
@@ -161,8 +160,8 @@ def generate_dataset_state_tool(dataset_paths: list[str], host: str = "local") -
 
     Reads the dataset's forging tracker and rewrites the snapshot, so it is cheap enough to run before deciding
     what to forge and again once a run finishes. A ``local`` snapshot reports a dataset it cannot read in its own entry
-    and leaves the others alone, while a ``remote`` snapshot fails the whole call, since one server-side invocation
-    covers every named dataset.
+    and leaves the others alone, while a ``remote`` snapshot fails the whole call, since one failure anywhere in the
+    server-side sequence aborts it.
 
     Args:
         dataset_paths: The dataset root directories to snapshot, which are paths ON THE SERVER for ``remote``.
@@ -241,7 +240,7 @@ def read_dataset_state_tool(
         status: Restricts the listing to one tracker status, such as ``FAILED``.
         limit: The jobs to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         include_items: Determines whether to list jobs when no filter is named.
         detailed: Determines whether the listed jobs carry the executor, timestamps, and error text.
 
@@ -299,7 +298,7 @@ def read_dataset_state_tool(
     window = resolve_page(
         total=matched.height, limit=resolve_detail_limit(limit=limit, detailed=detailed), start_row=start_row
     )
-    page = matched.slice(window.start, window.length)
+    page = matched.slice(offset=window.start, length=window.length)
     response["jobs"] = [project_item(item=item, fields=fields) for item in page.to_dicts()]
     response.update(page_fields(window=window, total=matched.height, listed=page.height))
     return response
@@ -318,10 +317,6 @@ def list_project_datasets_tool(
 ) -> dict[str, Any]:
     """Lists the forged datasets stored under a project, and which of them hold a given session or animal.
 
-    This is the tool that answers what datasets a project holds and whether a session has been forged into any of
-    them, which no other tool reports. The manifest is session-rowed and says nothing about datasets, because a
-    dataset's own artifacts own that fact.
-
     A project holds a handful of datasets rather than thousands, so the listing is the summary and appears in every
     response. Naming a session or an animal narrows it to the datasets holding them. Opting into detail reads each
     listed dataset's state snapshot and adds its job counts by status, which is the expensive half since it opens one
@@ -336,7 +331,7 @@ def list_project_datasets_tool(
         animal: The animal identifier to restrict the listing to the datasets holding it.
         limit: The datasets to list. Defaults to 200, or to 50 when detail is requested. A value at or below zero lists
             every match.
-        start_row: The match index to begin the listing at. Follow ``next_start_row`` to walk a long result.
+        start_row: The match index at which to begin the listing. Follow ``next_start_row`` to walk a long result.
         detailed: Determines whether each listed dataset reports its animals and its job counts by status, read from
             its state snapshot.
 

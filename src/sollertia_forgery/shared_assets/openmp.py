@@ -19,7 +19,7 @@ _PACKAGE_MANAGER_DIRECTORIES: tuple[Path, ...] = (
     Path("/usr/local/opt/libomp/lib"),
     Path("/opt/local/lib/libomp"),
 )
-"""The directories the macOS package managers install the OpenMP runtime into.
+"""The directories into which the macOS package managers install the OpenMP runtime.
 
 The first two are the Homebrew keg paths for the Apple Silicon and the Intel prefix, and the third is the MacPorts
 path. A package manager runtime is examined ahead of every other source, because its lifecycle is independent of the
@@ -37,7 +37,7 @@ that carries it. Upgrading or removing that distribution leaves the link danglin
 """
 
 _LINK_DIRECTORY: Path = Path("/usr/local/lib")
-"""The directory the OpenMP runtime is linked into so that the dynamic loader finds it.
+"""The directory into which the OpenMP runtime is linked so that the dynamic loader finds it.
 
 Numba's omppool extension records its dependency as '@rpath/libomp.dylib' and carries no LC_RPATH entries, so the
 loader resolves the file name against DYLD_FALLBACK_LIBRARY_PATH instead. This directory is on that path by default,
@@ -65,7 +65,7 @@ class OpenMPStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class OpenMPSummary:
+class _OpenMPSummary:
     """Summarizes a request to make the OpenMP runtime loadable, whether previewed as a dry run or carried out."""
 
     status: OpenMPStatus
@@ -77,7 +77,7 @@ class OpenMPSummary:
     link_path: Path | None
     """The absolute path to the link that makes the runtime loadable, or None when no runtime was found."""
     searched_paths: tuple[Path, ...]
-    """The paths examined while discovering the runtime, in the order they were examined."""
+    """The candidate paths that discovery considered, in the order it would examine them."""
     loadable: bool
     """Determines whether the OpenMP runtime loads from a fresh interpreter once the call returns."""
 
@@ -105,13 +105,10 @@ def verify_openmp_runtime() -> None:
     """Aborts the runtime when Numba's OpenMP threading layer has no runtime to load on this macOS host.
 
     Notes:
-        Every processing pipeline calls this before it dispatches a job, so a host that cannot run a parallelized
-        kernel fails while it has done no work rather than partway through a session. The error replaces the
-        threading-layer error Numba raises at the first parallelized call, which names no remedy. The platforms whose
-        threading layer needs no separately installed runtime return without checking anything.
-
-        The check belongs to the pipelines rather than to the package import, so importing this library to read the
-        dataset types it publishes costs nothing on a macOS host that never processes anything.
+        A host that cannot run a parallelized kernel fails while it has done no work rather than partway through a
+        session. The error replaces the threading-layer error Numba raises at the first parallelized call, which
+        names no remedy. The platforms whose threading layer needs no separately installed runtime return without
+        checking anything.
 
         This library selects the threading layer for the whole process, so the guarantee covers every kernel the
         process may compile, including the parallelized stages its dependencies own.
@@ -139,18 +136,18 @@ def resolve_openmp_runtime(
     link_path: Path | None = None,
     execute: bool = False,
     force: bool = False,
-) -> OpenMPSummary:
+) -> _OpenMPSummary:
     """Links a discovered OpenMP runtime into a directory the dynamic loader searches by default.
 
     The link is what makes Numba's OpenMP threading layer resolve on macOS, because the omppool extension shipped in
-    the Numba wheel names its dependency through an rpath it carries no entries for. A host whose runtime already
+    the Numba wheel names its dependency through an rpath for which it carries no entries. A host whose runtime already
     loads is left alone unless the link is forced. Only macOS reaches the linking path, because every other platform
     runs the TBB threading layer and gains nothing from an OpenMP runtime.
 
     Args:
         runtime_path: The absolute path to the OpenMP runtime to link, or None to search the macOS package manager
             directories, the active conda environment, and the installed Python distributions for one.
-        link_path: The absolute path to write the link to, or None to derive it from the directory the loader
+        link_path: The absolute path at which to write the link, or None to derive it from the directory the loader
             searches by default.
         execute: Determines whether to create the resolved link, where a dry run reports it and changes nothing.
         force: Determines whether to link a runtime on a host whose runtime already loads.
@@ -159,8 +156,8 @@ def resolve_openmp_runtime(
         The summary describing the resolved runtime, the resolved link, and what the call changed.
 
     Raises:
-        RuntimeError: If the host runs a platform other than macOS, if the link directory cannot be created, or if
-            the link cannot be written.
+        RuntimeError: If the host runs a platform other than macOS, if the resolved link path already holds the
+            runtime itself, if the link directory cannot be created, or if the link cannot be written.
     """
     if sys.platform != "darwin":
         message = (
@@ -230,7 +227,7 @@ def _summarize_request(
     link: Path | None = None,
     searched: tuple[Path, ...] = (),
     loadable: bool = False,
-) -> OpenMPSummary:
+) -> _OpenMPSummary:
     """Builds the summary reporting one outcome of an OpenMP runtime request.
 
     Args:
@@ -244,7 +241,7 @@ def _summarize_request(
     Returns:
         The assembled summary.
     """
-    return OpenMPSummary(
+    return _OpenMPSummary(
         status=status,
         unresolved_reason=reason,
         runtime_path=runtime,
@@ -287,7 +284,7 @@ def _discover_openmp_runtime(candidates: tuple[Path, ...]) -> Path | None:
 
 
 def _link_would_replace_runtime(runtime_path: Path, link_path: Path) -> bool:
-    """Determines whether writing the link would destroy the runtime it is meant to point at.
+    """Determines whether writing the link would destroy the runtime it is meant to target.
 
     Notes:
         A link path that already holds a symbolic link is one this call replaces, which is the ordinary case of
@@ -295,8 +292,8 @@ def _link_would_replace_runtime(runtime_path: Path, link_path: Path) -> bool:
         remove the only copy and leave a link resolving to nothing.
 
     Args:
-        runtime_path: The absolute path to the OpenMP runtime the link would point at.
-        link_path: The absolute path the link would be written to.
+        runtime_path: The absolute path to the OpenMP runtime the link would target.
+        link_path: The absolute path to which the link would be written.
 
     Returns:
         True when the link path holds the runtime itself rather than a link to it, and False otherwise.
@@ -316,8 +313,8 @@ def _link_openmp_runtime(runtime_path: Path, link_path: Path) -> None:
         failing to write the replacement.
 
     Args:
-        runtime_path: The absolute path to the OpenMP runtime the link points at.
-        link_path: The absolute path to write the link to.
+        runtime_path: The absolute path to the OpenMP runtime the link targets.
+        link_path: The absolute path at which to write the link.
 
     Raises:
         RuntimeError: If the link directory cannot be created or the link cannot be written.
